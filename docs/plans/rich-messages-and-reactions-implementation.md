@@ -530,3 +530,80 @@ _Asked for by the user after the placeholder fix: "let's do those two related fi
 
 ### Manual Validation
 The user checked the running app and confirmed ("Let's go").
+
+## Chunk 7: Add and remove reactions (picker)
+
+### Changes Made
+- `src/api/client.rs`:
+  - `react(channel, message, emoji)` sends `PUT /channels/{c}/messages/{m}/reactions/{emoji}`, and `unreact(…)` sends `DELETE` on the same path.
+  - `encode_path_segment` percent-encodes every byte outside RFC 3986's unreserved set, so 👍 becomes `%F0%9F%91%8D`. Custom emoji ULIDs pass through unchanged.
+- `src/store.rs`:
+  - `has_reacted(channel, id, emoji)`.
+  - `reaction_choices(channel)` returns `COMMON_REACTIONS` (40 Unicode emoji), then custom emoji sorted by name. In a server channel that's the server's own emoji; in DMs and groups it's every server's (`EmojiParent::Detached` is excluded).
+  - `MessageRow.allowed_reactions` is `Some(PickerEmoji…)` only when `interactions.restrict_reactions` is set.
+  - New `PickerEmoji { key, emoji }`. The private `reaction_emoji(key)` is shared by chips and the picker.
+  - **Reaction limit, added after the user hit it:**
+    - `MAX_REACTIONS = 20`, Stoat's `limits.global.message_reactions`.
+    - `MessageRow::reactions_full()` and `picker_choices(choices) -> PickerChoices { emoji, full }`: a full message offers only its existing emoji, otherwise the allowed set or the channel's choices.
+    - `would_exceed_reactions(channel, id, emoji)`.
+  - `#[allow(clippy::large_enum_variant)]` on `TimelineRow`, with a comment. `MessageRow` grew to 248 bytes against 24 for the single start-of-channel row, and boxing every message isn't worth it.
+- `src/ui/emoji_picker.rs` (new): `emoji_grid(id, choices, note, chosen, on_pick, cx)` draws an 8-column grid of 34 px cells:
+  - Unicode emoji at `text_xl`, custom emoji at 24 px with a `Skeleton` while loading.
+  - A tooltip on each, and emoji already chosen highlighted.
+  - It scrolls past 6 rows, and an optional note sits above the grid.
+- `src/ui/chat.rs`:
+  - New `RowAction` variants (now `Clone`): `ToggleReaction { message, emoji }` and `Picker(Option<message>)`.
+  - New `ChatView.picker_for` and `reacting: HashSet<(message, emoji)>`.
+  - `toggle_reaction` works like this:
+    1. If that emoji's request is already in flight, ignore the click.
+    2. Choose add or remove from `has_reacted`.
+    3. A new emoji on a full message stops here with a warning toast, and no request is sent.
+    4. Apply the change to the store, then `sync_pane`.
+    5. Send `react` or `unreact`. On failure, apply the reverse change and show an error toast (`reaction_error_text`):
+       - `MissingPermission` becomes "You can't react here."
+       - `InvalidOperation` becomes a readable explanation (limit or disallowed emoji).
+       - Anything else falls back to the API error text.
+  - Chips are clickable and toggle your reaction.
+  - Each message row is wrapped in a `group("message-row")` div. `reaction_button` builds a controlled `Popover` (`open` and `on_open_change` drive `picker_for`), triggered by a ghost xsmall `Plus` button with an "Add reaction" tooltip, whose content is `emoji_grid` over `message.picker_choices(..)`.
+  - The button is `invisible()` unless the row is hovered or its picker is open.
+  - **Placement, after user feedback** ("move the reaction picker to below the message"):
+    - The button now sits in the bubble's `Bubble::reactions(BubbleReactions)` slot. The slot is restyled with no pill (transparent, no border or padding), placed 28 px outside the bubble's far edge and level with its bottom.
+    - The popover opens below the button and reaches back under the bubble: `Anchor::TopRight` for others' messages, `TopLeft` for yours.
+    - The slot is absolutely positioned, so rows keep their height.
+  - `render_main` builds a `Pickers { choices, open_for }` once per render and passes it to each row.
+- `src/ui/mod.rs`: `pub mod emoji_picker`.
+- Tests:
+  - `tests/api_reactions.rs` (new, wiremock), 4 tests:
+    - `PUT` for a Unicode emoji (encoded) and a custom emoji (ID), both with the session header
+    - `DELETE` for a skin-toned emoji (every byte encoded) and a custom emoji
+    - a 403 `MissingPermission` mapped to `ApiError::Api`
+  - `tests/store_reactions.rs`, +4 tests:
+    - optimistic add, then echo (count stays 2), then rollback of a refused add and a refused removal
+    - picker choices: common emoji first, then the server's own by name; all servers' in DMs; no detached emoji
+    - restricted messages, with a preset list without the restriction ignored
+    - a full message (20) offering only its own emoji, `would_exceed_reactions`, and the usual picker returning at 19
+  - `tests/store_live.rs`: the row helper sets `allowed_reactions`.
+
+### Divergences
+- **Minor, errors:** errors are toasts (`window.push_notification`), not an inline message in the row. That needs no per-row error state and is just as visible. Refusals were confirmed live.
+- **Minor, DMs:** the picker offers custom emoji from all of the user's servers in DMs and groups. The plan said "current server", and DMs have none.
+- **Minor, in-flight requests:** a second click on the same emoji ignores clicks while its request is in flight, so add and remove requests can't cross.
+- **User feedback 1, placement:** the "+" first sat at the far edge of the row, centred vertically, with the picker opening sideways. It was moved to the bubble's bottom corner, as described above.
+- **User feedback 2, "Invalid Operation" on a message with lots of reactions:**
+  - The log showed `PUT …/reactions/%E2%9D%A4%EF%B8%8F` failing with HTTP 400 `InvalidOperation`, at `crates/core/database/src/models/messages/model.rs:986`.
+  - In `revolt-database` 0.16.2 that line is `add_reaction`'s check `self.reactions.len() >= config.features.limits.global.message_reactions && !self.reactions.contains_key(emoji)`. `Revolt.toml` sets `message_reactions = 20`.
+  - The rollback and toast worked as designed. The limit handling and readable errors above were added on top.
+  - `GET /` doesn't expose the limit, so 20 is a constant.
+
+### Verification Performed
+- `cargo test --test api_reactions`: 4 passed. `cargo test --test store_reactions`: 12 passed.
+- `cargo test`: 210 passed, 0 failed, 5 ignored.
+- `cargo clippy --all-targets -- -D warnings`: clean. `cargo fmt --check`: clean.
+- Live (from the app log):
+  - `PUT` then `DELETE` of 💪 (`%F0%9F%92%AA`) on a message succeeded.
+  - The ❤️ refusal on a full message happened, then was handled as above after the fix.
+  - Each relaunch reached `Ready` and loaded history, with no other errors.
+
+### Manual Validation
+- The user tried reacting in the running app, which surfaced the two pieces of feedback above.
+- After both fixes, the user confirmed "LGTM": adding and removing via chips and the picker, the picker under the message, and the full-message picker.

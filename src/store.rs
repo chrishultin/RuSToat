@@ -6,8 +6,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::api::events::Ready;
 use crate::api::models::{
-    BulkMessageResponse, Channel, Embed, Emoji, FieldsChannel, FieldsMessage, File, Member,
-    Message, MessageFlags, PartialChannel, PartialMessage, Presence, Server, SystemMessage, User,
+    BulkMessageResponse, Channel, Embed, Emoji, EmojiParent, FieldsChannel, FieldsMessage, File,
+    Member, Message, MessageFlags, PartialChannel, PartialMessage, Presence, Server, SystemMessage,
+    User,
 };
 use crate::attachment::AttachmentView;
 use crate::embed::EmbedView;
@@ -55,6 +56,9 @@ pub struct History {
 }
 
 /// One row of a channel's message view.
+// Nearly every row is a message; the one small start-of-channel row isn't
+// worth boxing every message for.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TimelineRow {
     /// Shown above the oldest message once there's no more history.
@@ -97,7 +101,71 @@ pub struct MessageRow {
     pub jumbo: bool,
     /// Reactions, in the order they were first added.
     pub reactions: Vec<ReactionChip>,
+    /// The only emoji the picker offers for this message, when its author
+    /// restricted reactions. `None`: the channel's usual choices.
+    pub allowed_reactions: Option<Vec<PickerEmoji>>,
 }
+
+/// An emoji the reaction picker offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickerEmoji {
+    /// As the API names it: the Unicode emoji, or a custom emoji's ID.
+    pub key: String,
+    pub emoji: ReactionEmoji,
+}
+
+/// Most different emoji a message can have (Stoat's
+/// `limits.global.message_reactions`, 20 by default). Adding a new one past
+/// it is refused with `InvalidOperation`; joining an existing one still works.
+pub const MAX_REACTIONS: usize = 20;
+
+/// What a message's reaction picker offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickerChoices {
+    pub emoji: Vec<PickerEmoji>,
+    /// The message is at [`MAX_REACTIONS`]: only its existing emoji are offered.
+    pub full: bool,
+}
+
+impl MessageRow {
+    /// The message already has as many different emoji as it can.
+    pub fn reactions_full(&self) -> bool {
+        self.reactions.len() >= MAX_REACTIONS
+    }
+
+    /// The picker for this message: its existing emoji when it's full, else
+    /// the emoji its author allowed, else the channel's usual `choices`.
+    pub fn picker_choices(&self, choices: &[PickerEmoji]) -> PickerChoices {
+        if self.reactions_full() {
+            return PickerChoices {
+                emoji: self
+                    .reactions
+                    .iter()
+                    .map(|chip| PickerEmoji {
+                        key: chip.key.clone(),
+                        emoji: chip.emoji.clone(),
+                    })
+                    .collect(),
+                full: true,
+            };
+        }
+        PickerChoices {
+            emoji: self
+                .allowed_reactions
+                .clone()
+                .unwrap_or_else(|| choices.to_vec()),
+            full: false,
+        }
+    }
+}
+
+/// The Unicode emoji every reaction picker offers, before custom ones.
+pub const COMMON_REACTIONS: [&str; 40] = [
+    "👍", "👎", "❤️", "😂", "😮", "😢", "😡", "🎉", "🔥", "👀", //
+    "✅", "❌", "💯", "🙏", "👏", "🤔", "😍", "🥳", "😎", "🤣", //
+    "😊", "😅", "🙃", "😭", "😬", "🤯", "🥺", "😴", "🤝", "💪", //
+    "🚀", "⭐", "💡", "🐛", "📌", "👋", "🙌", "💀", "🫡", "➕",
+];
 
 /// One reaction under a message: an emoji and how many people used it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -662,25 +730,89 @@ impl ChatStore {
             .reactions
             .iter()
             .filter(|(_, users)| !users.is_empty())
-            .map(|(key, users)| {
-                let emoji = if crate::time::is_ulid(key) {
-                    let name = self.emoji(key).map_or("emoji", |e| e.name.as_str());
-                    ReactionEmoji::Custom {
-                        id: key.clone(),
-                        url: self.media.emoji(key),
-                        name: format!(":{name}:"),
-                    }
-                } else {
-                    ReactionEmoji::Unicode(key.clone())
-                };
-                ReactionChip {
-                    key: key.clone(),
-                    emoji,
-                    count: users.len(),
-                    mine: users.contains(&self.me),
-                }
+            .map(|(key, users)| ReactionChip {
+                key: key.clone(),
+                emoji: self.reaction_emoji(key),
+                count: users.len(),
+                mine: users.contains(&self.me),
             })
             .collect()
+    }
+
+    /// How a reaction key is drawn: custom emoji are told apart by being a ULID.
+    fn reaction_emoji(&self, key: &str) -> ReactionEmoji {
+        if crate::time::is_ulid(key) {
+            let name = self.emoji(key).map_or("emoji", |e| e.name.as_str());
+            ReactionEmoji::Custom {
+                id: key.to_string(),
+                url: self.media.emoji(key),
+                name: format!(":{name}:"),
+            }
+        } else {
+            ReactionEmoji::Unicode(key.to_string())
+        }
+    }
+
+    /// What the reaction picker offers in `channel`: the common Unicode emoji,
+    /// then custom emoji by name. Those are the channel's server's in a
+    /// server, or all of the user's servers' in DMs and groups.
+    pub fn reaction_choices(&self, channel: &str) -> Vec<PickerEmoji> {
+        let server = self.server_of(channel);
+        let mut custom: Vec<&Emoji> = self
+            .emojis
+            .values()
+            .filter(|emoji| match (&emoji.parent, server) {
+                (EmojiParent::Server { id }, Some(server)) => id == server,
+                (EmojiParent::Server { .. }, None) => true,
+                (EmojiParent::Detached, _) => false,
+            })
+            .collect();
+        custom.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+        COMMON_REACTIONS
+            .iter()
+            .map(|key| key.to_string())
+            .chain(custom.into_iter().map(|emoji| emoji.id.clone()))
+            .map(|key| PickerEmoji {
+                emoji: self.reaction_emoji(&key),
+                key,
+            })
+            .collect()
+    }
+
+    /// The emoji a message's author limited reactions to, if they did.
+    fn allowed_reactions(&self, message: &Message) -> Option<Vec<PickerEmoji>> {
+        let interactions = &message.interactions;
+        if !interactions.restrict_reactions {
+            return None;
+        }
+        let allowed = interactions.reactions.as_ref()?;
+        Some(
+            allowed
+                .iter()
+                .map(|key| PickerEmoji {
+                    key: key.clone(),
+                    emoji: self.reaction_emoji(key),
+                })
+                .collect(),
+        )
+    }
+
+    /// Whether adding `emoji` to a loaded message would be a new kind of
+    /// reaction past [`MAX_REACTIONS`].
+    pub fn would_exceed_reactions(&self, channel: &str, id: &str, emoji: &str) -> bool {
+        self.histories
+            .get(channel)
+            .and_then(|h| h.messages.iter().find(|m| m.id == id))
+            .is_some_and(|m| !m.reactions.contains_key(emoji) && m.reactions.len() >= MAX_REACTIONS)
+    }
+
+    /// Whether the logged-in user has reacted to a loaded message with `emoji`.
+    pub fn has_reacted(&self, channel: &str, id: &str, emoji: &str) -> bool {
+        self.histories
+            .get(channel)
+            .and_then(|h| h.messages.iter().find(|m| m.id == id))
+            .and_then(|m| m.reactions.get(emoji))
+            .is_some_and(|users| users.contains(&self.me))
     }
 
     /// Remove messages from a loaded channel. Returns true if any were removed.
@@ -1032,6 +1164,7 @@ impl ChatStore {
                         .as_deref()
                         .is_some_and(crate::markdown::is_jumbo),
                 reactions: self.reaction_chips(message),
+                allowed_reactions: self.allowed_reactions(message),
             }));
             previous = Some((message, author));
         }

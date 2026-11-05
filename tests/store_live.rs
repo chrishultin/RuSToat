@@ -138,6 +138,7 @@ fn row(id: &str, body: &str) -> TimelineRow {
         attachments: Vec::new(),
         embeds: Vec::new(),
         reactions: Vec::new(),
+        allowed_reactions: None,
         system: false,
         edited: false,
         continuation: false,

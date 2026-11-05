@@ -1,13 +1,13 @@
 //! The signed-in UI: server rail, channel list, and the selected channel.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::bubble::{Bubble, BubbleContent, BubbleVariant};
+use gpui_kit::component::bubble::{Bubble, BubbleContent, BubbleReactions, BubbleVariant};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::component::message::{
@@ -16,6 +16,7 @@ use gpui_kit::component::message::{
 };
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::popover::Popover;
 use gpui_kit::component::skeleton::Skeleton;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::tooltip::Tooltip;
@@ -23,6 +24,7 @@ use gpui_kit::component::{ActiveTheme, Icon, Sizable, WindowExt, h_flex, v_flex}
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
+use crate::api::ApiError;
 use crate::api::StoatClient;
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
 use crate::attachment::{AttachmentView, FileKind, fit_into};
@@ -33,9 +35,10 @@ use crate::notify::{self, Delivery, Notice, Viewing};
 use crate::places::{Place, Places, PlacesFile};
 use crate::runtime::spawn_io;
 use crate::store::{
-    ChannelEntry, ChannelKind, ChatStore, MessageRow, ReactionEmoji, RowOp, ServerEntry,
-    TimelineRow, diff_rows, display_name,
+    ChannelEntry, ChannelKind, ChatStore, MessageRow, PickerEmoji, ReactionEmoji, RowOp,
+    ServerEntry, TimelineRow, diff_rows, display_name,
 };
+use crate::ui::emoji_picker::emoji_grid;
 use crate::ui::math::MathPlugin;
 
 /// How many messages to load when a channel is opened.
@@ -102,6 +105,11 @@ pub struct ChatView {
     viewer: Option<ViewedImage>,
     /// Focused while the viewer is open, so Esc reaches it.
     viewer_focus: FocusHandle,
+    /// The message whose reaction picker is open.
+    picker_for: Option<String>,
+    /// Reaction changes waiting on the server, as (message, emoji). Another
+    /// click on the same one waits, so requests can't cross.
+    reacting: HashSet<(String, String)>,
     _connection: Connection,
     _events: Task<()>,
     _root: Task<()>,
@@ -206,6 +214,8 @@ impl ChatView {
             banners: HashMap::new(),
             viewer: None,
             viewer_focus: cx.focus_handle(),
+            picker_for: None,
+            reacting: HashSet::new(),
             _connection: connection,
             _events: events,
             _root: root,
@@ -410,8 +420,81 @@ impl ChatView {
                 self.viewer = Some(image);
                 window.focus(&self.viewer_focus, cx);
             }
+            RowAction::ToggleReaction { message, emoji } => {
+                self.picker_for = None;
+                self.toggle_reaction(channel.to_string(), message, emoji, window, cx);
+            }
+            RowAction::Picker(message) => self.picker_for = message,
         }
         cx.notify();
+    }
+
+    /// Add or remove the user's reaction: shown at once, then sent. If the
+    /// server refuses, it's undone and a toast says why. The server echoes a
+    /// successful change back as an event, which changes nothing by then.
+    fn toggle_reaction(
+        &mut self,
+        channel: String,
+        message: String,
+        emoji: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let pending = (message.clone(), emoji.clone());
+        if !self.reacting.insert(pending.clone()) {
+            return;
+        }
+        let add = !self.store.has_reacted(&channel, &message, &emoji);
+        if add
+            && self
+                .store
+                .would_exceed_reactions(&channel, &message, &emoji)
+        {
+            self.reacting.remove(&pending);
+            window.push_notification(Notification::warning(FULL_REACTIONS_TEXT), cx);
+            return;
+        }
+        let me = self.store.me().to_string();
+        if self.store.apply_react(&channel, &message, &me, &emoji, add) {
+            self.sync_pane(&channel, cx);
+        }
+        let client = self.client.clone();
+        let request = spawn_io({
+            let (channel, message, emoji) = (channel.clone(), message.clone(), emoji.clone());
+            async move {
+                if add {
+                    client.react(&channel, &message, &emoji).await
+                } else {
+                    client.unreact(&channel, &message, &emoji).await
+                }
+            }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.reacting.remove(&pending);
+                let error = match result {
+                    Ok(Ok(())) => return,
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't change reaction {emoji} on {message}: {err:?}");
+                        reaction_error_text(&err)
+                    }
+                    Err(err) => {
+                        log::warn!("reaction task failed: {err:?}");
+                        "Couldn't update your reaction.".into()
+                    }
+                };
+                if this
+                    .store
+                    .apply_react(&channel, &message, &me, &emoji, !add)
+                {
+                    this.sync_pane(&channel, cx);
+                }
+                window.push_notification(Notification::error(error), cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn close_viewer(&mut self, cx: &mut Context<Self>) {
@@ -1232,6 +1315,10 @@ impl ChatView {
                         placeholder("No messages yet.".into())
                     } else {
                         let rows = pane.rows.clone();
+                        let pickers = Rc::new(Pickers {
+                            choices: Rc::new(self.store.reaction_choices(&channel.id)),
+                            open_for: self.picker_for.clone(),
+                        });
                         let view = cx.entity().downgrade();
                         let channel_id = channel.id.clone();
                         let on_action: OnRowAction = Rc::new(move |action, window, cx| {
@@ -1286,7 +1373,7 @@ impl ChatView {
                                     SharedString::from(format!("messages-{}", channel.id)),
                                     pane.scroller.clone(),
                                     move |ix, _window, _cx| {
-                                        render_row(&rows[ix], colors, &on_action)
+                                        render_row(&rows[ix], colors, &on_action, &pickers)
                                     },
                                 )
                                 // The scroller's default rows are spaced for whole
@@ -1368,11 +1455,17 @@ struct RowColors {
 }
 
 /// Something a message row asks the view to do.
+#[derive(Clone)]
 enum RowAction {
     /// "Show image": load a large image after all (by file ID).
     RevealImage(String),
     /// Open an inline image in the full-size viewer.
     ViewImage(ViewedImage),
+    /// Add the user's `emoji` reaction to `message`, or take it back if
+    /// they've already reacted with it.
+    ToggleReaction { message: String, emoji: String },
+    /// Open the reaction picker on a message (`Some`), or close it.
+    Picker(Option<String>),
 }
 
 type OnRowAction = Rc<dyn Fn(RowAction, &mut Window, &mut App)>;
@@ -1440,7 +1533,20 @@ fn avatar(
     }
 }
 
-fn render_row(row: &TimelineRow, colors: RowColors, on_action: &OnRowAction) -> AnyElement {
+/// The reaction picker's state for the rows being drawn.
+struct Pickers {
+    /// What the picker offers in this channel (messages may restrict it).
+    choices: Rc<Vec<PickerEmoji>>,
+    /// The message whose picker is open.
+    open_for: Option<String>,
+}
+
+fn render_row(
+    row: &TimelineRow,
+    colors: RowColors,
+    on_action: &OnRowAction,
+    pickers: &Pickers,
+) -> AnyElement {
     match row {
         TimelineRow::StartOfChannel { name } => v_flex()
             .px_4()
@@ -1461,7 +1567,7 @@ fn render_row(row: &TimelineRow, colors: RowColors, on_action: &OnRowAction) -> 
             )
             .into_any_element(),
         TimelineRow::Message(message) if message.system => render_system_row(message, colors),
-        TimelineRow::Message(message) => render_message_row(message, colors, on_action),
+        TimelineRow::Message(message) => render_message_row(message, colors, on_action, pickers),
     }
 }
 
@@ -1500,6 +1606,7 @@ fn render_message_row(
     message: &MessageRow,
     colors: RowColors,
     on_action: &OnRowAction,
+    pickers: &Pickers,
 ) -> AnyElement {
     let first = !message.continuation;
     let last = message.group_end;
@@ -1601,7 +1708,8 @@ fn render_message_row(
         } else {
             BubbleVariant::Secondary
         })
-        .content(surface);
+        .content(surface)
+        .reactions(reaction_button(message, on_action, pickers));
 
     // The avatar sits beside the last bubble of a group; earlier ones keep
     // the empty slot so the bubbles line up.
@@ -1629,22 +1737,141 @@ fn render_message_row(
             .child(div().text_color(colors.muted).child(message.time.clone()))
     });
 
-    MessageLayout::new()
+    let layout = MessageLayout::new()
         .alignment(alignment)
         .avatar_slot(avatar_slot)
         .when_some(header, |el, header| el.header(header))
         .content(MessageContent::new().bubble(bubble))
-        .when_some(render_reactions(message, colors), |el, footer| {
-            el.footer(footer)
-        })
+        .when_some(
+            render_reactions(message, colors, on_action),
+            |el, footer| el.footer(footer),
+        )
         // The name/time header sits right above its bubble (default gap is 10 px).
         .with_stack_style(StyleRefinement::default().gap(px(HEADER_GAP)))
         // Reactions sit just under their bubble (default gap is 10 px too).
         .gap(px(REACTIONS_GAP))
         .px_4()
         // Space between groups; bubbles within a group sit close together.
-        .pt(px(if first { GROUP_GAP } else { BUBBLE_GAP }))
+        .pt(px(if first { GROUP_GAP } else { BUBBLE_GAP }));
+
+    div()
+        .relative()
+        .group(ROW_GROUP)
+        .child(layout)
         .into_any_element()
+}
+
+/// Group name for hovering a message row.
+const ROW_GROUP: &str = "message-row";
+
+/// How far outside the bubble's edge the "add reaction" button sits.
+const REACT_BUTTON_OFFSET: f32 = 28.;
+
+/// The "add reaction" button, just outside the bubble at its bottom corner
+/// (on the side away from the avatar), so the picker opens under the
+/// message. It shows while the row is hovered or its picker is open, and
+/// takes no space (so rows don't change height).
+fn reaction_button(
+    message: &MessageRow,
+    on_action: &OnRowAction,
+    pickers: &Pickers,
+) -> BubbleReactions {
+    let open = pickers.open_for.as_deref() == Some(message.id.as_str());
+    let choices = Rc::new(message.picker_choices(&pickers.choices));
+    let chosen: Rc<HashSet<String>> = Rc::new(
+        message
+            .reactions
+            .iter()
+            .filter(|chip| chip.mine)
+            .map(|chip| chip.key.clone())
+            .collect(),
+    );
+    let id = message.id.clone();
+    let on_open = {
+        let (on_action, id) = (on_action.clone(), id.clone());
+        move |open: &bool, window: &mut Window, cx: &mut App| {
+            on_action(RowAction::Picker(open.then(|| id.clone())), window, cx)
+        }
+    };
+    let on_pick: crate::ui::emoji_picker::OnPick = {
+        let (on_action, id) = (on_action.clone(), id.clone());
+        Rc::new(move |emoji: &str, window: &mut Window, cx: &mut App| {
+            on_action(
+                RowAction::ToggleReaction {
+                    message: id.clone(),
+                    emoji: emoji.to_string(),
+                },
+                window,
+                cx,
+            )
+        })
+    };
+    let popover = Popover::new(SharedString::from(format!("react-{id}")))
+        // Opens below the button, reaching back under the bubble.
+        .anchor(if message.mine {
+            Anchor::TopLeft
+        } else {
+            Anchor::TopRight
+        })
+        .open(open)
+        .on_open_change(on_open)
+        .trigger(
+            Button::new(SharedString::from(format!("react-{id}-button")))
+                .ghost()
+                .xsmall()
+                .icon(IconName::Plus)
+                .tooltip("Add reaction"),
+        )
+        .content(move |_, _, cx| {
+            let note = choices.full.then_some(FULL_REACTIONS_TEXT);
+            emoji_grid(&id, &choices.emoji, note, &chosen, on_pick.clone(), cx)
+        });
+    let trigger = div()
+        .when(!open, |el| {
+            el.invisible()
+                .group_hover(ROW_GROUP, |style| style.visible())
+        })
+        .child(popover);
+    // gpui-component's slot for things on a bubble's edge. Moved fully
+    // outside the bubble, level with its bottom, without a pill of its own.
+    let outside = px(-REACT_BUTTON_OFFSET);
+    BubbleReactions::new()
+        .alignment(if message.mine {
+            MessageAlignment::Start
+        } else {
+            MessageAlignment::End
+        })
+        .bottom(px(0.))
+        .map(|el| {
+            if message.mine {
+                el.left(outside)
+            } else {
+                el.right(outside)
+            }
+        })
+        .bg(transparent_black())
+        .border_0()
+        .p_0()
+        .child(trigger)
+}
+
+/// Shown when a message is at [`MAX_REACTIONS`](crate::store::MAX_REACTIONS).
+const FULL_REACTIONS_TEXT: &str =
+    "This message has as many different reactions as it can (20). You can still join one.";
+
+/// What a refused reaction's toast says.
+fn reaction_error_text(err: &ApiError) -> SharedString {
+    use revolt_result::ErrorType;
+    match err.error_type() {
+        Some(ErrorType::MissingPermission { .. }) => "You can't react here.".into(),
+        // The reaction limit (checked before sending, but another client may
+        // have just filled it), an emoji the author didn't allow, or a
+        // custom emoji that isn't usable here.
+        Some(ErrorType::InvalidOperation) => "Stoat didn't accept that reaction. The message \
+             may have the most reactions it can, or that emoji isn't allowed here."
+            .into(),
+        _ => format!("Couldn't update your reaction: {err}").into(),
+    }
 }
 
 /// Space between a bubble and its reactions.
@@ -1656,7 +1883,11 @@ const REACTION_EMOJI_PX: f32 = 16.;
 
 /// The message's reaction chips (emoji and count, outlined when the user is
 /// one of them), wrapping under the bubble. `None` without reactions.
-fn render_reactions(message: &MessageRow, colors: RowColors) -> Option<MessageFooter> {
+fn render_reactions(
+    message: &MessageRow,
+    colors: RowColors,
+    on_action: &OnRowAction,
+) -> Option<MessageFooter> {
     if message.reactions.is_empty() {
         return None;
     }
@@ -1705,6 +1936,16 @@ fn render_reactions(message: &MessageRow, colors: RowColors) -> Option<MessageFo
                 }
             })
             .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            // Clicking a chip adds the user's reaction, or takes it back.
+            .cursor_pointer()
+            .on_click({
+                let on_action = on_action.clone();
+                let toggle = RowAction::ToggleReaction {
+                    message: message.id.clone(),
+                    emoji: chip.key.clone(),
+                };
+                move |_, window, cx| on_action(toggle.clone(), window, cx)
+            })
             .child(emoji)
             .child(
                 div()
