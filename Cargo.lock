@@ -7458,6 +7458,7 @@ dependencies = [
  "env_logger 0.11.11",
  "futures",
  "gpui-kit",
+ "image",
  "keyring",
  "log",
  "markdown",
@@ -7473,6 +7474,7 @@ dependencies = [
  "serde_urlencoded",
  "svgtypes 0.16.2",
  "thiserror 2.0.21",
+ "thumbhash",
  "tokio",
  "tokio-tungstenite",
  "unicode-properties",
@@ -7864,6 +7866,12 @@ dependencies = [
  "quote 1.0.47",
  "syn 3.0.9",
 ]
+
+[[package]]
+name = "thumbhash"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b7726e0245a7331bd0c9a1fb4fd99fd695bcd478ca569f0eda2ff2cb14e7a00"
 
 [[package]]
 name = "tiff"

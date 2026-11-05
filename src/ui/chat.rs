@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -1092,6 +1093,7 @@ impl ChatView {
             .on_click(cx.listener(move |this, _, _, cx| this.select_channel(id.clone(), cx)))
             .child(match channel.avatar.clone() {
                 Some(url) => avatar(
+                    format!("channel-avatar-{}", channel.id),
                     Some(url),
                     &channel.name,
                     20.,
@@ -1116,6 +1118,7 @@ impl ChatView {
             .into();
         let online = matches!(self.status, Status::Connected);
         let me_avatar = avatar(
+            "my-avatar",
             Some(self.store.user_avatar_url(self.store.me())),
             &name,
             32.,
@@ -1392,7 +1395,16 @@ const AVATAR_SIZE: f32 = 32.;
 
 /// A round avatar, falling back to the name's initial while it loads, if it
 /// fails, or if there's no image.
-fn avatar(url: Option<String>, name: &str, size: f32, bg: Hsla, fg: Hsla) -> AnyElement {
+/// `id` must be unique among the avatars on screen: the image keeps its
+/// loading state under it (without one, the initial never shows while loading).
+fn avatar(
+    id: impl Into<SharedString>,
+    url: Option<String>,
+    name: &str,
+    size: f32,
+    bg: Hsla,
+    fg: Hsla,
+) -> AnyElement {
     let initial: SharedString = name
         .chars()
         .find(|c| c.is_alphanumeric())
@@ -1416,6 +1428,7 @@ fn avatar(url: Option<String>, name: &str, size: f32, bg: Hsla, fg: Hsla) -> Any
     };
     match url {
         Some(url) => img(SharedUri::from(url))
+            .id(id.into())
             .size(px(size))
             .flex_none()
             .rounded_full()
@@ -1594,6 +1607,7 @@ fn render_message_row(
     // the empty slot so the bubbles line up.
     let avatar_slot = if last {
         MessageAvatar::new().child(avatar(
+            format!("avatar-{}", message.id),
             message.avatar.clone(),
             &message.author,
             AVATAR_SIZE,
@@ -1658,9 +1672,14 @@ fn render_reactions(message: &MessageRow, colors: RowColors) -> Option<MessageFo
                 ..
             } => (
                 img(SharedUri::from(url.clone()))
+                    .id(SharedString::from(format!(
+                        "reaction-{}-{ix}-emoji",
+                        message.id
+                    )))
                     .size(px(REACTION_EMOJI_PX))
                     .flex_none()
                     .object_fit(ObjectFit::Contain)
+                    .with_loading(|| icon_loading(REACTION_EMOJI_PX, false))
                     .into_any_element(),
                 name.clone().into(),
             ),
@@ -1724,6 +1743,7 @@ fn render_attachment(
             width,
             height,
             original,
+            thumbhash,
             too_big: false,
             ..
         } => {
@@ -1733,7 +1753,7 @@ fn render_attachment(
                 original: *original,
             };
             let on_action = on_action.clone();
-            inline_image(id, url, (*width, *height), colors)
+            inline_image(id, url, (*width, *height), thumbhash.clone(), colors)
                 .cursor_pointer()
                 .on_click(move |_, window, cx| {
                     on_action(RowAction::ViewImage(viewed.clone()), window, cx)
@@ -1787,10 +1807,12 @@ fn render_attachment(
 /// A picture at exactly its display size (so its row never changes height
 /// when it loads), with a backdrop while loading or if it fails. Callers add
 /// what clicking it does.
+/// `thumbhash`: shown blurred while the image loads, instead of the pulsing box.
 fn inline_image(
     id: SharedString,
     url: &str,
     (width, height): (u32, u32),
+    thumbhash: Option<Arc<[u8]>>,
     colors: RowColors,
 ) -> Stateful<Div> {
     let backdrop = move || {
@@ -1813,7 +1835,15 @@ fn inline_image(
                 .size_full()
                 .rounded(px(ATTACHMENT_RADIUS))
                 .object_fit(ObjectFit::Contain)
-                .with_loading(move || image_loading(colors.muted, ATTACHMENT_RADIUS))
+                .with_loading(move || match thumbhash.clone() {
+                    Some(hash) => crate::ui::thumbhash::preview(hash)
+                        .size_full()
+                        .rounded(px(ATTACHMENT_RADIUS))
+                        .object_fit(ObjectFit::Fill)
+                        .with_fallback(move || image_loading(colors.muted, ATTACHMENT_RADIUS))
+                        .into_any_element(),
+                    None => image_loading(colors.muted, ATTACHMENT_RADIUS),
+                })
                 .with_fallback(move || {
                     backdrop()
                         .flex()
@@ -1825,6 +1855,22 @@ fn inline_image(
                         .into_any_element()
                 }),
         )
+}
+
+/// A small pulsing square (or circle) standing in for an icon or emoji
+/// while it downloads.
+fn icon_loading(size: f32, round: bool) -> AnyElement {
+    Skeleton::new()
+        .size(px(size))
+        .flex_none()
+        .map(|el| {
+            if round {
+                el.rounded_full()
+            } else {
+                el.rounded_sm()
+            }
+        })
+        .into_any_element()
 }
 
 /// What an image shows while it downloads (once that's taken a moment): a
@@ -1869,7 +1915,8 @@ fn viewable_embed_image(
         original: image.original,
     };
     let on_action = on_action.clone();
-    inline_image(id, &image.url, (image.width, image.height), colors)
+    // Remote images have no ThumbHash: they get the pulsing box.
+    inline_image(id, &image.url, (image.width, image.height), None, colors)
         .cursor_pointer()
         .on_click(move |_, window, cx| on_action(RowAction::ViewImage(viewed.clone()), window, cx))
 }
@@ -1927,10 +1974,12 @@ fn render_embed_card(
             .when_some(card.icon.clone(), |el, icon| {
                 el.child(
                     img(SharedUri::from(icon))
+                        .id(SharedString::from(format!("{id}-site-icon")))
                         .size(px(16.))
                         .flex_none()
                         .rounded_sm()
-                        .object_fit(ObjectFit::Contain),
+                        .object_fit(ObjectFit::Contain)
+                        .with_loading(|| icon_loading(16., false)),
                 )
             })
             .child(div().truncate().child(name))
@@ -1961,10 +2010,12 @@ fn render_embed_card(
             .when_some(title_icon, |el, icon| {
                 el.child(
                     img(SharedUri::from(icon))
+                        .id(SharedString::from(format!("{id}-title-icon")))
                         .size(px(20.))
                         .flex_none()
                         .rounded_full()
-                        .object_fit(ObjectFit::Cover),
+                        .object_fit(ObjectFit::Cover)
+                        .with_loading(|| icon_loading(20., true)),
                 )
             })
             .child(text)
@@ -2001,6 +2052,7 @@ fn render_embed_card(
             format!("{id}-image").into(),
             &image.url,
             (image.width, image.height),
+            None,
             colors,
         )
         .cursor_pointer();
@@ -2135,6 +2187,7 @@ fn server_icon(server: &ServerEntry, media: &MediaUrls, selected: bool) -> AnyEl
     let initials = server.initials.clone();
     match server.icon.as_ref().and_then(|icon| media.file(icon)) {
         Some(url) => img(SharedUri::from(url))
+            .id(SharedString::from(format!("server-icon-{}", server.id)))
             .size(px(48.))
             .object_fit(ObjectFit::Cover)
             .map(|img| {
@@ -2143,6 +2196,10 @@ fn server_icon(server: &ServerEntry, media: &MediaUrls, selected: bool) -> AnyEl
                 } else {
                     img.rounded_full()
                 }
+            })
+            .with_loading({
+                let initials = initials.clone();
+                move || div().child(initials.clone()).into_any_element()
             })
             .with_fallback(move || div().child(initials.clone()).into_any_element())
             .into_any_element(),

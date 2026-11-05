@@ -495,3 +495,38 @@ None from the plan, which called for "a shimmer or blank placeholder while loadi
 
 ### Manual Validation
 The user confirmed the placeholder in the running app ("Yeah"), and asked for the two related fixes next: avatar and emoji loading states, and thumbhash previews.
+
+## Follow-up: avatar and icon loading states, and ThumbHash previews
+
+_Asked for by the user after the placeholder fix: "let's do those two related fixes as well"._
+
+### Changes Made
+- **Loading states for every `img()`** (`src/ui/chat.rs`). These had the same missing-ID problem as the placeholder fix, so their loading states never showed:
+  - `avatar()` takes an `id`. Callers pass `avatar-{message}`, `channel-avatar-{channel}` and `my-avatar`. The initial-letter placeholder now shows while loading, as well as on failure.
+  - `server_icon` gets an ID, `server-icon-{server}`, and shows the server's initials while loading, as its doc comment already claimed.
+  - Custom-emoji reaction chips, embed site icons and bot title icons get IDs and a new `icon_loading(size, round)`: a small `Skeleton`.
+- **ThumbHash previews**:
+  - `Cargo.toml`: adds `thumbhash = "0.1"` (MIT, pure Rust) and `image = { version = "0.25", default-features = false }`, the version GPUI already uses (0.25.10).
+  - `src/attachment.rs`: `AttachmentView::Image.thumbhash: Option<Arc<[u8]>>`, from `Metadata::Image.thumbhash`.
+  - `src/ui/thumbhash.rs` (new):
+    - `decode(hash)` turns the hash into RGBA (`thumb_hash_to_rgba`), then BGRA, then an `image::Frame`, then a `RenderImage`. Bad input gives `None`.
+    - The `Thumbhash` asset (`Source = Arc<[u8]>`) caches the decoded preview in GPUI's asset cache, so each hash is decoded once.
+    - `preview(hash)` is an `img(ImageSource::Custom(..))` that reads that cache. A hash that doesn't decode becomes an image error, so the caller's fallback shows.
+  - `inline_image` takes `thumbhash`. With one, the loading state is the preview stretched to the reserved box (`ObjectFit::Fill`, same corners), falling back to the `Skeleton` box. Embed images pass `None`, since remote images have no hash.
+- Tests:
+  - `src/ui/thumbhash.rs` unit tests: a red|blue 4×2 hash decodes landscape, with red on the left and blue on the right in BGRA order. Truncated hashes and 256 arbitrary byte strings never panic.
+  - `tests/store_attachments.rs`: `images_carry_their_thumbhash_for_a_blurred_preview`, and the existing equality test sets `thumbhash: None`.
+
+### Divergences
+- **Live check before building:** a temporary debug log (removed again) showed a real upload (4032×3024) with a 21-byte `thumbhash`, so the data is there.
+- **Clippy:** `manual_async_fn` is allowed on `Thumbhash::load`, with a comment. An `async fn` would borrow `cx` into the future, and the `Asset` trait needs a `'static` one.
+- **Not covered:** custom emoji inside message text. `TextView` (gpui-component) draws those `<img>`s itself.
+- **Seen in the log, not changed:** the January proxy returns 400 for SVG site icons (`stoat.chat/favicon.svg`), so GPUI logs an asset error and the icon is left out. This is existing chunk 5 behaviour.
+
+### Verification Performed
+- `cargo test`: 202 passed, 0 failed, 5 ignored. The 3 new tests are 2 `thumbhash` unit tests and 1 attachment test.
+- `cargo clippy --all-targets -- -D warnings`: clean, after the two fixes above. `cargo fmt --check`: clean.
+- Live: relaunched with an empty image cache. History loaded in four channels; the only error was the SVG proxy 400 above.
+
+### Manual Validation
+The user checked the running app and confirmed ("Let's go").

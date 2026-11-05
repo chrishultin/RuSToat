@@ -86,9 +86,28 @@ fn images_show_inline_from_the_file_server() {
             width: 400,
             height: 300,
             original: (640, 480),
+            thumbhash: None,
             too_big: false,
         }
     );
+}
+
+#[test]
+fn images_carry_their_thumbhash_for_a_blurred_preview() {
+    // Stoat sends it as a JSON array of bytes.
+    let file = file(
+        "f-hash",
+        "hash.jpg",
+        json!({ "type": "Image", "width": 4032, "height": 3024,
+                "thumbhash": [1, 2, 3, 250] }),
+        "image/jpeg",
+        1000,
+    );
+    let AttachmentView::Image { thumbhash, .. } = AttachmentView::new(&file, &media(), false)
+    else {
+        panic!();
+    };
+    assert_eq!(thumbhash.as_deref(), Some(&[1u8, 2, 3, 250][..]));
 }
 
 #[test]

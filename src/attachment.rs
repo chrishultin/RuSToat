@@ -7,6 +7,8 @@
 //! display size comes from the upload's metadata, so a row's height is known
 //! before the bytes arrive and never changes when they do.
 
+use std::sync::Arc;
+
 use crate::api::models::{File, Metadata};
 use crate::media::MediaUrls;
 
@@ -46,6 +48,8 @@ pub enum AttachmentView {
         /// The upload's own size from its metadata (zero if unknown), for the
         /// full-size viewer.
         original: (usize, usize),
+        /// The upload's ThumbHash, for a blurred preview while it loads.
+        thumbhash: Option<Arc<[u8]>>,
         /// Over [`MAX_AUTO_LOAD_BYTES`] and not revealed yet: drawn as a card
         /// with a "Show image" button instead.
         too_big: bool,
@@ -67,7 +71,15 @@ impl AttachmentView {
         let size_label = size_label(size);
         let url = media.file(file);
         match (&file.metadata, url) {
-            (Metadata::Image { width, height, .. }, Some(url)) => {
+            (
+                Metadata::Image {
+                    width,
+                    height,
+                    thumbhash,
+                    ..
+                },
+                Some(url),
+            ) => {
                 let original = (*width, *height);
                 let (width, height) = fit_within(*width, *height);
                 AttachmentView::Image {
@@ -78,6 +90,7 @@ impl AttachmentView {
                     width,
                     height,
                     original,
+                    thumbhash: thumbhash.as_deref().map(Arc::from),
                     too_big: size > MAX_AUTO_LOAD_BYTES && !revealed,
                 }
             }
