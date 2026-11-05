@@ -8,6 +8,7 @@ use futures::StreamExt;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::bubble::{Bubble, BubbleContent, BubbleVariant};
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::component::message::{
     Message as MessageLayout, MessageAlignment, MessageAvatar, MessageContent, MessageHeader,
 };
@@ -83,16 +84,33 @@ pub struct ChatView {
     /// Older-page requests in flight, and the last failure, by channel.
     loading_older: HashMap<String, Task<()>>,
     older_errors: HashMap<String, SharedString>,
+    /// The one read-acknowledgement waiting to go out: (channel, message, task).
+    /// Replacing it (newer message, other channel) cancels the old one.
+    pending_ack: Option<(String, String, Task<()>)>,
     _connection: Connection,
     _events: Task<()>,
     _root: Task<()>,
+    _activation: Subscription,
 }
+
+/// How long the newest message must stay on screen before it's marked read,
+/// so a burst of live messages sends one acknowledgement, not one each.
+const ACK_DELAY: Duration = Duration::from_secs(1);
 
 impl EventEmitter<ChatEvent> for ChatView {}
 
 impl ChatView {
     /// `client` must carry the session token. `me` is the logged-in user's ID.
-    pub fn new(client: StoatClient, me: String, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        client: StoatClient,
+        me: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // Coming back to the window counts as reading what's on screen.
+        let activation = cx.observe_window_activation(window, |this, window, cx| {
+            this.maybe_ack_current(window, cx)
+        });
         let root = spawn_io({
             let client = client.clone();
             async move { client.root_config().await }
@@ -138,9 +156,11 @@ impl ChatView {
             load_errors: HashMap::new(),
             loading_older: HashMap::new(),
             older_errors: HashMap::new(),
+            pending_ack: None,
             _connection: connection,
             _events: events,
             _root: root,
+            _activation: activation,
         }
     }
 
@@ -439,6 +459,85 @@ impl ChatView {
         cx.notify();
     }
 
+    /// Mark the open channel read on Stoat, if the user can actually see its
+    /// newest message: the window is active and the list is at the bottom.
+    /// Debounced by [`ACK_DELAY`]; at most one acknowledgement is pending.
+    fn maybe_ack_current(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if !self.has_ready || !window.is_window_active() {
+            return;
+        }
+        let Some(channel) = self.current_channel().map(|c| c.id) else {
+            return;
+        };
+        // "Not scrolled up" covers following the tail, being scrolled to the
+        // end by hand, and content too short to scroll at all.
+        let at_bottom = self
+            .panes
+            .get(&channel)
+            .is_some_and(|pane| !pane.scroller.read(cx).is_scrolled_up());
+        if !at_bottom {
+            return;
+        }
+        let Some(latest) = self.store.unacked_latest(&channel) else {
+            return;
+        };
+        if matches!(&self.pending_ack, Some((c, m, _)) if *c == channel && *m == latest) {
+            return;
+        }
+
+        let client = self.client.clone();
+        let task = cx.spawn({
+            let (channel, latest) = (channel.clone(), latest.clone());
+            async move |this, cx| {
+                cx.background_executor().timer(ACK_DELAY).await;
+                // Clear it here straight away; the request follows.
+                if this
+                    .update(cx, |this, cx| {
+                        this.store.apply_ack(&channel, &latest);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                let request = spawn_io({
+                    let (channel, latest) = (channel.clone(), latest.clone());
+                    async move { client.ack_message(&channel, &latest).await }
+                });
+                match request.await {
+                    Ok(Ok(())) => log::debug!("acked {channel} up to {latest}"),
+                    Ok(Err(err)) => log::warn!("couldn't mark {channel} read: {err:?}"),
+                    Err(err) => log::warn!("ack task failed: {err:?}"),
+                }
+                this.update(cx, |this, _| {
+                    if matches!(&this.pending_ack, Some((c, m, _)) if *c == channel && *m == latest)
+                    {
+                        this.pending_ack = None;
+                    }
+                })
+                .ok();
+            }
+        });
+        self.pending_ack = Some((channel, latest, task));
+    }
+
+    /// "Mark as read" on a server: clear it here and tell Stoat.
+    fn mark_server_read(&mut self, server: String, cx: &mut Context<Self>) {
+        self.store.apply_server_ack(&server);
+        cx.notify();
+        let client = self.client.clone();
+        let request = spawn_io({
+            let server = server.clone();
+            async move { client.ack_server(&server).await }
+        });
+        cx.spawn(async move |_, _| match request.await {
+            Ok(Ok(())) => log::debug!("marked server {server} read"),
+            Ok(Err(err)) => log::warn!("couldn't mark server {server} read: {err:?}"),
+            Err(err) => log::warn!("server ack task failed: {err:?}"),
+        })
+        .detach();
+    }
+
     fn retry_older(&mut self, channel: String, cx: &mut Context<Self>) {
         self.older_errors.remove(&channel);
         self.load_older(channel, cx);
@@ -490,6 +589,7 @@ impl ChatView {
             self.place == Place::Home,
             home_unread,
             home_mentions,
+            None,
             cx.listener(|this, _, _, cx| this.select_place(Place::Home, cx)),
             cx,
         );
@@ -501,6 +601,13 @@ impl ChatView {
                 let place = Place::Server(server.id.clone());
                 let selected = self.place == place;
                 let icon = server_icon(&server, &self.media, selected);
+                let view = cx.entity().downgrade();
+                let server_id = server.id.clone();
+                let mark_read: MarkRead = Rc::new(move |_, _, cx| {
+                    let server_id = server_id.clone();
+                    view.update(cx, |this, cx| this.mark_server_read(server_id, cx))
+                        .ok();
+                });
                 rail_button(
                     SharedString::from(format!("rail-{}", server.id)),
                     icon,
@@ -508,6 +615,7 @@ impl ChatView {
                     selected,
                     server.unread,
                     server.mentions,
+                    Some(mark_read),
                     cx.listener(move |this, _, _, cx| this.select_place(place.clone(), cx)),
                     cx,
                 )
@@ -1144,6 +1252,9 @@ fn server_icon(server: &ServerEntry, media: &MediaUrls, selected: bool) -> AnyEl
 
 /// A rail button, with a marker on the left edge when selected (an icon image
 /// covers the button's own highlight colour).
+/// What a rail button's "Mark as read" menu item does.
+type MarkRead = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+
 #[allow(clippy::too_many_arguments)]
 fn rail_button(
     id: impl Into<ElementId>,
@@ -1152,6 +1263,7 @@ fn rail_button(
     selected: bool,
     unread: bool,
     mentions: usize,
+    mark_read: Option<MarkRead>,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> Div {
@@ -1185,6 +1297,19 @@ fn rail_button(
         .on_click(on_click)
         .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         .child(content);
+    // Right-click: "Mark as read" (servers only).
+    let button = match mark_read {
+        Some(mark_read) => button
+            .context_menu(move |menu, _, _| {
+                let mark_read = mark_read.clone();
+                menu.item(
+                    PopupMenuItem::new("Mark as read")
+                        .on_click(move |event, window, cx| mark_read(event, window, cx)),
+                )
+            })
+            .into_any_element(),
+        None => button.into_any_element(),
+    };
 
     div()
         .relative()
@@ -1248,8 +1373,9 @@ impl Render for ChatView {
         // After layout, check whether the open channel is scrolled to its top
         // (or too short to scroll) and has more history to load.
         if let Some(channel) = self.current_channel().map(|c| c.id) {
-            cx.defer_in(window, move |this, _, cx| {
-                this.maybe_load_older(&channel, cx)
+            cx.defer_in(window, move |this, window, cx| {
+                this.maybe_load_older(&channel, cx);
+                this.maybe_ack_current(window, cx);
             });
         }
         let theme = cx.theme();

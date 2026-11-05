@@ -63,3 +63,38 @@ _Pre-existing uncommitted files at start: `docs/plans/unreads-and-notifications.
 
 ### Manual Validation
 The user compared the running app with the web app and confirmed "Matches": unread indicators and mention counts agree.
+
+## Chunk 2: Mark as read
+
+_Built in a git worktree (`.claude/worktrees/mark-as-read`, branch `feature/mark-as-read`, cut from `main` at `efda345`). The user had a second session ("Fix Peter's advanced formatting rendering") working in the main checkout at the same time, and chose to isolate this chunk rather than share the folder and git index. `.claude/worktrees/` is listed in `.git/info/exclude`, which isn't committed. The build cache was APFS-cloned (`cp -Rc`) from the main checkout, so no full rebuild was needed._
+
+### Changes Made
+- `src/api/client.rs`: `ack_message(channel, message)` is `PUT /channels/{channel}/ack/{message}`, and `ack_server(server)` is `PUT /servers/{server}/ack`. Both use `send_raw`, so a 204 with no body is success.
+- `src/store.rs`:
+  - `unacked_latest(channel)`: the channel's newest message ID if anything in it is unread or has an unread mention, otherwise `None`.
+  - `apply_server_ack(server)` applies `apply_ack` to each of the server's channels at its newest message.
+- `src/ui/chat.rs`:
+  - **Auto ack:** `maybe_ack_current(window, cx)` runs only when:
+    - `Ready` has arrived
+    - `window.is_window_active()`
+    - the open channel's pane isn't `is_scrolled_up()`. That covers following the tail, being scrolled to the end by hand, and content too short to scroll. The first version used `is_following_tail()`, which can stay false after the user scrolls back down manually, so it was changed before review.
+    - `unacked_latest` returns something
+  - **Debounce and dedupe:** it keeps one `pending_ack: (channel, message, Task)`. A different channel or message replaces it, which cancels the old task. A pending ack for the same channel and message is a no-op. After `ACK_DELAY` (1 s) the task clears the indicator locally, sends the request (logging failures), and clears `pending_ack`.
+  - **When it runs:** after every render (deferred alongside `maybe_load_older`), and from `observe_window_activation`, so coming back to the window marks the visible channel read. `ChatView::new` now takes `window` for that subscription; `src/ui/app_root.rs` passes it.
+  - **Mark as read:** right-click a server in the rail and choose "Mark as read", via gpui-component's `ContextMenuExt::context_menu` and `PopupMenuItem::new(…).on_click(…)`. It calls `mark_server_read`, which applies `apply_server_ack` locally, then `ack_server` in a detached task (failures logged). `rail_button` takes `Option<MarkRead>`; Home passes `None`.
+- Tests:
+  - `tests/api_unreads.rs` (new), 3 `wiremock` tests: the `ack_message` path and session header with 204; `ack_server` the same; 403 `MissingPermission` mapping to `ApiError::Api`.
+  - `tests/store_unreads.rs`: +2 tests, `unacked_latest` (read, unread, no messages, after a live message) and `a_server_ack_clears_every_channel_in_it` (DMs untouched).
+
+### Divergences
+- **Process (user-directed): built in a worktree.** It merges back into `main` after review; see the header note.
+- **Minor: Home has no "Mark as read".** The plan only specified servers.
+- **Minor: the indicator clears when the debounce fires**, just before the request is sent, not after it succeeds. A failed request is logged and the channel stays read locally; it's acked again on the next new message.
+
+### Verification Performed
+- `cargo test --test api_unreads --test store_unreads`: 13 passed.
+- `cargo test`: 125 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings`: clean. `cargo fmt`: applied.
+- Live: launched the worktree build. The session restored and the app connected.
+
+### Manual Validation
+The user tested the worktree build against the web app and confirmed "Works": reading here clears unread state in the web app.

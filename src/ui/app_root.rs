@@ -114,7 +114,7 @@ impl AppRoot {
         cx: &mut Context<Self>,
     ) -> Screen {
         let client = self.client.with_token(token.clone());
-        let view = cx.new(|cx| ChatView::new(client, me, cx));
+        let view = cx.new(|cx| ChatView::new(client, me, window, cx));
         let events = cx.subscribe_in(&view, window, |this, _, event, window, cx| match event {
             ChatEvent::LogOutRequested => this.log_out(window, cx),
             ChatEvent::SessionRejected => {

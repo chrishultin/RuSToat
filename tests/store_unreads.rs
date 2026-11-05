@@ -211,3 +211,42 @@ fn summaries_roll_up_to_servers_and_home() {
     assert!(ada.unread);
     assert_eq!(ada.mentions, 1);
 }
+
+#[test]
+fn unacked_latest_is_the_newest_message_only_when_something_is_unread() {
+    let mut store = store();
+    assert_eq!(store.unacked_latest("ch-general"), None, "already read");
+    assert_eq!(store.unacked_latest("dm-ada").as_deref(), Some(DM_ADA_LAST));
+    assert_eq!(store.unacked_latest("ch-welcome"), None, "no messages");
+    store.apply_message(message("ch-general", "u-ada", serde_json::json!({})));
+    assert_eq!(store.unacked_latest("ch-general").as_deref(), Some(NEWER));
+}
+
+#[test]
+fn a_server_ack_clears_every_channel_in_it() {
+    let mut store = store();
+    store.apply_message(message(
+        "ch-random",
+        "u-ada",
+        serde_json::json!({ "mentions": ["u-me"] }),
+    ));
+    let mut general = message("ch-general", "u-ada", serde_json::json!({}));
+    general.id = "01JC00000000000000000000ZY".into();
+    store.apply_message(general);
+    assert!(store.is_unread("ch-random") && store.is_unread("ch-general"));
+
+    store.apply_server_ack("srv-alpha");
+
+    assert!(!store.is_unread("ch-random"));
+    assert!(!store.is_unread("ch-general"));
+    assert_eq!(store.mention_count("ch-random"), 0);
+    let alpha = store
+        .servers()
+        .into_iter()
+        .find(|s| s.id == "srv-alpha")
+        .unwrap();
+    assert!(!alpha.unread);
+    assert_eq!(alpha.mentions, 0);
+    // DMs aren't part of a server.
+    assert!(store.is_unread("dm-ada"));
+}

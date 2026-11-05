@@ -179,6 +179,25 @@ impl StoatClient {
         self.send(Method::GET, &path, None::<&()>).await
     }
 
+    /// `PUT /channels/{channel}/ack/{message}`: the user has read `channel`
+    /// up to and including `message`.
+    pub async fn ack_message(&self, channel: &str, message: &str) -> Result<(), ApiError> {
+        self.send_raw(
+            Method::PUT,
+            &format!("/channels/{channel}/ack/{message}"),
+            None::<&()>,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// `PUT /servers/{server}/ack`: mark every channel in `server` read.
+    pub async fn ack_server(&self, server: &str) -> Result<(), ApiError> {
+        self.send_raw(Method::PUT, &format!("/servers/{server}/ack"), None::<&()>)
+            .await
+            .map(|_| ())
+    }
+
     /// `POST /auth/session/logout`: end this client's session on the server.
     ///
     /// A token the server already rejects counts as logged out.

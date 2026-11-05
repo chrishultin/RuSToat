@@ -319,6 +319,34 @@ impl ChatStore {
         state.mentions.retain(|m| m.as_str() > message_id);
     }
 
+    /// The message to acknowledge to mark `channel` read: its newest message,
+    /// if there's anything unread (or an unread mention) in it.
+    pub fn unacked_latest(&self, channel_id: &str) -> Option<String> {
+        if !self.is_unread(channel_id) && self.mention_count(channel_id) == 0 {
+            return None;
+        }
+        last_message_id(self.channels.get(channel_id)?).map(str::to_string)
+    }
+
+    /// Mark every text channel in `server` read up to its newest message
+    /// (what `PUT /servers/{id}/ack` does on the server).
+    pub fn apply_server_ack(&mut self, server_id: &str) {
+        let Some(server) = self.servers.get(server_id) else {
+            return;
+        };
+        let acks: Vec<(String, String)> = server
+            .channels
+            .iter()
+            .filter_map(|id| {
+                let latest = last_message_id(self.channels.get(id)?)?;
+                Some((id.clone(), latest.to_string()))
+            })
+            .collect();
+        for (channel, latest) in acks {
+            self.apply_ack(&channel, &latest);
+        }
+    }
+
     /// Whether a channel has messages newer than the user's read position.
     /// A channel with no read position at all counts as unread if it has any
     /// messages, as in Stoat's web client.
