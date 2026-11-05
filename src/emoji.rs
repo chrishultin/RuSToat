@@ -72,6 +72,11 @@ fn shortcode_of(emoji: &emojis::Emoji) -> String {
 /// it, then ones with a later word starting with it (`:engine` finds
 /// `fire_engine`). Custom emoji come before Unicode ones that match as well.
 pub fn search(query: &str, custom: &[CustomEmoji]) -> Vec<EmojiChoice> {
+    search_all(query, custom, MAX_SUGGESTIONS)
+}
+
+/// Like [`search`], but up to `limit` results (the emoji picker's search).
+pub fn search_all(query: &str, custom: &[CustomEmoji], limit: usize) -> Vec<EmojiChoice> {
     let query = query.to_lowercase();
     if query.is_empty() {
         return Vec::new();
@@ -89,7 +94,7 @@ pub fn search(query: &str, custom: &[CustomEmoji]) -> Vec<EmojiChoice> {
     found.sort_by_key(|(tier, _)| *tier);
     found
         .into_iter()
-        .take(MAX_SUGGESTIONS)
+        .take(limit)
         .map(|(_, choice)| choice)
         .collect()
 }
@@ -121,4 +126,103 @@ fn tier<'a>(query: &str, names: impl IntoIterator<Item = &'a str>) -> Option<u8>
 /// The Unicode emoji whose shortcode is exactly `code` (`smile` → 😄).
 pub fn by_shortcode(code: &str) -> Option<&'static str> {
     emojis::get_by_shortcode(code).map(|emoji| emoji.as_str())
+}
+
+/// Every Unicode emoji, by category in Unicode (CLDR) order, with each
+/// category's name. Default skin tones only.
+pub fn groups() -> Vec<(&'static str, Vec<EmojiChoice>)> {
+    emojis::Group::iter()
+        .map(|group| {
+            let emoji = emojis::iter()
+                .filter(|emoji| emoji.group() == group)
+                .map(EmojiChoice::unicode)
+                .collect();
+            (group_name(group), emoji)
+        })
+        .collect()
+}
+
+fn group_name(group: emojis::Group) -> &'static str {
+    use emojis::Group;
+    match group {
+        Group::SmileysAndEmotion => "Smileys & Emotion",
+        Group::PeopleAndBody => "People & Body",
+        Group::AnimalsAndNature => "Animals & Nature",
+        Group::FoodAndDrink => "Food & Drink",
+        Group::TravelAndPlaces => "Travel & Places",
+        Group::Activities => "Activities",
+        Group::Objects => "Objects",
+        Group::Symbols => "Symbols",
+        Group::Flags => "Flags",
+    }
+}
+
+/// Most emoji kept as recently used.
+pub const MAX_RECENT: usize = 16;
+
+/// Emoji the user picked recently, most recent first, while the app runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecentEmoji(Vec<EmojiChoice>);
+
+impl RecentEmoji {
+    /// `choice` was just used: it moves to the front.
+    pub fn used(&mut self, choice: EmojiChoice) {
+        self.0.retain(|c| *c != choice);
+        self.0.insert(0, choice);
+        self.0.truncate(MAX_RECENT);
+    }
+
+    pub fn list(&self) -> &[EmojiChoice] {
+        &self.0
+    }
+}
+
+/// Most results the picker's search shows.
+pub const MAX_SEARCH_RESULTS: usize = 64;
+
+/// What the emoji picker shows, as titled sections: for a search, its
+/// results; otherwise recently used, every category, then this server's
+/// custom emoji. Empty sections are left out.
+pub fn picker_sections(
+    query: &str,
+    recent: &RecentEmoji,
+    custom: &[CustomEmoji],
+) -> Vec<(String, Vec<EmojiChoice>)> {
+    let query = query.trim();
+    let sections = if query.is_empty() {
+        let mut sections = vec![("Recently used".to_string(), recent.list().to_vec())];
+        sections.extend(groups().into_iter().map(|(name, emoji)| (name.to_string(), emoji)));
+        sections.push((
+            "Custom".to_string(),
+            custom.iter().cloned().map(EmojiChoice::Custom).collect(),
+        ));
+        sections
+    } else {
+        let results = search_all(query.trim_matches(':'), custom, MAX_SEARCH_RESULTS);
+        vec![("Results".to_string(), results)]
+    };
+    sections
+        .into_iter()
+        .filter(|(_, emoji)| !emoji.is_empty())
+        .collect()
+}
+
+/// One row of the picker's list: all rows are the same height, so the
+/// list can be virtualized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickerRow {
+    Header(String),
+    /// Up to a row's worth of emoji.
+    Emoji(Vec<EmojiChoice>),
+}
+
+/// `sections` laid out as rows of at most `columns` emoji, each section
+/// under its header.
+pub fn picker_rows(sections: Vec<(String, Vec<EmojiChoice>)>, columns: usize) -> Vec<PickerRow> {
+    let mut rows = Vec::new();
+    for (title, emoji) in sections {
+        rows.push(PickerRow::Header(title));
+        rows.extend(emoji.chunks(columns.max(1)).map(|row| PickerRow::Emoji(row.to_vec())));
+    }
+    rows
 }

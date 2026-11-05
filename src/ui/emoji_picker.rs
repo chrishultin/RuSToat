@@ -1,7 +1,8 @@
-//! The reaction picker: a grid of emoji in a popover. The common Unicode
+//! The emoji pickers. The reaction picker: a grid of emoji in a popover. The common Unicode
 //! emoji come first, then custom emoji (see [`ChatStore::reaction_choices`]),
 //! or only the ones a message allows. Emoji the user has already reacted
-//! with are highlighted, and picking one again takes it back.
+//! with are highlighted, and picking one again takes it back. The message
+//! box's picker ([`EmojiBrowser`]) has every emoji, with search.
 //!
 //! [`ChatStore::reaction_choices`]: crate::store::ChatStore::reaction_choices
 
@@ -14,6 +15,11 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
+use gpui_kit::assets::IconName;
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::{Icon, Sizable, v_flex};
+
+use crate::emoji::{CustomEmoji, EmojiChoice, PickerRow, RecentEmoji, picker_rows, picker_sections};
 use crate::store::{PickerEmoji, ReactionEmoji};
 
 /// Emoji per row.
@@ -38,12 +44,7 @@ pub fn emoji_grid(
     on_pick: OnPick,
     cx: &App,
 ) -> impl IntoElement + use<> {
-    let theme = cx.theme();
-    let (hover, selected, muted) = (
-        theme.secondary,
-        theme.primary.opacity(0.2),
-        theme.muted_foreground,
-    );
+    let muted = cx.theme().muted_foreground;
     let cells = choices.iter().enumerate().map(|(ix, choice)| {
         let key = choice.key.clone();
         let on_pick = on_pick.clone();
@@ -57,17 +58,7 @@ pub fn emoji_grid(
                 name,
                 ..
             } => (
-                img(SharedUri::from(url.clone()))
-                    .id(SharedString::from(format!("{id}-pick-{ix}-img")))
-                    .size(px(CUSTOM_EMOJI_PX))
-                    .object_fit(ObjectFit::Contain)
-                    .with_loading(|| {
-                        Skeleton::new()
-                            .size(px(CUSTOM_EMOJI_PX))
-                            .rounded_sm()
-                            .into_any_element()
-                    })
-                    .into_any_element(),
+                custom_face(format!("{id}-pick-{ix}-img"), url),
                 name.clone().into(),
             ),
             ReactionEmoji::Custom {
@@ -82,19 +73,14 @@ pub fn emoji_grid(
                 name.clone().into(),
             ),
         };
-        div()
-            .id(SharedString::from(format!("{id}-pick-{ix}")))
-            .size(px(CELL))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded_md()
-            .cursor_pointer()
-            .when(chosen.contains(&choice.key), |el| el.bg(selected))
-            .hover(move |style| style.bg(hover))
-            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-            .on_click(move |_, window, cx| on_pick(&key, window, cx))
-            .child(face)
+        emoji_cell(
+            format!("{id}-pick-{ix}"),
+            face,
+            tooltip,
+            chosen.contains(&choice.key),
+            cx,
+        )
+        .on_click(move |_, window, cx| on_pick(&key, window, cx))
     });
     let grid = div()
         .id(SharedString::from(format!("{id}-picker")))
@@ -118,4 +104,195 @@ pub fn emoji_grid(
             )
         })
         .child(grid)
+}
+
+/// One emoji's square, as both pickers draw it, highlighted if `chosen`.
+/// Callers add what clicking it does.
+fn emoji_cell(
+    id: String,
+    face: AnyElement,
+    tooltip: SharedString,
+    chosen: bool,
+    cx: &App,
+) -> Stateful<Div> {
+    let theme = cx.theme();
+    let (hover, selected) = (theme.secondary, theme.primary.opacity(0.2));
+    div()
+        .id(SharedString::from(id))
+        .size(px(CELL))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .cursor_pointer()
+        .when(chosen, |el| el.bg(selected))
+        .hover(move |style| style.bg(hover))
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .child(face)
+}
+
+/// A custom emoji's picture in its square, pulsing while it loads.
+fn custom_face(id: String, url: &str) -> AnyElement {
+    img(SharedUri::from(url.to_string()))
+        .id(SharedString::from(id))
+        .size(px(CUSTOM_EMOJI_PX))
+        .object_fit(ObjectFit::Contain)
+        .with_loading(|| {
+            Skeleton::new()
+                .size(px(CUSTOM_EMOJI_PX))
+                .rounded_sm()
+                .into_any_element()
+        })
+        .into_any_element()
+}
+
+/// What picking in the emoji browser does: the emoji, and whether Shift
+/// was held (to keep the browser open).
+pub type OnBrowsePick = Rc<dyn Fn(&EmojiChoice, bool, &mut Window, &mut App)>;
+
+/// The browser's list is this tall; it scrolls.
+const BROWSER_HEIGHT: f32 = 9. * CELL;
+
+/// The message box's emoji picker: a search field over a virtualized list
+/// of every emoji (recently used, each category, then custom emoji), in
+/// rows of [`COLUMNS`] with a header row per section.
+pub struct EmojiBrowser {
+    search: Entity<InputState>,
+    recent: RecentEmoji,
+    custom: Vec<CustomEmoji>,
+    rows: Rc<Vec<PickerRow>>,
+    scroll: UniformListScrollHandle,
+    on_pick: OnBrowsePick,
+    _search: Subscription,
+}
+
+impl EmojiBrowser {
+    /// The browser, its search field focused.
+    pub fn new(
+        recent: RecentEmoji,
+        custom: Vec<CustomEmoji>,
+        on_pick: OnBrowsePick,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search emoji"));
+        let subscription = cx.subscribe_in(
+            &search,
+            window,
+            |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
+                    this.rebuild(cx);
+                    this.scroll.scroll_to_item(0, ScrollStrategy::Top);
+                    cx.notify();
+                }
+                // Enter picks the first result.
+                InputEvent::PressEnter { .. } => {
+                    let first = this.rows.iter().find_map(|row| match row {
+                        PickerRow::Emoji(emoji) => emoji.first().cloned(),
+                        PickerRow::Header(_) => None,
+                    });
+                    if let Some(first) = first {
+                        (this.on_pick)(&first, false, window, cx);
+                    }
+                }
+                _ => {}
+            },
+        );
+        search.update(cx, |search, cx| search.focus(window, cx));
+        let mut browser = Self {
+            search,
+            recent,
+            custom,
+            rows: Rc::default(),
+            scroll: UniformListScrollHandle::new(),
+            on_pick,
+            _search: subscription,
+        };
+        browser.rebuild(cx);
+        browser
+    }
+
+    fn rebuild(&mut self, cx: &App) {
+        let query = self.search.read(cx).value();
+        let sections = picker_sections(&query, &self.recent, &self.custom);
+        self.rows = Rc::new(picker_rows(sections, COLUMNS));
+    }
+}
+
+impl Render for EmojiBrowser {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (rows, on_pick) = (self.rows.clone(), self.on_pick.clone());
+        let muted = cx.theme().muted_foreground;
+        let list = if rows.is_empty() {
+            div()
+                .h(px(BROWSER_HEIGHT))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(muted)
+                .child("No emoji found")
+                .into_any_element()
+        } else {
+            uniform_list("emoji-browser", rows.len(), move |range, _, cx| {
+                range
+                    .map(|ix| browser_row(ix, &rows[ix], &on_pick, cx))
+                    .collect()
+            })
+            .h(px(BROWSER_HEIGHT))
+            .track_scroll(&self.scroll)
+            .into_any_element()
+        };
+        v_flex()
+            .w(px(COLUMNS as f32 * CELL))
+            .gap_2()
+            .child(
+                Input::new(&self.search)
+                    .small()
+                    .cleanable(true)
+                    .prefix(Icon::new(IconName::Search).small().text_color(muted)),
+            )
+            .child(list)
+    }
+}
+
+/// Row `ix` of the browser: a section header, or a row of emoji.
+fn browser_row(ix: usize, row: &PickerRow, on_pick: &OnBrowsePick, cx: &App) -> AnyElement {
+    match row {
+        PickerRow::Header(title) => div()
+            .h(px(CELL))
+            .px_1()
+            .flex()
+            .items_end()
+            .pb_1()
+            .text_xs()
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(cx.theme().muted_foreground)
+            .child(title.clone())
+            .into_any_element(),
+        PickerRow::Emoji(emoji) => div()
+            .h(px(CELL))
+            .flex()
+            .children(emoji.iter().enumerate().map(|(col, choice)| {
+                let id = format!("browse-{ix}-{col}");
+                let (face, tooltip): (AnyElement, SharedString) = match choice {
+                    EmojiChoice::Unicode { emoji, shortcode } => (
+                        div().text_xl().child(*emoji).into_any_element(),
+                        format!(":{shortcode}:").into(),
+                    ),
+                    EmojiChoice::Custom(custom) => (
+                        match &custom.url {
+                            Some(url) => custom_face(format!("{id}-img"), url),
+                            None => div().text_xs().truncate().child(custom.name.clone()).into_any_element(),
+                        },
+                        format!(":{}:", custom.name).into(),
+                    ),
+                };
+                let (choice, on_pick) = (choice.clone(), on_pick.clone());
+                emoji_cell(id, face, tooltip, false, cx).on_click(move |event, window, cx| {
+                    on_pick(&choice, event.modifiers().shift, window, cx)
+                })
+            }))
+            .into_any_element(),
+    }
 }

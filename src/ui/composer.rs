@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -12,6 +13,7 @@ use gpui_kit::component::input::{
     MoveDown, MoveUp, Position, Textarea, TextareaState,
 };
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::popover::Popover;
 use gpui_kit::component::{ActiveTheme, Disableable, Icon, Sizable, WindowExt, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -21,7 +23,9 @@ use crate::attachment::FileKind;
 use crate::complete::{
     Insertion, Query, Suggestion, TokenRef, closed_shortcode, completion_query, mention_spans,
 };
+use crate::emoji::{CustomEmoji, EmojiChoice, RecentEmoji};
 use crate::media::MediaUrls;
+use crate::ui::emoji_picker::{EmojiBrowser, OnBrowsePick};
 use crate::draft::{
     AttachmentLimits, Draft, DraftAttachment, Drafts, EditStash, MAX_MESSAGE_CHARS, ReplyTarget,
     SendCheck, TooManyReplies, char_count, check_send, save_pasted_image,
@@ -45,6 +49,9 @@ pub enum ComposerEvent {
     Input { empty: bool },
     /// Something's being completed: answer with [`Composer::set_suggestions`].
     Complete(Query),
+    /// The emoji button was clicked: answer with
+    /// [`Composer::open_emoji_picker`] and the channel's custom emoji.
+    OpenEmojiPicker,
 }
 
 /// What gives a chip its label (`@Ada`) when text is loaded into the box.
@@ -85,6 +92,9 @@ pub struct Composer {
     last_text: String,
     /// Where custom emoji chips' images come from.
     media: MediaUrls,
+    /// The emoji picker, while it's open.
+    emoji_picker: Option<Entity<EmojiBrowser>>,
+    recent_emoji: RecentEmoji,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -137,6 +147,8 @@ impl Composer {
             labels: HashMap::new(),
             last_text: String::new(),
             media: MediaUrls::default(),
+            emoji_picker: None,
+            recent_emoji: RecentEmoji::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -325,6 +337,66 @@ impl Composer {
     /// Where custom emoji chips' images come from.
     pub fn set_media(&mut self, media: MediaUrls) {
         self.media = media;
+    }
+
+    /// Open the emoji picker, offering `custom` emoji after the Unicode ones.
+    pub fn open_emoji_picker(
+        &mut self,
+        custom: Vec<CustomEmoji>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let this = cx.entity().downgrade();
+        let on_pick: OnBrowsePick = Rc::new(move |choice, keep_open, window, cx| {
+            this.update(cx, |this, cx| this.insert_emoji(choice, keep_open, window, cx))
+                .ok();
+        });
+        let recent = self.recent_emoji.clone();
+        self.emoji_picker =
+            Some(cx.new(|cx| EmojiBrowser::new(recent, custom, on_pick, window, cx)));
+        cx.notify();
+    }
+
+    fn close_emoji_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.emoji_picker.take().is_some() {
+            self.focus(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// Put a picked emoji at the cursor: a Unicode one as text, a custom one
+    /// as a chip. The picker closes unless Shift was held.
+    fn insert_emoji(
+        &mut self,
+        choice: &EmojiChoice,
+        keep_open: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.recent_emoji.used(choice.clone());
+        match choice {
+            EmojiChoice::Unicode { emoji, .. } => {
+                self.input
+                    .update(cx, |input, cx| input.insert(*emoji, window, cx));
+            }
+            EmojiChoice::Custom(custom) => {
+                let token = TokenRef::Emoji(custom.id.clone());
+                let label = format!(":{}:", custom.name);
+                self.labels.insert(token.token_id(), label.clone());
+                let chip = InlineToken::new(token.token_id(), token.wire_text()).with_label(label);
+                self.input.update(cx, |input, cx| {
+                    if let Err(err) = input.replace_with_token(chip, window, cx) {
+                        log::warn!("couldn't insert {token:?}: {err}");
+                    }
+                });
+            }
+        }
+        self.last_text = self.input.read(cx).value().to_string();
+        if keep_open {
+            cx.notify();
+        } else {
+            self.close_emoji_picker(window, cx);
+        }
     }
 
     /// Typing the closing `:` of a known shortcode (`:smile:`) turns it
@@ -589,8 +661,13 @@ impl Composer {
         }
     }
 
-    /// Esc in the message box: stop editing, or else stop replying.
+    /// Esc in the message box: stop editing, or else stop replying. (In
+    /// the emoji picker, it only closes the picker.)
     fn on_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.emoji_picker.is_some() {
+            self.close_emoji_picker(window, cx);
+            return;
+        }
         if self.cancel_edit(window, cx) {
             return;
         }
@@ -606,6 +683,10 @@ impl Composer {
     /// (not already editing): edit the last message. Otherwise Up moves the
     /// cursor as usual.
     fn on_move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
+        // Keys in the emoji picker's search field pass through here too.
+        if self.emoji_picker.is_some() {
+            return;
+        }
         if self.completing() {
             cx.stop_propagation();
             self.move_selection(-1, cx);
@@ -999,6 +1080,30 @@ impl Render for Composer {
         let editing = self.editing.editing().is_some();
         let tray = (!self.draft.attachments.is_empty()).then(|| self.render_tray(cx));
         let suggestions = self.completing().then(|| self.render_suggestions(cx));
+        let emoji = {
+            let this = cx.entity().downgrade();
+            let picker = self.emoji_picker.clone();
+            Popover::new("emoji-picker")
+                .anchor(Anchor::BottomRight)
+                .open(self.emoji_picker.is_some())
+                .on_open_change(move |open, window, cx| {
+                    this.update(cx, |this, cx| {
+                        if *open {
+                            cx.emit(ComposerEvent::OpenEmojiPicker);
+                        } else {
+                            this.close_emoji_picker(window, cx);
+                        }
+                    })
+                    .ok();
+                })
+                .trigger(
+                    Button::new("emoji-button")
+                        .ghost()
+                        .icon(IconName::FaceSlightlySmiling)
+                        .tooltip("Emoji"),
+                )
+                .content(move |_, _, _| div().children(picker.clone()))
+        };
         let attach = Button::new("attach")
             .ghost()
             .icon(IconName::Paperclip)
@@ -1042,6 +1147,7 @@ impl Render for Composer {
                                 }),
                         ),
                     )
+                    .child(emoji)
                     .children(suggestions),
             )
             .children(tray)

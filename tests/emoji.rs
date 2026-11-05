@@ -88,3 +88,119 @@ fn exact_shortcodes_are_looked_up() {
     assert_eq!(by_shortcode("nope"), None);
     assert_eq!(by_shortcode("01M6GEW5A0CCCCCCCCCCCCCCCC"), None);
 }
+
+// The emoji picker.
+
+use stoat_gpui::emoji::{
+    MAX_RECENT, PickerRow, RecentEmoji, groups, picker_rows, picker_sections, search_all,
+};
+
+#[test]
+fn groups_come_in_unicode_order_and_none_is_empty() {
+    let groups = groups();
+    let names: Vec<&str> = groups.iter().map(|(name, _)| *name).collect();
+    assert_eq!(
+        names,
+        [
+            "Smileys & Emotion",
+            "People & Body",
+            "Animals & Nature",
+            "Food & Drink",
+            "Travel & Places",
+            "Activities",
+            "Objects",
+            "Symbols",
+            "Flags"
+        ]
+    );
+    assert!(groups.iter().all(|(_, emoji)| !emoji.is_empty()));
+    let total: usize = groups.iter().map(|(_, emoji)| emoji.len()).sum();
+    assert!(total > 1800, "{total}");
+    // The first emoji of all, and no skin-tone variants.
+    assert_eq!(glyphs(&groups[0].1[..1]), ["😀"]);
+    assert!(!glyphs(&groups[1].1).iter().any(|e| e.contains('\u{1F3FB}')));
+}
+
+fn unicode(emoji: &'static str) -> EmojiChoice {
+    match search_all(emoji, &[], 1).first() {
+        Some(choice) => choice.clone(),
+        None => EmojiChoice::Unicode {
+            emoji,
+            shortcode: emoji.into(),
+        },
+    }
+}
+
+#[test]
+fn recently_used_is_most_recent_first_without_duplicates_and_capped() {
+    let mut recent = RecentEmoji::default();
+    recent.used(unicode("smile"));
+    recent.used(unicode("tada"));
+    recent.used(unicode("smile"));
+    assert_eq!(glyphs(recent.list()), ["😄", "🎉"]);
+    recent.used(EmojiChoice::Custom(parrot()));
+    assert_eq!(glyphs(recent.list()), [":smile_parrot:", "😄", "🎉"]);
+
+    for choice in groups()[3].1.iter().take(20) {
+        recent.used(choice.clone());
+    }
+    assert_eq!(recent.list().len(), MAX_RECENT);
+    assert_eq!(recent.list()[0], groups()[3].1[19]);
+}
+
+#[test]
+fn the_pickers_search_gives_what_completion_gives_then_more() {
+    for query in ["smi", "cat", "heart", "parrot"] {
+        let all = search_all(query, &[parrot()], 64);
+        let completion = search(query, &[parrot()]);
+        assert_eq!(all[..completion.len()], completion[..], "{query}");
+    }
+    assert!(search_all("heart", &[], 64).len() > MAX_SUGGESTIONS);
+}
+
+#[test]
+fn the_picker_shows_recent_then_categories_then_custom_or_search_results() {
+    let mut recent = RecentEmoji::default();
+    let titles = |sections: &[(String, Vec<EmojiChoice>)]| -> Vec<String> {
+        sections.iter().map(|(title, _)| title.clone()).collect()
+    };
+    // Nothing recent or custom: just the categories.
+    let sections = picker_sections("", &recent, &[]);
+    assert_eq!(titles(&sections).len(), 9);
+    assert_eq!(titles(&sections)[0], "Smileys & Emotion");
+
+    recent.used(unicode("tada"));
+    let sections = picker_sections("", &recent, &[parrot()]);
+    let names = titles(&sections);
+    assert_eq!(names.first().map(String::as_str), Some("Recently used"));
+    assert_eq!(names.last().map(String::as_str), Some("Custom"));
+    assert_eq!(glyphs(&sections.last().unwrap().1), [":smile_parrot:"]);
+
+    // A search (with or without colons) shows only results.
+    let sections = picker_sections(" :cat ", &recent, &[]);
+    assert_eq!(titles(&sections), ["Results"]);
+    assert_eq!(glyphs(&sections[0].1)[0], "🐱");
+    assert!(picker_sections("zzzz", &recent, &[]).is_empty());
+}
+
+#[test]
+fn picker_rows_put_a_header_over_rows_of_eight() {
+    let ten: Vec<EmojiChoice> = groups()[0].1[..10].to_vec();
+    let rows = picker_rows(
+        vec![("A".into(), ten.clone()), ("B".into(), ten[..3].to_vec())],
+        8,
+    );
+    assert_eq!(
+        rows,
+        vec![
+            PickerRow::Header("A".into()),
+            PickerRow::Emoji(ten[..8].to_vec()),
+            PickerRow::Emoji(ten[8..].to_vec()),
+            PickerRow::Header("B".into()),
+            PickerRow::Emoji(ten[..3].to_vec()),
+        ]
+    );
+    // Every category, virtualized: a few hundred rows, not 1,900 cells.
+    let all = picker_rows(picker_sections("", &RecentEmoji::default(), &[]), 8);
+    assert!(all.len() < 300, "{}", all.len());
+}

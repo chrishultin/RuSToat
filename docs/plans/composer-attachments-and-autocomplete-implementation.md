@@ -204,3 +204,111 @@ Deferred by the user ("we'll test it all later"). The chunk's checks (a member w
 
 ### Manual Validation
 Deferred by the user ("we'll test it all later"). The chunk's checks (`:thu` → 👍, a custom emoji from the list, `:tada:` converting on the final colon) move to the plan's Manual Test 7.
+
+## Chunk 6: Emoji button with a full picker
+
+### Changes Made
+- `src/emoji.rs`:
+  - `groups()`: every Unicode emoji (default skin tones) by `emojis::Group`, in Unicode order, with display names.
+  - `RecentEmoji` (`used`, `list`; most recent first, no duplicates, `MAX_RECENT = 16`).
+  - `search_all(query, custom, limit)`, with `search` = `search_all(…, 8)`, so the picker's first results are exactly the `:` completion's.
+  - `picker_sections(query, recent, custom)`: "Recently used", the 9 categories and "Custom", or "Results" (up to 64) for a search (colons trimmed), dropping empty sections.
+  - `PickerRow::{Header, Emoji}` and `picker_rows(sections, columns)`.
+- `src/ui/emoji_picker.rs`:
+  - The cell rendering is factored out of `emoji_grid` into `emoji_cell` (34 px square, hover, chosen tint, tooltip) and `custom_face` (an image with a loading skeleton). The reaction grid now uses them.
+  - New `EmojiBrowser` view: a search `InputState` (focused on open, cleanable, search icon) over a `uniform_list` of `PickerRow`s, all 34 px high, 9 rows tall. Changing the search rebuilds the rows and scrolls to the top, and Enter picks the first result.
+  - Clicking a cell calls `OnBrowsePick(choice, shift)`.
+- `src/ui/composer.rs`:
+  - A smiley button (`IconName::FaceSlightlySmiling`) right of the box, in a `Popover` anchored bottom-right and controlled by `emoji_picker.is_some()`. Opening emits `ComposerEvent::OpenEmojiPicker`, and `ChatView` answers with `open_emoji_picker(store.custom_emoji_for(channel))`.
+  - `insert_emoji` records the emoji as recently used and inserts it at the cursor (Unicode with `insert`, custom with `replace_with_token`, a chip). It closes the picker and refocuses the box unless Shift was held.
+  - While the picker is open, `on_move_up` and `on_escape` leave the box alone (its search field's keys pass through the composer), and Esc only closes the picker.
+- `src/ui/chat.rs`: handles `ComposerEvent::OpenEmojiPicker`.
+- `src/assets.rs`: registers `FaceSlightlySmiling`.
+- `tests/emoji.rs`: 5 new tests (groups in Unicode order, all non-empty, more than 1800 emoji, no skin tones; recently used order, deduplication and cap; picker search equal to completion and then more; sections for empty, recent and custom, search and no results; rows of 8 under headers, fewer than 300 rows in all).
+
+### Divergences
+- **Icon:** the button uses `IconName::FaceSlightlySmiling`. Lucide 1.43 (bundled by gpui-kit-assets) renamed `smile` to `face-slightly-smiling`, so `IconName::Smile` doesn't exist.
+- **The browser is its own view** (`EmojiBrowser`, holding the search state, the rows and the scroll handle) rather than an `emoji_browser(...)` function, because the search field and the virtualized list need state. Cells are shared with `emoji_grid` through `emoji_cell` and `custom_face`.
+- **Custom emoji come by event.** The composer asks with `OpenEmojiPicker` and `ChatView` answers, as `Complete` does for suggestions.
+- **Picker search shows up to 64 results.** Its first 8 are exactly the `:` completion's, which is what the plan's "same results" check tests.
+- **Recently used isn't per server.** A custom emoji from one server can show as recent elsewhere. Stoat lets custom emoji be used anywhere.
+- **Smoke check:** the final build launched with no panics. It stopped at the Keychain prompt for the rebuilt binary, so the signed-in UI wasn't drawn in this session.
+
+### Verification Performed
+- `cargo test --test emoji`: 11 passed.
+- Full suite: `cargo test` gives 320 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings` is clean.
+
+### Manual Validation
+Deferred by the user ("we'll test it all later"). The chunk's checks (search "cat" and pick 🐱 at the cursor, smooth scrolling through all categories, picking a custom emoji, recently used first on reopening) move to the plan's Manual Test 8.
+
+## Summary
+
+_Completed: 2026-11-05 (code). Manual testing was deferred by the user to the end and is still to be done._
+
+### Chunks Completed
+1. **Attach files with a button, upload on send:** the paperclip, the tray, limits from `GET /`, pending rows with per-file progress, Autumn uploads, and retry rules for uploaded IDs.
+2. **Paste and drag-and-drop:** screenshots and copied files paste into the tray (images saved to a temp file, TIFF and BMP converted to PNG), and a "Drop to attach" overlay on the conversation.
+3. **@mention autocomplete with chips:** pure `complete.rs`, a keyboard-driven suggestion list, mention chips, and chips rebuilt from wire text in drafts and edits.
+4. **Server members and #channels:** a lazy `GET /servers/{id}/members` once per server, "Loading members…", and `#` channel chips.
+5. **:emoji: autocomplete:** the `emojis` crate, pure `emoji.rs` search, custom emoji chips drawn as images, and `:shortcode:` converting on the typed closing colon.
+6. **Emoji button with a full picker:** a virtualized `EmojiBrowser` with search, recently used, 9 categories and custom emoji, inserting at the cursor (Shift keeps it open).
+
+### Divergences
+- **Chunk 1:**
+  - `FileKind` is reused.
+  - `content_type` is on `DraftAttachment`.
+  - `PendingAttachment` wraps the draft file.
+  - The image fallback box is 300×200.
+  - Uploads have a 10-minute timeout.
+  - The upload API shape was confirmed live (`{"id": …}`).
+- **Chunk 2:**
+  - Pasted images go to a temp file, so every attachment is a path (no in-memory `Bytes`).
+  - TIFF and BMP become PNG.
+  - Mixed clipboards are already resolved to text by GPUI's macOS pasteboard.
+  - Drops are ignored while the image viewer is open.
+- **Chunk 3:**
+  - Candidates come through a `Complete` event and `set_suggestions`, not a callback.
+  - Labels are passed to `set_channel` and `start_edit` (the composer can't read the store) and cached by token ID.
+  - `Candidate.display_name` was added.
+  - Recent authors rank first within each match tier.
+  - The list doesn't follow cursor-only moves.
+- **Chunk 4:**
+  - `add_members` takes only the response.
+  - Voice channels aren't offered for `#`.
+  - The nickname and `@username` share one row.
+  - A failed member fetch is retried on the next `@`.
+- **Chunk 5:**
+  - `emojis` depends on `phf`.
+  - Ranking adds an exact-match tier.
+  - Closing colons convert Unicode shortcodes only, and only for a typed `:`.
+- **Chunk 6:**
+  - The button uses the `FaceSlightlySmiling` icon (Lucide renamed `smile`).
+  - `EmojiBrowser` is its own view, with cells shared with the reaction grid.
+  - Custom emoji come through an `OpenEmojiPicker` event.
+  - Picker search shows up to 64 results.
+  - Recently used is global.
+- **At completion:** `tests/api_login.rs`'s live `GET /` check now also asserts that `limits` parse from the live shape for both account types.
+- **Process:** only chunk 1 is committed so far. The chunk 2 commit timed out waiting for signing approval (Secretive or Touch ID: `communication with agent failed`). Chunks 2–6 are complete in the working tree. Each chunk's files were saved at its green state in `/tmp/rustoat-snapshots/chunk{3,4,5,6}` (chunk 2 is staged in the index), to be committed one per chunk once signing can be approved.
+
+### Definition of Done
+- [x] **Attaching:** the attach button, paste (images and files) and drag-and-drop add files to a tray with thumbnails and ×. Files over the size limit (20 MB) or past the count limit (5) are refused with a toast. Text pastes unchanged. Implemented and unit-tested. Only the button was used live (chunk 1); paste, drop and the toasts **still need manual checks**.
+- [x] **Sending files:** pending at once with per-file progress, uploaded on send to `POST {autumn}/attachments`, posted with `attachments`, confirmed by nonce with no duplicates (tested). Confirmed live in chunk 1 (an SVG upload, then the send).
+- [x] **File failures:** the reason with Retry and Discard. After a network failure the uploaded IDs and the key are kept; after an answered failure everything is uploaded again with a fresh key (tested). **The live offline Retry still needs a manual check.**
+- [x] **@mentions:** DM and group recipients and recent authors at once, all server members after a single lazy fetch. Picking inserts an `@Name` chip sent as `<@id>`, with arrows, Enter or Tab, and Esc. Chips show in drafts and edits. Implemented and unit-tested; **still needs a manual check** (pinging in the web app, deleting a chip as one unit).
+- [x] **#channels:** `#` suggests the server's text channels and inserts a chip sent as `<#id>`. Implemented and unit-tested; **still needs a manual check.**
+- [x] **:emoji:** `:` with 2 or more characters suggests Unicode and custom emoji, a complete `:shortcode:` converts, and times and URLs don't trigger (tested). **Still needs a manual check.**
+- [x] **Emoji picker:** virtualized, with search, recently used, every category and custom emoji, inserting at the cursor. Implemented and unit-tested (pure parts); **still needs a manual check** (scrolling, focus, custom emoji).
+- [x] **Checks:** `cargo test && cargo clippy --all-targets -- -D warnings` gives 320 passed, 0 failed, 5 ignored, and clippy is clean. `cargo test -- --ignored`: all 5 live checks pass (Keychain round trip, live `GET /` against the pinned models, now including `limits`, the events handshake, the default avatar, the media proxy).
+
+### Remaining Manual Steps
+1. **Approve the signed commits** for chunks 2–6 (one Touch ID prompt each).
+2. **Plan Manual Tests**, all deferred by the user:
+   1. Attach a PNG, a PDF and a short video with a caption, and send. Watch the progress and compare with the web app.
+   2. Paste a screenshot (⌘⌃⇧4), paste copied Finder files, drag a file onto the message list (the overlay should show), and paste plain text (it should stay text).
+   3. Send with Wi-Fi off, then Retry once back online. It should send exactly once, with its files. (Also outstanding from milestone 3.)
+   4. Try a 25 MB file and a sixth file. Each should get a toast.
+   5. `@` in a DM and in a server, including a quiet member (shown after "Loading members…"). Link a channel with `#`. Both should ping or link in the web app.
+   6. Edit a message with a mention and a custom emoji. Both should show as chips. Save it unchanged, then with a change.
+   7. `:thu` → 👍, a custom emoji from the list, typing `:tada:` in full, and `12:30` (nothing should open).
+   8. The emoji picker: search "cat" → 🐱, scroll every category, pick a custom emoji, reopen (recently used should come first), Shift-click (it should stay open), and Esc (it should close without clearing replies).
+   9. Light and dark mode: the tray, the progress bars, the suggestion list, chips, the drop overlay and the picker.

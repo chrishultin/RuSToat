@@ -14,6 +14,7 @@ gpui_kit::assets::icon_assets!(
         Bookmark,
         CornerUpRight,
         Download,
+        FaceSlightlySmiling,
         FileImage,
         FileMusic,
         FileVideoCamera,

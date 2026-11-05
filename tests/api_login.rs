@@ -205,4 +205,10 @@ async fn live_root_config_parses_and_matches_pinned_models() {
         "live API is {}, but revolt-models is pinned to 0.16.2",
         root.version
     );
+    // The attachment limits are read from the live shape, not the fallbacks.
+    let limits = &root.features.limits;
+    for account in [&limits.default, &limits.new_user] {
+        assert!(account.file_upload_size_limits.attachments.is_some(), "{limits:?}");
+        assert!(account.message_attachments.is_some(), "{limits:?}");
+    }
 }

@@ -266,6 +266,15 @@ impl ChatView {
                     };
                     this.suggest(&channel, query, true, cx);
                 }
+                ComposerEvent::OpenEmojiPicker => {
+                    let Some(channel) = composer.read(cx).channel().map(str::to_string) else {
+                        return;
+                    };
+                    let custom = this.store.custom_emoji_for(&channel);
+                    composer.update(cx, |composer, cx| {
+                        composer.open_emoji_picker(custom, window, cx)
+                    });
+                }
                 ComposerEvent::EditLast => {
                     let Some(channel) = composer.read(cx).channel().map(str::to_string) else {
                         return;
