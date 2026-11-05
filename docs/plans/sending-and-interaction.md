@@ -212,7 +212,7 @@ Keep the architecture of milestones 1 and 2:
 **Depends on:** Chunk 3 (the menu)
 **Risks:**
 - **Dialog API:** find gpui-component's dialog entry point (`window.open_dialog` or similar) and its keyboard handling: Enter confirms, Esc cancels.
-- **Reply previews:** messages whose reply source was just deleted should show "Original message was deleted" (chunk 2's state) without a refetch loop.
+- **Reply previews:** messages whose reply source was just deleted should show "Original message was deleted" (chunk 2's state) without a refetch loop. *(Handled in chunk 2: `apply_delete` marks deleted IDs in the reply-source cache. A message restored after a refused delete shows normally again, because loaded history is checked before the cache. `remove_local` must not mark it deleted in the cache, so a restore needs no cleanup.)*
 **How to verify:** `cargo test` covers:
 - `DELETE /channels/{c}/messages/{m}` with the session header
 - remove then restore returning the message to its exact index

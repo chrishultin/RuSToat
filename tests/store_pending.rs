@@ -4,11 +4,14 @@
 
 use serde_json::json;
 use stoat_gpui::api::models::{BulkMessageResponse, Message};
+use stoat_gpui::api::models::ReplyIntent;
 use stoat_gpui::draft::{
-    Drafts, MAX_MESSAGE_CHARS, SendCheck, char_count, check_send, new_nonce,
+    Draft, Drafts, MAX_MESSAGE_CHARS, ReplyTarget, SendCheck, TooManyReplies, char_count,
+    check_send, new_nonce,
 };
 use stoat_gpui::store::{
-    ChatStore, MessageRow, PendingMessage, PendingState, RowOp, TimelineRow, diff_rows,
+    ChatStore, MessageRow, PendingMessage, PendingState, ReplyState, RowOp, TimelineRow,
+    diff_rows,
 };
 
 const CH: &str = "ch-send";
@@ -294,14 +297,106 @@ fn the_limit_counts_characters_not_bytes() {
     assert_eq!(char_count(&"a".repeat(2001)), Some((2001, true)));
 }
 
+fn draft(text: &str) -> Draft {
+    Draft {
+        text: text.into(),
+        replies: Vec::new(),
+    }
+}
+
+fn target(id: &str) -> ReplyTarget {
+    ReplyTarget {
+        id: id.into(),
+        author: "Ada".into(),
+        mention: true,
+    }
+}
+
 #[test]
-fn drafts_are_kept_per_channel() {
+fn drafts_are_kept_per_channel_with_their_replies() {
     let mut drafts = Drafts::default();
-    drafts.save("a", "half a thought");
-    drafts.save("b", "   ");
-    assert_eq!(drafts.take("a"), "half a thought");
-    assert_eq!(drafts.take("a"), "", "taken");
-    assert_eq!(drafts.take("b"), "", "blank drafts aren't kept");
+    drafts.save("a", draft("half a thought"));
+    drafts.save("b", draft("   "));
+    let mut replying = draft("");
+    replying.add_reply(target("m1")).unwrap();
+    drafts.save("c", replying.clone());
+
+    assert_eq!(drafts.take("a").text, "half a thought");
+    assert_eq!(drafts.take("a"), Draft::default(), "taken");
+    assert_eq!(drafts.take("b"), Draft::default(), "blank drafts aren't kept");
+    // Replying with nothing typed yet is still a draft.
+    assert_eq!(drafts.take("c"), replying);
+}
+
+#[test]
+fn replies_have_a_mention_toggle_and_a_limit_of_five() {
+    let mut draft = draft("yes");
+    for n in 0..5 {
+        draft.add_reply(target(&format!("m{n}"))).unwrap();
+    }
+    // The same message again changes nothing; a sixth is refused.
+    assert_eq!(draft.add_reply(target("m0")), Ok(()));
+    assert_eq!(draft.add_reply(target("m5")), Err(TooManyReplies));
+    assert_eq!(draft.replies.len(), 5);
+
+    draft.toggle_mention("m1");
+    draft.remove_reply("m2");
+    let intents = draft.reply_intents();
+    assert_eq!(
+        intents
+            .iter()
+            .map(|i| (i.id.as_str(), i.mention))
+            .collect::<Vec<_>>(),
+        vec![("m0", true), ("m1", false), ("m3", true), ("m4", true)]
+    );
+    assert!(intents.iter().all(|i| i.fail_if_not_exists.is_none()));
+}
+
+#[test]
+fn pending_replies_show_previews_of_loaded_originals() {
+    let mut store = store();
+    let ada = ulid_at(T0 - 60_000, "AAAAAAAAAAAAAAAA");
+    let mine = ulid_at(T0, "BBBBBBBBBBBBBBBB");
+    let mut reply = pending("n1", "agreed", T0 + 1_000);
+    reply.replies = vec![
+        ReplyIntent {
+            id: ada.clone(),
+            mention: true,
+            fail_if_not_exists: None,
+        },
+        ReplyIntent {
+            id: mine.clone(),
+            mention: false,
+            fail_if_not_exists: None,
+        },
+    ];
+    store.add_pending(reply);
+    let row = rows(&store).pop().unwrap();
+    assert_eq!(row.pending, Some(PendingState::Sending));
+    let previews: Vec<(String, String, bool, ReplyState)> = row
+        .replies
+        .into_iter()
+        .map(|p| (p.id, p.snippet, p.mentions_author, p.state))
+        .collect();
+    assert_eq!(
+        previews,
+        vec![
+            (ada, "hi".into(), true, ReplyState::Loaded),
+            (mine, "hello".into(), false, ReplyState::Loaded),
+        ]
+    );
+    // A reply starts its own group, even right after our own message.
+    assert!(!rows(&store).pop().unwrap().continuation);
+}
+
+#[test]
+fn copy_text_gives_the_typed_markdown() {
+    let mut store = store();
+    store.add_pending(pending("n1", "**bold** <@u-ada>", T0 + 1_000));
+    let mine = ulid_at(T0, "BBBBBBBBBBBBBBBB");
+    assert_eq!(store.raw_content(CH, &mine), Some("hello"));
+    assert_eq!(store.raw_content(CH, "n1"), Some("**bold** <@u-ada>"));
+    assert_eq!(store.raw_content(CH, "nope"), None);
 }
 
 #[test]

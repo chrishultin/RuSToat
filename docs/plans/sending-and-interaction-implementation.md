@@ -118,3 +118,45 @@ The user ran the app (`cargo run`). They sent a message in a DM and a multi-line
 
 ### Manual Validation
 The user ran the chunk 2 build and confirmed reply previews work ("lgtm"). The log shows no fetch failures or rate limiting.
+
+## Chunk 3: Message actions and replying
+
+### Changes Made
+- `src/draft.rs`:
+  - `ReplyTarget { id, author, mention }`, `TooManyReplies`, and `Draft { text, replies }`.
+  - `Draft`'s methods: `is_empty`, `add_reply` (replying to the same message twice is a no-op, and a sixth past `MAX_REPLIES` is an error), `toggle_mention`, `remove_reply`, and `reply_intents()` (`ReplyIntent`s with `fail_if_not_exists: None`).
+  - `Drafts` now keeps a `Draft` per channel. A draft with replies but no text still counts.
+- `src/ui/composer.rs`:
+  - The composer holds the current `Draft`'s replies. `set_channel` saves and restores text and replies together.
+  - `add_reply(target)` returns `Err(TooManyReplies)` past 5 and focuses the box.
+  - `ComposerEvent::Send { text, replies }` carries the reply intents, and replies are cleared after sending.
+  - The reply bar draws one line per reply: the Reply icon, "Replying to **Name**", an "@ On"/"@ Off" toggle (primary or ghost, with a tooltip) and ×.
+  - Esc (the `input::Escape` action, which the textarea passes on) clears all replies. Without replies it keeps propagating.
+- `src/ui/chat.rs`:
+  - `send_message` takes the replies, and they're stored on the `PendingMessage`.
+  - `reaction_button` became `message_toolbar`: the "+" picker and a Reply button in an `h_flex`, `TOOLBAR_OFFSET` (50 px) outside the bubble, shown on hover or while the picker is open, and not shown on pending rows.
+  - Message rows have an ID (`row-{key}`) and a `context_menu` with Reply and Copy text. Pending rows have no menu.
+  - New `RowAction::Reply(ReplyTarget)`: the composer adds the reply, or a warning toast "You can reply to up to 5 messages at once." New `RowAction::CopyText(id)`: `store.raw_content` goes to the clipboard.
+  - `reply_target(row)`: the mention is on for others' messages and off for the user's own ("Replying to yourself").
+- `src/store.rs`:
+  - `raw_content(channel, id)` gives the Markdown source of a loaded message, or a pending one by key. It was planned for chunk 4 but was needed now for Copy text.
+  - `pending_message()` turns a pending message into a `Message` whose `mentions` are the authors (via `original_author`) of the originals its replies ping, so pending previews show "@".
+- `src/assets.rs`: registers the `Reply` icon. `Copy` and `Close` are defaults.
+- Tests: `tests/store_pending.rs` (the drafts test was rewritten for `Draft`, plus 3 new tests), and `tests/api_send.rs` (the replies body now has a mention-off reply too).
+
+### Divergences
+- **Right-click (a plan risk):** the risk didn't happen. gpui-component's context menu listens for right-button presses on the whole window and checks which element is under the cursor, and `TextView` doesn't handle the right button. The menu is on the whole message row, so it works on the text, the padding and the avatar. No "More…" button was needed.
+- **Replying to your own message** starts with the mention off. The plan says mentions default to on; that still holds for others' messages.
+- **`raw_content`** was brought forward from chunk 4, for Copy text. Chunk 4's plan entry needs no change.
+
+### Verification Performed
+- `cargo test --test store_pending`: 18 passed. New tests:
+  - The 5-reply limit, a repeated reply as a no-op, the mention toggle and removal, giving the right `ReplyIntent`s.
+  - Drafts kept with their replies.
+  - A pending reply showing previews of loaded originals, with the "@" from the reply's mention choice, and starting its own group.
+  - Copy text giving the typed Markdown, for loaded and pending messages.
+- `cargo test --test api_send`: 6 passed. The replies body is checked as `[{id, mention: true}, {id, mention: false}]`, with no `fail_if_not_exists` key.
+- Full suite: `cargo test`, 245 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings`: clean.
+
+### Manual Validation
+The user ran the chunk 3 build, used it (log: two sends in a DM), and said to continue. The log shows no errors.

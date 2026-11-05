@@ -20,6 +20,7 @@ gpui_kit::assets::icon_assets!(
         Hash,
         House,
         Image,
+        Reply,
         Users,
         Volume2,
         WifiOff

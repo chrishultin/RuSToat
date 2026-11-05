@@ -530,6 +530,40 @@ impl ChatStore {
             .or_insert(ReplySource::Unavailable);
     }
 
+    /// A loaded message's text as typed (its Markdown source), or a pending
+    /// one's (by its key).
+    pub fn raw_content(&self, channel: &str, id: &str) -> Option<&str> {
+        if let Some(pending) = self.pending(channel).iter().find(|p| p.key == id) {
+            return Some(&pending.content);
+        }
+        self.find_message(channel, id)?.content.as_deref()
+    }
+
+    /// A pending message as the [`Message`] it will become, mentioning the
+    /// authors of the originals its replies ping (so previews show "@").
+    fn pending_message(&self, pending: &PendingMessage) -> Message {
+        let mut message = pending_as_message(pending, &self.me);
+        let mentions: Vec<String> = pending
+            .replies
+            .iter()
+            .filter(|r| r.mention)
+            .filter_map(|r| self.original_author(&pending.channel, &r.id))
+            .collect();
+        message.mentions = (!mentions.is_empty()).then_some(mentions);
+        message
+    }
+
+    /// Who wrote the original `id`, if it's loaded or cached.
+    fn original_author(&self, channel: &str, id: &str) -> Option<String> {
+        match self.find_message(channel, id) {
+            Some(message) => Some(message.author.clone()),
+            None => match self.reply_sources.get(id) {
+                Some(ReplySource::Found(message)) => Some(message.author.clone()),
+                _ => None,
+            },
+        }
+    }
+
     /// A loaded message by ID.
     fn find_message(&self, channel: &str, id: &str) -> Option<&Message> {
         let messages = &self.histories.get(channel)?.messages;
@@ -1426,7 +1460,7 @@ impl ChatStore {
         let pending: Vec<(Message, &PendingMessage)> = self
             .pending(channel)
             .iter()
-            .map(|p| (pending_as_message(p, &self.me), p))
+            .map(|p| (self.pending_message(p), p))
             .collect();
         let loaded = history
             .messages

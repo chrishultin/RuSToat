@@ -52,18 +52,26 @@ async fn replies_are_sent_with_their_mention_choice() {
         .and(path("/channels/ch-general/messages"))
         .and(body_json(json!({
             "content": "yes",
-            "replies": [{ "id": "01JC0000000000000000000001", "mention": true }]
+            "replies": [
+                { "id": "01JC0000000000000000000001", "mention": true },
+                { "id": "01JC0000000000000000000002", "mention": false }
+            ]
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(created("yes")))
         .expect(1)
         .mount(&server)
         .await;
 
-    let replies = [ReplyIntent {
-        id: "01JC0000000000000000000001".into(),
-        mention: true,
+    let reply = |id: &str, mention| ReplyIntent {
+        id: id.into(),
+        mention,
         fail_if_not_exists: None,
-    }];
+    };
+    // The second with its "@" toggled off.
+    let replies = [
+        reply("01JC0000000000000000000001", true),
+        reply("01JC0000000000000000000002", false),
+    ];
     client(&server)
         .send_message("ch-general", "yes", &replies, KEY)
         .await

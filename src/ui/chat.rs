@@ -26,8 +26,10 @@ use gpui_kit::*;
 
 use crate::api::ApiError;
 use crate::api::StoatClient;
+use crate::api::models::ReplyIntent;
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
 use crate::attachment::{AttachmentView, FileKind, fit_into};
+use crate::draft::ReplyTarget;
 use crate::embed::{Description, EmbedCard, EmbedImage, EmbedView};
 use crate::markdown::{JUMBO_TEXT_PX, is_external_link};
 use crate::media::MediaUrls;
@@ -209,11 +211,11 @@ impl ChatView {
             &composer,
             window,
             |this, composer, event: &ComposerEvent, window, cx| match event {
-                ComposerEvent::Send(text) => {
+                ComposerEvent::Send { text, replies } => {
                     let Some(channel) = composer.read(cx).channel().map(str::to_string) else {
                         return;
                     };
-                    this.send_message(channel, text.clone(), window, cx);
+                    this.send_message(channel, text.clone(), replies.clone(), window, cx);
                 }
             },
         );
@@ -457,6 +459,19 @@ impl ChatView {
                     self.sync_pane(channel, cx);
                 }
             }
+            RowAction::Reply(target) => {
+                let added = self
+                    .composer
+                    .update(cx, |composer, cx| composer.add_reply(target, window, cx));
+                if added.is_err() {
+                    window.push_notification(Notification::warning(TOO_MANY_REPLIES_TEXT), cx);
+                }
+            }
+            RowAction::CopyText(id) => {
+                if let Some(text) = self.store.raw_content(channel, &id) {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+                }
+            }
             RowAction::JumpTo(id) => {
                 if let Some(pane) = self.panes.get(channel)
                     && let Some(ix) = pane.rows.iter().position(
@@ -478,6 +493,7 @@ impl ChatView {
         &mut self,
         channel: String,
         content: String,
+        replies: Vec<ReplyIntent>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -488,7 +504,7 @@ impl ChatView {
             nonce,
             channel: channel.clone(),
             content,
-            replies: Vec::new(),
+            replies,
             state: PendingState::Sending,
             sent_ms,
             nonce_used: false,
@@ -1701,6 +1717,10 @@ enum RowAction {
     DiscardSend(String),
     /// Scroll to a loaded message (a reply's original).
     JumpTo(String),
+    /// Reply to a message (from the hover toolbar or the right-click menu).
+    Reply(ReplyTarget),
+    /// Copy a message's text as typed (its Markdown source).
+    CopyText(String),
 }
 
 type OnRowAction = Rc<dyn Fn(RowAction, &mut Window, &mut App)>;
@@ -1944,9 +1964,9 @@ fn render_message_row(
             BubbleVariant::Secondary
         })
         .content(surface)
-        // Nothing to react to until it's on the server.
+        // Nothing to react or reply to until it's on the server.
         .when(message.pending.is_none(), |el| {
-            el.reactions(reaction_button(message, on_action, pickers))
+            el.reactions(message_toolbar(message, on_action, pickers))
         });
 
     // The avatar sits beside the last bubble of a group; earlier ones keep
@@ -2008,16 +2028,57 @@ fn render_message_row(
         // Space between groups; bubbles within a group sit close together.
         .pt(px(if first { GROUP_GAP } else { BUBBLE_GAP }));
 
-    div()
+    let row = div()
+        .id(SharedString::from(format!("row-{}", message.key)))
         .relative()
         .group(ROW_GROUP)
         // Muted until Stoat has it.
         .when(message.pending == Some(PendingState::Sending), |el| {
             el.opacity(PENDING_OPACITY)
         })
-        .child(layout)
-        .into_any_element()
+        .child(layout);
+    if message.pending.is_some() {
+        return row.into_any_element();
+    }
+    // Right-click anywhere on the row (text, padding, avatar).
+    let (on_action, id) = (on_action.clone(), message.id.clone());
+    let reply = reply_target(message);
+    row.context_menu(move |menu, _, _| {
+        let act = |action: RowAction| {
+            let on_action = on_action.clone();
+            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                on_action(action.clone(), window, cx)
+            }
+        };
+        menu.item(
+            PopupMenuItem::new("Reply")
+                .icon(IconName::Reply)
+                .on_click(act(RowAction::Reply(reply.clone()))),
+        )
+        .item(
+            PopupMenuItem::new("Copy text")
+                .icon(IconName::Copy)
+                .on_click(act(RowAction::CopyText(id.clone()))),
+        )
+    })
+    .into_any_element()
 }
+
+/// Replying to `message`: pinging its author by default, unless it's ours.
+fn reply_target(message: &MessageRow) -> ReplyTarget {
+    ReplyTarget {
+        id: message.id.clone(),
+        author: if message.mine {
+            "yourself".into()
+        } else {
+            message.author.clone()
+        },
+        mention: !message.mine,
+    }
+}
+
+/// Shown when replying to a sixth message at once.
+const TOO_MANY_REPLIES_TEXT: &str = "You can reply to up to 5 messages at once.";
 
 /// Height of a reply preview line, the same whatever its state, so a row
 /// doesn't change height when its original loads.
@@ -2138,14 +2199,15 @@ fn render_pending_status(
 /// Group name for hovering a message row.
 const ROW_GROUP: &str = "message-row";
 
-/// How far outside the bubble's edge the "add reaction" button sits.
-const REACT_BUTTON_OFFSET: f32 = 28.;
+/// How far outside the bubble's edge the hover toolbar reaches: two 20 px
+/// buttons, a 2 px gap, and 8 px of space from the bubble.
+const TOOLBAR_OFFSET: f32 = 50.;
 
-/// The "add reaction" button, just outside the bubble at its bottom corner
-/// (on the side away from the avatar), so the picker opens under the
-/// message. It shows while the row is hovered or its picker is open, and
-/// takes no space (so rows don't change height).
-fn reaction_button(
+/// The hover toolbar ("add reaction" and Reply), just outside the bubble at
+/// its bottom corner (on the side away from the avatar), so the picker opens
+/// under the message. It shows while the row is hovered or its picker is
+/// open, and takes no space (so rows don't change height).
+fn message_toolbar(
     message: &MessageRow,
     on_action: &OnRowAction,
     pickers: &Pickers,
@@ -2200,15 +2262,26 @@ fn reaction_button(
             let note = choices.full.then_some(FULL_REACTIONS_TEXT);
             emoji_grid(&id, &choices.emoji, note, &chosen, on_pick.clone(), cx)
         });
-    let trigger = div()
+    let reply = {
+        let (on_action, target) = (on_action.clone(), reply_target(message));
+        Button::new(SharedString::from(format!("reply-{}-button", message.id)))
+            .ghost()
+            .xsmall()
+            .icon(IconName::Reply)
+            .tooltip("Reply")
+            .on_click(move |_, window, cx| on_action(RowAction::Reply(target.clone()), window, cx))
+    };
+    let toolbar = h_flex()
+        .gap_0p5()
         .when(!open, |el| {
             el.invisible()
                 .group_hover(ROW_GROUP, |style| style.visible())
         })
-        .child(popover);
+        .child(popover)
+        .child(reply);
     // gpui-component's slot for things on a bubble's edge. Moved fully
     // outside the bubble, level with its bottom, without a pill of its own.
-    let outside = px(-REACT_BUTTON_OFFSET);
+    let outside = px(-TOOLBAR_OFFSET);
     BubbleReactions::new()
         .alignment(if message.mine {
             MessageAlignment::Start
@@ -2226,7 +2299,7 @@ fn reaction_button(
         .bg(transparent_black())
         .border_0()
         .p_0()
-        .child(trigger)
+        .child(toolbar)
 }
 
 /// Shown when a message is at [`MAX_REACTIONS`](crate::store::MAX_REACTIONS).
