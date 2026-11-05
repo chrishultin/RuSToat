@@ -138,3 +138,33 @@ Deferred by the user ("we'll test it all later"). The chunk's checks (pasting a 
 
 ### Manual Validation
 Deferred by the user ("we'll test it all later"). The chunk's checks (`@` in a DM with arrows and Enter, a chip deleting as one unit, the mention pinging in the web app, an edit showing chips) move to the plan's Manual Tests 5 and 6.
+
+## Chunk 4: Server members and #channels
+
+### Changes Made
+- `src/api/client.rs`: `fetch_members(server) -> AllMemberResponse` (`GET /servers/{id}/members`).
+- `src/store.rs`:
+  - `add_members(response)` caches the users and members, keyed by (server, user).
+  - `channel_server(channel)` (public).
+  - `channel_candidates(channel)`: the server's sidebar channels (`server_channels`, so only those the user can see) without voice channels, in sidebar order. None outside servers.
+- `src/complete.rs`: `Suggestion::channel(id, name)` has the glyph `#` and inserts `TokenRef::Channel` with the label `#name`.
+- `src/ui/chat.rs`:
+  - `member_fetches` (asked this session) and `members_loading`.
+  - `suggest(channel, query, fetch)`: in a server, `@` calls `fetch_members` the first time, and the list shows "Loading members…" (`loading = true`) with local candidates meanwhile. `#` ranks `channel_candidates` by name.
+  - When members arrive, `refresh_suggestions` re-ranks the open query. A failed fetch is forgotten (retried on the next `@` typed), and its refresh doesn't fetch, so it can't loop.
+- Tests:
+  - `tests/api_send.rs`: `fetching_members_gets_the_whole_list_with_users` (path, session header, parsing).
+  - `tests/complete.rs`: 4 new tests (a fetched list makes a quiet member mentionable, shown by nickname with `@username`, only in that server; a nickname match above a username substring; channel candidates in sidebar order without voice channels and none in DMs; the channel chip).
+
+### Divergences
+- **`add_members` takes only the response.** The member IDs carry the server, so the plan's `server` parameter isn't needed.
+- **Voice channels aren't offered for `#`**, following the plan's "text channels". Stoat models them as `TextChannel` with `voice`, and they're filtered out.
+- **The nickname shows beside `@username` on the same row**, not under it, keeping rows at a fixed 32 px.
+- **A failed member fetch is retried on the next `@`.** The plan says once per server per session; that holds for successful fetches.
+
+### Verification Performed
+- `cargo test --test complete --test api_send`: 19 and 10 passed.
+- Full suite: `cargo test` gives 308 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings` is clean.
+
+### Manual Validation
+Deferred by the user ("we'll test it all later"). The chunk's checks (a member who hasn't posted appearing after a moment, `#gen` → `#general` showing as a link in the web app) move to the plan's Manual Test 5.

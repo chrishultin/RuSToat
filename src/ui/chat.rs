@@ -29,7 +29,7 @@ use crate::api::StoatClient;
 use crate::api::models::ReplyIntent;
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
 use crate::attachment::{AttachmentView, fit_into};
-use crate::complete::{Query, QueryKind, Suggestion, TokenRef, rank_people};
+use crate::complete::{Query, QueryKind, Suggestion, TokenRef, rank, rank_people};
 use crate::draft::{AttachmentLimits, DraftAttachment, ReplyTarget};
 use crate::embed::{Description, EmbedCard, EmbedImage, EmbedView};
 use crate::markdown::{JUMBO_TEXT_PX, is_external_link};
@@ -122,6 +122,10 @@ pub struct ChatView {
     reacting: HashSet<(String, String)>,
     /// Reply originals being fetched, by message ID (each once).
     reply_fetches: HashSet<String>,
+    /// Servers whose full member list was asked for (once per session, for
+    /// `@`), and those still loading.
+    member_fetches: HashSet<String>,
+    members_loading: HashSet<String>,
     /// The message box, under the open channel.
     composer: Entity<Composer>,
     _composer: Subscription,
@@ -259,7 +263,7 @@ impl ChatView {
                     let Some(channel) = composer.read(cx).channel().map(str::to_string) else {
                         return;
                     };
-                    this.suggest(&channel, query, cx);
+                    this.suggest(&channel, query, true, cx);
                 }
                 ComposerEvent::EditLast => {
                     let Some(channel) = composer.read(cx).channel().map(str::to_string) else {
@@ -294,6 +298,8 @@ impl ChatView {
             picker_for: None,
             reacting: HashSet::new(),
             reply_fetches: HashSet::new(),
+            member_fetches: HashSet::new(),
+            members_loading: HashSet::new(),
             composer,
             _composer: composer_events,
             typing,
@@ -661,20 +667,90 @@ impl ChatView {
     }
 
     /// Answer the message box's `query` with suggestions from what's known
-    /// about `channel`.
-    fn suggest(&mut self, channel: &str, query: &Query, cx: &mut Context<Self>) {
+    /// about `channel`. `fetch`: in a server, load its members if needed.
+    fn suggest(&mut self, channel: &str, query: &Query, fetch: bool, cx: &mut Context<Self>) {
+        let mut loading = false;
         let suggestions = match query.kind {
             QueryKind::Mention => {
+                // In a server, everyone can be mentioned: fetch them all the
+                // first time, showing who's known meanwhile.
+                if let Some(server) = self.store.channel_server(channel).map(str::to_string) {
+                    loading = if fetch {
+                        self.fetch_members(server, cx)
+                    } else {
+                        self.members_loading.contains(&server)
+                    };
+                }
                 rank_people(&query.query, &self.store.mention_candidates(channel))
                     .iter()
                     .map(Suggestion::person)
                     .collect()
             }
-            QueryKind::Channel | QueryKind::Emoji => Vec::new(),
+            QueryKind::Channel => {
+                let channels = self.store.channel_candidates(channel);
+                rank(&query.query, &channels, |c| vec![c.name.as_str()], |_| false)
+                    .iter()
+                    .map(|c| Suggestion::channel(&c.id, &c.name))
+                    .collect()
+            }
+            QueryKind::Emoji => Vec::new(),
         };
         self.composer.update(cx, |composer, cx| {
-            composer.set_suggestions(query, suggestions, false, cx)
+            composer.set_suggestions(query, suggestions, loading, cx)
         });
+    }
+
+    /// Fetch `server`'s whole member list, unless it was already asked for
+    /// this session. When it arrives, open `@` suggestions there refresh.
+    /// Returns whether it's still loading.
+    fn fetch_members(&mut self, server: String, cx: &mut Context<Self>) -> bool {
+        if !self.member_fetches.insert(server.clone()) {
+            return self.members_loading.contains(&server);
+        }
+        self.members_loading.insert(server.clone());
+        let request = spawn_io({
+            let (client, server) = (self.client.clone(), server.clone());
+            async move { client.fetch_members(&server).await }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = request.await;
+            this.update(cx, |this, cx| {
+                this.members_loading.remove(&server);
+                match result {
+                    Ok(Ok(members)) => {
+                        log::info!("{} members in {server}", members.members.len());
+                        this.store.add_members(members);
+                    }
+                    // Asked again on the next `@` there.
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't load members of {server}: {err}");
+                        this.member_fetches.remove(&server);
+                    }
+                    Err(err) => {
+                        log::warn!("member task failed: {err:?}");
+                        this.member_fetches.remove(&server);
+                    }
+                }
+                // Not fetching again: after a failure, that would loop.
+                this.refresh_suggestions(cx);
+            })
+            .ok();
+        })
+        .detach();
+        true
+    }
+
+    /// Suggest again for what the message box is completing (something it
+    /// draws on has changed).
+    fn refresh_suggestions(&mut self, cx: &mut Context<Self>) {
+        let composer = self.composer.read(cx);
+        let (Some(channel), Some(query)) = (
+            composer.channel().map(str::to_string),
+            composer.completion_query().cloned(),
+        ) else {
+            return;
+        };
+        self.suggest(&channel, &query, false, cx);
     }
 
     /// Edit the user's message `id` in the message box.

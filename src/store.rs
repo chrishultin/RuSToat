@@ -6,7 +6,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::api::events::Ready;
 use crate::api::models::{
-    BulkMessageResponse, Channel, Embed, Emoji, EmojiParent, FieldsChannel, FieldsMessage, File,
+    AllMemberResponse, BulkMessageResponse, Channel, Embed, Emoji, EmojiParent, FieldsChannel, FieldsMessage, File,
     Member, Message, MessageFlags, PartialChannel, PartialMessage, Presence, ReplyIntent, Server,
     SystemMessage, User,
 };
@@ -1838,6 +1838,35 @@ impl ChatStore {
             _ => {}
         }
         people
+    }
+
+    /// Cache a server's full member list and its users (for `@`).
+    pub fn add_members(&mut self, response: AllMemberResponse) {
+        for user in response.users {
+            self.users.insert(user.id.clone(), user);
+        }
+        for member in response.members {
+            self.members
+                .insert((member.id.server.clone(), member.id.user.clone()), member);
+        }
+    }
+
+    /// The server `channel` belongs to, if it's a server channel.
+    pub fn channel_server(&self, channel: &str) -> Option<&str> {
+        self.server_of(channel)
+    }
+
+    /// What `#` suggests in `channel`: the text channels of its server
+    /// that the user can see, in sidebar order. None outside servers.
+    pub fn channel_candidates(&self, channel: &str) -> Vec<ChannelEntry> {
+        let Some(server) = self.server_of(channel) else {
+            return Vec::new();
+        };
+        self.server_channels(server)
+            .into_iter()
+            .flat_map(|section| section.channels)
+            .filter(|entry| entry.kind == ChannelKind::Text { voice: false })
+            .collect()
     }
 
     /// `user` as `@` suggests them in `channel`. `None` if they aren't known.

@@ -314,4 +314,19 @@ impl Suggestion {
             },
         }
     }
+
+    /// `#name`, sent as `<#id>`.
+    pub fn channel(id: &str, name: &str) -> Self {
+        Suggestion {
+            key: format!("channel:{id}"),
+            title: name.to_string(),
+            detail: None,
+            image: None,
+            glyph: Some("#".into()),
+            insert: Insertion::Token {
+                token: TokenRef::Channel(id.to_string()),
+                label: format!("#{name}"),
+            },
+        }
+    }
 }

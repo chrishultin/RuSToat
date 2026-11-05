@@ -287,3 +287,80 @@ fn chip_labels_name_people_channels_and_emoji() {
         "#general"
     );
 }
+
+// Server members and channels (`#`).
+
+#[test]
+fn a_fetched_member_list_makes_everyone_mentionable() {
+    let mut store = store();
+    let members: stoat_gpui::api::models::AllMemberResponse = serde_json::from_value(json!({
+        "members": [
+            { "_id": { "server": "srv-alpha", "user": "u-quiet" },
+              "joined_at": "2026-01-01T00:00:00.000Z", "nickname": "Ada Quiet" },
+            { "_id": { "server": "srv-alpha", "user": "u-me" },
+              "joined_at": "2026-01-01T00:00:00.000Z" }
+        ],
+        "users": [
+            { "_id": "u-quiet", "username": "zz_adalovelace", "discriminator": "0010",
+              "relationship": "None", "online": false }
+        ]
+    }))
+    .unwrap();
+    assert!(!ids(&store.mention_candidates("ch-general")).contains(&"u-quiet"));
+    store.add_members(members);
+    let people = store.mention_candidates("ch-general");
+    assert_eq!(ids(&people), vec!["u-quiet", "u-cy"]);
+    // Shown by nickname, with the username to tell them apart.
+    let quiet = Suggestion::person(&people[0]);
+    assert_eq!(quiet.title, "Ada Quiet");
+    assert_eq!(quiet.detail.as_deref(), Some("@zz_adalovelace"));
+    // Not in another server's channels.
+    assert!(!ids(&store.mention_candidates("ch-beta")).contains(&"u-quiet"));
+}
+
+#[test]
+fn a_nickname_match_ranks_above_a_username_substring() {
+    let mut nick = person("nick", "Adams", "zed", false);
+    nick.display_name = Some("Zed".into());
+    let sub = person("sub", "Bob", "bob_adams", true);
+    assert_eq!(ids(&rank_people("adam", &[sub, nick])), vec!["nick", "sub"]);
+}
+
+#[test]
+fn channel_candidates_are_the_servers_text_channels_in_sidebar_order() {
+    let store = store();
+    let sidebar: Vec<String> = store
+        .server_channels("srv-alpha")
+        .into_iter()
+        .flat_map(|s| s.channels)
+        .map(|c| c.name)
+        .collect();
+    let names: Vec<String> = store
+        .channel_candidates("ch-general")
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
+    // Voice channels ("hangout") aren't linked.
+    let expected: Vec<String> = sidebar.into_iter().filter(|n| n != "hangout").collect();
+    assert_eq!(names, expected);
+    assert!(names.contains(&"general".to_string()) && names.contains(&"random".to_string()));
+    assert_eq!(store.channel_server("ch-general"), Some("srv-alpha"));
+    // Outside servers: none.
+    assert!(store.channel_candidates("dm-ada").is_empty());
+    assert_eq!(store.channel_server("dm-ada"), None);
+}
+
+#[test]
+fn a_channel_suggestion_inserts_a_channel_chip() {
+    let suggestion = Suggestion::channel(GENERAL, "general");
+    assert_eq!(suggestion.title, "general");
+    assert_eq!(suggestion.glyph.as_deref(), Some("#"));
+    assert_eq!(
+        suggestion.insert,
+        Insertion::Token {
+            token: TokenRef::Channel(GENERAL.into()),
+            label: "#general".into()
+        }
+    );
+    assert_eq!(TokenRef::Channel(GENERAL.into()).wire_text(), format!("<#{GENERAL}>"));
+}

@@ -227,3 +227,29 @@ async fn deleting_sends_delete_with_the_session() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn fetching_members_gets_the_whole_list_with_users() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/servers/srv-alpha/members"))
+        .and(header("x-session-token", "tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "members": [
+                { "_id": { "server": "srv-alpha", "user": "u-cy" },
+                  "joined_at": "2026-01-01T00:00:00.000Z", "nickname": "Cyclone" }
+            ],
+            "users": [
+                { "_id": "u-cy", "username": "cy", "discriminator": "0009",
+                  "relationship": "None", "online": false }
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let members = client(&server).fetch_members("srv-alpha").await.unwrap();
+    assert_eq!(members.members.len(), 1);
+    assert_eq!(members.members[0].nickname.as_deref(), Some("Cyclone"));
+    assert_eq!(members.users[0].username, "cy");
+}

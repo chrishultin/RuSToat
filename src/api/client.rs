@@ -3,7 +3,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use reqwest::{Client, Method};
 use revolt_models::v0::{
-    BulkMessageResponse, DataEditMessage, DataLogin, DataMessageSend, MFAResponse, Message,
+    AllMemberResponse, BulkMessageResponse, DataEditMessage, DataLogin, DataMessageSend, MFAResponse, Message,
     MessageSort,
     OptionsQueryMessages, ReplyIntent, ResponseLogin, User,
 };
@@ -393,6 +393,13 @@ impl StoatClient {
             None::<&()>,
         )
         .await
+    }
+
+    /// `GET /servers/{server}/members`: every member of `server`, with
+    /// their users. Stoat 0.16.2 has no member search, so it's the whole list.
+    pub async fn fetch_members(&self, server: &str) -> Result<AllMemberResponse, ApiError> {
+        self.send(Method::GET, &format!("/servers/{server}/members"), None::<&()>)
+            .await
     }
 
     /// `PUT /channels/{channel}/ack/{message}`: the user has read `channel`
