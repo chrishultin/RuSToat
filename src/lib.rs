@@ -7,13 +7,16 @@
 pub mod accounts;
 pub mod api;
 pub mod assets;
+pub mod attachment;
 pub mod banners;
 pub mod dock;
+pub mod embed;
 pub mod http;
 pub mod markdown;
 pub mod math;
 pub mod media;
 pub mod notify;
+pub mod places;
 pub mod runtime;
 pub mod session;
 pub mod store;

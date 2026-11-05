@@ -1,35 +1,44 @@
 //! The signed-in UI: server rail, channel list, and the selected channel.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::bubble::{Bubble, BubbleContent, BubbleVariant};
+use gpui_kit::component::bubble::{Bubble, BubbleContent, BubbleReactions, BubbleVariant};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::component::message::{
-    Message as MessageLayout, MessageAlignment, MessageAvatar, MessageContent, MessageHeader,
+    Message as MessageLayout, MessageAlignment, MessageAvatar, MessageContent, MessageFooter,
+    MessageHeader,
 };
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::popover::Popover;
+use gpui_kit::component::skeleton::Skeleton;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable, WindowExt, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
+use crate::api::ApiError;
 use crate::api::StoatClient;
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
+use crate::attachment::{AttachmentView, FileKind, fit_into};
+use crate::embed::{Description, EmbedCard, EmbedImage, EmbedView};
 use crate::markdown::{JUMBO_TEXT_PX, is_external_link};
 use crate::media::MediaUrls;
 use crate::notify::{self, Delivery, Notice, Viewing};
+use crate::places::{Place, Places, PlacesFile};
 use crate::runtime::spawn_io;
 use crate::store::{
-    ChannelEntry, ChannelKind, ChatStore, MessageRow, RowOp, ServerEntry, TimelineRow, diff_rows,
-    display_name,
+    ChannelEntry, ChannelKind, ChatStore, MessageRow, PickerEmoji, ReactionEmoji, RowOp,
+    ServerEntry, TimelineRow, diff_rows, display_name,
 };
+use crate::ui::emoji_picker::emoji_grid;
 use crate::ui::math::MathPlugin;
 
 /// How many messages to load when a channel is opened.
@@ -39,13 +48,6 @@ pub enum ChatEvent {
     LogOutRequested,
     /// The server no longer accepts our session.
     SessionRejected,
-}
-
-/// Which list the channel column shows.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum Place {
-    Home,
-    Server(String),
 }
 
 enum Status {
@@ -76,6 +78,10 @@ pub struct ChatView {
     place: Place,
     /// Last channel picked in each place, so switching servers comes back to it.
     selected: HashMap<Place, String>,
+    /// Where `place` and `selected` are kept between launches (`None` if
+    /// there's nowhere to keep them), and what was last written there.
+    places_file: Option<PlacesFile>,
+    saved_places: Places,
     /// File server base URL for icons, from `GET /`. `None` until loaded.
     /// Where images come from. Only the API base is known until `GET /` loads.
     media: MediaUrls,
@@ -95,6 +101,15 @@ pub struct ChatView {
     /// macOS banners still showing: channel (also the banner's tag) → the
     /// message it's for. Dismissed once the channel is read past it.
     banners: HashMap<String, String>,
+    /// The image open in the full-size viewer, over everything else.
+    viewer: Option<ViewedImage>,
+    /// Focused while the viewer is open, so Esc reaches it.
+    viewer_focus: FocusHandle,
+    /// The message whose reaction picker is open.
+    picker_for: Option<String>,
+    /// Reaction changes waiting on the server, as (message, emoji). Another
+    /// click on the same one waits, so requests can't cross.
+    reacting: HashSet<(String, String)>,
     _connection: Connection,
     _events: Task<()>,
     _root: Task<()>,
@@ -169,7 +184,14 @@ impl ChatView {
             }
         });
         // Until `GET /` loads, only the API base (default avatars) is known.
-        let media = MediaUrls::new(api, None, None);
+        let media = MediaUrls::new(api.clone(), None, None);
+        // Start where the last launch left off. Anything since deleted is
+        // dropped once Ready arrives (`drop_stale_selection`).
+        let places_file = PlacesFile::for_account(&api, &me);
+        let saved_places = places_file
+            .as_ref()
+            .map(PlacesFile::load)
+            .unwrap_or_default();
         let mut store = ChatStore::new(me);
         store.set_media(media.clone());
         Self {
@@ -177,8 +199,10 @@ impl ChatView {
             store,
             has_ready: false,
             status: Status::Connecting { attempt: 1 },
-            place: Place::Home,
-            selected: HashMap::new(),
+            place: saved_places.place.clone(),
+            selected: saved_places.selected.clone(),
+            places_file,
+            saved_places,
             media,
             panes: HashMap::new(),
             loading: HashMap::new(),
@@ -188,6 +212,10 @@ impl ChatView {
             pending_ack: None,
             dock_badge: 0,
             banners: HashMap::new(),
+            viewer: None,
+            viewer_focus: cx.focus_handle(),
+            picker_for: None,
+            reacting: HashSet::new(),
             _connection: connection,
             _events: events,
             _root: root,
@@ -270,6 +298,41 @@ impl ChatView {
                     self.sync_pane(&channel, cx);
                 }
             }
+            ConnectionEvent::Event(ServerEvent::MessageReact {
+                id,
+                channel,
+                user,
+                emoji,
+            }) => {
+                if self.store.apply_react(&channel, &id, &user, &emoji, true) {
+                    self.sync_pane(&channel, cx);
+                }
+            }
+            ConnectionEvent::Event(ServerEvent::MessageUnreact {
+                id,
+                channel,
+                user,
+                emoji,
+            }) => {
+                if self.store.apply_react(&channel, &id, &user, &emoji, false) {
+                    self.sync_pane(&channel, cx);
+                }
+            }
+            ConnectionEvent::Event(ServerEvent::MessageRemoveReaction { id, channel, emoji }) => {
+                if self.store.apply_remove_reaction(&channel, &id, &emoji) {
+                    self.sync_pane(&channel, cx);
+                }
+            }
+            ConnectionEvent::Event(ServerEvent::MessageAppend {
+                id,
+                channel,
+                embeds,
+            }) => {
+                log::debug!("live: {} embed(s) for {id} in {channel}", embeds.len());
+                if self.store.apply_append(&channel, &id, embeds) {
+                    self.sync_pane(&channel, cx);
+                }
+            }
             ConnectionEvent::Event(ServerEvent::BulkMessageDelete { channel, ids }) => {
                 if self.store.apply_delete(&channel, &ids) {
                     self.sync_pane(&channel, cx);
@@ -340,8 +403,208 @@ impl ChatView {
         cx.notify();
     }
 
+    fn on_row_action(
+        &mut self,
+        channel: &str,
+        action: RowAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            // "Show image" on a large image: load it after all.
+            RowAction::RevealImage(file_id) => {
+                self.store.reveal_image(&file_id);
+                self.sync_pane(channel, cx);
+            }
+            RowAction::ViewImage(image) => {
+                self.viewer = Some(image);
+                window.focus(&self.viewer_focus, cx);
+            }
+            RowAction::ToggleReaction { message, emoji } => {
+                self.picker_for = None;
+                self.toggle_reaction(channel.to_string(), message, emoji, window, cx);
+            }
+            RowAction::Picker(message) => self.picker_for = message,
+        }
+        cx.notify();
+    }
+
+    /// Add or remove the user's reaction: shown at once, then sent. If the
+    /// server refuses, it's undone and a toast says why. The server echoes a
+    /// successful change back as an event, which changes nothing by then.
+    fn toggle_reaction(
+        &mut self,
+        channel: String,
+        message: String,
+        emoji: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let pending = (message.clone(), emoji.clone());
+        if !self.reacting.insert(pending.clone()) {
+            return;
+        }
+        let add = !self.store.has_reacted(&channel, &message, &emoji);
+        if add
+            && self
+                .store
+                .would_exceed_reactions(&channel, &message, &emoji)
+        {
+            self.reacting.remove(&pending);
+            window.push_notification(Notification::warning(FULL_REACTIONS_TEXT), cx);
+            return;
+        }
+        let me = self.store.me().to_string();
+        if self.store.apply_react(&channel, &message, &me, &emoji, add) {
+            self.sync_pane(&channel, cx);
+        }
+        let client = self.client.clone();
+        let request = spawn_io({
+            let (channel, message, emoji) = (channel.clone(), message.clone(), emoji.clone());
+            async move {
+                if add {
+                    client.react(&channel, &message, &emoji).await
+                } else {
+                    client.unreact(&channel, &message, &emoji).await
+                }
+            }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.reacting.remove(&pending);
+                let error = match result {
+                    Ok(Ok(())) => return,
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't change reaction {emoji} on {message}: {err:?}");
+                        reaction_error_text(&err)
+                    }
+                    Err(err) => {
+                        log::warn!("reaction task failed: {err:?}");
+                        "Couldn't update your reaction.".into()
+                    }
+                };
+                if this
+                    .store
+                    .apply_react(&channel, &message, &me, &emoji, !add)
+                {
+                    this.sync_pane(&channel, cx);
+                }
+                window.push_notification(Notification::error(error), cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn close_viewer(&mut self, cx: &mut Context<Self>) {
+        self.viewer = None;
+        cx.notify();
+    }
+
+    /// The full-size viewer: the image fitted to the window (never enlarged)
+    /// on a dimmed backdrop, under a bar with its name and actions. It takes
+    /// every click and scroll, so the messages underneath don't react.
+    fn render_viewer(
+        &self,
+        image: &ViewedImage,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let viewport = window.viewport_size();
+        let room = |side: Pixels, taken: f32| (f32::from(side) - taken).max(1.) as u32;
+        let max_w = room(viewport.width, 2. * VIEWER_MARGIN);
+        let max_h = room(viewport.height, 2. * VIEWER_MARGIN + VIEWER_BAR);
+        // Unknown dimensions: the whole space, letterboxed.
+        let (w, h) =
+            fit_into(image.original.0, image.original.1, max_w, max_h).unwrap_or((max_w, max_h));
+        let open = image.url.clone();
+        let bar = h_flex()
+            .h(px(VIEWER_BAR))
+            .flex_none()
+            .px_4()
+            .gap_2()
+            .bg(theme.background)
+            .text_color(theme.foreground)
+            .border_b_1()
+            .border_color(theme.border)
+            // Clicks on the bar aren't clicks on the backdrop.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(image.name.clone()),
+            )
+            .child(
+                Button::new("viewer-open")
+                    .ghost()
+                    .small()
+                    .icon(IconName::ExternalLink)
+                    .label("Open in browser")
+                    .on_click(move |_, _, cx| cx.open_url(&open)),
+            )
+            .child(
+                Button::new("viewer-close")
+                    .ghost()
+                    .small()
+                    .icon(IconName::Close)
+                    .tooltip("Close (Esc)")
+                    .on_click(cx.listener(|this, _, _, cx| this.close_viewer(cx))),
+            );
+        div()
+            .id("image-viewer")
+            .track_focus(&self.viewer_focus)
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .flex_col()
+            .bg(black().opacity(0.85))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" {
+                    cx.stop_propagation();
+                    this.close_viewer(cx);
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.close_viewer(cx)),
+            )
+            .on_scroll(|_, _, cx| cx.stop_propagation())
+            .child(bar)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .w(px(w as f32))
+                            .h(px(h as f32))
+                            // Clicking the picture itself doesn't close it.
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(
+                                img(SharedUri::from(image.url.clone()))
+                                    .id("image-viewer-img")
+                                    .size_full()
+                                    .object_fit(ObjectFit::Contain)
+                                    .with_loading(move || image_loading(muted, 0.)),
+                            ),
+                    ),
+            )
+    }
+
     fn select_place(&mut self, place: Place, cx: &mut Context<Self>) {
         self.place = place;
+        self.remember_places();
         self.ensure_current_loaded(cx);
         cx.notify();
     }
@@ -403,14 +666,34 @@ impl ChatView {
         };
         self.place = place.clone();
         self.selected.insert(place, channel.to_string());
+        self.remember_places();
         self.ensure_current_loaded(cx);
         cx.notify();
     }
 
     fn select_channel(&mut self, id: String, cx: &mut Context<Self>) {
         self.selected.insert(self.place.clone(), id);
+        self.remember_places();
         self.ensure_current_loaded(cx);
         cx.notify();
+    }
+
+    /// Save the open place and picked channels for next launch, if they changed.
+    fn remember_places(&mut self) {
+        let Some(file) = &self.places_file else {
+            return;
+        };
+        let places = Places {
+            place: self.place.clone(),
+            selected: self.selected.clone(),
+        };
+        if places == self.saved_places {
+            return;
+        }
+        if let Err(err) = file.save(&places) {
+            log::warn!("couldn't save places: {err:#}");
+        }
+        self.saved_places = places;
     }
 
     /// Start loading the current channel's history if it isn't loaded or loading.
@@ -893,6 +1176,7 @@ impl ChatView {
             .on_click(cx.listener(move |this, _, _, cx| this.select_channel(id.clone(), cx)))
             .child(match channel.avatar.clone() {
                 Some(url) => avatar(
+                    format!("channel-avatar-{}", channel.id),
                     Some(url),
                     &channel.name,
                     20.,
@@ -917,6 +1201,7 @@ impl ChatView {
             .into();
         let online = matches!(self.status, Status::Connected);
         let me_avatar = avatar(
+            "my-avatar",
             Some(self.store.user_avatar_url(self.store.me())),
             &name,
             32.,
@@ -1004,6 +1289,12 @@ impl ChatView {
             danger: theme.danger,
             avatar_bg: theme.secondary,
             avatar_fg: theme.secondary_foreground,
+            border: theme.border,
+            link: theme.link,
+            mine: theme.primary,
+            mine_bg: theme.primary.opacity(0.15),
+            card_bg: theme.background,
+            image_bg: theme.secondary,
         };
         let placeholder = |text: SharedString| {
             v_flex()
@@ -1024,6 +1315,18 @@ impl ChatView {
                         placeholder("No messages yet.".into())
                     } else {
                         let rows = pane.rows.clone();
+                        let pickers = Rc::new(Pickers {
+                            choices: Rc::new(self.store.reaction_choices(&channel.id)),
+                            open_for: self.picker_for.clone(),
+                        });
+                        let view = cx.entity().downgrade();
+                        let channel_id = channel.id.clone();
+                        let on_action: OnRowAction = Rc::new(move |action, window, cx| {
+                            view.update(cx, |this, cx| {
+                                this.on_row_action(&channel_id, action, window, cx)
+                            })
+                            .ok();
+                        });
                         let older = if self.loading_older.contains_key(&channel.id) {
                             Some(
                                 div()
@@ -1069,7 +1372,9 @@ impl ChatView {
                                 MessageScroller::new(
                                     SharedString::from(format!("messages-{}", channel.id)),
                                     pane.scroller.clone(),
-                                    move |ix, _window, _cx| render_row(&rows[ix], colors),
+                                    move |ix, _window, _cx| {
+                                        render_row(&rows[ix], colors, &on_action, &pickers)
+                                    },
                                 )
                                 // The scroller's default rows are spaced for whole
                                 // chat turns (`pb_8` under every row, plus `px_3`).
@@ -1138,14 +1443,61 @@ struct RowColors {
     danger: Hsla,
     avatar_bg: Hsla,
     avatar_fg: Hsla,
+    border: Hsla,
+    link: Hsla,
+    /// Outline and count of reactions the user is part of.
+    mine: Hsla,
+    mine_bg: Hsla,
+    /// File cards, so they stand out inside a bubble.
+    card_bg: Hsla,
+    /// Behind an image while it loads, or if it fails.
+    image_bg: Hsla,
 }
+
+/// Something a message row asks the view to do.
+#[derive(Clone)]
+enum RowAction {
+    /// "Show image": load a large image after all (by file ID).
+    RevealImage(String),
+    /// Open an inline image in the full-size viewer.
+    ViewImage(ViewedImage),
+    /// Add the user's `emoji` reaction to `message`, or take it back if
+    /// they've already reacted with it.
+    ToggleReaction { message: String, emoji: String },
+    /// Open the reaction picker on a message (`Some`), or close it.
+    Picker(Option<String>),
+}
+
+type OnRowAction = Rc<dyn Fn(RowAction, &mut Window, &mut App)>;
+
+#[derive(Clone)]
+struct ViewedImage {
+    url: String,
+    name: String,
+    /// From the upload's metadata; zero if unknown.
+    original: (usize, usize),
+}
+
+/// Space around the image in the full-size viewer.
+const VIEWER_MARGIN: f32 = 32.;
+/// Height of the viewer's top bar.
+const VIEWER_BAR: f32 = 48.;
 
 /// Matches gpui-component's message avatar slot (`size-8`).
 const AVATAR_SIZE: f32 = 32.;
 
 /// A round avatar, falling back to the name's initial while it loads, if it
 /// fails, or if there's no image.
-fn avatar(url: Option<String>, name: &str, size: f32, bg: Hsla, fg: Hsla) -> AnyElement {
+/// `id` must be unique among the avatars on screen: the image keeps its
+/// loading state under it (without one, the initial never shows while loading).
+fn avatar(
+    id: impl Into<SharedString>,
+    url: Option<String>,
+    name: &str,
+    size: f32,
+    bg: Hsla,
+    fg: Hsla,
+) -> AnyElement {
     let initial: SharedString = name
         .chars()
         .find(|c| c.is_alphanumeric())
@@ -1169,6 +1521,7 @@ fn avatar(url: Option<String>, name: &str, size: f32, bg: Hsla, fg: Hsla) -> Any
     };
     match url {
         Some(url) => img(SharedUri::from(url))
+            .id(id.into())
             .size(px(size))
             .flex_none()
             .rounded_full()
@@ -1180,7 +1533,20 @@ fn avatar(url: Option<String>, name: &str, size: f32, bg: Hsla, fg: Hsla) -> Any
     }
 }
 
-fn render_row(row: &TimelineRow, colors: RowColors) -> AnyElement {
+/// The reaction picker's state for the rows being drawn.
+struct Pickers {
+    /// What the picker offers in this channel (messages may restrict it).
+    choices: Rc<Vec<PickerEmoji>>,
+    /// The message whose picker is open.
+    open_for: Option<String>,
+}
+
+fn render_row(
+    row: &TimelineRow,
+    colors: RowColors,
+    on_action: &OnRowAction,
+    pickers: &Pickers,
+) -> AnyElement {
     match row {
         TimelineRow::StartOfChannel { name } => v_flex()
             .px_4()
@@ -1201,7 +1567,7 @@ fn render_row(row: &TimelineRow, colors: RowColors) -> AnyElement {
             )
             .into_any_element(),
         TimelineRow::Message(message) if message.system => render_system_row(message, colors),
-        TimelineRow::Message(message) => render_message_row(message, colors),
+        TimelineRow::Message(message) => render_message_row(message, colors, on_action, pickers),
     }
 }
 
@@ -1236,7 +1602,12 @@ const BUBBLE_RADIUS: f32 = 16.;
 /// Corner radius where consecutive bubbles from one sender meet.
 const JOINED_RADIUS: f32 = 4.;
 
-fn render_message_row(message: &MessageRow, colors: RowColors) -> AnyElement {
+fn render_message_row(
+    message: &MessageRow,
+    colors: RowColors,
+    on_action: &OnRowAction,
+    pickers: &Pickers,
+) -> AnyElement {
     let first = !message.continuation;
     let last = message.group_end;
     let alignment = if message.mine {
@@ -1263,59 +1634,88 @@ fn render_message_row(message: &MessageRow, colors: RowColors) -> AnyElement {
             .rounded_tl(top)
             .rounded_bl(bottom)
     };
-    let surface = surface
-        .when_some(message.body.clone(), |el, body| {
-            el.child(
-                // Keyed by `render_key`, so an edit (or a renamed mention)
-                // gets a fresh parse instead of the cached one.
-                TextView::markdown(SharedString::from(message.render_key.clone()), body)
-                    // `$$…$$` formatting (colour, size), drawn natively.
-                    .plugin(MathPlugin)
-                    // Emoji-only messages are drawn big (custom ones are sized
-                    // in the Markdown itself).
-                    .map(|text| {
-                        if message.jumbo {
-                            text.text_size(px(JUMBO_TEXT_PX))
-                        } else {
-                            text.text_sm()
-                        }
-                    })
-                    .selectable(true)
-                    .on_link_click(|url, _, _, cx| {
-                        // Mentions are internal `stoat:` links: nothing to open yet.
-                        if is_external_link(url) {
-                            cx.open_url(url);
-                        }
-                    }),
-            )
-        })
-        .children(message.attachments.iter().map(|name| {
-            div()
-                .text_sm()
-                .text_color(colors.muted)
-                .child(format!("[attachment: {name}]"))
-        }))
-        .when(message.edited, |el| {
-            el.child(div().text_xs().text_color(colors.muted).child("(edited)"))
-        });
+    let surface =
+        surface
+            .when_some(message.body.clone(), |el, body| {
+                el.child(
+                    // Keyed by `render_key`, so an edit (or a renamed mention)
+                    // gets a fresh parse instead of the cached one.
+                    TextView::markdown(SharedString::from(message.render_key.clone()), body)
+                        // `$$…$$` formatting (colour, size), drawn natively.
+                        .plugin(MathPlugin)
+                        // Emoji-only messages are drawn big (custom ones are sized
+                        // in the Markdown itself).
+                        .map(|text| {
+                            if message.jumbo {
+                                text.text_size(px(JUMBO_TEXT_PX))
+                            } else {
+                                text.text_sm()
+                            }
+                        })
+                        .selectable(true)
+                        .on_link_click(|url, _, _, cx| {
+                            // Mentions are internal `stoat:` links: nothing to open yet.
+                            if is_external_link(url) {
+                                cx.open_url(url);
+                            }
+                        }),
+                )
+            })
+            .when(!message.attachments.is_empty(), |el| {
+                el.child(
+                    v_flex()
+                        .gap_1()
+                        .when(message.body.is_some(), |el| el.mt_1())
+                        .children(message.attachments.iter().enumerate().map(
+                            |(ix, attachment)| {
+                                let id =
+                                    SharedString::from(format!("attachment-{}-{ix}", message.id));
+                                render_attachment(id, attachment, colors, on_action)
+                            },
+                        )),
+                )
+            })
+            .when(!message.embeds.is_empty(), |el| {
+                el.child(
+                    v_flex()
+                        .gap_1()
+                        .when(
+                            message.body.is_some() || !message.attachments.is_empty(),
+                            |el| el.mt_1(),
+                        )
+                        .children(message.embeds.iter().enumerate().map(|(ix, embed)| {
+                            let id = SharedString::from(format!("embed-{}-{ix}", message.id));
+                            render_embed(id, embed, colors, on_action)
+                        })),
+                )
+            })
+            .when(message.edited, |el| {
+                el.child(div().text_xs().text_color(colors.muted).child("(edited)"))
+            });
 
-    // Big emoji stand on their own: same bubble (so it keeps its width and
-    // side), with the surface made invisible. Not `BubbleVariant::Ghost`:
-    // gpui-component stretches ghost bubbles to the full row width, which
-    // left-aligned emoji-only messages even when they were ours.
-    let surface = surface.when(message.jumbo, |el| el.bg(transparent_black()).p_0());
+    // Big emoji and bare attachments stand on their own: same bubble (so it
+    // keeps its width and side), with the surface made invisible. Not
+    // `BubbleVariant::Ghost`: gpui-component stretches ghost bubbles to the
+    // full row width, which left-aligned emoji-only messages even when they
+    // were ours.
+    let bare = message.jumbo
+        || (message.body.is_none()
+            && (!message.attachments.is_empty() || !message.embeds.is_empty()));
+    let surface = surface.when(bare, |el| el.bg(transparent_black()).p_0());
     let bubble = Bubble::new()
         .with_variant(if message.mine {
             BubbleVariant::Tinted
         } else {
             BubbleVariant::Secondary
         })
-        .content(surface);
+        .content(surface)
+        .reactions(reaction_button(message, on_action, pickers));
 
     // The avatar sits beside the last bubble of a group; earlier ones keep
     // the empty slot so the bubbles line up.
     let avatar_slot = if last {
         MessageAvatar::new().child(avatar(
+            format!("avatar-{}", message.id),
             message.avatar.clone(),
             &message.author,
             AVATAR_SIZE,
@@ -1337,17 +1737,679 @@ fn render_message_row(message: &MessageRow, colors: RowColors) -> AnyElement {
             .child(div().text_color(colors.muted).child(message.time.clone()))
     });
 
-    MessageLayout::new()
+    let layout = MessageLayout::new()
         .alignment(alignment)
         .avatar_slot(avatar_slot)
         .when_some(header, |el, header| el.header(header))
         .content(MessageContent::new().bubble(bubble))
+        .when_some(
+            render_reactions(message, colors, on_action),
+            |el, footer| el.footer(footer),
+        )
         // The name/time header sits right above its bubble (default gap is 10 px).
         .with_stack_style(StyleRefinement::default().gap(px(HEADER_GAP)))
+        // Reactions sit just under their bubble (default gap is 10 px too).
+        .gap(px(REACTIONS_GAP))
         .px_4()
         // Space between groups; bubbles within a group sit close together.
-        .pt(px(if first { GROUP_GAP } else { BUBBLE_GAP }))
+        .pt(px(if first { GROUP_GAP } else { BUBBLE_GAP }));
+
+    div()
+        .relative()
+        .group(ROW_GROUP)
+        .child(layout)
         .into_any_element()
+}
+
+/// Group name for hovering a message row.
+const ROW_GROUP: &str = "message-row";
+
+/// How far outside the bubble's edge the "add reaction" button sits.
+const REACT_BUTTON_OFFSET: f32 = 28.;
+
+/// The "add reaction" button, just outside the bubble at its bottom corner
+/// (on the side away from the avatar), so the picker opens under the
+/// message. It shows while the row is hovered or its picker is open, and
+/// takes no space (so rows don't change height).
+fn reaction_button(
+    message: &MessageRow,
+    on_action: &OnRowAction,
+    pickers: &Pickers,
+) -> BubbleReactions {
+    let open = pickers.open_for.as_deref() == Some(message.id.as_str());
+    let choices = Rc::new(message.picker_choices(&pickers.choices));
+    let chosen: Rc<HashSet<String>> = Rc::new(
+        message
+            .reactions
+            .iter()
+            .filter(|chip| chip.mine)
+            .map(|chip| chip.key.clone())
+            .collect(),
+    );
+    let id = message.id.clone();
+    let on_open = {
+        let (on_action, id) = (on_action.clone(), id.clone());
+        move |open: &bool, window: &mut Window, cx: &mut App| {
+            on_action(RowAction::Picker(open.then(|| id.clone())), window, cx)
+        }
+    };
+    let on_pick: crate::ui::emoji_picker::OnPick = {
+        let (on_action, id) = (on_action.clone(), id.clone());
+        Rc::new(move |emoji: &str, window: &mut Window, cx: &mut App| {
+            on_action(
+                RowAction::ToggleReaction {
+                    message: id.clone(),
+                    emoji: emoji.to_string(),
+                },
+                window,
+                cx,
+            )
+        })
+    };
+    let popover = Popover::new(SharedString::from(format!("react-{id}")))
+        // Opens below the button, reaching back under the bubble.
+        .anchor(if message.mine {
+            Anchor::TopLeft
+        } else {
+            Anchor::TopRight
+        })
+        .open(open)
+        .on_open_change(on_open)
+        .trigger(
+            Button::new(SharedString::from(format!("react-{id}-button")))
+                .ghost()
+                .xsmall()
+                .icon(IconName::Plus)
+                .tooltip("Add reaction"),
+        )
+        .content(move |_, _, cx| {
+            let note = choices.full.then_some(FULL_REACTIONS_TEXT);
+            emoji_grid(&id, &choices.emoji, note, &chosen, on_pick.clone(), cx)
+        });
+    let trigger = div()
+        .when(!open, |el| {
+            el.invisible()
+                .group_hover(ROW_GROUP, |style| style.visible())
+        })
+        .child(popover);
+    // gpui-component's slot for things on a bubble's edge. Moved fully
+    // outside the bubble, level with its bottom, without a pill of its own.
+    let outside = px(-REACT_BUTTON_OFFSET);
+    BubbleReactions::new()
+        .alignment(if message.mine {
+            MessageAlignment::Start
+        } else {
+            MessageAlignment::End
+        })
+        .bottom(px(0.))
+        .map(|el| {
+            if message.mine {
+                el.left(outside)
+            } else {
+                el.right(outside)
+            }
+        })
+        .bg(transparent_black())
+        .border_0()
+        .p_0()
+        .child(trigger)
+}
+
+/// Shown when a message is at [`MAX_REACTIONS`](crate::store::MAX_REACTIONS).
+const FULL_REACTIONS_TEXT: &str =
+    "This message has as many different reactions as it can (20). You can still join one.";
+
+/// What a refused reaction's toast says.
+fn reaction_error_text(err: &ApiError) -> SharedString {
+    use revolt_result::ErrorType;
+    match err.error_type() {
+        Some(ErrorType::MissingPermission { .. }) => "You can't react here.".into(),
+        // The reaction limit (checked before sending, but another client may
+        // have just filled it), an emoji the author didn't allow, or a
+        // custom emoji that isn't usable here.
+        Some(ErrorType::InvalidOperation) => "Stoat didn't accept that reaction. The message \
+             may have the most reactions it can, or that emoji isn't allowed here."
+            .into(),
+        _ => format!("Couldn't update your reaction: {err}").into(),
+    }
+}
+
+/// Space between a bubble and its reactions.
+const REACTIONS_GAP: f32 = 4.;
+/// Height of a reaction chip.
+const REACTION_HEIGHT: f32 = 24.;
+/// Custom emoji in a reaction chip.
+const REACTION_EMOJI_PX: f32 = 16.;
+
+/// The message's reaction chips (emoji and count, outlined when the user is
+/// one of them), wrapping under the bubble. `None` without reactions.
+fn render_reactions(
+    message: &MessageRow,
+    colors: RowColors,
+    on_action: &OnRowAction,
+) -> Option<MessageFooter> {
+    if message.reactions.is_empty() {
+        return None;
+    }
+    let chips = message.reactions.iter().enumerate().map(|(ix, chip)| {
+        let (emoji, tooltip): (AnyElement, SharedString) = match &chip.emoji {
+            ReactionEmoji::Unicode(emoji) => (
+                div().text_sm().child(emoji.clone()).into_any_element(),
+                emoji.clone().into(),
+            ),
+            ReactionEmoji::Custom {
+                url: Some(url),
+                name,
+                ..
+            } => (
+                img(SharedUri::from(url.clone()))
+                    .id(SharedString::from(format!(
+                        "reaction-{}-{ix}-emoji",
+                        message.id
+                    )))
+                    .size(px(REACTION_EMOJI_PX))
+                    .flex_none()
+                    .object_fit(ObjectFit::Contain)
+                    .with_loading(|| icon_loading(REACTION_EMOJI_PX, false))
+                    .into_any_element(),
+                name.clone().into(),
+            ),
+            ReactionEmoji::Custom {
+                url: None, name, ..
+            } => (
+                div().text_xs().child(name.clone()).into_any_element(),
+                name.clone().into(),
+            ),
+        };
+        h_flex()
+            .id(SharedString::from(format!("reaction-{}-{ix}", message.id)))
+            .h(px(REACTION_HEIGHT))
+            .px_2()
+            .gap_1()
+            .rounded_full()
+            .border_1()
+            .map(|el| {
+                if chip.mine {
+                    el.border_color(colors.mine).bg(colors.mine_bg)
+                } else {
+                    el.border_color(colors.border).bg(colors.card_bg)
+                }
+            })
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            // Clicking a chip adds the user's reaction, or takes it back.
+            .cursor_pointer()
+            .on_click({
+                let on_action = on_action.clone();
+                let toggle = RowAction::ToggleReaction {
+                    message: message.id.clone(),
+                    emoji: chip.key.clone(),
+                };
+                move |_, window, cx| on_action(toggle.clone(), window, cx)
+            })
+            .child(emoji)
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(if chip.mine { colors.mine } else { colors.muted })
+                    .child(chip.count.to_string()),
+            )
+    });
+    Some(
+        MessageFooter::new()
+            // Line up with the bubble's edge, not its text.
+            .content_inset(false)
+            .flex_wrap()
+            .children(chips),
+    )
+}
+
+/// Corner radius of inline images and file cards.
+const ATTACHMENT_RADIUS: f32 = 8.;
+/// File cards' width (they shrink in a narrow bubble).
+const FILE_CARD_WIDTH: f32 = 320.;
+
+/// An inline image at its precomputed size (so the row never changes height
+/// when it loads), or a file card. `id` is unique within the list.
+fn render_attachment(
+    id: SharedString,
+    attachment: &AttachmentView,
+    colors: RowColors,
+    on_action: &OnRowAction,
+) -> AnyElement {
+    match attachment {
+        AttachmentView::Image {
+            url,
+            name,
+            width,
+            height,
+            original,
+            thumbhash,
+            too_big: false,
+            ..
+        } => {
+            let viewed = ViewedImage {
+                url: url.clone(),
+                name: name.clone(),
+                original: *original,
+            };
+            let on_action = on_action.clone();
+            inline_image(id, url, (*width, *height), thumbhash.clone(), colors)
+                .cursor_pointer()
+                .on_click(move |_, window, cx| {
+                    on_action(RowAction::ViewImage(viewed.clone()), window, cx)
+                })
+                .into_any_element()
+        }
+        AttachmentView::Image {
+            id: file_id,
+            name,
+            size_label,
+            too_big: true,
+            ..
+        } => {
+            let on_action = on_action.clone();
+            let file_id = file_id.clone();
+            file_card(id.clone(), IconName::FileImage, name, size_label, colors)
+                .child(
+                    Button::new(SharedString::from(format!("{id}-show")))
+                        .xsmall()
+                        .label("Show image")
+                        .on_click(move |_, window, cx| {
+                            on_action(RowAction::RevealImage(file_id.clone()), window, cx)
+                        }),
+                )
+                .into_any_element()
+        }
+        AttachmentView::File {
+            name,
+            size_label,
+            url,
+            kind,
+        } => {
+            let icon = match kind {
+                FileKind::Image => IconName::FileImage,
+                FileKind::Video => IconName::FileVideoCamera,
+                FileKind::Audio => IconName::FileMusic,
+                FileKind::Text => IconName::FileText,
+                FileKind::File => IconName::File,
+            };
+            file_card(id, icon, name, size_label, colors)
+                .when_some(url.clone(), |card, url| {
+                    card.cursor_pointer()
+                        .on_click(move |_, _, cx| cx.open_url(&url))
+                        .child(Icon::new(IconName::Download).text_color(colors.muted))
+                })
+                .into_any_element()
+        }
+    }
+}
+
+/// A picture at exactly its display size (so its row never changes height
+/// when it loads), with a backdrop while loading or if it fails. Callers add
+/// what clicking it does.
+/// `thumbhash`: shown blurred while the image loads, instead of the pulsing box.
+fn inline_image(
+    id: SharedString,
+    url: &str,
+    (width, height): (u32, u32),
+    thumbhash: Option<Arc<[u8]>>,
+    colors: RowColors,
+) -> Stateful<Div> {
+    let backdrop = move || {
+        div()
+            .size_full()
+            .rounded(px(ATTACHMENT_RADIUS))
+            .bg(colors.image_bg)
+    };
+    div()
+        .id(id.clone())
+        .relative()
+        .w(px(width as f32))
+        .h(px(height as f32))
+        .flex_none()
+        .child(
+            img(SharedUri::from(url.to_string()))
+                // The image's own ID keeps its loading state between frames;
+                // without one, the loading placeholder never shows.
+                .id(SharedString::from(format!("{id}-img")))
+                .size_full()
+                .rounded(px(ATTACHMENT_RADIUS))
+                .object_fit(ObjectFit::Contain)
+                .with_loading(move || match thumbhash.clone() {
+                    Some(hash) => crate::ui::thumbhash::preview(hash)
+                        .size_full()
+                        .rounded(px(ATTACHMENT_RADIUS))
+                        .object_fit(ObjectFit::Fill)
+                        .with_fallback(move || image_loading(colors.muted, ATTACHMENT_RADIUS))
+                        .into_any_element(),
+                    None => image_loading(colors.muted, ATTACHMENT_RADIUS),
+                })
+                .with_fallback(move || {
+                    backdrop()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_xs()
+                        .text_color(colors.muted)
+                        .child("Couldn't load image")
+                        .into_any_element()
+                }),
+        )
+}
+
+/// A small pulsing square (or circle) standing in for an icon or emoji
+/// while it downloads.
+fn icon_loading(size: f32, round: bool) -> AnyElement {
+    Skeleton::new()
+        .size(px(size))
+        .flex_none()
+        .map(|el| {
+            if round {
+                el.rounded_full()
+            } else {
+                el.rounded_sm()
+            }
+        })
+        .into_any_element()
+}
+
+/// What an image shows while it downloads (once that's taken a moment): a
+/// pulsing box with a faint picture icon.
+fn image_loading(icon_color: Hsla, radius: f32) -> AnyElement {
+    div()
+        .relative()
+        .size_full()
+        .child(
+            Skeleton::new()
+                .absolute()
+                .inset_0()
+                .size_full()
+                .rounded(px(radius)),
+        )
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    Icon::new(IconName::Image)
+                        .large()
+                        .text_color(icon_color.opacity(0.6)),
+                ),
+        )
+        .into_any_element()
+}
+
+/// An embed picture that opens in the full-size viewer.
+fn viewable_embed_image(
+    id: SharedString,
+    image: &EmbedImage,
+    colors: RowColors,
+    on_action: &OnRowAction,
+) -> Stateful<Div> {
+    let viewed = ViewedImage {
+        url: image.url.clone(),
+        name: "Image".into(),
+        original: image.original,
+    };
+    let on_action = on_action.clone();
+    // Remote images have no ThumbHash: they get the pulsing box.
+    inline_image(id, &image.url, (image.width, image.height), None, colors)
+        .cursor_pointer()
+        .on_click(move |_, window, cx| on_action(RowAction::ViewImage(viewed.clone()), window, cx))
+}
+
+/// Widest an embed card gets: a large image plus the card's padding and bar.
+const EMBED_CARD_MAX_WIDTH: f32 = 432.;
+/// Width of an embed card's colour bar.
+const EMBED_BAR_WIDTH: f32 = 4.;
+/// Lines of a website's description shown before it's cut off.
+const EMBED_DESCRIPTION_LINES: usize = 4;
+
+fn render_embed(
+    id: SharedString,
+    embed: &EmbedView,
+    colors: RowColors,
+    on_action: &OnRowAction,
+) -> AnyElement {
+    match embed {
+        EmbedView::Image(image) => {
+            viewable_embed_image(id, image, colors, on_action).into_any_element()
+        }
+        EmbedView::Video { url } => {
+            let open = url.clone();
+            let shown = url
+                .trim_start_matches("https://")
+                .trim_start_matches("http://");
+            file_card(id, IconName::FileVideoCamera, shown, "Video", colors)
+                .cursor_pointer()
+                .on_click(move |_, _, cx| cx.open_url(&open))
+                .child(Icon::new(IconName::ExternalLink).text_color(colors.muted))
+                .into_any_element()
+        }
+        EmbedView::Card(card) => render_embed_card(id, card, colors, on_action),
+    }
+}
+
+/// A link preview or bot embed: colour bar, site, title (linked), description,
+/// and a picture beside or under the text.
+fn render_embed_card(
+    id: SharedString,
+    card: &EmbedCard,
+    colors: RowColors,
+    on_action: &OnRowAction,
+) -> AnyElement {
+    let bar = card
+        .colour
+        .map(|colour| Hsla::from(rgba(colour)))
+        .unwrap_or(colors.border);
+
+    let site = card.site_name.clone().map(|name| {
+        h_flex()
+            .gap_1p5()
+            .text_xs()
+            .text_color(colors.muted)
+            .when_some(card.icon.clone(), |el, icon| {
+                el.child(
+                    img(SharedUri::from(icon))
+                        .id(SharedString::from(format!("{id}-site-icon")))
+                        .size(px(16.))
+                        .flex_none()
+                        .rounded_sm()
+                        .object_fit(ObjectFit::Contain)
+                        .with_loading(|| icon_loading(16., false)),
+                )
+            })
+            .child(div().truncate().child(name))
+    });
+    // Bot embeds have an icon but no site name: it goes by the title instead.
+    let title_icon = card
+        .site_name
+        .is_none()
+        .then(|| card.icon.clone())
+        .flatten();
+    let title = card.title.clone().map(|title| {
+        let text = div()
+            .id(SharedString::from(format!("{id}-title")))
+            .text_sm()
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(title);
+        let text = match card.link.clone() {
+            Some(link) => text
+                .text_color(colors.link)
+                .cursor_pointer()
+                .hover(|style| style.underline())
+                .on_click(move |_, _, cx| cx.open_url(&link)),
+            None => text,
+        };
+        h_flex()
+            .gap_1p5()
+            .items_start()
+            .when_some(title_icon, |el, icon| {
+                el.child(
+                    img(SharedUri::from(icon))
+                        .id(SharedString::from(format!("{id}-title-icon")))
+                        .size(px(20.))
+                        .flex_none()
+                        .rounded_full()
+                        .object_fit(ObjectFit::Cover)
+                        .with_loading(|| icon_loading(20., true)),
+                )
+            })
+            .child(text)
+    });
+    let description = card
+        .description
+        .clone()
+        .map(|description| match description {
+            Description::Plain(text) => div()
+                .text_sm()
+                .text_color(colors.muted)
+                .line_clamp(EMBED_DESCRIPTION_LINES)
+                .child(text)
+                .into_any_element(),
+            Description::Markdown { source, render_key } => {
+                TextView::markdown(SharedString::from(render_key), source)
+                    .plugin(MathPlugin)
+                    .text_sm()
+                    .selectable(true)
+                    .on_link_click(|url, _, _, cx| {
+                        if is_external_link(url) {
+                            cx.open_url(url);
+                        }
+                    })
+                    .into_any_element()
+            }
+        });
+    let thumbnail = card
+        .thumbnail
+        .as_ref()
+        .map(|image| viewable_embed_image(format!("{id}-thumb").into(), image, colors, on_action));
+    let image = card.image.as_ref().map(|image| {
+        let picture = inline_image(
+            format!("{id}-image").into(),
+            &image.url,
+            (image.width, image.height),
+            None,
+            colors,
+        )
+        .cursor_pointer();
+        match (card.playable, card.link.clone()) {
+            // A video's picture: a play badge, and a click opens the video.
+            (true, Some(link)) => picture
+                .on_click(move |_, _, cx| cx.open_url(&link))
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            div()
+                                .size(px(48.))
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .bg(black().opacity(0.6))
+                                .text_color(white())
+                                .child(Icon::new(IconName::Play).large()),
+                        ),
+                )
+                .into_any_element(),
+            _ => {
+                let viewed = ViewedImage {
+                    url: image.url.clone(),
+                    name: card.title.clone().unwrap_or_else(|| "Image".into()),
+                    original: image.original,
+                };
+                let on_action = on_action.clone();
+                picture
+                    .on_click(move |_, window, cx| {
+                        on_action(RowAction::ViewImage(viewed.clone()), window, cx)
+                    })
+                    .into_any_element()
+            }
+        }
+    });
+    let media = card
+        .media
+        .as_ref()
+        .map(|media| render_attachment(format!("{id}-media").into(), media, colors, on_action));
+
+    div()
+        .flex()
+        .flex_row()
+        .max_w(px(EMBED_CARD_MAX_WIDTH))
+        .rounded(px(ATTACHMENT_RADIUS))
+        .overflow_hidden()
+        .border_1()
+        .border_color(colors.border)
+        .bg(colors.card_bg)
+        .child(div().w(px(EMBED_BAR_WIDTH)).flex_none().bg(bar))
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .p_3()
+                .gap_1()
+                .child(
+                    h_flex()
+                        .items_start()
+                        .gap_3()
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_1()
+                                .children(site)
+                                .children(title)
+                                .children(description),
+                        )
+                        .children(thumbnail),
+                )
+                .children(image)
+                .children(media),
+        )
+        .into_any_element()
+}
+
+/// A bordered row with a file icon, name and size; callers add what's on the right.
+fn file_card(
+    id: SharedString,
+    icon: IconName,
+    name: &str,
+    size_label: &str,
+    colors: RowColors,
+) -> Stateful<Div> {
+    h_flex()
+        .id(id)
+        .w(px(FILE_CARD_WIDTH))
+        .max_w_full()
+        .gap_3()
+        .px_3()
+        .py_2()
+        .rounded(px(ATTACHMENT_RADIUS))
+        .border_1()
+        .border_color(colors.border)
+        .bg(colors.card_bg)
+        .child(Icon::new(icon).large().text_color(colors.muted))
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(div().text_sm().truncate().child(name.to_string()))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.muted)
+                        .child(size_label.to_string()),
+                ),
+        )
 }
 
 fn channel_icon(kind: ChannelKind) -> IconName {
@@ -1366,6 +2428,7 @@ fn server_icon(server: &ServerEntry, media: &MediaUrls, selected: bool) -> AnyEl
     let initials = server.initials.clone();
     match server.icon.as_ref().and_then(|icon| media.file(icon)) {
         Some(url) => img(SharedUri::from(url))
+            .id(SharedString::from(format!("server-icon-{}", server.id)))
             .size(px(48.))
             .object_fit(ObjectFit::Cover)
             .map(|img| {
@@ -1374,6 +2437,10 @@ fn server_icon(server: &ServerEntry, media: &MediaUrls, selected: bool) -> AnyEl
                 } else {
                     img.rounded_full()
                 }
+            })
+            .with_loading({
+                let initials = initials.clone();
+                move || div().child(initials.clone()).into_any_element()
             })
             .with_fallback(move || div().child(initials.clone()).into_any_element())
             .into_any_element(),
@@ -1520,13 +2587,24 @@ impl Render for ChatView {
             self.dock_badge = attention;
         }
         self.dismiss_read_banners(cx);
+        let viewer = self
+            .viewer
+            .as_ref()
+            .map(|image| self.render_viewer(image, window, cx).into_any_element());
         let theme = cx.theme();
-        h_flex()
+        let (background, foreground) = (theme.background, theme.foreground);
+        div()
+            .relative()
             .size_full()
-            .bg(theme.background)
-            .text_color(theme.foreground)
-            .child(self.render_rail(cx))
-            .child(self.render_channel_list(cx))
-            .child(self.render_main(cx))
+            .child(
+                h_flex()
+                    .size_full()
+                    .bg(background)
+                    .text_color(foreground)
+                    .child(self.render_rail(cx))
+                    .child(self.render_channel_list(cx))
+                    .child(self.render_main(cx)),
+            )
+            .children(viewer)
     }
 }

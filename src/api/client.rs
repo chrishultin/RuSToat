@@ -191,6 +191,29 @@ impl StoatClient {
         .map(|_| ())
     }
 
+    /// `PUT /channels/{channel}/messages/{message}/reactions/{emoji}`: react
+    /// with `emoji` (a Unicode emoji, or a custom emoji's ID).
+    pub async fn react(&self, channel: &str, message: &str, emoji: &str) -> Result<(), ApiError> {
+        self.send_raw(
+            Method::PUT,
+            &reaction_path(channel, message, emoji),
+            None::<&()>,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// `DELETE` on the same path: take our own `emoji` reaction back.
+    pub async fn unreact(&self, channel: &str, message: &str, emoji: &str) -> Result<(), ApiError> {
+        self.send_raw(
+            Method::DELETE,
+            &reaction_path(channel, message, emoji),
+            None::<&()>,
+        )
+        .await
+        .map(|_| ())
+    }
+
     /// `PUT /servers/{server}/ack`: mark every channel in `server` read.
     pub async fn ack_server(&self, server: &str) -> Result<(), ApiError> {
         self.send_raw(Method::PUT, &format!("/servers/{server}/ack"), None::<&()>)
@@ -258,6 +281,28 @@ impl StoatClient {
         }
         Ok((status, bytes.to_vec()))
     }
+}
+
+fn reaction_path(channel: &str, message: &str, emoji: &str) -> String {
+    format!(
+        "/channels/{channel}/messages/{message}/reactions/{}",
+        encode_path_segment(emoji)
+    )
+}
+
+/// Percent-encode everything but RFC 3986's unreserved characters, so a
+/// Unicode emoji (`👍` → `%F0%9F%91%8D`) is one path segment. Custom emoji
+/// IDs pass through unchanged.
+fn encode_path_segment(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    for byte in segment.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 /// Query string for message history, built from the backend's own

@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
 use revolt_models::v0::{
-    Channel, ChannelUnread, Emoji, FieldsChannel, FieldsMessage, Member, Message, PartialChannel,
-    PartialMessage, Server, User,
+    Channel, ChannelUnread, Embed, Emoji, FieldsChannel, FieldsMessage, Member, Message,
+    PartialChannel, PartialMessage, Server, User,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -65,9 +65,37 @@ pub enum ServerEvent {
         id: String,
         channel: String,
     },
+    /// Embeds (link previews) worked out after the message was sent. They
+    /// arrive a moment after the message itself.
+    MessageAppend {
+        id: String,
+        channel: String,
+        embeds: Vec<Embed>,
+    },
     BulkMessageDelete {
         channel: String,
         ids: Vec<String>,
+    },
+    /// `user` reacted to a message with `emoji` (a Unicode emoji, or a
+    /// custom emoji's ID).
+    MessageReact {
+        id: String,
+        channel: String,
+        user: String,
+        emoji: String,
+    },
+    /// `user` took their `emoji` reaction back.
+    MessageUnreact {
+        id: String,
+        channel: String,
+        user: String,
+        emoji: String,
+    },
+    /// A moderator cleared every `emoji` reaction from a message.
+    MessageRemoveReaction {
+        id: String,
+        channel: String,
+        emoji: String,
     },
     EmojiCreate(Box<Emoji>),
     /// Some user settings changed. Only `notifications` is kept; `None` if
@@ -190,6 +218,73 @@ fn decode(mut value: Value, out: &mut Vec<ServerEvent>) {
                 }
             }))
         }
+        "MessageAppend" => {
+            #[derive(Deserialize)]
+            struct Append {
+                id: String,
+                channel: String,
+                #[serde(default)]
+                append: Value,
+            }
+            // Embeds one by one, so a kind this client doesn't know (a new
+            // `special`) costs that embed, not the others.
+            out.push(decode_as(value, &kind, |mut a: Append| {
+                let mut skipped = 0;
+                let embeds = lenient_list(
+                    a.append.get_mut("embeds").map(Value::take),
+                    "embed in MessageAppend",
+                    &mut skipped,
+                );
+                ServerEvent::MessageAppend {
+                    id: a.id,
+                    channel: a.channel,
+                    embeds,
+                }
+            }))
+        }
+        // Unlike the other message events, these name the channel `channel_id`.
+        "MessageReact" | "MessageUnreact" => {
+            #[derive(Deserialize)]
+            struct React {
+                id: String,
+                channel_id: String,
+                user_id: String,
+                emoji_id: String,
+            }
+            let add = kind == "MessageReact";
+            out.push(decode_as(value, &kind, |r: React| {
+                if add {
+                    ServerEvent::MessageReact {
+                        id: r.id,
+                        channel: r.channel_id,
+                        user: r.user_id,
+                        emoji: r.emoji_id,
+                    }
+                } else {
+                    ServerEvent::MessageUnreact {
+                        id: r.id,
+                        channel: r.channel_id,
+                        user: r.user_id,
+                        emoji: r.emoji_id,
+                    }
+                }
+            }))
+        }
+        "MessageRemoveReaction" => {
+            #[derive(Deserialize)]
+            struct Remove {
+                id: String,
+                channel_id: String,
+                emoji_id: String,
+            }
+            out.push(decode_as(value, &kind, |r: Remove| {
+                ServerEvent::MessageRemoveReaction {
+                    id: r.id,
+                    channel: r.channel_id,
+                    emoji: r.emoji_id,
+                }
+            }))
+        }
         "BulkMessageDelete" => {
             #[derive(Deserialize)]
             struct BulkDelete {
@@ -276,12 +371,16 @@ impl Ready {
     fn from_value(mut value: Value) -> Self {
         let mut skipped = 0;
         let mut take = |field: &str| value.get_mut(field).map(Value::take);
-        let users = lenient_list(take("users"), "user", &mut skipped);
-        let servers = lenient_list(take("servers"), "server", &mut skipped);
-        let channels = lenient_list(take("channels"), "channel", &mut skipped);
-        let members = lenient_list(take("members"), "member", &mut skipped);
-        let emojis = lenient_list(take("emojis"), "emoji", &mut skipped);
-        let unreads = lenient_list(take("channel_unreads"), "channel unread", &mut skipped);
+        let users = lenient_list(take("users"), "user in Ready", &mut skipped);
+        let servers = lenient_list(take("servers"), "server in Ready", &mut skipped);
+        let channels = lenient_list(take("channels"), "channel in Ready", &mut skipped);
+        let members = lenient_list(take("members"), "member in Ready", &mut skipped);
+        let emojis = lenient_list(take("emojis"), "emoji in Ready", &mut skipped);
+        let unreads = lenient_list(
+            take("channel_unreads"),
+            "channel unread in Ready",
+            &mut skipped,
+        );
         let settings = take("user_settings");
         let server_order = settings
             .clone()
@@ -323,7 +422,7 @@ fn lenient_list<T: DeserializeOwned>(
             Ok(parsed) => Some(parsed),
             Err(err) => {
                 *skipped += 1;
-                log::warn!("skipping {what} in Ready that didn't parse: {err}");
+                log::warn!("skipping {what} that didn't parse: {err}");
                 None
             }
         })
@@ -576,6 +675,10 @@ async fn session(
                         message_event @ (ServerEvent::Message(_)
                         | ServerEvent::MessageUpdate { .. }
                         | ServerEvent::MessageDelete { .. }
+                        | ServerEvent::MessageAppend { .. }
+                        | ServerEvent::MessageReact { .. }
+                        | ServerEvent::MessageUnreact { .. }
+                        | ServerEvent::MessageRemoveReaction { .. }
                         | ServerEvent::BulkMessageDelete { .. }
                         | ServerEvent::EmojiCreate(_)
                         | ServerEvent::UserSettingsUpdate { .. }

@@ -60,6 +60,8 @@ The list of accounts is kept, without tokens, in `~/Library/Application Support/
 - **Expect a Keychain prompt during development.** macOS ties Keychain access to the app's code signature, and every `cargo build` produces a new unsigned binary. After a rebuild, macOS may ask whether `stoat-gpui` can use the saved item. Choose **Always Allow**. This is expected and won't happen with a signed release build.
 - If your saved session can't be checked at startup (offline, or a Stoat outage), the app keeps it and offers **Retry**. It only discards a saved session that Stoat itself rejects.
 
+The app also remembers where you were: the open server, and the last channel you viewed in each server and in Home. Switching back to a server returns you to its channel, and the next launch opens where you left off. This is saved in `~/Library/Application Support/chat.stoat.rustoat/places.json`, per instance and account. Deleting the file just starts you at Home.
+
 ## Built on Stoat's own crates
 
 API types come straight from the Stoat backend's published crates instead of being re-declared:
