@@ -15,6 +15,20 @@ fn main() {
     // the first network call.
     runtime::runtime();
 
+    // Pasted images left behind by RuSToat processes that have since quit
+    // (a day without changes); in the background, so launch isn't held up.
+    std::thread::spawn(|| {
+        let removed = stoat_gpui::draft::sweep_paste_dirs(
+            &std::env::temp_dir(),
+            std::process::id(),
+            std::time::SystemTime::now(),
+            std::time::Duration::from_secs(24 * 60 * 60),
+        );
+        if !removed.is_empty() {
+            log::info!("removed {} old pasted-image folder(s)", removed.len());
+        }
+    });
+
     gpui_kit::application()
         .with_assets(stoat_gpui::assets::AppAssets)
         .with_http_client(stoat_gpui::http::ReqwestHttpClient::new())

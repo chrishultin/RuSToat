@@ -23,6 +23,11 @@ pub enum ApiError {
     #[error("Couldn't reach Stoat. Check your connection and try again.")]
     Network(#[source] reqwest::Error),
 
+    /// A file to upload couldn't be read: missing, unreadable, or it got
+    /// shorter while it was being sent.
+    #[error("Couldn't read the file ({0}).")]
+    File(#[source] std::io::Error),
+
     /// The server answered, but not in a shape this client understands.
     #[error("Unexpected response from Stoat (HTTP {status}): {detail}")]
     Unexpected { status: u16, detail: String },

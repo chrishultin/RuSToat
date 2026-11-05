@@ -276,3 +276,53 @@ Deferred to the end:
 - The tone survives a relaunch.
 - Swatches look right in light and dark mode.
 - With two accounts signed in, a tone chosen in one applies in the other.
+
+## Chunk 7: Stream uploads from disk; clean up pasted files
+
+### Changes Made
+- `Cargo.toml`: tokio features `fs` and `io-util`.
+- `src/api/error.rs`: a new `ApiError::File(io::Error)`, shown as "Couldn't read the file (…)."
+- `src/api/client.rs`, `upload_attachment(file_server, name, content_type, path: &Path, on_progress)`:
+  - It opens the file with `tokio::fs::File` and takes the length from metadata. Failing either returns `ApiError::File` before any request.
+  - The body is a `futures::stream::try_unfold` that reads at most `min(remaining, 64 KB)` per step (so exactly `len` bytes, even if the file grew), calls `on_progress` after each read, and errors with `UnexpectedEof` ("it got shorter while sending") on an early EOF.
+  - A read failure is recorded in a shared slot, so a failed `send()` (or a response after a broken body) is reported as `ApiError::File` rather than `Network`.
+  - `on_progress` is shared through an `Arc`. The unused `futures::StreamExt` import was removed.
+- `src/draft.rs`:
+  - A `DraftAttachment.temporary` flag: `from_path` sets false, `save_pasted_image` sets true.
+  - New `PASTE_DIR_PREFIX` and `paste_dir(tmp, pid)`.
+  - `remove_temporary(&DraftAttachment)`: only temporary files, and a file that's already gone is fine.
+  - `sweep_paste_dirs(tmp, own_pid, now, max_age) -> Vec<PathBuf>`: removes `rustoat-pasted-<numeric pid>` folders that aren't this process's and whose modification time is at least `max_age` before `now`.
+  - A new unit test module with 3 tests.
+- `src/store.rs`:
+  - A `released_files` field, filled by `release_files` with temporary attachments of pending messages that leave the list. That's `confirm_pending` (the POST response or echo), `confirm_pending_in_history` (a history load), `discard_pending`, and `remove_server` (chunk 4, leaving a server).
+  - `take_released_files()` drains it.
+  - `discard_pending` now returns `Option<PendingMessage>`.
+  - Removed a stray doc line (`/// Forget an unconfirmed message…`) left above `set_upload_progress` from milestone 4.
+- `src/ui/chat.rs`:
+  - `upload_file` passes `&file.path`; there's no more `spawn_blocking` read.
+  - `upload_error_text` maps `ApiError::File(err)` to "couldn't read it ({err}).".
+  - `sync_outside`, called by `AppRoot` on every notify, including for hidden accounts, deletes every `take_released_files()` entry.
+  - The two `discard_pending` callers use `.is_some()`.
+- `src/ui/composer.rs`: the tray's × deletes the file if it's temporary. `pasted_dir()` uses `draft::paste_dir`.
+- `src/main.rs`: at launch, a background thread runs `sweep_paste_dirs(temp_dir, pid, now, 24 h)` and logs how many folders it removed.
+- Tests:
+  - `tests/api_upload.rs`: the existing upload tests now use `tempfile` files. New: `a_missing_file_fails_before_any_request` (the mock expects 0 calls; `ApiError::File(NotFound)`), and `a_file_that_shrinks_mid_upload_is_a_file_error` (the progress callback truncates the file to 100 KB after the first 64 KB chunk; `ApiError::File(UnexpectedEof)`). The 200 KB test still checks the exact body bytes and that progress ends at `(200000, 200000)`.
+  - `tests/store_pending.rs`: four new tests. Confirmation by the POST response, then the echo, hands back once. A history load hands back. A failure keeps the files and Discard hands them back. The user's own files are never handed back. The existing discard assertions were updated for the `Option` return.
+
+### Divergences
+- **`take_released_files`, not `take_confirmed_files`.** One drain covers confirmation, discard and server removal. Because discard also releases through it, `ChatView` deletes files in a single place (`sync_outside`) and doesn't use `discard_pending`'s return value for that. Minor.
+- **The sweep runs on a background thread from `main.rs`** (the plan amendment after the merge), not from `ChatView`.
+- **New `ApiError::File` variant** so file failures read "couldn't read it" rather than "couldn't reach the file server". Minor.
+- **`remove_server` doesn't have its own test for releasing files.** It uses the same `release_files` helper as the tested paths.
+
+### Verification Performed
+- `cargo test --lib draft`: 3 passed.
+- `cargo test --test api_upload`: 10 passed. The truncation test passed 10 out of 10 consecutive runs.
+- `cargo test --test store_pending`: 34 passed.
+- `cargo test`: 394 passed, 0 failed. `cargo clippy --all-targets -- -D warnings`: clean.
+
+### Manual Validation
+Deferred to the end:
+- Paste a screenshot and send it: its file disappears from `$TMPDIR/rustoat-pasted-*` once confirmed.
+- Paste one and remove it with ×: its file is gone.
+- A roughly 15 MB upload keeps memory flat in Activity Monitor.

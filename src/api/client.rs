@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use futures::StreamExt;
 use reqwest::{Client, Method};
 use revolt_models::v0::{
     AllMemberResponse, BulkMessageResponse, DataEditMessage, DataLogin, DataMessageSend, MFAResponse, Message,
@@ -280,9 +279,13 @@ impl StoatClient {
         parse(status, &bytes)
     }
 
-    /// `POST {file_server}/attachments`: upload a file for a message, as the
-    /// multipart field `file`. Returns its ID, to send in
+    /// `POST {file_server}/attachments`: upload the file at `path` for a
+    /// message, as the multipart field `file`. Returns its ID, to send in
     /// [`Self::send_message`]'s `attachments` (each ID can be used once).
+    ///
+    /// The file is read from disk in chunks as it's sent, never held whole.
+    /// Its size is taken when the upload starts; if it can't be opened, or
+    /// gets shorter mid-upload, that's [`ApiError::File`].
     ///
     /// `on_progress(sent, total)` is called as the body is handed to the
     /// connection, ending with `(total, total)`.
@@ -291,25 +294,48 @@ impl StoatClient {
         file_server: &str,
         name: &str,
         content_type: &str,
-        bytes: Vec<u8>,
+        path: &std::path::Path,
         on_progress: impl Fn(u64, u64) + Send + Sync + 'static,
     ) -> Result<String, ApiError> {
+        use std::io::{Error, ErrorKind};
+        use std::sync::{Arc, Mutex};
+
         use reqwest::multipart::{Form, Part};
+        use tokio::io::AsyncReadExt as _;
 
         #[derive(Deserialize)]
         struct Uploaded {
             id: String,
         }
 
-        let total = bytes.len() as u64;
-        let mut sent = 0;
-        let chunks: Vec<Vec<u8>> = bytes.chunks(UPLOAD_CHUNK).map(<[u8]>::to_vec).collect();
-        let counted = futures::stream::iter(chunks).map(move |chunk| {
-            sent += chunk.len() as u64;
-            on_progress(sent, total);
-            Ok::<_, std::io::Error>(chunk)
+        let file = tokio::fs::File::open(path).await.map_err(ApiError::File)?;
+        let total = file.metadata().await.map_err(ApiError::File)?.len();
+        // A read failure only reaches reqwest as a broken body; keep what
+        // it was, to report it as the file's fault rather than the network's.
+        let read_failure: Arc<Mutex<Option<(ErrorKind, String)>>> = Arc::default();
+        let (failure, on_progress) = (read_failure.clone(), Arc::new(on_progress));
+        let chunks = futures::stream::try_unfold((file, 0u64), move |(mut file, sent)| {
+            let (on_progress, failure) = (on_progress.clone(), failure.clone());
+            async move {
+                if sent >= total {
+                    return Ok(None);
+                }
+                // Exactly `total` bytes, even if the file has grown since.
+                let mut chunk = vec![0; (total - sent).min(UPLOAD_CHUNK as u64) as usize];
+                let read = match file.read(&mut chunk).await {
+                    Ok(0) => Err(Error::new(ErrorKind::UnexpectedEof, "it got shorter while sending")),
+                    other => other,
+                };
+                let read = read.inspect_err(|err| {
+                    *failure.lock().unwrap() = Some((err.kind(), err.to_string()));
+                })?;
+                chunk.truncate(read);
+                let sent = sent + read as u64;
+                on_progress(sent, total);
+                Ok::<_, Error>(Some((chunk, (file, sent))))
+            }
         });
-        let part = Part::stream_with_length(reqwest::Body::wrap_stream(counted), total)
+        let part = Part::stream_with_length(reqwest::Body::wrap_stream(chunks), total)
             .file_name(name.to_string())
             .mime_str(content_type)
             .map_err(|e| ApiError::Unexpected {
@@ -324,7 +350,17 @@ impl StoatClient {
         if let Some(token) = &self.token {
             request = request.header("x-session-token", token);
         }
-        let response = request.send().await.map_err(ApiError::Network)?;
+        let file_error = || {
+            let failure = read_failure.lock().unwrap().take();
+            failure.map(|(kind, text)| ApiError::File(Error::new(kind, text)))
+        };
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(err) => return Err(file_error().unwrap_or(ApiError::Network(err))),
+        };
+        if let Some(err) = file_error() {
+            return Err(err);
+        }
         let status = response.status();
         let body = response.bytes().await.map_err(ApiError::Network)?;
         log::debug!("upload {name}: HTTP {status}: {}", String::from_utf8_lossy(&body));

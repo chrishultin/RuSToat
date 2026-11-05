@@ -400,6 +400,9 @@ pub struct ChatStore {
     notifications: NotificationSettings,
     /// Messages the user sent that aren't confirmed yet, by channel, in send order.
     pending: HashMap<String, Vec<PendingMessage>>,
+    /// Temporary files (pasted images) of pending messages that are gone
+    /// (confirmed, discarded, or their server left), waiting to be deleted.
+    released_files: Vec<DraftAttachment>,
     /// Originals of replies that aren't in the loaded history, by message ID.
     reply_sources: HashMap<String, ReplySource>,
 }
@@ -840,9 +843,30 @@ impl ChatStore {
         let Some(pending) = self.pending.get_mut(&message.channel) else {
             return false;
         };
-        let before = pending.len();
-        pending.retain(|p| p.nonce != nonce);
-        pending.len() != before
+        let (confirmed, kept): (Vec<_>, Vec<_>) =
+            std::mem::take(pending).into_iter().partition(|p| p.nonce == nonce);
+        *pending = kept;
+        let found = !confirmed.is_empty();
+        self.release_files(confirmed);
+        found
+    }
+
+    /// Hand back the temporary files of pending messages that are gone.
+    fn release_files(&mut self, gone: impl IntoIterator<Item = PendingMessage>) {
+        self.released_files.extend(
+            gone.into_iter()
+                .flat_map(|p| p.attachments)
+                .map(|a| a.file)
+                .filter(|file| file.temporary),
+        );
+    }
+
+    /// Temporary files (pasted images) no pending message needs any more,
+    /// each handed out once: delete them. Messages leave the pending list
+    /// when confirmed (by the POST response, the live echo or a history
+    /// load), discarded, or dropped with their server.
+    pub fn take_released_files(&mut self) -> Vec<DraftAttachment> {
+        std::mem::take(&mut self.released_files)
     }
 
     /// Drop pending messages that a freshly loaded page already has (sent
@@ -854,12 +878,15 @@ impl ChatStore {
             return;
         };
         let me = &self.me;
-        pending.retain(|p| {
-            !history
-                .messages
-                .iter()
-                .any(|m| m.author == *me && m.nonce.as_deref() == Some(p.nonce.as_str()))
-        });
+        let (confirmed, kept): (Vec<_>, Vec<_>) =
+            std::mem::take(pending).into_iter().partition(|p| {
+                history
+                    .messages
+                    .iter()
+                    .any(|m| m.author == *me && m.nonce.as_deref() == Some(p.nonce.as_str()))
+            });
+        *pending = kept;
+        self.release_files(confirmed);
     }
 
     /// A message the user just sent, shown until Stoat confirms it.
@@ -929,7 +956,6 @@ impl ChatStore {
         Some(pending.clone())
     }
 
-    /// Forget an unconfirmed message. Returns false if there's no such one.
     /// `sent` of `total` bytes of the pending message `key`'s file
     /// `local_id` have gone. Returns false if there's no such file, or it's
     /// already uploaded.
@@ -972,13 +998,15 @@ impl ChatStore {
             .find(|a| a.file.local_id == local_id)
     }
 
-    pub fn discard_pending(&mut self, channel: &str, key: &str) -> bool {
-        let Some(pending) = self.pending.get_mut(channel) else {
-            return false;
-        };
-        let before = pending.len();
-        pending.retain(|p| p.key != key);
-        pending.len() != before
+    /// Forget an unconfirmed message (the user chose Discard). Returns it,
+    /// or `None` if there's no such one. Its temporary files are released
+    /// ([`Self::take_released_files`]).
+    pub fn discard_pending(&mut self, channel: &str, key: &str) -> Option<PendingMessage> {
+        let pending = self.pending.get_mut(channel)?;
+        let ix = pending.iter().position(|p| p.key == key)?;
+        let discarded = pending.remove(ix);
+        self.release_files([discarded.clone()]);
+        Some(discarded)
     }
 
     /// The channel has been read up to `message_id` (here, or by another of
@@ -1996,7 +2024,9 @@ impl ChatStore {
         for cid in &removed {
             self.histories.remove(cid);
             self.read_states.remove(cid);
-            self.pending.remove(cid);
+            if let Some(gone) = self.pending.remove(cid) {
+                self.release_files(gone);
+            }
         }
         self.members.retain(|(server, _), _| server != id);
         removed

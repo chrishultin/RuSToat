@@ -188,9 +188,12 @@ fn failing_then_retrying_gives_sending_again_and_discard_removes_it() {
     assert!(store.retry_pending(CH, "n1", || "n2".into()).is_none());
 
     assert!(store.fail_pending(CH, "n1", "nope".into(), false));
-    assert!(store.discard_pending(CH, "n1"));
+    assert_eq!(
+        store.discard_pending(CH, "n1").map(|p| p.key),
+        Some("n1".to_string())
+    );
     assert_eq!(summary(&store), vec![real("hi"), real("hello")]);
-    assert!(!store.discard_pending(CH, "n1"));
+    assert!(store.discard_pending(CH, "n1").is_none());
 }
 
 #[test]
@@ -732,4 +735,75 @@ fn pasted_images_count_toward_the_limits() {
         Err(AttachError::TooMany { max: 2 })
     );
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// Pasted images: handed back to be deleted once no pending message needs them.
+
+/// A pasted image (temporary) and a file of the user's own.
+fn pasted_and_own() -> (DraftAttachment, DraftAttachment) {
+    let mut pasted = file("pasted-image-1.png", 10);
+    pasted.temporary = true;
+    (pasted, file("holiday.jpg", 20))
+}
+
+fn released(store: &mut ChatStore) -> Vec<String> {
+    store
+        .take_released_files()
+        .into_iter()
+        .map(|f| f.name)
+        .collect()
+}
+
+#[test]
+fn confirming_by_the_post_response_or_echo_hands_back_temporary_files_once() {
+    let mut store = store();
+    let (pasted, own) = pasted_and_own();
+    store.add_pending(with_files("n1", "look", &[pasted, own]));
+    assert!(released(&mut store).is_empty(), "still pending");
+
+    // The POST response, then the echo: the files come back once.
+    let sent = message(&ulid_at(T0 + 1_200, "CCCCCCCCCCCCCCCC"), "u-me", "look", Some("n1"));
+    store.apply_message(sent.clone());
+    assert_eq!(released(&mut store), ["pasted-image-1.png"]);
+    store.apply_message(sent);
+    assert!(released(&mut store).is_empty());
+}
+
+#[test]
+fn confirming_by_a_history_load_hands_back_temporary_files() {
+    let mut store = store();
+    let (pasted, own) = pasted_and_own();
+    store.add_pending(with_files("n1", "sent while offline", &[own, pasted]));
+    let page: BulkMessageResponse = serde_json::from_value(json!([
+        { "_id": ulid_at(T0 + 1_200, "CCCCCCCCCCCCCCCC"), "channel": CH,
+          "author": "u-me", "content": "sent while offline", "nonce": "n1" },
+    ]))
+    .unwrap();
+    store.set_history(CH, page, 50);
+    assert_eq!(released(&mut store), ["pasted-image-1.png"]);
+}
+
+#[test]
+fn discarding_hands_back_temporary_files_and_failing_doesnt() {
+    let mut store = store();
+    let (pasted, own) = pasted_and_own();
+    store.add_pending(with_files("n1", "look", &[pasted, own]));
+    // A failure keeps the files, for Retry.
+    assert!(store.fail_pending(CH, "n1", "offline".into(), false));
+    assert!(released(&mut store).is_empty());
+
+    let discarded = store.discard_pending(CH, "n1").unwrap();
+    assert_eq!(discarded.attachments.len(), 2);
+    assert_eq!(released(&mut store), ["pasted-image-1.png"]);
+}
+
+#[test]
+fn the_users_own_files_are_never_handed_back() {
+    let mut store = store();
+    let (_, own) = pasted_and_own();
+    store.add_pending(with_files("n1", "a", std::slice::from_ref(&own)));
+    store.add_pending(with_files("n2", "b", &[own]));
+    store.apply_message(message(&ulid_at(T0 + 1_200, "CCCCCCCCCCCCCCCC"), "u-me", "a", Some("n1")));
+    store.discard_pending(CH, "n2");
+    assert!(released(&mut store).is_empty());
 }

@@ -96,6 +96,9 @@ pub struct DraftAttachment {
     /// Where it is on disk. (Pasted images are saved to a file first, see
     /// [`save_pasted_image`].)
     pub path: PathBuf,
+    /// RuSToat made the file (a pasted image), so it's deleted once it's no
+    /// longer needed (see [`remove_temporary`]). The user's own files never are.
+    pub temporary: bool,
 }
 
 impl DraftAttachment {
@@ -119,6 +122,7 @@ impl DraftAttachment {
             content_type,
             dimensions: None,
             path,
+            temporary: false,
         }
     }
 
@@ -150,7 +154,73 @@ pub fn save_pasted_image(
     let path = dir.join(format!("pasted-image-{n}.{extension}"));
     std::fs::write(&path, bytes)?;
     let dimensions = crate::attachment::local_image_size(&path);
-    Ok(DraftAttachment::from_path(path, bytes.len() as u64).with_dimensions(dimensions))
+    let mut file = DraftAttachment::from_path(path, bytes.len() as u64).with_dimensions(dimensions);
+    file.temporary = true;
+    Ok(file)
+}
+
+/// Pasted images are saved in `rustoat-pasted-{pid}` under the temporary
+/// directory ([`paste_dir`]).
+pub const PASTE_DIR_PREFIX: &str = "rustoat-pasted-";
+
+/// This process's folder for pasted images, under `tmp`.
+pub fn paste_dir(tmp: &Path, pid: u32) -> PathBuf {
+    tmp.join(format!("{PASTE_DIR_PREFIX}{pid}"))
+}
+
+/// Delete `file` if RuSToat made it (a pasted image); the user's own files
+/// are left alone. A file that's already gone is fine.
+pub fn remove_temporary(file: &DraftAttachment) {
+    if !file.temporary {
+        return;
+    }
+    match std::fs::remove_file(&file.path) {
+        Ok(()) => log::debug!("removed {}", file.path.display()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => log::warn!("couldn't remove {}: {err}", file.path.display()),
+    }
+}
+
+/// Remove pasted-image folders other RuSToat processes left in `tmp`: those
+/// not changed for `max_age` (as of `now`), and never `own_pid`'s. Another
+/// RuSToat still running keeps its folder unless it's been idle that long.
+/// Returns the folders removed.
+pub fn sweep_paste_dirs(
+    tmp: &Path,
+    own_pid: u32,
+    now: std::time::SystemTime,
+    max_age: std::time::Duration,
+) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(tmp) else {
+        return Vec::new();
+    };
+    let own = paste_dir(tmp, own_pid);
+    let mut removed = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_paste_dir = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.strip_prefix(PASTE_DIR_PREFIX))
+            .is_some_and(|pid| pid.parse::<u32>().is_ok());
+        if !is_paste_dir || path == own || !path.is_dir() {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= max_age);
+        if !stale {
+            continue;
+        }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => removed.push(path),
+            Err(err) => log::warn!("couldn't remove {}: {err}", path.display()),
+        }
+    }
+    removed
 }
 
 /// `bytes` (an image in any format this build reads) as a PNG.
@@ -362,4 +432,76 @@ pub fn new_nonce(now_ms: u64) -> String {
     // A fresh `RandomState` is randomly keyed: hashing anything gives noise.
     let random = RandomState::new().hash_one(count);
     format!("rustoat-{now_ms}-{count}-{random:016x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, SystemTime};
+
+    use super::*;
+
+    const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+
+    /// A fresh, empty directory for one test.
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("stoat-gpui-draft-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_sweep_removes_old_foreign_folders_only() {
+        let tmp = temp_dir("sweep");
+        let own = paste_dir(&tmp, 100);
+        let foreign = paste_dir(&tmp, 200);
+        let not_ours = tmp.join("rustoat-pasted-notapid");
+        let unrelated = tmp.join("something-else");
+        for dir in [&own, &foreign, &not_ours, &unrelated] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("pasted-image-1.png"), b"png").unwrap();
+        }
+
+        // Everything was just made: nothing is old enough.
+        assert!(sweep_paste_dirs(&tmp, 100, SystemTime::now(), DAY).is_empty());
+        assert!(foreign.exists());
+
+        // A day and a bit later, only the other process's folder goes.
+        let later = SystemTime::now() + DAY + Duration::from_secs(60);
+        assert_eq!(
+            sweep_paste_dirs(&tmp, 100, later, DAY),
+            vec![foreign.clone()]
+        );
+        assert!(!foreign.exists());
+        assert!(own.exists() && not_ours.exists() && unrelated.exists());
+
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn the_sweep_copes_with_a_missing_temporary_directory() {
+        let missing = std::env::temp_dir().join("stoat-gpui-draft-does-not-exist");
+        assert!(sweep_paste_dirs(&missing, 1, SystemTime::now(), DAY).is_empty());
+    }
+
+    #[test]
+    fn only_temporary_files_are_removed() {
+        let dir = temp_dir("remove");
+        let pasted = save_pasted_image(&dir, "png", b"not really a png").unwrap();
+        assert!(pasted.temporary);
+        let path = dir.join("mine.txt");
+        std::fs::write(&path, b"keep me").unwrap();
+        let mine = DraftAttachment::from_path(path.clone(), 7);
+        assert!(!mine.temporary);
+
+        remove_temporary(&mine);
+        assert!(path.exists());
+        remove_temporary(&pasted);
+        assert!(!pasted.path.exists());
+        // Already gone: fine.
+        remove_temporary(&pasted);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

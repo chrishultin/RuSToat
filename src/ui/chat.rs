@@ -655,7 +655,7 @@ impl ChatView {
             RowAction::Picker(message) => self.picker_for = message,
             RowAction::RetrySend(key) => self.retry_send(channel, &key, window, cx),
             RowAction::DiscardSend(key) => {
-                if self.store.discard_pending(channel, &key) {
+                if self.store.discard_pending(channel, &key).is_some() {
                     self.sync_pane(channel, cx);
                 }
             }
@@ -1124,7 +1124,7 @@ impl ChatView {
                     // echo or the next history load brings it.
                     Ok(Err(err)) if is_duplicate(&err) => {
                         log::info!("{key} in {channel} was already sent");
-                        if this.store.discard_pending(&channel, &key) {
+                        if this.store.discard_pending(&channel, &key).is_some() {
                             this.sync_pane(&channel, cx);
                         }
                         cx.notify();
@@ -1400,12 +1400,16 @@ impl ChatView {
         self.banners.insert(notice.channel, message_id);
     }
 
-    /// Keep what's shown outside the window in step with this account, after
-    /// any change: take away banners for channels read since (here, in
-    /// another session, by posting, or with Mark as read), and return how
-    /// many things need attention, for the Dock badge. The owner calls this
-    /// whenever the view notifies, which hidden views do too.
+    /// Keep what's outside the window in step with this account, after any
+    /// change: take away banners for channels read since (here, in another
+    /// session, by posting, or with Mark as read), delete pasted images no
+    /// pending message needs any more, and return how many things need
+    /// attention, for the Dock badge. The owner calls this whenever the view
+    /// notifies, which hidden views do too.
     pub fn sync_outside(&mut self, cx: &mut Context<Self>) -> usize {
+        for file in self.store.take_released_files() {
+            crate::draft::remove_temporary(&file);
+        }
         let store = &self.store;
         let account = &self.account_id;
         self.banners.retain(|channel, message| {
@@ -3045,13 +3049,9 @@ async fn upload_file(
     let mut upload = spawn_io({
         let (client, file_server, file) = (client.clone(), file_server.to_string(), file.clone());
         async move {
-            let path = file.path.clone();
-            let bytes = tokio::task::spawn_blocking(move || std::fs::read(path))
-                .await
-                .map_err(|e| e.to_string())?
-                .map_err(|e| format!("couldn't read it ({e})"))?;
+            // Read from disk as it's sent (see `upload_attachment`).
             client
-                .upload_attachment(&file_server, &file.name, &file.content_type, bytes, move |sent, total| {
+                .upload_attachment(&file_server, &file.name, &file.content_type, &file.path, move |sent, total| {
                     tx.unbounded_send((sent, total)).ok();
                 })
                 .await
@@ -3096,6 +3096,7 @@ async fn upload_file(
 fn upload_error_text(err: &ApiError) -> String {
     match err {
         ApiError::Network(_) => "couldn't reach the file server.".into(),
+        ApiError::File(err) => format!("couldn't read it ({err})."),
         ApiError::Unexpected { status: 413, .. } => "it's too big.".into(),
         ApiError::RateLimited { .. } => "uploading too fast. Wait a moment, then retry.".into(),
         _ => match err.error_type() {

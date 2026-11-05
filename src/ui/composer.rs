@@ -898,7 +898,7 @@ fn read_file(path: PathBuf) -> Option<Result<DraftAttachment, String>> {
 /// Where pasted images are saved before they're sent: a folder of this
 /// process's own under the temporary directory (which macOS clears out).
 fn pasted_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("rustoat-pasted-{}", std::process::id()))
+    crate::draft::paste_dir(&std::env::temp_dir(), std::process::id())
 }
 
 /// Side of a file's thumbnail or icon in the tray.
@@ -960,6 +960,12 @@ impl Composer {
                             .icon(IconName::Close)
                             .tooltip("Remove")
                             .on_click(cx.listener(move |this, _, _, cx| {
+                                // A pasted image removed from the tray is gone for good.
+                                if let Some(file) =
+                                    this.draft.attachments.iter().find(|a| a.local_id == local_id)
+                                {
+                                    crate::draft::remove_temporary(file);
+                                }
                                 this.draft.remove_attachment(local_id);
                                 cx.notify();
                             })),

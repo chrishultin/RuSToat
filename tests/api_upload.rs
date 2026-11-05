@@ -16,6 +16,14 @@ fn client(api: &str) -> StoatClient {
     StoatClient::new(api).with_token("tok")
 }
 
+/// A file holding `bytes`, in a folder that's removed when the guard drops.
+fn temp_file(name: &str, bytes: &[u8]) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(name);
+    std::fs::write(&path, bytes).unwrap();
+    (dir, path)
+}
+
 fn fixture(name: &str) -> serde_json::Value {
     let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
@@ -34,9 +42,10 @@ async fn uploading_posts_the_file_as_multipart_and_returns_its_id() {
         .await;
 
     let bytes: Vec<u8> = (0..200_000u32).map(|n| n as u8).collect();
+    let (_dir, file) = temp_file("cat.png", &bytes);
     let progress = Arc::new(Mutex::new(Vec::new()));
     let id = client("http://unused.invalid")
-        .upload_attachment(&format!("{}/", autumn.uri()), "cat.png", "image/png", bytes.clone(), {
+        .upload_attachment(&format!("{}/", autumn.uri()), "cat.png", "image/png", &file, {
             let progress = progress.clone();
             move |sent, total| progress.lock().unwrap().push((sent, total))
         })
@@ -71,8 +80,9 @@ async fn a_refused_upload_is_an_api_error() {
         .respond_with(ResponseTemplate::new(413).set_body_string("Payload Too Large"))
         .mount(&autumn)
         .await;
+    let (_dir, file) = temp_file("x.bin", &[0; 10]);
     let err = client("http://unused.invalid")
-        .upload_attachment(&autumn.uri(), "big.bin", "application/octet-stream", vec![0; 10], |_, _| {})
+        .upload_attachment(&autumn.uri(), "big.bin", "application/octet-stream", &file, |_, _| {})
         .await
         .unwrap_err();
     assert!(matches!(err, ApiError::Unexpected { status: 413, .. }), "{err:?}");
@@ -86,7 +96,7 @@ async fn a_refused_upload_is_an_api_error() {
         .mount(&autumn)
         .await;
     let err = client("http://unused.invalid")
-        .upload_attachment(&autumn.uri(), "x.exe", "application/octet-stream", vec![0; 10], |_, _| {})
+        .upload_attachment(&autumn.uri(), "x.exe", "application/octet-stream", &file, |_, _| {})
         .await
         .unwrap_err();
     assert!(matches!(err, ApiError::Api(_)), "{err:?}");
@@ -94,11 +104,64 @@ async fn a_refused_upload_is_an_api_error() {
 
 #[tokio::test]
 async fn an_unreachable_file_server_is_a_network_error() {
+    let (_dir, file) = temp_file("a.txt", &[1]);
     let err = client("http://unused.invalid")
-        .upload_attachment("http://127.0.0.1:1", "a.txt", "text/plain", vec![1], |_, _| {})
+        .upload_attachment("http://127.0.0.1:1", "a.txt", "text/plain", &file, |_, _| {})
         .await
         .unwrap_err();
     assert!(matches!(err, ApiError::Network(_)), "{err:?}");
+}
+
+#[tokio::test]
+async fn a_missing_file_fails_before_any_request() {
+    let autumn = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/attachments"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "f" })))
+        .expect(0)
+        .mount(&autumn)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let err = client("http://unused.invalid")
+        .upload_attachment(&autumn.uri(), "gone.png", "image/png", &dir.path().join("gone.png"), |_, _| {})
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, ApiError::File(e) if e.kind() == std::io::ErrorKind::NotFound),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_file_that_shrinks_mid_upload_is_a_file_error() {
+    let autumn = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/attachments"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "f" })))
+        .mount(&autumn)
+        .await;
+    let bytes = vec![7u8; 200_000];
+    let (_dir, file) = temp_file("clip.mp4", &bytes);
+    // Cut the file short once the first chunk has been read (its size was
+    // already taken), as if it were edited or replaced while sending.
+    let truncate = file.clone();
+    let err = client("http://unused.invalid")
+        .upload_attachment(&autumn.uri(), "clip.mp4", "video/mp4", &file, move |sent, _| {
+            if sent <= 64 * 1024 {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&truncate)
+                    .unwrap()
+                    .set_len(100_000)
+                    .unwrap();
+            }
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, ApiError::File(e) if e.kind() == std::io::ErrorKind::UnexpectedEof),
+        "{err:?}"
+    );
 }
 
 #[test]
