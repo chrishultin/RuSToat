@@ -46,3 +46,43 @@ The repo already had `cargo fmt --check` drift in many milestone 4 files. Format
 
 ### Manual Validation
 The user was given the steps: a bundled run with the one-time prompts, a rebuild and rerun with no prompt, and `cargo run` with no prompt. They replied "OK, keep going" without itemising results. The "RuSToat" session name after a fresh login was optional and wasn't reported.
+
+## Chunk 2: App icon (a cyborg Stoat)
+
+### Changes Made
+- `assets/icon/rustoat.svg` (new, hand-written, 1024×1024):
+  - Apple's 824 px rounded square at (100,100), `rx=185`, with a purple gradient (`#3b3156` to `#1d1730`) and a drop shadow (`feDropShadow`).
+  - Stoat's silhouette path, copied from `favicon-stoat.svg`. Stoat's circle bounds (303..643, 382..722) map onto the rounded square, so the path sits in `matrix(0.761575,0,0,0.761575,229.94,298.32)` and the cyborg parts use the path's own coordinates (the eye hole is at about (415,322)).
+  - Cyborg parts:
+    - A brushed-metal plate (gradient plus a striped pattern), clipped to the silhouette, wrapping the crown and the eye, with a panel seam.
+    - 8 rivets.
+    - A glowing cyan eye: a metal socket, a blurred `feGaussianBlur` glow, a radial-gradient lens and highlights.
+    - Rust-orange (`#ce422b`) circuit traces with hollow nodes, clipped to the silhouette.
+  - Traces and rivets are in groups with `class="detail"`.
+- `examples/render_icon.rs` (new): `render_icon <svg> <out.iconset>` renders the 10 `iconutil` PNGs with resvg. For images at 32 px or smaller, it swaps `class="detail"` for `display="none"` before parsing, so the small icons drop the traces and rivets.
+- `scripts/make-icon.sh` (new): renders into a `mktemp` iconset (removed on exit), then `iconutil -c icns -o assets/icon/RuSToat.icns`.
+- `assets/icon/RuSToat.icns` (new, generated, committed; 398 KB).
+- `scripts/bundle.sh`: creates `Contents/Resources`, copies the `.icns` there, adds `CFBundleIconFile RuSToat` to the plist, and `touch`es the app after signing so Finder and the Dock look again.
+- `Cargo.toml` and `Cargo.lock`: dev-dependency `resvg = { version = "0.46", default-features = false }`.
+- `README.md`: an icon bullet in the bundle section (regenerating it, `killall Dock`, the brand-terms caveat).
+
+### Divergences
+- **resvg 0.46, not 0.45.1, and no separate tiny-skia dependency.** On this host the tree uses resvg 0.46.0 (through gpui-pre); 0.45.1 only appears for other targets. resvg re-exports `tiny_skia` (with PNG support) and `usvg`, so one dev-dependency covers both. Minor.
+- **Small-size variant by class.** Detail elements are marked `class="detail"` (duplicate `id`s would be invalid) and hidden by a string substitution in the example. Minor; this is what the plan's risk note anticipated.
+
+### Verification Performed
+- `scripts/make-icon.sh && file assets/icon/RuSToat.icns`: `Mac OS X icon, 397654 bytes, "ic12" type`.
+- `iconutil -c iconset assets/icon/RuSToat.icns -o /tmp/check.iconset`: all 10 sizes present, 16x16 through 512x512@2x.
+- Visual check of the 1024 render against the original favicon: the round hole is the eye and the almond shape is the far eye. The 16 and 32 px renders keep the silhouette, the plate and the cyan eye.
+- `scripts/bundle.sh`: `plutil -p` shows `CFBundleIconFile => RuSToat` and `CFBundleIdentifier => com.chrishultin.rustoat`. `Contents/Resources/RuSToat.icns` is present, and `codesign --verify --strict` is valid and satisfies its designated requirement.
+- `bash -n` and `shellcheck` on `scripts/*.sh`: clean.
+- `cargo test`: 326 passed, 0 failed. `cargo clippy --all-targets -- -D warnings`: clean (includes the example).
+
+### Manual Validation
+- The bundled app was launched for the user (`scripts/run-bundled.sh`). The log confirmed chunk 1's migration live:
+  - "moved the saved session to the new Keychain service".
+  - "restored saved session for spedione".
+  - "moved …/chat.stoat.rustoat to …/com.chrishultin.rustoat".
+  - Events reached Ready.
+- The log also showed `banners: permission request failed (Notifications are not allowed for this application)`. The new bundle ID needs notification permission granted again. The user was pointed to System Settings → Notifications → RuSToat.
+- The user confirmed "Looks good" for the Dock icon and the design. Whether a banner shows the icon wasn't separately confirmed; it depends on notification permission being re-granted.

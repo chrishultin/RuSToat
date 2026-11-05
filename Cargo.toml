@@ -59,3 +59,6 @@ block2 = "0.6"
 wiremock = "0.6"
 # The parser inside TextView (already in the tree), to check what `prepare` produces parses as intended.
 markdown = "1"
+# Rendering the app icon's SVG to PNGs (examples/render_icon.rs). The version
+# GPUI already uses; it re-exports tiny-skia for the pixel buffer.
+resvg = { version = "0.46", default-features = false }

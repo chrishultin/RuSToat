@@ -26,8 +26,10 @@ target="${CARGO_TARGET_DIR:-target}/$profile"
 app="$target/RuSToat.app"
 version="$(cargo pkgid | sed 's/.*[#@]//')"
 
-mkdir -p "$app/Contents/MacOS"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$target/stoat-gpui" "$app/Contents/MacOS/stoat-gpui"
+# The icon (regenerate it from assets/icon/rustoat.svg with scripts/make-icon.sh).
+cp assets/icon/RuSToat.icns "$app/Contents/Resources/RuSToat.icns"
 cat > "$app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -38,6 +40,8 @@ cat > "$app/Contents/Info.plist" <<EOF
   <key>CFBundleName</key>
   <string>RuSToat</string>
   <key>CFBundleDisplayName</key>
+  <string>RuSToat</string>
+  <key>CFBundleIconFile</key>
   <string>RuSToat</string>
   <key>CFBundleExecutable</key>
   <string>stoat-gpui</string>
@@ -58,5 +62,8 @@ cat > "$app/Contents/Info.plist" <<EOF
 EOF
 
 identity="$(scripts/sign.sh "$app")"
+# Finder and the Dock cache icons by bundle; a fresh modification date
+# nudges them to look again.
+touch "$app"
 echo "signed as: $identity" >&2
 echo "$app"

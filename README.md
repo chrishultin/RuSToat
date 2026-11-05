@@ -47,6 +47,7 @@ This builds `target/debug/RuSToat.app` (identifier `com.chrishultin.rustoat`, si
 - **The first bundled run asks for permission to send notifications.** Choose **Allow**. If you don't, RuSToat logs `banners: turned off…` and falls back to in-app toasts. You can change the setting later in System Settings → Notifications → RuSToat.
 - **Banners only appear while RuSToat is in the background.** While its window is in front, you get toasts instead. Clicking a banner brings RuSToat forward on that channel, and reading a channel, here or in another Stoat client, removes its banner from Notification Center.
 - **The bundle and `cargo run` share one code identity,** so a Keychain "Always Allow" given to one covers the other.
+- **The bundle has RuSToat's own icon,** a cyborg take on Stoat's stoat (`assets/icon/rustoat.svg`). After editing the SVG, run `scripts/make-icon.sh` to regenerate `assets/icon/RuSToat.icns`. If the Dock keeps showing an old icon, run `killall Dock`. The icon derives from Stoat's logo: fine for personal use, but check Stoat's brand terms before distributing it.
 
 ### Self-hosted instances
 

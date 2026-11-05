@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  RuSToat app icon: Stoat's stoat-on-purple (https://stoat.chat/favicon-stoat.svg),
+  rebuilt as a cyborg. A derivative of Stoat's logo: fine for personal use;
+  check Stoat's brand terms before distributing it publicly.
+
+  1024×1024 canvas with Apple's 824 px rounded square at (100, 100). The stoat
+  and its cyborg parts share one transform, so they're drawn in the original
+  path's coordinates (the eye is at about (415, 322)).
+
+  Groups with class "detail" are dropped from the 16 and 32 px renders
+  (see examples/render_icon.rs).
+
+  Regenerate the .icns with scripts/make-icon.sh.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3b3156"/>
+      <stop offset="1" stop-color="#1d1730"/>
+    </linearGradient>
+    <linearGradient id="metal" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#eef1f5"/>
+      <stop offset="0.35" stop-color="#b7bec8"/>
+      <stop offset="0.55" stop-color="#d9dee5"/>
+      <stop offset="1" stop-color="#7d8794"/>
+    </linearGradient>
+    <!-- Brushed-metal streaks, laid over the plate. -->
+    <pattern id="brush" width="40" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(-18)">
+      <rect width="40" height="9" fill="none"/>
+      <rect y="0" width="40" height="2" fill="#ffffff" opacity="0.28"/>
+      <rect y="5" width="40" height="1.5" fill="#4a5260" opacity="0.14"/>
+    </pattern>
+    <radialGradient id="rivet" cx="0.35" cy="0.35" r="0.7">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.5" stop-color="#a9b1bc"/>
+      <stop offset="1" stop-color="#4b5462"/>
+    </radialGradient>
+    <radialGradient id="lens" cx="0.42" cy="0.4" r="0.65">
+      <stop offset="0" stop-color="#f2ffff"/>
+      <stop offset="0.3" stop-color="#7ff6ff"/>
+      <stop offset="0.75" stop-color="#14c8e6"/>
+      <stop offset="1" stop-color="#06708a"/>
+    </radialGradient>
+    <radialGradient id="socket" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0.6" stop-color="#2a2f38"/>
+      <stop offset="1" stop-color="#596270"/>
+    </radialGradient>
+    <filter id="glow" x="-1" y="-1" width="3" height="3">
+      <feGaussianBlur stdDeviation="30"/>
+    </filter>
+    <filter id="shadow" x="-0.1" y="-0.1" width="1.2" height="1.25">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+    <clipPath id="tile">
+      <rect x="100" y="100" width="824" height="824" rx="185"/>
+    </clipPath>
+    <!-- Stoat's silhouette, holes (ears, eye, nose) included. -->
+    <path id="stoat" d="M234,120C258,129 289,129 310,115C294,99 277,82 260,68C239,52 203,24 179,48C158,69 146,144 148,173C150,200 164,234 196,218C188,204 182,189 182,172C194,184 209,190 226,186C215,173 202,157 201,138C218,148 238,154 258,148C249,139 239,132 234,120M646,334C646,335 647,336 649,336C649,336 650,336 650,336C674,319 664,271 633,272C617,272 619,284 624,294C630,308 634,314 646,334M413,283C364,290 370,365 421,361C473,358 466,276 413,283M642,495C650,495 658,492 665,487C671,483 677,477 681,470C686,463 690,456 692,449C693,445 694,442 694,438C694,434 691,430 687,427C683,424 678,423 674,422C658,419 642,422 627,425C620,427 613,429 607,433C600,437 589,447 591,462C592,469 601,475 606,480C617,488 629,495 642,495L642,495ZM14,898C-11,528 -14,450 100,203C108,236 129,266 164,271C146,252 131,231 123,206C111,164 121,108 134,67C160,-12 200,-16 265,29C294,49 320,75 346,99C344,80 332,63 319,49C320,48 418,35 482,58C552,83 592,121 629,183C659,234 676,265 672,328C671,350 665,354 675,376C683,393 704,422 705,439C707,488 620,534 578,541C529,550 447,526 396,515C347,505 298,500 254,473C197,438 165,378 157,312C145,346 155,393 170,426C202,495 271,532 322,586C342,607 359,630 375,655C383,609 409,567 451,546C403,703 514,773 573,898L14,898ZM626,142C600,105 566,75 524,56C633,-51 634,25 626,142"/>
+    <clipPath id="body">
+      <use href="#stoat"/>
+    </clipPath>
+  </defs>
+
+  <g filter="url(#shadow)">
+    <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+  </g>
+
+  <g clip-path="url(#tile)">
+    <g transform="matrix(0.761575,0,0,0.761575,229.94,298.32)">
+      <use href="#stoat" fill="#ffffff"/>
+
+      <g clip-path="url(#body)">
+        <!-- Circuit traces in Rust orange, running out from the plate. -->
+        <g class="detail" fill="none" stroke="#ce422b" stroke-width="13" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M300,232 L232,300 L110,300 L110,600 L190,680 L190,760"/>
+          <path d="M408,400 L408,452 L318,452"/>
+          <path d="M478,392 L478,478"/>
+          <path d="M562,268 L602,308 L602,378"/>
+          <g fill="#ffffff" stroke-width="11">
+            <circle cx="190" cy="772" r="17"/>
+            <circle cx="110" cy="440" r="15"/>
+            <circle cx="304" cy="452" r="17"/>
+            <circle cx="478" cy="492" r="17"/>
+            <circle cx="602" cy="392" r="17"/>
+          </g>
+        </g>
+
+        <!-- The metal head plate, wrapping round the eye. -->
+        <path d="M300,-40 L720,-40 L720,110 L612,168 Q578,318 486,394 L352,402 Q282,332 282,236 Z"
+              fill="url(#metal)" stroke="#59616e" stroke-width="10"/>
+        <path d="M300,-40 L720,-40 L720,110 L612,168 Q578,318 486,394 L352,402 Q282,332 282,236 Z"
+              fill="url(#brush)"/>
+        <!-- A panel seam. -->
+        <path d="M452,40 L470,262" fill="none" stroke="#59616e" stroke-width="7" stroke-linecap="round"/>
+      </g>
+
+      <!-- Rivets along the plate's edge. -->
+      <g class="detail" fill="url(#rivet)" stroke="#3f4652" stroke-width="3">
+        <circle cx="574" cy="200" r="13"/>
+        <circle cx="548" cy="300" r="13"/>
+        <circle cx="506" cy="352" r="13"/>
+        <circle cx="338" cy="350" r="13"/>
+        <circle cx="314" cy="296" r="13"/>
+        <circle cx="314" cy="206" r="13"/>
+        <circle cx="380" cy="128" r="13"/>
+        <circle cx="520" cy="110" r="13"/>
+      </g>
+
+      <!-- The glowing cyan eye. -->
+      <circle cx="416" cy="322" r="64" fill="url(#socket)" stroke="#2a2f38" stroke-width="6"/>
+      <circle cx="416" cy="322" r="78" fill="#29f0ff" filter="url(#glow)"/>
+      <circle cx="416" cy="322" r="44" fill="url(#lens)"/>
+      <circle cx="416" cy="322" r="16" fill="#ffffff" opacity="0.9"/>
+      <circle cx="400" cy="304" r="7" fill="#ffffff"/>
+    </g>
+  </g>
+</svg>
