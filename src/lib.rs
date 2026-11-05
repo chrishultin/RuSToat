@@ -23,6 +23,7 @@ pub mod permissions;
 pub mod places;
 pub mod prefs;
 pub mod runtime;
+pub mod search;
 pub mod session;
 pub mod store;
 pub mod time;

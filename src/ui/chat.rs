@@ -9,6 +9,7 @@ use futures::StreamExt;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::bubble::{Bubble, BubbleContent, BubbleReactions, BubbleVariant};
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
+use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::component::message::{
     Message as MessageLayout, MessageAlignment, MessageAvatar, MessageContent, MessageFooter,
@@ -26,8 +27,8 @@ use gpui_kit::*;
 
 use crate::api::ApiError;
 use crate::api::StoatClient;
-use crate::api::models::ReplyIntent;
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
+use crate::api::models::{BulkMessageResponse, MessageSort, ReplyIntent};
 use crate::attachment::{AttachmentView, fit_into};
 use crate::complete::{Query, QueryKind, Suggestion, TokenRef, rank, rank_people};
 use crate::draft::{AttachmentLimits, DraftAttachment, ReplyTarget};
@@ -37,6 +38,7 @@ use crate::media::MediaUrls;
 use crate::notify::{self, Delivery, Notice, Viewing};
 use crate::places::{Place, Places, PlacesFile};
 use crate::runtime::spawn_io;
+use crate::search::{MAX_QUERY_CHARS, QueryCheck, RESULT_LIMIT, check_query};
 use crate::typing::{OutgoingTyping, TypingSignal, TypingState, typing_label};
 use crate::store::{
     ChannelEntry, ChannelKind, ChatStore, MemberList, MemberListRow, MessageRow, PendingAttachment,
@@ -96,6 +98,35 @@ struct Pane {
     scroller: Entity<MessageScrollerState>,
     /// Watches scrolling, to load older messages at the top.
     _scroll: Subscription,
+}
+
+/// What the right-hand panel shows. The member list is also subject to
+/// [`ChatView::member_list_open`]; search is temporary and belongs to the
+/// channel it was run in.
+enum SidePanel {
+    Members,
+    Search(SearchPanel),
+}
+
+/// The search panel: the query as sent, and how it went.
+struct SearchPanel {
+    /// The channel searched, the only one the panel is shown in.
+    channel: String,
+    /// What was typed when Enter was pressed.
+    query: String,
+    sort: MessageSort,
+    /// Which request this panel is waiting for (see [`ChatView::search_seq`]).
+    seq: u64,
+    state: SearchState,
+}
+
+enum SearchState {
+    Loading,
+    Results(Rc<Vec<MessageRow>>),
+    Empty,
+    /// The query had this many characters: too many to send.
+    TooLong(usize),
+    Error(SharedString),
 }
 
 pub struct ChatView {
@@ -170,11 +201,24 @@ pub struct ChatView {
     /// Member lists built for the panel, by channel. Dropped whenever
     /// members, users or permissions change (see [`Self::forget_member_lists`]).
     member_lists: HashMap<String, Rc<MemberList>>,
+    /// What the right-hand panel shows.
+    side_panel: SidePanel,
+    /// The header's search box. Enter searches the open channel.
+    search_input: Entity<InputState>,
+    /// Counts searches, so that an answer for an old one (or for another
+    /// channel) can be told from the one being waited for and dropped.
+    search_seq: u64,
+    /// The search in flight. Replacing or dropping it cancels the request.
+    search_task: Option<Task<()>>,
+    /// The channel the panel and search box were last drawn for, to notice
+    /// when it changes and start them over.
+    panel_channel: Option<String>,
     /// The message box, under the open channel.
     composer: Entity<Composer>,
     /// The default skin tone for emoji (`:` suggestions use it too).
     skin_tone: crate::prefs::Tone,
     _composer: Subscription,
+    _search_input: Subscription,
     /// Others typing, and when to tell Stoat the user is.
     typing: TypingState,
     outgoing_typing: OutgoingTyping,
@@ -261,6 +305,16 @@ impl ChatView {
         let mut store = ChatStore::new(me);
         store.set_media(media.clone());
         let composer = cx.new(|cx| Composer::new(window, cx));
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search messages…"));
+        let search_events = cx.subscribe_in(
+            &search_input,
+            window,
+            |this, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.run_search(cx);
+                }
+            },
+        );
         let composer_events = cx.subscribe_in(
             &composer,
             window,
@@ -367,9 +421,15 @@ impl ChatView {
             members_failed: HashSet::new(),
             member_list_open: true,
             member_lists: HashMap::new(),
+            side_panel: SidePanel::Members,
+            search_input,
+            search_seq: 0,
+            search_task: None,
+            panel_channel: None,
             composer,
             skin_tone: crate::prefs::Tone::default(),
             _composer: composer_events,
+            _search_input: search_events,
             typing,
             outgoing_typing: OutgoingTyping::default(),
             typing_tick: None,
@@ -1162,6 +1222,162 @@ impl ChatView {
         self.member_list_open = open;
         self.ensure_members(cx);
         cx.notify();
+    }
+
+    /// Start the right-hand panel and the search box over when the open
+    /// channel has changed: search belongs to the channel it was run in.
+    fn sync_side_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let channel = self.current_channel().map(|c| c.id);
+        if channel == self.panel_channel {
+            return;
+        }
+        self.panel_channel = channel;
+        self.search_task = None;
+        self.search_seq += 1;
+        self.side_panel = SidePanel::Members;
+        self.search_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+    }
+
+    /// Enter in the search box: search the open channel for what was typed.
+    fn run_search(&mut self, cx: &mut Context<Self>) {
+        let text = self.search_input.read(cx).value().to_string();
+        self.search_for(text, cx);
+    }
+
+    /// Search the open channel for `text` (as typed), if it's a query Stoat
+    /// would take; otherwise say why not, or do nothing for a blank one.
+    fn search_for(&mut self, text: String, cx: &mut Context<Self>) {
+        let Some(channel) = self.current_channel().map(|c| c.id) else {
+            return;
+        };
+        let sort = self.search_sort(&channel);
+        match check_query(&text) {
+            QueryCheck::Empty => {}
+            QueryCheck::TooLong { chars } => {
+                self.search_task = None;
+                self.search_seq += 1;
+                self.side_panel = SidePanel::Search(SearchPanel {
+                    channel,
+                    query: text,
+                    sort,
+                    seq: self.search_seq,
+                    state: SearchState::TooLong(chars),
+                });
+                cx.notify();
+            }
+            QueryCheck::Ok(query) => self.start_search(channel, query, sort, cx),
+        }
+    }
+
+    /// The sort the search panel for `channel` is using (Latest to start with).
+    fn search_sort(&self, channel: &str) -> MessageSort {
+        match &self.side_panel {
+            SidePanel::Search(panel) if panel.channel == channel => panel.sort.clone(),
+            _ => MessageSort::Latest,
+        }
+    }
+
+    /// Change the order of the results, and search again for the same query.
+    fn set_search_sort(&mut self, sort: MessageSort, cx: &mut Context<Self>) {
+        let Some(channel) = self.current_channel().map(|c| c.id) else {
+            return;
+        };
+        let SidePanel::Search(panel) = &mut self.side_panel else {
+            return;
+        };
+        if panel.channel != channel {
+            return;
+        }
+        panel.sort = sort;
+        let query = panel.query.clone();
+        self.search_for(query, cx);
+    }
+
+    /// Ask Stoat for `query` in `channel` and show the panel, waiting. An
+    /// answer lands only if no later search (or channel change) has replaced
+    /// this one meanwhile.
+    fn start_search(
+        &mut self,
+        channel: String,
+        query: String,
+        sort: MessageSort,
+        cx: &mut Context<Self>,
+    ) {
+        self.search_seq += 1;
+        let seq = self.search_seq;
+        self.side_panel = SidePanel::Search(SearchPanel {
+            channel: channel.clone(),
+            query: query.clone(),
+            sort: sort.clone(),
+            seq,
+            state: SearchState::Loading,
+        });
+        let client = self.client.clone();
+        let request = spawn_io({
+            let channel = channel.clone();
+            async move {
+                client
+                    .search_messages(&channel, &query, sort, RESULT_LIMIT)
+                    .await
+            }
+        });
+        self.search_task = Some(cx.spawn(async move |this, cx| {
+            let result = request.await;
+            this.update(cx, |this, cx| {
+                if !matches!(&this.side_panel, SidePanel::Search(panel) if panel.seq == seq) {
+                    return;
+                }
+                let state = match result {
+                    Ok(Ok(page)) => this.search_results(&channel, page),
+                    Ok(Err(err)) => {
+                        log::warn!("searching {channel} failed: {err:?}");
+                        SearchState::Error(search_error_text(&err))
+                    }
+                    Err(err) => {
+                        log::warn!("search task failed: {err:?}");
+                        SearchState::Error("Something went wrong searching.".into())
+                    }
+                };
+                if let SidePanel::Search(panel) = &mut this.side_panel {
+                    panel.state = state;
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// What the panel shows for a search's `page` in `channel`.
+    fn search_results(&mut self, channel: &str, page: BulkMessageResponse) -> SearchState {
+        let messages = self.store.absorb_results(page);
+        // Authors (and members) may be new.
+        self.forget_member_lists();
+        let rows = self.store.result_rows(channel, &messages);
+        if rows.is_empty() {
+            SearchState::Empty
+        } else {
+            SearchState::Results(Rc::new(rows))
+        }
+    }
+
+    /// Esc in the search box: forget the search and give the panel back to
+    /// the member list, then go back to typing a message.
+    fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_task = None;
+        self.search_seq += 1;
+        self.side_panel = SidePanel::Members;
+        self.search_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.composer
+            .update(cx, |composer, cx| composer.focus(window, cx));
+        cx.notify();
+    }
+
+    fn on_search_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        self.close_search(window, cx);
     }
 
     /// Suggest again for what the message box is completing (something it
@@ -2612,6 +2828,21 @@ impl ChatView {
             _ => None,
         };
 
+        // Enter searches this channel; Esc forgets the search.
+        let search_box = div()
+            .w(px(SEARCH_BOX_WIDTH))
+            .flex_none()
+            .on_action(cx.listener(Self::on_search_escape))
+            .child(
+                Input::new(&self.search_input)
+                    .small()
+                    .cleanable(true)
+                    .prefix(
+                        Icon::new(IconName::Search)
+                            .small()
+                            .text_color(theme.muted_foreground),
+                    ),
+            );
         let header = h_flex()
             .h(px(48.))
             .flex_none()
@@ -2638,7 +2869,9 @@ impl ChatView {
                     },
                 )),
             })
-            // Right side. DMs and Saved Notes have no member list to toggle.
+            // Right side: search in every channel, but DMs and Saved Notes
+            // have no member list to toggle.
+            .when(channel.is_some(), |el| el.child(search_box))
             .when(
                 channel
                     .as_ref()
@@ -2660,25 +2893,9 @@ impl ChatView {
                 },
             );
 
-        let member_panel = channel
-            .as_ref()
-            .filter(|c| self.member_list_open && self.store.has_member_list(&c.id))
-            .map(|c| self.render_member_panel(c, cx));
+        let side_panel = channel.as_ref().and_then(|c| self.render_side_panel(c, cx));
+        let colors = row_colors(cx);
         let theme = cx.theme();
-        let colors = RowColors {
-            muted: theme.muted_foreground,
-            system: theme.muted_foreground,
-            danger: theme.danger,
-            avatar_bg: theme.secondary,
-            avatar_fg: theme.secondary_foreground,
-            border: theme.border,
-            link: theme.link,
-            mine: theme.primary,
-            mine_bg: theme.primary.opacity(0.15),
-            card_bg: theme.background,
-            image_bg: theme.secondary,
-            highlight: theme.accent.opacity(0.5),
-        };
         let placeholder = |text: SharedString| {
             v_flex()
                 .flex_1()
@@ -2906,7 +3123,7 @@ impl ChatView {
                     .flex_1()
                     .min_h_0()
                     .child(conversation)
-                    .when_some(member_panel, |el, panel| el.child(panel)),
+                    .when_some(side_panel, |el, panel| el.child(panel)),
             )
             .when(channel.is_some(), |el| el.child(render_drop_overlay(cx)))
     }
@@ -2924,6 +3141,169 @@ impl ChatView {
             let list = Rc::new(self.store.member_list(&channel.id));
             self.member_lists.insert(channel.id, list);
         }
+    }
+
+    /// The right-hand panel for `channel`: its search, else its people if the
+    /// member list is open. `None` when there's nothing to show.
+    fn render_side_panel(
+        &self,
+        channel: &ChannelEntry,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        match &self.side_panel {
+            SidePanel::Search(panel) if panel.channel == channel.id => {
+                Some(self.render_search_panel(panel, channel, cx))
+            }
+            _ => (self.member_list_open && self.store.has_member_list(&channel.id))
+                .then(|| self.render_member_panel(channel, cx)),
+        }
+    }
+
+    /// The search panel: the order to show matches in, and the matches as
+    /// compact rows that jump to the message when clicked.
+    fn render_search_panel(
+        &self,
+        panel: &SearchPanel,
+        channel: &ChannelEntry,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let colors = row_colors(cx);
+        let theme = cx.theme();
+        let (foreground, border, background) = (
+            theme.sidebar_foreground,
+            theme.sidebar_border,
+            theme.sidebar,
+        );
+        let note = |text: SharedString, colour: Hsla| {
+            div()
+                .px_3()
+                .py_1()
+                .text_sm()
+                .text_color(colour)
+                .child(text)
+                .into_any_element()
+        };
+        let sorts = [
+            ("search-sort-latest", "Latest", MessageSort::Latest),
+            ("search-sort-oldest", "Oldest", MessageSort::Oldest),
+            ("search-sort-relevance", "Relevance", MessageSort::Relevance),
+        ];
+        let sort_buttons = h_flex()
+            .gap_1()
+            .px_2()
+            .pb_1()
+            .children(sorts.into_iter().map(|(id, label, sort)| {
+                let selected = panel.sort == sort;
+                Button::new(id)
+                    .ghost()
+                    .xsmall()
+                    .label(label)
+                    .selected(selected)
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.set_search_sort(sort.clone(), cx)),
+                    )
+            }));
+        let body = match &panel.state {
+            SearchState::Loading => note("Searching…".into(), colors.muted),
+            SearchState::Empty => note(
+                "No messages match. Search matches whole words.".into(),
+                colors.muted,
+            ),
+            SearchState::TooLong(chars) => note(
+                format!("Searches can be up to {MAX_QUERY_CHARS} characters. This one is {chars}.")
+                    .into(),
+                colors.danger,
+            ),
+            SearchState::Error(error) => note(error.clone(), colors.danger),
+            SearchState::Results(rows) => {
+                let view = cx.entity().downgrade();
+                let channel_id = channel.id.clone();
+                // Clicking a result asks to jump to it; nothing else on a
+                // result is live (they're not kept up to date).
+                let on_action: OnRowAction = Rc::new(move |action, window, cx| {
+                    view.update(cx, |this, cx| {
+                        this.on_row_action(&channel_id, action, window, cx)
+                    })
+                    .ok();
+                });
+                let pickers = Pickers {
+                    choices: Rc::default(),
+                    open_for: None,
+                };
+                let count = if rows.len() as i64 >= RESULT_LIMIT {
+                    format!("The first {} matches", rows.len())
+                } else if rows.len() == 1 {
+                    "1 match".to_string()
+                } else {
+                    format!("{} matches", rows.len())
+                };
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        div()
+                            .px_3()
+                            .pb_1()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(colors.muted)
+                            .child(count),
+                    )
+                    .child(
+                        v_flex()
+                            .id("search-results")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .pb_2()
+                            .children(
+                                rows.iter().map(|row| {
+                                    render_preview_row(row, colors, &on_action, &pickers)
+                                }),
+                            ),
+                    )
+                    .into_any_element()
+            }
+        };
+        v_flex()
+            .id("search-panel")
+            .w(px(MEMBER_PANEL_WIDTH))
+            .h_full()
+            .flex_none()
+            .bg(background)
+            .text_color(foreground)
+            .border_l_1()
+            .border_color(border)
+            .child(
+                h_flex()
+                    .px_3()
+                    .pt_2()
+                    .pb_1()
+                    .flex_none()
+                    .justify_between()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(colors.muted)
+                            .truncate()
+                            .child(format!("SEARCH RESULTS FOR “{}”", panel.query.trim())),
+                    )
+                    .child(
+                        Button::new("search-close")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Close)
+                            .tooltip("Close search (Esc)")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.close_search(window, cx)),
+                            ),
+                    ),
+            )
+            .child(sort_buttons)
+            .child(body)
+            .into_any_element()
     }
 
     /// The right-hand panel: `channel`'s people (see [`Self::refresh_member_list`]).
@@ -3022,6 +3402,9 @@ impl ChatView {
 
 /// Width of the right-hand panel.
 const MEMBER_PANEL_WIDTH: f32 = 240.;
+
+/// Width of the header's search box.
+const SEARCH_BOX_WIDTH: f32 = 220.;
 
 /// Height of every row of the member list (section titles too, which is what
 /// lets it be a `uniform_list`).
@@ -3190,6 +3573,25 @@ fn render_drop_overlay(cx: &App) -> Div {
         )
 }
 
+/// The colours message rows are drawn with, from the theme.
+fn row_colors(cx: &App) -> RowColors {
+    let theme = cx.theme();
+    RowColors {
+        muted: theme.muted_foreground,
+        system: theme.muted_foreground,
+        danger: theme.danger,
+        avatar_bg: theme.secondary,
+        avatar_fg: theme.secondary_foreground,
+        border: theme.border,
+        link: theme.link,
+        mine: theme.primary,
+        mine_bg: theme.primary.opacity(0.15),
+        card_bg: theme.background,
+        image_bg: theme.secondary,
+        highlight: theme.accent.opacity(0.5),
+    }
+}
+
 #[derive(Clone, Copy)]
 struct RowColors {
     muted: Hsla,
@@ -3339,7 +3741,24 @@ fn render_row(
             )
             .into_any_element(),
         TimelineRow::Message(message) if message.system => render_system_row(message, colors),
-        TimelineRow::Message(message) => render_message_row(message, colors, on_action, pickers),
+        TimelineRow::Message(message) => {
+            render_message_row(message, colors, on_action, pickers, false)
+        }
+    }
+}
+
+/// A search result: a compact message row that jumps to the message when
+/// clicked (see [`render_message_row`]).
+fn render_preview_row(
+    row: &MessageRow,
+    colors: RowColors,
+    on_action: &OnRowAction,
+    pickers: &Pickers,
+) -> AnyElement {
+    if row.system {
+        render_system_row(row, colors)
+    } else {
+        render_message_row(row, colors, on_action, pickers, true)
     }
 }
 
@@ -3374,15 +3793,29 @@ const BUBBLE_RADIUS: f32 = 16.;
 /// Corner radius where consecutive bubbles from one sender meet.
 const JOINED_RADIUS: f32 = 4.;
 
+/// A message in the timeline. With `preview` (a search result), it's drawn
+/// compactly and always on the left, with just its text and attachments: no
+/// hover toolbar, reactions, link previews or right-click menu, and clicking
+/// it jumps to the message instead.
 fn render_message_row(
     message: &MessageRow,
     colors: RowColors,
     on_action: &OnRowAction,
     pickers: &Pickers,
+    preview: bool,
 ) -> AnyElement {
     let first = !message.continuation;
     let last = message.group_end;
-    let alignment = if message.mine {
+    // In a preview the whole row is the click (to jump), so the pictures in
+    // it do nothing of their own.
+    let attachment_action: OnRowAction = if preview {
+        Rc::new(|_, _, _| {})
+    } else {
+        on_action.clone()
+    };
+    // Previews are all on one side, whoever wrote them.
+    let right = message.mine && !preview;
+    let alignment = if right {
         MessageAlignment::End
     } else {
         MessageAlignment::Start
@@ -3393,7 +3826,7 @@ fn render_message_row(
     let round = px(BUBBLE_RADIUS);
     let top = px(if first { BUBBLE_RADIUS } else { JOINED_RADIUS });
     let bottom = px(if last { BUBBLE_RADIUS } else { JOINED_RADIUS });
-    let surface = if message.mine {
+    let surface = if right {
         BubbleContent::new()
             .rounded_tl(round)
             .rounded_bl(round)
@@ -3424,7 +3857,8 @@ fn render_message_row(
                                 text.text_sm()
                             }
                         })
-                        .selectable(true)
+                        // A click on a result jumps; it doesn't select.
+                        .selectable(!preview)
                         .on_link_click(|url, _, _, cx| {
                             // Mentions are internal `stoat:` links: nothing to open yet.
                             if is_external_link(url) {
@@ -3442,12 +3876,12 @@ fn render_message_row(
                             |(ix, attachment)| {
                                 let id =
                                     SharedString::from(format!("attachment-{}-{ix}", message.id));
-                                render_attachment(id, attachment, colors, on_action)
+                                render_attachment(id, attachment, colors, &attachment_action)
                             },
                         )),
                 )
             })
-            .when(!message.embeds.is_empty(), |el| {
+            .when(!preview && !message.embeds.is_empty(), |el| {
                 el.child(
                     v_flex()
                         .gap_1()
@@ -3481,8 +3915,9 @@ fn render_message_row(
             BubbleVariant::Secondary
         })
         .content(surface)
-        // Nothing to react or reply to until it's on the server.
-        .when(message.pending.is_none(), |el| {
+        // Nothing to react or reply to until it's on the server (or in a
+        // search result).
+        .when(message.pending.is_none() && !preview, |el| {
             el.reactions(message_toolbar(message, on_action, pickers))
         });
 
@@ -3530,7 +3965,7 @@ fn render_message_row(
                 .bubble(bubble),
         )
         .when_some(
-            render_reactions(message, colors, on_action),
+            render_reactions(message, colors, on_action).filter(|_| !preview),
             |el, footer| el.footer(footer),
         )
         .when_some(
@@ -3541,7 +3976,8 @@ fn render_message_row(
         .with_stack_style(StyleRefinement::default().gap(px(HEADER_GAP)))
         // Reactions sit just under their bubble (default gap is 10 px too).
         .gap(px(REACTIONS_GAP))
-        .px_4()
+        .when(preview, |el| el.px_2())
+        .when(!preview, |el| el.px_4())
         // Space between groups; bubbles within a group sit close together.
         .pt(px(if first { GROUP_GAP } else { BUBBLE_GAP }));
 
@@ -3553,8 +3989,18 @@ fn render_message_row(
         .when(message.pending == Some(PendingState::Sending), |el| {
             el.opacity(PENDING_OPACITY)
         })
-        .when(message.highlighted, |el| el.bg(colors.highlight))
+        .when(message.highlighted && !preview, |el| {
+            el.bg(colors.highlight)
+        })
         .child(layout);
+    if preview {
+        let (on_action, id) = (on_action.clone(), message.id.clone());
+        return row
+            .cursor_pointer()
+            .hover(|style| style.bg(colors.highlight))
+            .on_click(move |_, window, cx| on_action(RowAction::JumpTo(id.clone()), window, cx))
+            .into_any_element();
+    }
     if message.pending.is_some() {
         return row.into_any_element();
     }
@@ -3959,6 +4405,20 @@ fn delete_error_text(err: &ApiError) -> SharedString {
     match err.error_type() {
         Some(ErrorType::MissingPermission { .. }) => "You can't delete this message.".into(),
         _ => format!("Couldn't delete the message: {err}").into(),
+    }
+}
+
+/// What the search panel says when a search fails.
+fn search_error_text(err: &ApiError) -> SharedString {
+    use revolt_result::ErrorType;
+    match err {
+        ApiError::RateLimited { .. } => "Searching too fast. Wait a moment, then try again.".into(),
+        _ => match err.error_type() {
+            Some(ErrorType::MissingPermission { .. }) => "You can't search this channel.".into(),
+            Some(ErrorType::IsBot) => "Bots can't search messages.".into(),
+            Some(ErrorType::InvalidOperation) => "Stoat didn't accept that search.".into(),
+            _ => format!("Couldn't search: {err}").into(),
+        },
     }
 }
 
@@ -4743,6 +5203,7 @@ impl Render for ChatView {
             });
         }
         self.sync_composer(window, cx);
+        self.sync_side_panel(window, cx);
         self.refresh_member_list();
         let viewer = self
             .viewer

@@ -2,9 +2,9 @@ use std::time::Duration;
 
 use reqwest::{Client, Method};
 use revolt_models::v0::{
-    AllMemberResponse, BulkMessageResponse, DataEditMessage, DataLogin, DataMessageSend, MFAResponse, Message,
-    MessageSort,
-    OptionsQueryMessages, ReplyIntent, ResponseLogin, User,
+    AllMemberResponse, BulkMessageResponse, DataEditMessage, DataLogin, DataMessageSearch,
+    DataMessageSend, MFAResponse, Message, MessageSort, OptionsQueryMessages, ReplyIntent,
+    ResponseLogin, User,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -447,6 +447,25 @@ impl StoatClient {
         .await
     }
 
+    /// `POST /channels/{channel}/search`: up to `limit` (1 to 100) messages
+    /// in `channel` that match `query` (1 to 64 characters), in `sort` order,
+    /// with their authors. Stoat matches whole words, stemmed, not substrings,
+    /// and searches one channel only.
+    pub async fn search_messages(
+        &self,
+        channel: &str,
+        query: &str,
+        sort: MessageSort,
+        limit: i64,
+    ) -> Result<BulkMessageResponse, ApiError> {
+        self.send(
+            Method::POST,
+            &format!("/channels/{channel}/search"),
+            Some(&search_body(query, sort, limit)),
+        )
+        .await
+    }
+
     /// `GET /servers/{server}/members`: every member of `server`, with
     /// their users. Stoat 0.16.2 has no member search, so it's the whole list.
     /// `exclude_offline` asks for the online members only (the web client
@@ -633,6 +652,22 @@ fn encode_path_segment(segment: &str) -> String {
     out
 }
 
+/// The body of a message search. Stoat refuses `pinned` together with
+/// `query`, even `pinned: false`, so unset fields are left out rather than
+/// sent as `null` (the same way as [`StoatClient::send_message`]).
+fn search_body(query: &str, sort: MessageSort, limit: i64) -> serde_json::Value {
+    let body = DataMessageSearch {
+        query: Some(query.to_string()),
+        pinned: None,
+        limit: Some(limit),
+        before: None,
+        after: None,
+        sort,
+        include_users: Some(true),
+    };
+    without_nulls(serde_json::to_value(&body).expect("search body serialises"))
+}
+
 /// Path of a server's member list, online members only if asked.
 fn members_path(server: &str, exclude_offline: bool) -> String {
     if exclude_offline {
@@ -666,7 +701,9 @@ fn messages_query(
 mod tests {
     use revolt_models::v0::MessageSort;
 
-    use super::{members_path, messages_query};
+    use serde_json::json;
+
+    use super::{members_path, messages_query, search_body};
 
     #[test]
     fn members_path_asks_for_online_members_only_when_told_to() {
@@ -705,5 +742,31 @@ mod tests {
             ),
             "limit=50&after=01JC0000000000000000000009&sort=Oldest&include_users=true"
         );
+    }
+
+    #[test]
+    fn search_body_has_no_pinned_and_no_nulls() {
+        let body = search_body("hello", MessageSort::Latest, 50);
+        assert_eq!(
+            body,
+            json!({
+                "query": "hello",
+                "limit": 50,
+                "sort": "Latest",
+                "include_users": true
+            })
+        );
+        assert!(body.get("pinned").is_none());
+    }
+
+    #[test]
+    fn search_body_carries_the_chosen_sort() {
+        for (sort, name) in [
+            (MessageSort::Latest, "Latest"),
+            (MessageSort::Oldest, "Oldest"),
+            (MessageSort::Relevance, "Relevance"),
+        ] {
+            assert_eq!(search_body("x", sort, 50)["sort"], name);
+        }
     }
 }

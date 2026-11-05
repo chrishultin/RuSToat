@@ -704,6 +704,33 @@ impl ChatStore {
         messages
     }
 
+    /// Take a search's results: cache the authors that came with them (so
+    /// [`Self::result_rows`] can name them) and return the messages, in the
+    /// order Stoat sent them. The channel's history is not touched: results
+    /// are scattered through it, and merging them in would leave gaps.
+    pub fn absorb_results(&mut self, page: BulkMessageResponse) -> Vec<Message> {
+        self.absorb_page(page)
+    }
+
+    /// Rows for search results in `channel`, in the order given. Every row
+    /// carries its author and time (none continues the one before it, since
+    /// the results aren't neighbours), and none is highlighted or shows reply
+    /// previews: results are for reading and clicking, not a timeline.
+    /// Messages from other channels are left out.
+    pub fn result_rows(&self, channel: &str, messages: &[Message]) -> Vec<MessageRow> {
+        messages
+            .iter()
+            .filter(|m| m.channel == channel)
+            .map(|message| {
+                let author = self.author_name(message);
+                let mut row = self.message_row(message, author, false);
+                row.replies.clear();
+                row.highlighted = false;
+                row
+            })
+            .collect()
+    }
+
     pub fn history(&self, channel: &str) -> Option<&History> {
         self.histories.get(channel)
     }
