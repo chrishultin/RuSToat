@@ -95,6 +95,32 @@ pub struct MessageRow {
     pub mine: bool,
     /// Nothing but a few emoji: drawn large, without a bubble surface.
     pub jumbo: bool,
+    /// Reactions, in the order they were first added.
+    pub reactions: Vec<ReactionChip>,
+}
+
+/// One reaction under a message: an emoji and how many people used it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReactionChip {
+    /// The emoji as the API names it: the Unicode emoji, or a custom emoji's ID.
+    pub key: String,
+    pub emoji: ReactionEmoji,
+    pub count: usize,
+    /// The logged-in user is one of them.
+    pub mine: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReactionEmoji {
+    Unicode(String),
+    Custom {
+        id: String,
+        /// `None` until the file server is known.
+        url: Option<String>,
+        /// `:name:` for the tooltip, or `:emoji:` if it isn't one of the
+        /// user's servers' emoji.
+        name: String,
+    },
 }
 
 /// Consecutive messages from one author closer together than this share a header.
@@ -577,15 +603,84 @@ impl ChatStore {
         if embeds.is_empty() {
             return false;
         }
-        let Some(message) = self
-            .histories
-            .get_mut(channel)
-            .and_then(|h| h.messages.iter_mut().find(|m| m.id == id))
-        else {
+        let Some(message) = self.message_mut(channel, id) else {
             return false;
         };
         message.embeds.get_or_insert_default().extend(embeds);
         true
+    }
+
+    /// Someone added (`add`) or took back their `emoji` reaction to a loaded
+    /// message. Returns true if that changed anything: repeats (our own
+    /// reaction echoed back, say) are no-ops. A reaction nobody's left on is
+    /// removed.
+    pub fn apply_react(
+        &mut self,
+        channel: &str,
+        id: &str,
+        user: &str,
+        emoji: &str,
+        add: bool,
+    ) -> bool {
+        let Some(message) = self.message_mut(channel, id) else {
+            return false;
+        };
+        if add {
+            return message
+                .reactions
+                .entry(emoji.to_string())
+                .or_default()
+                .insert(user.to_string());
+        }
+        let Some(users) = message.reactions.get_mut(emoji) else {
+            return false;
+        };
+        let removed = users.shift_remove(user);
+        if users.is_empty() {
+            message.reactions.shift_remove(emoji);
+        }
+        removed
+    }
+
+    /// Every `emoji` reaction cleared from a loaded message (by a moderator).
+    pub fn apply_remove_reaction(&mut self, channel: &str, id: &str, emoji: &str) -> bool {
+        self.message_mut(channel, id)
+            .is_some_and(|message| message.reactions.shift_remove(emoji).is_some())
+    }
+
+    fn message_mut(&mut self, channel: &str, id: &str) -> Option<&mut Message> {
+        self.histories
+            .get_mut(channel)?
+            .messages
+            .iter_mut()
+            .find(|m| m.id == id)
+    }
+
+    /// The chips for a message's reactions, in order.
+    fn reaction_chips(&self, message: &Message) -> Vec<ReactionChip> {
+        message
+            .reactions
+            .iter()
+            .filter(|(_, users)| !users.is_empty())
+            .map(|(key, users)| {
+                let emoji = if crate::time::is_ulid(key) {
+                    let name = self.emoji(key).map_or("emoji", |e| e.name.as_str());
+                    ReactionEmoji::Custom {
+                        id: key.clone(),
+                        url: self.media.emoji(key),
+                        name: format!(":{name}:"),
+                    }
+                } else {
+                    ReactionEmoji::Unicode(key.clone())
+                };
+                ReactionChip {
+                    key: key.clone(),
+                    emoji,
+                    count: users.len(),
+                    mine: users.contains(&self.me),
+                }
+            })
+            .collect()
     }
 
     /// Remove messages from a loaded channel. Returns true if any were removed.
@@ -936,6 +1031,7 @@ impl ChatStore {
                         .content
                         .as_deref()
                         .is_some_and(crate::markdown::is_jumbo),
+                reactions: self.reaction_chips(message),
             }));
             previous = Some((message, author));
         }

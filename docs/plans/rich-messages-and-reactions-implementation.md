@@ -427,3 +427,47 @@ The user checked the viewer in the running app and confirmed "lgtm":
 
 ### Manual Validation
 The user checked embeds in the running app and confirmed "Embeds look good".
+
+## Chunk 6: Reactions display (live)
+
+### Changes Made
+- `src/api/events.rs`:
+  - New `ServerEvent::MessageReact { id, channel, user, emoji }`, `MessageUnreact { … }` and `MessageRemoveReaction { id, channel, emoji }`.
+  - They're decoded from the wire names `channel_id`, `user_id` and `emoji_id`, and forwarded.
+- `src/store.rs`:
+  - `MessageRow.reactions: Vec<ReactionChip { key, emoji, count, mine }>`. `ReactionEmoji` is `Unicode(String)` or `Custom { id, url, name }`.
+  - The new `reaction_chips()` builds chips in `Message.reactions` (IndexMap) order and skips empty sets. Keys that are ULIDs (`time::is_ulid`) are custom emoji: their URL comes from `MediaUrls::emoji`, and their name is `:name:` from the store, or `:emoji:` if unknown.
+  - `apply_react(channel, id, user, emoji, add)` returns whether anything changed: an `IndexSet` insert or remove. A repeat, such as our own reaction echoed back, is a no-op. When the last user is removed, the emoji's entry is removed (`shift_remove`, which keeps order).
+  - `apply_remove_reaction(channel, id, emoji)`.
+  - New private `message_mut(channel, id)`, which `apply_append` now uses too.
+- `src/ui/chat.rs`:
+  - All three events go through the store, then `sync_pane`.
+  - `render_reactions` builds a `MessageFooter` (`content_inset(false)`, `flex_wrap`) of 24 px pill chips. Each chip shows a Unicode emoji (`text_sm`) or a 16 px custom emoji image (`:name:` text before the file server is known), plus the count, with the emoji or `:name:` as its tooltip.
+  - Reactions you're part of get the theme primary outline and count colour, on a 15% primary tint. Others get the border colour on the card background.
+  - The footer goes under the bubble on the sender's side. The row-to-footer gap is `REACTIONS_GAP` = 4 px instead of 10.
+  - `RowColors` gains `mine` and `mine_bg`.
+- `tests/store_reactions.rs` (new), 8 tests:
+  - decoding all three events with their real field names, and a `channel`-named React rejected as `Unknown`
+  - chip order, counts and `mine`, with Unicode vs custom and the custom URL and name
+  - reacting up to 3 and then unreacting to zero (chip and map entry gone)
+  - echoes, absent reactions and unloaded messages doing nothing
+  - remove-all for one emoji
+  - order kept after a removal, with a re-add going to the end
+  - custom emoji names from `EmojiCreate`
+  - a live react giving a `Remeasure` of just its row
+- `tests/store_live.rs`: the row helper sets `reactions`.
+
+### Divergences
+- **Minor, placement:** the plan said to use `Bubble::reactions(BubbleReactions)`. That slot is one absolutely positioned pill overlapping the bubble's bottom edge (`bottom: -1.25rem`). It takes no layout space, so it would overlap the next row in the virtualised list and wouldn't be measured, and it doesn't wrap. Chips go in gpui-component's `MessageFooter` slot instead, which exists for "reactions, or action buttons" and stays in the layout.
+- **Minor:** decode tests live in a new `tests/store_reactions.rs`, not `tests/store_live.rs`.
+- **Known limit:** as with message text (chunk 3), an `EmojiCreate` doesn't rebuild rows already drawn, so a custom chip's tooltip name updates on the next change to that channel.
+- **Effect on chunk 7:** clicking a chip toggles your reaction. Chips are `Stateful<Div>` with IDs, so `on_click` can be added directly. The "+" can go at the end of the same footer, which also covers the plan's fallback of an always-visible "+".
+
+### Verification Performed
+- `cargo test --test store_reactions`: 8 passed.
+- `cargo test`: 199 passed, 0 failed, 5 ignored.
+- `cargo clippy --all-targets -- -D warnings`: clean. `cargo fmt --check`: clean.
+- Live: relaunched. `Ready` logged 5 servers, 76 channels and 41 emoji, and the last-open channel loaded 50 messages, with no warnings or errors.
+
+### Manual Validation
+The user checked reactions in the running app and confirmed "reactions look good".

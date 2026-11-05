@@ -10,7 +10,8 @@ use gpui_kit::component::bubble::{Bubble, BubbleContent, BubbleVariant};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::component::message::{
-    Message as MessageLayout, MessageAlignment, MessageAvatar, MessageContent, MessageHeader,
+    Message as MessageLayout, MessageAlignment, MessageAvatar, MessageContent, MessageFooter,
+    MessageHeader,
 };
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::notification::Notification;
@@ -30,8 +31,8 @@ use crate::notify::{self, Delivery, Notice, Viewing};
 use crate::places::{Place, Places, PlacesFile};
 use crate::runtime::spawn_io;
 use crate::store::{
-    ChannelEntry, ChannelKind, ChatStore, MessageRow, RowOp, ServerEntry, TimelineRow, diff_rows,
-    display_name,
+    ChannelEntry, ChannelKind, ChatStore, MessageRow, ReactionEmoji, RowOp, ServerEntry,
+    TimelineRow, diff_rows, display_name,
 };
 use crate::ui::math::MathPlugin;
 
@@ -282,6 +283,31 @@ impl ChatView {
             ConnectionEvent::Event(ServerEvent::MessageDelete { id, channel }) => {
                 log::debug!("live: delete {id} in {channel}");
                 if self.store.apply_delete(&channel, &[id]) {
+                    self.sync_pane(&channel, cx);
+                }
+            }
+            ConnectionEvent::Event(ServerEvent::MessageReact {
+                id,
+                channel,
+                user,
+                emoji,
+            }) => {
+                if self.store.apply_react(&channel, &id, &user, &emoji, true) {
+                    self.sync_pane(&channel, cx);
+                }
+            }
+            ConnectionEvent::Event(ServerEvent::MessageUnreact {
+                id,
+                channel,
+                user,
+                emoji,
+            }) => {
+                if self.store.apply_react(&channel, &id, &user, &emoji, false) {
+                    self.sync_pane(&channel, cx);
+                }
+            }
+            ConnectionEvent::Event(ServerEvent::MessageRemoveReaction { id, channel, emoji }) => {
+                if self.store.apply_remove_reaction(&channel, &id, &emoji) {
                     self.sync_pane(&channel, cx);
                 }
             }
@@ -1175,6 +1201,8 @@ impl ChatView {
             avatar_fg: theme.secondary_foreground,
             border: theme.border,
             link: theme.link,
+            mine: theme.primary,
+            mine_bg: theme.primary.opacity(0.15),
             card_bg: theme.background,
             image_bg: theme.secondary,
         };
@@ -1323,6 +1351,9 @@ struct RowColors {
     avatar_fg: Hsla,
     border: Hsla,
     link: Hsla,
+    /// Outline and count of reactions the user is part of.
+    mine: Hsla,
+    mine_bg: Hsla,
     /// File cards, so they stand out inside a bubble.
     card_bg: Hsla,
     /// Behind an image while it loads, or if it fails.
@@ -1585,12 +1616,88 @@ fn render_message_row(
         .avatar_slot(avatar_slot)
         .when_some(header, |el, header| el.header(header))
         .content(MessageContent::new().bubble(bubble))
+        .when_some(render_reactions(message, colors), |el, footer| {
+            el.footer(footer)
+        })
         // The name/time header sits right above its bubble (default gap is 10 px).
         .with_stack_style(StyleRefinement::default().gap(px(HEADER_GAP)))
+        // Reactions sit just under their bubble (default gap is 10 px too).
+        .gap(px(REACTIONS_GAP))
         .px_4()
         // Space between groups; bubbles within a group sit close together.
         .pt(px(if first { GROUP_GAP } else { BUBBLE_GAP }))
         .into_any_element()
+}
+
+/// Space between a bubble and its reactions.
+const REACTIONS_GAP: f32 = 4.;
+/// Height of a reaction chip.
+const REACTION_HEIGHT: f32 = 24.;
+/// Custom emoji in a reaction chip.
+const REACTION_EMOJI_PX: f32 = 16.;
+
+/// The message's reaction chips (emoji and count, outlined when the user is
+/// one of them), wrapping under the bubble. `None` without reactions.
+fn render_reactions(message: &MessageRow, colors: RowColors) -> Option<MessageFooter> {
+    if message.reactions.is_empty() {
+        return None;
+    }
+    let chips = message.reactions.iter().enumerate().map(|(ix, chip)| {
+        let (emoji, tooltip): (AnyElement, SharedString) = match &chip.emoji {
+            ReactionEmoji::Unicode(emoji) => (
+                div().text_sm().child(emoji.clone()).into_any_element(),
+                emoji.clone().into(),
+            ),
+            ReactionEmoji::Custom {
+                url: Some(url),
+                name,
+                ..
+            } => (
+                img(SharedUri::from(url.clone()))
+                    .size(px(REACTION_EMOJI_PX))
+                    .flex_none()
+                    .object_fit(ObjectFit::Contain)
+                    .into_any_element(),
+                name.clone().into(),
+            ),
+            ReactionEmoji::Custom {
+                url: None, name, ..
+            } => (
+                div().text_xs().child(name.clone()).into_any_element(),
+                name.clone().into(),
+            ),
+        };
+        h_flex()
+            .id(SharedString::from(format!("reaction-{}-{ix}", message.id)))
+            .h(px(REACTION_HEIGHT))
+            .px_2()
+            .gap_1()
+            .rounded_full()
+            .border_1()
+            .map(|el| {
+                if chip.mine {
+                    el.border_color(colors.mine).bg(colors.mine_bg)
+                } else {
+                    el.border_color(colors.border).bg(colors.card_bg)
+                }
+            })
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            .child(emoji)
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(if chip.mine { colors.mine } else { colors.muted })
+                    .child(chip.count.to_string()),
+            )
+    });
+    Some(
+        MessageFooter::new()
+            // Line up with the bubble's edge, not its text.
+            .content_inset(false)
+            .flex_wrap()
+            .children(chips),
+    )
 }
 
 /// Corner radius of inline images and file cards.

@@ -76,6 +76,27 @@ pub enum ServerEvent {
         channel: String,
         ids: Vec<String>,
     },
+    /// `user` reacted to a message with `emoji` (a Unicode emoji, or a
+    /// custom emoji's ID).
+    MessageReact {
+        id: String,
+        channel: String,
+        user: String,
+        emoji: String,
+    },
+    /// `user` took their `emoji` reaction back.
+    MessageUnreact {
+        id: String,
+        channel: String,
+        user: String,
+        emoji: String,
+    },
+    /// A moderator cleared every `emoji` reaction from a message.
+    MessageRemoveReaction {
+        id: String,
+        channel: String,
+        emoji: String,
+    },
     EmojiCreate(Box<Emoji>),
     /// Some user settings changed. Only `notifications` is kept; `None` if
     /// this update didn't touch it.
@@ -218,6 +239,49 @@ fn decode(mut value: Value, out: &mut Vec<ServerEvent>) {
                     id: a.id,
                     channel: a.channel,
                     embeds,
+                }
+            }))
+        }
+        // Unlike the other message events, these name the channel `channel_id`.
+        "MessageReact" | "MessageUnreact" => {
+            #[derive(Deserialize)]
+            struct React {
+                id: String,
+                channel_id: String,
+                user_id: String,
+                emoji_id: String,
+            }
+            let add = kind == "MessageReact";
+            out.push(decode_as(value, &kind, |r: React| {
+                if add {
+                    ServerEvent::MessageReact {
+                        id: r.id,
+                        channel: r.channel_id,
+                        user: r.user_id,
+                        emoji: r.emoji_id,
+                    }
+                } else {
+                    ServerEvent::MessageUnreact {
+                        id: r.id,
+                        channel: r.channel_id,
+                        user: r.user_id,
+                        emoji: r.emoji_id,
+                    }
+                }
+            }))
+        }
+        "MessageRemoveReaction" => {
+            #[derive(Deserialize)]
+            struct Remove {
+                id: String,
+                channel_id: String,
+                emoji_id: String,
+            }
+            out.push(decode_as(value, &kind, |r: Remove| {
+                ServerEvent::MessageRemoveReaction {
+                    id: r.id,
+                    channel: r.channel_id,
+                    emoji: r.emoji_id,
                 }
             }))
         }
@@ -612,6 +676,9 @@ async fn session(
                         | ServerEvent::MessageUpdate { .. }
                         | ServerEvent::MessageDelete { .. }
                         | ServerEvent::MessageAppend { .. }
+                        | ServerEvent::MessageReact { .. }
+                        | ServerEvent::MessageUnreact { .. }
+                        | ServerEvent::MessageRemoveReaction { .. }
                         | ServerEvent::BulkMessageDelete { .. }
                         | ServerEvent::EmojiCreate(_)
                         | ServerEvent::UserSettingsUpdate { .. }
