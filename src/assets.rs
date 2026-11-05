@@ -18,6 +18,7 @@ gpui_kit::assets::icon_assets!(
         FileVideoCamera,
         Hash,
         House,
+        Image,
         Users,
         Volume2,
         WifiOff

@@ -471,3 +471,27 @@ The user checked embeds in the running app and confirmed "Embeds look good".
 
 ### Manual Validation
 The user checked reactions in the running app and confirmed "reactions look good".
+
+## Follow-up (between chunks 6 and 7): image loading placeholder
+
+_Asked for by the user after chunk 6: "Can we see about adding a placeholder for images while they load?"_
+
+### Changes Made
+- **Cause.** Chunk 4's loading placeholder (a flat `image_bg` box) never appeared. GPUI's `img()` shows its `with_loading` element only after `LOADING_DELAY` (200 ms), and it times that with per-element state (`with_optional_element_state(global_id, …)`). That state exists only when the `img` has an element ID; ours had none, so the space stayed empty until the bytes arrived.
+- `src/ui/chat.rs`:
+  - `inline_image` gives its `img` the ID `"{id}-img"`. It's shared by attachments, embed images and thumbnails.
+  - The viewer's image gets the ID `"image-viewer-img"` and the same loading element.
+  - New `image_loading(icon_color, radius)`: a gpui-component `Skeleton` (a pulsing opacity animation) filling the reserved box with the image's corner radius, plus a centred Lucide `Image` icon at 60% of the muted colour.
+  - The 200 ms delay is kept, so cached images appear without a flash. The failure fallback ("Couldn't load image" on `image_bg`) is unchanged.
+- `src/assets.rs`: adds Lucide `Image`.
+
+### Divergences
+None from the plan, which called for "a shimmer or blank placeholder while loading". This fixes chunk 4's version, which never showed.
+
+### Verification Performed
+- `cargo test`: 199 passed, 0 failed, 5 ignored.
+- `cargo clippy --all-targets -- -D warnings`: clean. `cargo fmt --check`: clean.
+- Live: relaunched with an empty image cache. `Ready` loaded, with no warnings or errors.
+
+### Manual Validation
+The user confirmed the placeholder in the running app ("Yeah"), and asked for the two related fixes next: avatar and emoji loading states, and thumbhash previews.

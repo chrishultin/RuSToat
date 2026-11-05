@@ -15,6 +15,7 @@ use gpui_kit::component::message::{
 };
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::skeleton::Skeleton;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable, WindowExt, h_flex, v_flex};
@@ -427,6 +428,7 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
+        let muted = theme.muted_foreground;
         let viewport = window.viewport_size();
         let room = |side: Pixels, taken: f32| (f32::from(side) - taken).max(1.) as u32;
         let max_w = room(viewport.width, 2. * VIEWER_MARGIN);
@@ -507,8 +509,10 @@ impl ChatView {
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .child(
                                 img(SharedUri::from(image.url.clone()))
+                                    .id("image-viewer-img")
                                     .size_full()
-                                    .object_fit(ObjectFit::Contain),
+                                    .object_fit(ObjectFit::Contain)
+                                    .with_loading(move || image_loading(muted, 0.)),
                             ),
                     ),
             )
@@ -1796,17 +1800,20 @@ fn inline_image(
             .bg(colors.image_bg)
     };
     div()
-        .id(id)
+        .id(id.clone())
         .relative()
         .w(px(width as f32))
         .h(px(height as f32))
         .flex_none()
         .child(
             img(SharedUri::from(url.to_string()))
+                // The image's own ID keeps its loading state between frames;
+                // without one, the loading placeholder never shows.
+                .id(SharedString::from(format!("{id}-img")))
                 .size_full()
                 .rounded(px(ATTACHMENT_RADIUS))
                 .object_fit(ObjectFit::Contain)
-                .with_loading(move || backdrop().into_any_element())
+                .with_loading(move || image_loading(colors.muted, ATTACHMENT_RADIUS))
                 .with_fallback(move || {
                     backdrop()
                         .flex()
@@ -1818,6 +1825,35 @@ fn inline_image(
                         .into_any_element()
                 }),
         )
+}
+
+/// What an image shows while it downloads (once that's taken a moment): a
+/// pulsing box with a faint picture icon.
+fn image_loading(icon_color: Hsla, radius: f32) -> AnyElement {
+    div()
+        .relative()
+        .size_full()
+        .child(
+            Skeleton::new()
+                .absolute()
+                .inset_0()
+                .size_full()
+                .rounded(px(radius)),
+        )
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    Icon::new(IconName::Image)
+                        .large()
+                        .text_color(icon_color.opacity(0.6)),
+                ),
+        )
+        .into_any_element()
 }
 
 /// An embed picture that opens in the full-size viewer.
