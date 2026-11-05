@@ -20,6 +20,14 @@ cargo run
 
 The first build compiles GPUI and takes several minutes.
 
+### Code signing
+
+`cargo run` and the app bundle are both signed as `com.chrishultin.rustoat` with your **Apple Development** certificate, picked automatically from your keychain (`scripts/sign.sh`; `cargo run` goes through `scripts/cargo-runner.sh`, set in `.cargo/config.toml`). A stable signature is what lets the Keychain remember your "Always Allow" across rebuilds. Test binaries aren't signed.
+
+- **Choose another identity** with `RUSTOAT_SIGN_IDENTITY="Apple Development: …"` (any name or hash from `security find-identity -v -p codesigning`).
+- **Without an Apple Development certificate,** the build is signed ad hoc with a warning. It still runs, but the Keychain asks again after every rebuild.
+- **The first signing may ask for your private key** ("codesign wants to access key…"). Choose **Always Allow**.
+
 For more logging:
 
 ```bash
@@ -34,11 +42,11 @@ New messages notify according to your Stoat notification settings. The Dock icon
 scripts/run-bundled.sh
 ```
 
-This builds `target/debug/RuSToat.app` (identifier `chat.stoat.rustoat`, ad-hoc signed) and runs it with its logs in your terminal. Pass `release` to bundle a release build. `scripts/bundle.sh` only builds the bundle and prints its path.
+This builds `target/debug/RuSToat.app` (identifier `com.chrishultin.rustoat`, signed as above) and runs it with its logs in your terminal. Pass `release` to bundle a release build. `scripts/bundle.sh` only builds the bundle and prints its path.
 
 - **The first bundled run asks for permission to send notifications.** Choose **Allow**. If you don't, RuSToat logs `banners: turned off…` and falls back to in-app toasts. You can change the setting later in System Settings → Notifications → RuSToat.
 - **Banners only appear while RuSToat is in the background.** While its window is in front, you get toasts instead. Clicking a banner brings RuSToat forward on that channel, and reading a channel, here or in another Stoat client, removes its banner from Notification Center.
-- **Expect a Keychain prompt on the first bundled run too.** The bundle has a different code identity from the `cargo run` binary, so it gets the same prompt.
+- **The bundle and `cargo run` share one code identity,** so a Keychain "Always Allow" given to one covers the other.
 
 ### Self-hosted instances
 
@@ -52,13 +60,21 @@ Saved sessions are stored per API URL, so switching instances never sends one se
 
 ## Your session and the Keychain
 
-After you log in, the session token is saved in your login Keychain under the service `chat.stoat.gpui-poc`, with the API URL as the account. The next launch signs you in automatically.
+After you log in, the session token is saved in your login Keychain under the service `com.chrishultin.rustoat`, with the API URL as the account. The next launch signs you in automatically.
 
-- **Log Out** (in the Stoat menu, or the button in the window) removes the Keychain item and ends the session on Stoat. If Stoat can't be reached, you're still logged out locally; revoke the session from Stoat's Settings → Sessions, where it's listed as "Stoat GPUI POC".
-- **Expect a Keychain prompt during development.** macOS ties Keychain access to the app's code signature, and every `cargo build` produces a new unsigned binary. After a rebuild, macOS may ask whether `stoat-gpui` can use the saved item. Choose **Always Allow**. This is expected and won't happen with a signed release build.
+- **Log Out** (in the Stoat menu, or the button in the window) removes the Keychain item and ends the session on Stoat. If Stoat can't be reached, you're still logged out locally; revoke the session from Stoat's Settings → Sessions, where it's listed as "RuSToat" (sessions from before the rename keep the name "Stoat GPUI POC").
+- **One Keychain prompt, then none.** macOS ties Keychain access to the app's code signature. The first run asks whether RuSToat can use its item; choose **Always Allow**. Because builds are signed with a stable identity (see [Code signing](#code-signing)), rebuilds don't ask again.
 - If your saved session can't be checked at startup (offline, or a Stoat outage), the app keeps it and offers **Retry**. It only discards a saved session that Stoat itself rejects.
 
-The app also remembers where you were: the open server, and the last channel you viewed in each server and in Home. Switching back to a server returns you to its channel, and the next launch opens where you left off. This is saved in `~/Library/Application Support/chat.stoat.rustoat/places.json`, per instance and account. Deleting the file just starts you at Home.
+The app also remembers where you were: the open server, and the last channel you viewed in each server and in Home. Switching back to a server returns you to its channel, and the next launch opens where you left off. This is saved in `~/Library/Application Support/com.chrishultin.rustoat/places.json`, per instance and account. Deleting the file just starts you at Home.
+
+### Moving over from the old names
+
+RuSToat used to run as `chat.stoat.rustoat` with the Keychain service `chat.stoat.gpui-poc`. The first launch under the new identifier moves everything over:
+
+- **Your saved session** is copied to the new Keychain service and the old item is deleted. macOS asks once more for the old item, since an older, differently signed build created it. Choose **Allow**.
+- **The Application Support folder** `chat.stoat.rustoat` is renamed to `com.chrishultin.rustoat`, unless the new one already exists.
+- **macOS asks for notification permission again,** once, for the new bundle identifier. The old "RuSToat" entry in System Settings → Notifications can be removed.
 
 ## Built on Stoat's own crates
 

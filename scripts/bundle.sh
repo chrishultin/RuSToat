@@ -3,7 +3,8 @@
 #
 # macOS only lets an app post notification banners when it runs from a
 # bundle with an identifier; a plain `cargo run` binary gets in-app toasts
-# instead. The bundle is ad-hoc signed, which is enough to run locally.
+# instead. The bundle is signed by scripts/sign.sh (your Apple Development
+# identity, or ad hoc without one), which is enough to run locally.
 #
 # Usage: scripts/bundle.sh [debug|release]   (default: debug)
 # Prints the bundle's path as the last line of output.
@@ -33,7 +34,7 @@ cat > "$app/Contents/Info.plist" <<EOF
 <plist version="1.0">
 <dict>
   <key>CFBundleIdentifier</key>
-  <string>chat.stoat.rustoat</string>
+  <string>com.chrishultin.rustoat</string>
   <key>CFBundleName</key>
   <string>RuSToat</string>
   <key>CFBundleDisplayName</key>
@@ -56,5 +57,6 @@ cat > "$app/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-codesign --force --sign - --identifier chat.stoat.rustoat "$app"
+identity="$(scripts/sign.sh "$app")"
+echo "signed as: $identity" >&2
 echo "$app"

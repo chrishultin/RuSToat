@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use stoat_gpui::api::{ApiError, StoatClient};
-use stoat_gpui::session::{self, MemoryStore, Restored, TokenStore};
+use stoat_gpui::session::{self, MemoryStore, MigratingStore, Restored, TokenStore};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -216,4 +216,79 @@ async fn log_out_with_already_revoked_token_counts_as_success() {
     server_result.unwrap();
     local_result.unwrap();
     assert_eq!(store.load(client.base_url()).unwrap(), None);
+}
+
+#[test]
+fn a_legacy_token_moves_to_the_new_store() {
+    let current = MemoryStore::default();
+    let legacy = MemoryStore::default();
+    legacy.save("https://a", "old-token").unwrap();
+
+    let token = session::load_migrating(&current, &legacy, "https://a").unwrap();
+    assert_eq!(token.as_deref(), Some("old-token"));
+    assert_eq!(
+        current.load("https://a").unwrap().as_deref(),
+        Some("old-token")
+    );
+    assert_eq!(legacy.load("https://a").unwrap(), None);
+}
+
+#[test]
+fn an_existing_new_token_wins_and_the_legacy_one_is_left_alone() {
+    let current = MemoryStore::default();
+    let legacy = MemoryStore::default();
+    current.save("https://a", "new-token").unwrap();
+    legacy.save("https://a", "old-token").unwrap();
+
+    let token = session::load_migrating(&current, &legacy, "https://a").unwrap();
+    assert_eq!(token.as_deref(), Some("new-token"));
+    assert_eq!(
+        legacy.load("https://a").unwrap().as_deref(),
+        Some("old-token")
+    );
+}
+
+#[test]
+fn no_token_in_either_store_gives_nothing() {
+    let current = MemoryStore::default();
+    let legacy = MemoryStore::default();
+    legacy.save("https://other", "other-token").unwrap();
+
+    assert_eq!(
+        session::load_migrating(&current, &legacy, "https://a").unwrap(),
+        None
+    );
+    assert_eq!(current.load("https://a").unwrap(), None);
+    assert_eq!(
+        legacy.load("https://other").unwrap().as_deref(),
+        Some("other-token")
+    );
+}
+
+#[tokio::test]
+async fn restore_signs_in_with_a_migrated_token() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/users/@me"))
+        .and(header("x-session-token", "old-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(users_me()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = StoatClient::new(server.uri());
+    let legacy = MemoryStore::default();
+    legacy.save(client.base_url(), "old-token").unwrap();
+    let store = Arc::new(MigratingStore::new(MemoryStore::default(), legacy));
+
+    let restored = session::restore(store.clone(), client.clone()).await;
+    assert!(
+        matches!(restored, Restored::SignedIn { .. }),
+        "got {restored:?}"
+    );
+    // Now saved under the new store: loading again doesn't need the legacy one.
+    assert_eq!(
+        store.load(client.base_url()).unwrap().as_deref(),
+        Some("old-token")
+    );
 }

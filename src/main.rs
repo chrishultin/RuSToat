@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use gpui_kit::*;
-use stoat_gpui::session::{KeychainStore, TokenStore};
+use stoat_gpui::session::{MigratingStore, TokenStore};
 use stoat_gpui::{runtime, ui};
 
 actions!(stoat, [Quit, LogOut]);
@@ -46,7 +46,7 @@ fn main() {
                 ..Default::default()
             };
 
-            let store: Arc<dyn TokenStore> = Arc::new(KeychainStore::new());
+            let store: Arc<dyn TokenStore> = Arc::new(MigratingStore::keychain());
             let (window, root) = gpui_kit::open_window(options, cx, |window, cx| {
                 cx.new(|cx| ui::AppRoot::new(store, window, cx))
             })

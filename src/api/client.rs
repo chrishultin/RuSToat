@@ -22,7 +22,7 @@ const UPLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 pub const DEFAULT_API_URL: &str = "https://api.stoat.chat";
 
 /// Session name shown in Stoat's Settings → Sessions, so it's easy to revoke.
-pub const SESSION_FRIENDLY_NAME: &str = "Stoat GPUI POC";
+pub const SESSION_FRIENDLY_NAME: &str = "RuSToat";
 
 /// The part of `GET /` this client uses.
 ///

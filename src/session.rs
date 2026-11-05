@@ -13,8 +13,12 @@ use anyhow::Context as _;
 use crate::api::models::User;
 use crate::api::{ApiError, StoatClient};
 
-/// Keychain service name for this app's entries.
-pub const KEYCHAIN_SERVICE: &str = "chat.stoat.gpui-poc";
+/// Keychain service name for this app's entries (the bundle identifier).
+pub const KEYCHAIN_SERVICE: &str = "com.chrishultin.rustoat";
+
+/// The service name used before RuSToat had its own bundle identifier.
+/// Items found there are moved to [`KEYCHAIN_SERVICE`] on first load.
+pub const LEGACY_KEYCHAIN_SERVICE: &str = "chat.stoat.gpui-poc";
 
 /// Somewhere to keep one session token per Stoat instance (API base URL).
 ///
@@ -75,6 +79,79 @@ impl TokenStore for KeychainStore {
             Err(err) => Err(err).context("deleting session token from Keychain"),
         }
     }
+}
+
+/// A store that moves tokens over from an older store the first time
+/// they're loaded (see [`load_migrating`]). Saves and clears only touch the
+/// current store.
+pub struct MigratingStore<C, L> {
+    current: C,
+    legacy: L,
+}
+
+impl<C: TokenStore, L: TokenStore> MigratingStore<C, L> {
+    pub fn new(current: C, legacy: L) -> Self {
+        Self { current, legacy }
+    }
+}
+
+impl MigratingStore<KeychainStore, KeychainStore> {
+    /// The real store: [`KEYCHAIN_SERVICE`], taking over items from
+    /// [`LEGACY_KEYCHAIN_SERVICE`].
+    pub fn keychain() -> Self {
+        Self::new(
+            KeychainStore::new(),
+            KeychainStore::with_service(LEGACY_KEYCHAIN_SERVICE),
+        )
+    }
+}
+
+impl<C: TokenStore, L: TokenStore> TokenStore for MigratingStore<C, L> {
+    fn load(&self, instance: &str) -> anyhow::Result<Option<String>> {
+        load_migrating(&self.current, &self.legacy, instance)
+    }
+
+    fn save(&self, instance: &str, token: &str) -> anyhow::Result<()> {
+        self.current.save(instance, token)
+    }
+
+    fn clear(&self, instance: &str) -> anyhow::Result<()> {
+        self.current.clear(instance)
+    }
+}
+
+/// Load `instance`'s token from `current`, or move it there from `legacy`.
+///
+/// A token already in `current` wins, and `legacy` isn't touched. Otherwise
+/// a legacy token is saved to `current` and then deleted from `legacy`. If
+/// the save fails the legacy item is kept, so the next launch tries again;
+/// either way the token is returned so this launch can sign in.
+pub fn load_migrating(
+    current: &dyn TokenStore,
+    legacy: &dyn TokenStore,
+    instance: &str,
+) -> anyhow::Result<Option<String>> {
+    if let Some(token) = current.load(instance)? {
+        return Ok(Some(token));
+    }
+    let token = match legacy.load(instance) {
+        Ok(Some(token)) => token,
+        Ok(None) => return Ok(None),
+        Err(err) => {
+            log::warn!("couldn't read the legacy saved session: {err:#}");
+            return Ok(None);
+        }
+    };
+    match current.save(instance, &token) {
+        Ok(()) => {
+            log::info!("moved the saved session to the new Keychain service");
+            if let Err(err) = legacy.clear(instance) {
+                log::warn!("couldn't delete the legacy saved session: {err:#}");
+            }
+        }
+        Err(err) => log::warn!("couldn't move the legacy saved session: {err:#}"),
+    }
+    Ok(Some(token))
 }
 
 /// An in-memory store for tests, and a fallback if the Keychain is unavailable.
@@ -209,7 +286,7 @@ mod tests {
     }
 
     /// Writes, reads and deletes a throwaway item in the real login Keychain
-    /// (service `chat.stoat.gpui-poc.test`). Run with `cargo test -- --ignored`.
+    /// (service `com.chrishultin.rustoat.test`). Run with `cargo test -- --ignored`.
     #[test]
     #[ignore = "touches the real macOS Keychain"]
     fn keychain_store_round_trips() {

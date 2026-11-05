@@ -12,6 +12,42 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
+/// The app's folder name in Application Support (the bundle identifier).
+pub const APP_ID: &str = "com.chrishultin.rustoat";
+
+/// The folder name used before RuSToat had its own bundle identifier.
+const LEGACY_APP_ID: &str = "chat.stoat.rustoat";
+
+/// `~/Library/Application Support`, or `None` without a home directory.
+pub fn support_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(Path::new(&home).join("Library/Application Support"))
+}
+
+/// The app's own folder in Application Support, moved over from its legacy
+/// name the first time it's asked for.
+pub fn app_dir() -> Option<PathBuf> {
+    let base = support_dir()?;
+    if let Err(err) = migrate_app_dir(&base) {
+        log::warn!("couldn't move the old app folder: {err:#}");
+    }
+    Some(base.join(APP_ID))
+}
+
+/// Rename `base/chat.stoat.rustoat` to `base/com.chrishultin.rustoat`, if
+/// the old folder exists and the new one doesn't. Returns whether it moved.
+pub fn migrate_app_dir(base: &Path) -> anyhow::Result<bool> {
+    let old = base.join(LEGACY_APP_ID);
+    let new = base.join(APP_ID);
+    if !old.is_dir() || new.exists() {
+        return Ok(false);
+    }
+    std::fs::rename(&old, &new)
+        .with_context(|| format!("renaming {} to {}", old.display(), new.display()))?;
+    log::info!("moved {} to {}", old.display(), new.display());
+    Ok(true)
+}
+
 /// Which list the channel column shows.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Place {
@@ -97,13 +133,10 @@ pub struct PlacesFile {
 }
 
 impl PlacesFile {
-    /// The real file, `~/Library/Application Support/chat.stoat.rustoat/places.json`.
+    /// The real file, `~/Library/Application Support/com.chrishultin.rustoat/places.json`.
     /// `None` if there's no home directory to put it in.
     pub fn for_account(instance: &str, user: &str) -> Option<Self> {
-        let home = std::env::var_os("HOME")?;
-        let path =
-            Path::new(&home).join("Library/Application Support/chat.stoat.rustoat/places.json");
-        Some(Self::at(path, instance, user))
+        Some(Self::at(app_dir()?.join("places.json"), instance, user))
     }
 
     /// A file somewhere else (tests).
@@ -219,6 +252,41 @@ mod tests {
             Places::default()
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_legacy_app_folder_is_renamed() {
+        let base = temp_dir("migrate");
+        std::fs::create_dir_all(base.join(LEGACY_APP_ID)).unwrap();
+        std::fs::write(base.join(LEGACY_APP_ID).join("places.json"), b"{}").unwrap();
+        assert!(migrate_app_dir(&base).unwrap());
+        assert!(!base.join(LEGACY_APP_ID).exists());
+        assert_eq!(
+            std::fs::read(base.join(APP_ID).join("places.json")).unwrap(),
+            b"{}"
+        );
+        // Nothing left to move.
+        assert!(!migrate_app_dir(&base).unwrap());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn an_existing_app_folder_is_left_alone() {
+        let base = temp_dir("migrate-both");
+        std::fs::create_dir_all(base.join(LEGACY_APP_ID)).unwrap();
+        std::fs::create_dir_all(base.join(APP_ID)).unwrap();
+        std::fs::write(base.join(LEGACY_APP_ID).join("places.json"), b"old").unwrap();
+        std::fs::write(base.join(APP_ID).join("places.json"), b"new").unwrap();
+        assert!(!migrate_app_dir(&base).unwrap());
+        assert_eq!(
+            std::fs::read(base.join(APP_ID).join("places.json")).unwrap(),
+            b"new"
+        );
+        assert!(base.join(LEGACY_APP_ID).exists());
+        // And with no folders at all, nothing happens.
+        let empty = temp_dir("migrate-none");
+        assert!(!migrate_app_dir(&empty).unwrap());
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
