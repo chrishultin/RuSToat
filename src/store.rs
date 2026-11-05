@@ -7,8 +7,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use crate::api::events::Ready;
 use crate::api::models::{
     AllMemberResponse, BulkMessageResponse, Channel, Embed, Emoji, EmojiParent, FieldsChannel, FieldsMember,
-    FieldsMessage, FieldsUser, File, Member, MemberCompositeKey, Message, MessageFlags, PartialChannel,
-    PartialMember, PartialMessage, PartialUser, Presence, ReplyIntent, Server, SystemMessage, User,
+    FieldsMessage, FieldsRole, FieldsServer, FieldsUser, File, Member, MemberCompositeKey, Message,
+    MessageFlags, PartialChannel, PartialMember, PartialMessage, PartialRole, PartialServer, PartialUser,
+    Presence, ReplyIntent, Role, Server, SystemMessage, User,
 };
 use crate::attachment::AttachmentView;
 use crate::complete::{Candidate, TokenRef};
@@ -2398,6 +2399,127 @@ impl ChatStore {
         before != shown(user)
     }
 
+    /// A server changed (`ServerUpdate`), merged with the backend's own
+    /// `Server::apply_options`. Servers that aren't cached are ignored.
+    /// Returns true if it was known.
+    pub fn apply_server_update(
+        &mut self,
+        id: &str,
+        data: PartialServer,
+        clear: &[FieldsServer],
+    ) -> bool {
+        let Some(server) = self.servers.get_mut(id) else {
+            return false;
+        };
+        server.apply_options(data);
+        for field in clear {
+            match field {
+                FieldsServer::Description => server.description = None,
+                FieldsServer::Categories => server.categories = None,
+                FieldsServer::SystemMessages => server.system_messages = None,
+                FieldsServer::Icon => server.icon = None,
+                FieldsServer::Banner => server.banner = None,
+            }
+        }
+        true
+    }
+
+    /// A role changed or was created (`ServerRoleUpdate`). A known role is
+    /// merged with the backend's own `Role::apply_options`. An unknown one is
+    /// new, and `data` is the whole role; without a name it can't be built,
+    /// so it's ignored until the next reconnect. Returns true if the server's
+    /// roles changed.
+    pub fn apply_role_update(
+        &mut self,
+        server: &str,
+        role_id: &str,
+        data: PartialRole,
+        clear: &[FieldsRole],
+    ) -> bool {
+        let Some(server) = self.servers.get_mut(server) else {
+            return false;
+        };
+        let count = server.roles.len() as i64;
+        let role = match server.roles.get_mut(role_id) {
+            Some(role) => {
+                role.apply_options(data);
+                role
+            }
+            None => {
+                let Some(name) = data.name else {
+                    log::warn!(
+                        "ignoring new role {role_id} in {} without a name",
+                        server.id
+                    );
+                    return false;
+                };
+                let role = Role {
+                    id: role_id.to_string(),
+                    name,
+                    permissions: data.permissions.unwrap_or_default(),
+                    colour: data.colour,
+                    hoist: data.hoist.unwrap_or(false),
+                    // New roles start at the bottom.
+                    rank: data.rank.unwrap_or(count),
+                    icon: data.icon,
+                    owner: data.owner,
+                };
+                server.roles.entry(role_id.to_string()).or_insert(role)
+            }
+        };
+        // The map's key is the role's ID, whatever `data` said.
+        role.id = role_id.to_string();
+        for field in clear {
+            match field {
+                FieldsRole::Colour => role.colour = None,
+                FieldsRole::Icon => role.icon = None,
+            }
+        }
+        true
+    }
+
+    /// A role was deleted (`ServerRoleDelete`). Stoat sends nothing else, so
+    /// it's taken off every cached member and channel override here too.
+    /// Returns true if it was known.
+    pub fn apply_role_delete(&mut self, server: &str, role_id: &str) -> bool {
+        let Some(known) = self.servers.get_mut(server) else {
+            return false;
+        };
+        let removed = known.roles.remove(role_id).is_some();
+        for ((member_server, _), member) in &mut self.members {
+            if member_server == server {
+                member.roles.retain(|id| id != role_id);
+            }
+        }
+        for channel in self.channels.values_mut() {
+            if let Channel::TextChannel {
+                server: channel_server,
+                role_permissions,
+                ..
+            } = channel
+                && channel_server == server
+            {
+                role_permissions.remove(role_id);
+            }
+        }
+        removed
+    }
+
+    /// The server's roles were reordered (`ServerRoleRanksUpdate`): each
+    /// listed role's rank becomes its index, so the first is the highest.
+    /// Returns true if the server is known.
+    pub fn apply_role_ranks(&mut self, server: &str, ranks: &[String]) -> bool {
+        let Some(server) = self.servers.get_mut(server) else {
+            return false;
+        };
+        for (rank, id) in ranks.iter().enumerate() {
+            if let Some(role) = server.roles.get_mut(id) {
+                role.rank = rank as i64;
+            }
+        }
+        true
+    }
+
     /// Cache a user fetched on their own (someone who just joined a server).
     pub fn add_user(&mut self, user: User) {
         self.users.insert(user.id.clone(), user);
@@ -2548,6 +2670,7 @@ impl ChatStore {
             .map(|s| {
                 let visible = s.channels.iter().filter(|id| {
                     matches!(self.channels.get(*id), Some(Channel::TextChannel { .. }))
+                        && self.shows_channel(id)
                 });
                 let (unread, mentions) = visible.fold((false, 0), |(unread, mentions), id| {
                     let shows_dot = self.is_unread(id) && !self.is_muted(id);
@@ -2565,9 +2688,25 @@ impl ChatStore {
             .collect()
     }
 
+    /// Whether the channel list shows `channel`. Server channels the user
+    /// can't view (a role edit since `Ready` hid them) aren't shown, except
+    /// while the user's own membership of the server isn't known yet (just
+    /// after joining it), when there's nothing to work it out from.
+    pub fn shows_channel(&self, channel: &str) -> bool {
+        match self.channels.get(channel) {
+            Some(Channel::TextChannel { server, .. }) => {
+                self.member(server, &self.me).is_none()
+                    || crate::permissions::can_view(self, &self.me, channel)
+            }
+            Some(_) => true,
+            None => false,
+        }
+    }
+
     /// A server's text channels: uncategorized ones first (in the server's
     /// order), then each category in order. Channels we can't see (missing
-    /// from `Ready`) and empty categories are left out.
+    /// from `Ready`, or hidden since: see [`Self::shows_channel`]) and empty
+    /// categories are left out.
     pub fn server_channels(&self, server_id: &str) -> Vec<ChannelSection> {
         let Some(server) = self.servers.get(server_id) else {
             return Vec::new();
@@ -2583,6 +2722,7 @@ impl ChatStore {
             .channels
             .iter()
             .filter(|id| !categorized.contains(id.as_str()))
+            .filter(|id| self.shows_channel(id))
             .filter_map(|id| self.channel_entry(id))
             .collect();
         if !uncategorized.is_empty() {
@@ -2595,6 +2735,7 @@ impl ChatStore {
             let channels: Vec<ChannelEntry> = category
                 .channels
                 .iter()
+                .filter(|id| self.shows_channel(id))
                 .filter_map(|id| self.channel_entry(id))
                 .collect();
             if !channels.is_empty() {

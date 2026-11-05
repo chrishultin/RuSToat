@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
 use revolt_models::v0::{
-    Channel, ChannelUnread, Embed, Emoji, FieldsChannel, FieldsMember, FieldsMessage, FieldsUser,
-    Member, MemberCompositeKey, Message, PartialChannel, PartialMember, PartialMessage,
-    PartialUser, Server, User,
+    Channel, ChannelUnread, Embed, Emoji, FieldsChannel, FieldsMember, FieldsMessage, FieldsRole,
+    FieldsServer, FieldsUser, Member, MemberCompositeKey, Message, PartialChannel, PartialMember,
+    PartialMessage, PartialRole, PartialServer, PartialUser, Server, User,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -158,6 +158,33 @@ pub enum ServerEvent {
         id: String,
         data: Box<PartialUser>,
         clear: Vec<FieldsUser>,
+    },
+    /// A server changed (name, icon, default permissions…): merge `data`,
+    /// then clear the `clear` fields.
+    ServerUpdate {
+        id: String,
+        data: Box<PartialServer>,
+        clear: Vec<FieldsServer>,
+    },
+    /// A role changed, or was created: then `data` is the whole role. Merge
+    /// `data`, then clear the `clear` fields.
+    ServerRoleUpdate {
+        server: String,
+        role_id: String,
+        data: Box<PartialRole>,
+        clear: Vec<FieldsRole>,
+    },
+    /// A role was deleted. Nothing else is sent: members and channel
+    /// overrides that had it lose it without their own events.
+    ServerRoleDelete {
+        server: String,
+        role_id: String,
+    },
+    /// The server's roles were reordered: every role, highest first (a
+    /// role's index is its rank).
+    ServerRoleRanksUpdate {
+        server: String,
+        ranks: Vec<String>,
     },
     /// An event type this client doesn't handle (yet). Holds the `type` tag.
     Unknown(String),
@@ -476,6 +503,68 @@ fn decode(mut value: Value, out: &mut Vec<ServerEvent>) {
                 id: u.id,
                 data: Box::new(u.data),
                 clear: u.clear,
+            }))
+        }
+        "ServerUpdate" => {
+            #[derive(Deserialize)]
+            struct Update {
+                id: String,
+                data: PartialServer,
+                #[serde(default)]
+                clear: Vec<FieldsServer>,
+            }
+            out.push(decode_as(value, &kind, |u: Update| {
+                ServerEvent::ServerUpdate {
+                    id: u.id,
+                    data: Box::new(u.data),
+                    clear: u.clear,
+                }
+            }))
+        }
+        // `id` is the server. The role is the top-level `role_id`, not
+        // whatever ID `data` carries.
+        "ServerRoleUpdate" => {
+            #[derive(Deserialize)]
+            struct Update {
+                id: String,
+                role_id: String,
+                data: PartialRole,
+                #[serde(default)]
+                clear: Vec<FieldsRole>,
+            }
+            out.push(decode_as(value, &kind, |u: Update| {
+                ServerEvent::ServerRoleUpdate {
+                    server: u.id,
+                    role_id: u.role_id,
+                    data: Box::new(u.data),
+                    clear: u.clear,
+                }
+            }))
+        }
+        "ServerRoleDelete" => {
+            #[derive(Deserialize)]
+            struct Delete {
+                id: String,
+                role_id: String,
+            }
+            out.push(decode_as(value, &kind, |d: Delete| {
+                ServerEvent::ServerRoleDelete {
+                    server: d.id,
+                    role_id: d.role_id,
+                }
+            }))
+        }
+        "ServerRoleRanksUpdate" => {
+            #[derive(Deserialize)]
+            struct Ranks {
+                id: String,
+                ranks: Vec<String>,
+            }
+            out.push(decode_as(value, &kind, |r: Ranks| {
+                ServerEvent::ServerRoleRanksUpdate {
+                    server: r.id,
+                    ranks: r.ranks,
+                }
             }))
         }
         other => out.push(ServerEvent::Unknown(other.to_string())),
@@ -873,7 +962,11 @@ async fn session(
                         | ServerEvent::UserUpdate { .. }
                         | ServerEvent::ChannelStartTyping { .. }
                         | ServerEvent::ChannelStopTyping { .. }
-                        | ServerEvent::EmojiDelete { .. }) => {
+                        | ServerEvent::EmojiDelete { .. }
+                        | ServerEvent::ServerUpdate { .. }
+                        | ServerEvent::ServerRoleUpdate { .. }
+                        | ServerEvent::ServerRoleDelete { .. }
+                        | ServerEvent::ServerRoleRanksUpdate { .. }) => {
                             Some(ConnectionEvent::Event(message_event))
                         }
                     };
@@ -927,9 +1020,9 @@ mod tests {
 
     #[test]
     fn unknown_event_types_are_kept_as_unknown() {
-        let events = parse_frame(r#"{"type":"ServerRoleUpdate","id":"s","role_id":"r"}"#);
+        let events = parse_frame(r#"{"type":"WebhookCreate","id":"w"}"#);
         assert!(
-            matches!(events.as_slice(), [ServerEvent::Unknown(kind)] if kind == "ServerRoleUpdate")
+            matches!(events.as_slice(), [ServerEvent::Unknown(kind)] if kind == "WebhookCreate")
         );
     }
 
@@ -1162,5 +1255,96 @@ mod tests {
         // No `clear` at all is fine too.
         let events = parse_frame(r#"{"type":"UserUpdate","id":"u-ada","data":{}}"#);
         assert!(matches!(events.as_slice(), [ServerEvent::UserUpdate { clear, .. }] if clear.is_empty()));
+    }
+
+    #[test]
+    fn server_update_decodes_data_and_clear() {
+        let events = parse_frame(
+            r#"{"type":"ServerUpdate","id":"srv-1","data":{"name":"Renamed","default_permissions":1048576},"clear":["Icon","Description"]}"#,
+        );
+        let [ServerEvent::ServerUpdate { id, data, clear }] = events.as_slice() else {
+            panic!("got {events:?}");
+        };
+        assert_eq!(id, "srv-1");
+        assert_eq!(data.name.as_deref(), Some("Renamed"));
+        assert_eq!(data.default_permissions, Some(1 << 20));
+        assert_eq!(clear, &[FieldsServer::Icon, FieldsServer::Description]);
+        // A default-permissions change carries only that, and no `clear`.
+        let events =
+            parse_frame(r#"{"type":"ServerUpdate","id":"srv-1","data":{"default_permissions":0}}"#);
+        assert!(matches!(
+            events.as_slice(),
+            [ServerEvent::ServerUpdate { data, clear, .. }]
+                if data.default_permissions == Some(0) && data.name.is_none() && clear.is_empty()
+        ));
+    }
+
+    #[test]
+    fn role_update_decodes_a_created_role() {
+        // What creating a role sends: the whole role, as a partial.
+        let events = parse_frame(
+            r#"{"type":"ServerRoleUpdate","id":"srv-1","role_id":"r-new",
+                "data":{"_id":"r-new","name":"New role","permissions":{"a":0,"d":0},"hoist":false,"rank":3},
+                "clear":[]}"#,
+        );
+        let [
+            ServerEvent::ServerRoleUpdate {
+                server,
+                role_id,
+                data,
+                clear,
+            },
+        ] = events.as_slice()
+        else {
+            panic!("got {events:?}");
+        };
+        assert_eq!((server.as_str(), role_id.as_str()), ("srv-1", "r-new"));
+        assert_eq!(data.name.as_deref(), Some("New role"));
+        assert_eq!(data.permissions.map(|p| (p.a, p.d)), Some((0, 0)));
+        assert_eq!((data.hoist, data.rank), (Some(false), Some(3)));
+        assert!(clear.is_empty());
+    }
+
+    #[test]
+    fn role_update_decodes_an_edit() {
+        let events = parse_frame(
+            r#"{"type":"ServerRoleUpdate","id":"srv-1","role_id":"r-mod","data":{"name":"Moderators"},"clear":["Colour"]}"#,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [ServerEvent::ServerRoleUpdate { data, clear, .. }]
+                if data.name.as_deref() == Some("Moderators")
+                    && data.colour.is_none()
+                    && data.permissions.is_none()
+                    && clear == &[FieldsRole::Colour]
+        ));
+        // A permission change: only `permissions`, and no `clear`.
+        let events = parse_frame(
+            r#"{"type":"ServerRoleUpdate","id":"srv-1","role_id":"r-mod","data":{"permissions":{"a":8388608,"d":0}}}"#,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [ServerEvent::ServerRoleUpdate { data, clear, .. }]
+                if data.permissions.map(|p| p.a) == Some(1 << 23) && clear.is_empty()
+        ));
+    }
+
+    #[test]
+    fn role_delete_and_ranks_decode() {
+        let events = parse_frame(
+            r#"{"type":"Bulk","v":[
+                {"type":"ServerRoleDelete","id":"srv-1","role_id":"r-old"},
+                {"type":"ServerRoleRanksUpdate","id":"srv-1","ranks":["r-b","r-a"]}
+            ]}"#,
+        );
+        assert!(matches!(
+            &events[0],
+            ServerEvent::ServerRoleDelete { server, role_id } if server == "srv-1" && role_id == "r-old"
+        ));
+        assert!(matches!(
+            &events[1],
+            ServerEvent::ServerRoleRanksUpdate { server, ranks }
+                if server == "srv-1" && ranks == &["r-b", "r-a"]
+        ));
     }
 }

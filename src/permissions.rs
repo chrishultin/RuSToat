@@ -7,10 +7,10 @@
 //! That crate asks its questions through an `async` trait, but every answer
 //! here comes from memory, so each call is run to completion on the spot.
 //!
-//! What the client can know limits the answer. Server roles and channel
-//! overrides are as of `Ready` plus live `ChannelUpdate`s: this client doesn't
-//! apply `ServerUpdate` or `ServerRoleUpdate` yet, so a role edited while it's
-//! running shows up after the next reconnect.
+//! What the client can know limits the answer. Server roles, default
+//! permissions and channel overrides are as of `Ready`, plus the live
+//! `ServerUpdate`, `ServerRoleUpdate`, `ServerRoleDelete`,
+//! `ServerRoleRanksUpdate` and `ChannelUpdate` events since.
 
 use revolt_permissions::{
     ChannelPermission, ChannelType, DEFAULT_PERMISSION_DIRECT_MESSAGE, Override, PermissionQuery,

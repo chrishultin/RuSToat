@@ -709,6 +709,42 @@ impl ChatView {
                     return;
                 }
             }
+            ConnectionEvent::Event(ServerEvent::ServerUpdate { id, data, clear }) => {
+                log::debug!("live: server {id} updated");
+                if !self.store.apply_server_update(&id, *data, &clear) {
+                    return;
+                }
+                self.server_permissions_changed(&id, cx);
+            }
+            ConnectionEvent::Event(ServerEvent::ServerRoleUpdate {
+                server,
+                role_id,
+                data,
+                clear,
+            }) => {
+                log::debug!("live: role {role_id} of {server} updated");
+                if !self
+                    .store
+                    .apply_role_update(&server, &role_id, *data, &clear)
+                {
+                    return;
+                }
+                self.server_permissions_changed(&server, cx);
+            }
+            ConnectionEvent::Event(ServerEvent::ServerRoleDelete { server, role_id }) => {
+                log::debug!("live: role {role_id} of {server} deleted");
+                if !self.store.apply_role_delete(&server, &role_id) {
+                    return;
+                }
+                self.server_permissions_changed(&server, cx);
+            }
+            ConnectionEvent::Event(ServerEvent::ServerRoleRanksUpdate { server, ranks }) => {
+                log::debug!("live: roles of {server} reordered");
+                if !self.store.apply_role_ranks(&server, &ranks) {
+                    return;
+                }
+                self.server_permissions_changed(&server, cx);
+            }
             ConnectionEvent::Event(_) => return,
             ConnectionEvent::Disconnected { reason, retry_in } => {
                 // Their stops may never arrive now.
@@ -724,6 +760,29 @@ impl ChatView {
             }
         }
         cx.notify();
+    }
+
+    /// `server`'s roles or default permissions changed: member list sections
+    /// and colours, who may pin (on every loaded row), and which channels the
+    /// user can see may all have too. If the open channel is now hidden, the
+    /// server's first channel opens instead.
+    fn server_permissions_changed(&mut self, server: &str, cx: &mut Context<Self>) {
+        self.forget_member_lists();
+        let loaded: Vec<String> = self
+            .panes
+            .keys()
+            .filter(|channel| self.store.channel_server(channel) == Some(server))
+            .cloned()
+            .collect();
+        for channel in loaded {
+            self.sync_pane(&channel, cx);
+        }
+        let selected = self.selected.len();
+        self.drop_stale_selection();
+        if self.selected.len() != selected {
+            self.remember_places();
+        }
+        self.ensure_current_loaded(cx);
     }
 
     /// The user left `server` (or was kicked or banned): drop it, its
@@ -787,15 +846,17 @@ impl ChatView {
         .detach();
     }
 
-    /// After a (re)connect, forget selections that point at things that are gone.
+    /// After a (re)connect or a permission change, forget selections that
+    /// point at things that are gone.
     fn drop_stale_selection(&mut self) {
         if let Place::Server(id) = &self.place
             && self.store.server(id).is_none()
         {
             self.place = Place::Home;
         }
+        // Also channels a role edit has hidden.
         self.selected
-            .retain(|_, channel| self.store.channel(channel).is_some());
+            .retain(|_, channel| self.store.shows_channel(channel));
     }
 
     /// Image URLs are known: give them to the store and redraw anything loaded.

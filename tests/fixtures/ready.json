@@ -16,11 +16,11 @@
         { "id": "cat-archive", "title": "Archive", "channels": ["ch-gone"] }
       ],
       "icon": { "_id": "file-alpha-icon", "tag": "icons", "filename": "alpha.png", "metadata": { "type": "Image", "width": 128, "height": 128 }, "content_type": "image/png", "size": 2048 },
-      "roles": {}, "default_permissions": 0, "approximate_member_count": 12
+      "roles": {}, "default_permissions": 2276038022144, "approximate_member_count": 12
     },
     {
       "_id": "srv-beta", "owner": "u-me", "name": "beta lounge",
-      "channels": ["ch-beta"], "default_permissions": 0, "approximate_member_count": 2
+      "channels": ["ch-beta"], "default_permissions": 2276038022144, "approximate_member_count": 2
     }
   ],
   "channels": [
