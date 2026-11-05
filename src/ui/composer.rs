@@ -3,14 +3,16 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Escape, InputEvent, Position, Textarea, TextareaState};
+use gpui_kit::component::input::{
+    Escape, InputEvent, MoveUp, Position, Textarea, TextareaState,
+};
 use gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::api::models::ReplyIntent;
 use crate::draft::{
-    Draft, Drafts, MAX_MESSAGE_CHARS, ReplyTarget, SendCheck, TooManyReplies, char_count,
+    Draft, Drafts, EditStash, MAX_MESSAGE_CHARS, ReplyTarget, SendCheck, TooManyReplies, char_count,
     check_send,
 };
 
@@ -21,7 +23,15 @@ pub enum ComposerEvent {
         text: String,
         replies: Vec<ReplyIntent>,
     },
+    /// Save new text for the user's message `id` (already checked and trimmed).
+    Edit { id: String, content: String },
+    /// Up in an empty box: edit the user's last message.
+    EditLast,
 }
+
+/// Shown when an edit would leave the message empty (Stoat needs at least
+/// one character).
+const EMPTY_EDIT_TEXT: &str = "To delete the message, use Delete.";
 
 pub struct Composer {
     input: Entity<TextareaState>,
@@ -30,6 +40,10 @@ pub struct Composer {
     /// What the message replies to. (Its text lives in `input`.)
     draft: Draft,
     drafts: Drafts,
+    /// Editing one of the user's messages, and the draft set aside meanwhile.
+    editing: EditStash,
+    /// Why Enter didn't do anything (cleared when the text changes).
+    hint: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -53,7 +67,10 @@ impl Composer {
             |this, _, event: &InputEvent, window, cx| match event {
                 InputEvent::PressEnter { shift: false, .. } => this.submit(window, cx),
                 // The character count follows the text.
-                InputEvent::Change => cx.notify(),
+                InputEvent::Change => {
+                    this.hint = None;
+                    cx.notify()
+                }
                 _ => {}
             },
         )];
@@ -62,6 +79,8 @@ impl Composer {
             channel: None,
             draft: Draft::default(),
             drafts: Drafts::default(),
+            editing: EditStash::default(),
+            hint: None,
             _subscriptions: subscriptions,
         }
     }
@@ -82,6 +101,9 @@ impl Composer {
         if self.channel.as_deref() == channel {
             return;
         }
+        // Leaving mid-edit cancels it; the draft underneath is kept.
+        self.cancel_edit(window, cx);
+        self.hint = None;
         if let Some(old) = &self.channel {
             let draft = Draft {
                 text: self.input.read(cx).value().to_string(),
@@ -92,13 +114,51 @@ impl Composer {
         let Draft { text, replies } = channel.map(|c| self.drafts.take(c)).unwrap_or_default();
         self.draft.replies = replies;
         self.channel = channel.map(str::to_string);
-        self.input.update(cx, |input, cx| {
-            input.set_placeholder(placeholder, window, cx);
-            input.set_value(text.clone(), window, cx);
-            // Carry on typing where the draft ends.
-            input.set_cursor_position(end_of(&text), window, cx);
-        });
+        self.input
+            .update(cx, |input, cx| input.set_placeholder(placeholder, window, cx));
+        self.set_text(&text, window, cx);
         cx.notify();
+    }
+
+    /// Replace the box's text, with the cursor at its end.
+    fn set_text(&self, text: &str, window: &mut Window, cx: &mut App) {
+        self.input.update(cx, |input, cx| {
+            input.set_value(text.to_string(), window, cx);
+            input.set_cursor_position(end_of(text), window, cx);
+        });
+    }
+
+    /// Edit the user's message `id`, whose text is `content`, in the box.
+    /// Whatever was being typed (and replied to) comes back afterwards.
+    pub fn start_edit(
+        &mut self,
+        id: String,
+        content: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = Draft {
+            text: self.input.read(cx).value().to_string(),
+            replies: std::mem::take(&mut self.draft.replies),
+        };
+        self.editing.begin(id, current);
+        self.hint = None;
+        self.set_text(content, window, cx);
+        self.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Leave edit mode, putting back what was being typed. Returns false if
+    /// there was no edit.
+    fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(stash) = self.editing.end() else {
+            return false;
+        };
+        self.draft.replies = stash.replies;
+        self.hint = None;
+        self.set_text(&stash.text, window, cx);
+        cx.notify();
+        true
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
@@ -123,6 +183,20 @@ impl Composer {
             return;
         }
         let text = self.input.read(cx).value();
+        if let Some(id) = self.editing.editing().map(str::to_string) {
+            match check_send(&text) {
+                SendCheck::Ready(content) => {
+                    self.cancel_edit(window, cx);
+                    cx.emit(ComposerEvent::Edit { id, content });
+                }
+                SendCheck::Empty => {
+                    self.hint = Some(EMPTY_EDIT_TEXT.into());
+                    cx.notify();
+                }
+                SendCheck::TooLong(_) => {}
+            }
+            return;
+        }
         // Blank and too-long messages stay in the box (the count says why).
         if let SendCheck::Ready(text) = check_send(&text) {
             let replies = self.draft.reply_intents();
@@ -134,14 +208,55 @@ impl Composer {
         }
     }
 
-    /// Esc in the message box: stop replying.
-    fn on_escape(&mut self, _: &Escape, _: &mut Window, cx: &mut Context<Self>) {
+    /// Esc in the message box: stop editing, or else stop replying.
+    fn on_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cancel_edit(window, cx) {
+            return;
+        }
         if self.draft.replies.is_empty() {
             cx.propagate();
             return;
         }
         self.draft.replies.clear();
         cx.notify();
+    }
+
+    /// Up in an empty box (not already editing): edit the last message.
+    /// Otherwise Up moves the cursor as usual.
+    fn on_move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
+        if self.editing.editing().is_none() && self.input.read(cx).value().is_empty() {
+            cx.stop_propagation();
+            cx.emit(ComposerEvent::EditLast);
+        }
+    }
+
+    /// "Editing message", with how to save or cancel.
+    fn render_edit_bar(&self, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme();
+        h_flex()
+            .gap_2()
+            .px_2()
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .child(Icon::new(IconName::Pencil).xsmall())
+            .child(
+                div()
+                    .flex_1()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.foreground)
+                    .child("Editing message"),
+            )
+            .child("Esc to cancel · Enter to save")
+            .child(
+                Button::new("edit-cancel")
+                    .xsmall()
+                    .ghost()
+                    .icon(IconName::Close)
+                    .tooltip("Cancel (Esc)")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.cancel_edit(window, cx);
+                    })),
+            )
     }
 
     /// "Replying to Name", one line per reply, with the mention toggle and ×.
@@ -219,7 +334,12 @@ fn end_of(text: &str) -> Position {
 impl Render for Composer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let count = char_count(&self.input.read(cx).value());
-        let reply_bar = (!self.draft.replies.is_empty()).then(|| self.render_reply_bar(cx));
+        let bar = if self.editing.editing().is_some() {
+            Some(self.render_edit_bar(cx))
+        } else {
+            (!self.draft.replies.is_empty()).then(|| self.render_reply_bar(cx))
+        };
+        let hint = self.hint.clone();
         let theme = cx.theme();
         v_flex()
             .flex_none()
@@ -228,8 +348,13 @@ impl Render for Composer {
             .pb_4()
             .gap_1()
             .on_action(cx.listener(Self::on_escape))
-            .children(reply_bar)
+            // Before the textarea moves the cursor.
+            .capture_action(cx.listener(Self::on_move_up))
+            .children(bar)
             .child(Textarea::new(&self.input))
+            .when_some(hint, |el, hint| {
+                el.child(div().px_2().text_xs().text_color(theme.danger).child(hint))
+            })
             .when_some(count, |el, (chars, over)| {
                 el.child(
                     h_flex()

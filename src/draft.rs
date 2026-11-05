@@ -140,6 +140,35 @@ impl Drafts {
     }
 }
 
+/// Editing a message in the message box: what was being typed is set aside
+/// until the edit is saved or cancelled.
+#[derive(Debug, Default)]
+pub struct EditStash {
+    editing: Option<(String, Draft)>,
+}
+
+impl EditStash {
+    /// Start editing `id`, setting `current` aside. Switching from one edit
+    /// to another keeps the first draft (the edit's text isn't a draft).
+    pub fn begin(&mut self, id: String, current: Draft) {
+        let stash = match self.editing.take() {
+            Some((_, stash)) => stash,
+            None => current,
+        };
+        self.editing = Some((id, stash));
+    }
+
+    /// The message being edited.
+    pub fn editing(&self) -> Option<&str> {
+        self.editing.as_ref().map(|(id, _)| id.as_str())
+    }
+
+    /// Stop editing (saved or cancelled): the draft to put back, if editing.
+    pub fn end(&mut self) -> Option<Draft> {
+        self.editing.take().map(|(_, stash)| stash)
+    }
+}
+
 /// A new `Idempotency-Key` for a send: the time, a counter, and a random
 /// part (Stoat's duplicate check is shared by every client, so time alone
 /// isn't enough). Well under Stoat's 64-byte limit.

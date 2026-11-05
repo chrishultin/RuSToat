@@ -217,6 +217,20 @@ impl ChatView {
                     };
                     this.send_message(channel, text.clone(), replies.clone(), window, cx);
                 }
+                ComposerEvent::Edit { id, content } => {
+                    let Some(channel) = composer.read(cx).channel().map(str::to_string) else {
+                        return;
+                    };
+                    this.edit_message(channel, id.clone(), content.clone(), window, cx);
+                }
+                ComposerEvent::EditLast => {
+                    let Some(channel) = composer.read(cx).channel().map(str::to_string) else {
+                        return;
+                    };
+                    if let Some(id) = this.store.last_own_message(&channel).map(str::to_string) {
+                        this.start_edit(&channel, id, window, cx);
+                    }
+                }
             },
         );
         Self {
@@ -467,6 +481,7 @@ impl ChatView {
                     window.push_notification(Notification::warning(TOO_MANY_REPLIES_TEXT), cx);
                 }
             }
+            RowAction::Edit(id) => self.start_edit(channel, id, window, cx),
             RowAction::CopyText(id) => {
                 if let Some(text) = self.store.raw_content(channel, &id) {
                     cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
@@ -515,6 +530,64 @@ impl ChatView {
             pane.scroller.update(cx, |scroller, cx| scroller.scroll_to_end(cx));
         }
         self.post_pending(pending, window, cx);
+        cx.notify();
+    }
+
+    /// Edit the user's message `id` in the message box.
+    fn start_edit(&mut self, channel: &str, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let content = self.store.raw_content(channel, &id).unwrap_or_default().to_string();
+        self.composer
+            .update(cx, |composer, cx| composer.start_edit(id, &content, window, cx));
+    }
+
+    /// Save an edit: shown at once, then sent. If Stoat refuses, the old
+    /// text comes back and a toast says why. The echo (`MessageUpdate`)
+    /// brings the same text, so it changes nothing visible.
+    fn edit_message(
+        &mut self,
+        channel: String,
+        id: String,
+        content: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.store.raw_content(&channel, &id) == Some(content.as_str()) {
+            return;
+        }
+        let Some(edit) = self.store.apply_local_edit(&channel, &id, &content) else {
+            return;
+        };
+        self.sync_pane(&channel, cx);
+        let client = self.client.clone();
+        let request = spawn_io({
+            let (channel, id) = (channel.clone(), id.clone());
+            async move { client.edit_message(&channel, &id, &content).await }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                let error = match result {
+                    Ok(Ok(_)) => {
+                        log::debug!("edited {id} in {channel}");
+                        return;
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't edit {id} in {channel}: {err:?}");
+                        edit_error_text(&err)
+                    }
+                    Err(err) => {
+                        log::warn!("edit task failed: {err:?}");
+                        "Couldn't save your edit.".into()
+                    }
+                };
+                if this.store.undo_local_edit(&channel, &id, edit) {
+                    this.sync_pane(&channel, cx);
+                }
+                window.push_notification(Notification::error(error), cx);
+            })
+            .ok();
+        })
+        .detach();
         cx.notify();
     }
 
@@ -1721,6 +1794,8 @@ enum RowAction {
     Reply(ReplyTarget),
     /// Copy a message's text as typed (its Markdown source).
     CopyText(String),
+    /// Edit one of the user's messages in the message box.
+    Edit(String),
 }
 
 type OnRowAction = Rc<dyn Fn(RowAction, &mut Window, &mut App)>;
@@ -2041,7 +2116,7 @@ fn render_message_row(
         return row.into_any_element();
     }
     // Right-click anywhere on the row (text, padding, avatar).
-    let (on_action, id) = (on_action.clone(), message.id.clone());
+    let (on_action, id, mine) = (on_action.clone(), message.id.clone(), message.mine);
     let reply = reply_target(message);
     row.context_menu(move |menu, _, _| {
         let act = |action: RowAction| {
@@ -2060,6 +2135,13 @@ fn render_message_row(
                 .icon(IconName::Copy)
                 .on_click(act(RowAction::CopyText(id.clone()))),
         )
+        .when(mine, |menu| {
+            menu.separator().item(
+                PopupMenuItem::new("Edit")
+                    .icon(IconName::Pencil)
+                    .on_click(act(RowAction::Edit(id.clone()))),
+            )
+        })
     })
     .into_any_element()
 }
@@ -2328,6 +2410,17 @@ fn composer_placeholder(channel: &ChannelEntry) -> String {
         ChannelKind::DirectMessage => format!("Message @{}", channel.name),
         ChannelKind::Group => format!("Message {}", channel.name),
         ChannelKind::SavedMessages => "Save a note".into(),
+    }
+}
+
+/// What a refused edit's toast says.
+fn edit_error_text(err: &ApiError) -> SharedString {
+    use revolt_result::ErrorType;
+    match err.error_type() {
+        Some(ErrorType::MissingPermission { .. } | ErrorType::CannotEditMessage) => {
+            "You can't edit this message.".into()
+        }
+        _ => format!("Couldn't save your edit: {err}").into(),
     }
 }
 

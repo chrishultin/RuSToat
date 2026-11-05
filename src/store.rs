@@ -149,6 +149,15 @@ pub enum ReplyState {
     Unavailable,
 }
 
+/// What a local edit replaced, to put back if Stoat refuses it
+/// ([`ChatStore::undo_local_edit`]).
+#[derive(Debug, Clone)]
+pub struct LocalEdit {
+    previous: Box<Message>,
+    /// The text the edit put in.
+    content: String,
+}
+
 /// A cached original of a reply that isn't in the loaded history.
 #[derive(Debug, Clone)]
 enum ReplySource {
@@ -528,6 +537,49 @@ impl ChatStore {
         self.reply_sources
             .entry(id.to_string())
             .or_insert(ReplySource::Unavailable);
+    }
+
+    /// Show an edit of a loaded message at once, marked edited, before
+    /// Stoat confirms it. Returns what it replaced, or `None` if the
+    /// message isn't loaded.
+    pub fn apply_local_edit(&mut self, channel: &str, id: &str, content: &str) -> Option<LocalEdit> {
+        let message = self.message_mut(channel, id)?;
+        let edit = LocalEdit {
+            previous: Box::new(message.clone()),
+            content: content.to_string(),
+        };
+        message.content = Some(content.to_string());
+        // The echo brings Stoat's own time; until then, now.
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        message.edited = serde_json::from_value(serde_json::Value::String(now)).ok();
+        Some(edit)
+    }
+
+    /// Stoat refused an edit: put the old text back, unless the message has
+    /// changed again since (another edit, from here or elsewhere). Returns
+    /// true if it was put back.
+    pub fn undo_local_edit(&mut self, channel: &str, id: &str, edit: LocalEdit) -> bool {
+        let Some(message) = self.message_mut(channel, id) else {
+            return false;
+        };
+        if message.content.as_deref() != Some(edit.content.as_str()) {
+            return false;
+        }
+        message.content = edit.previous.content;
+        message.edited = edit.previous.edited;
+        true
+    }
+
+    /// The newest loaded message the user wrote (not a system message):
+    /// what Up in an empty message box edits.
+    pub fn last_own_message(&self, channel: &str) -> Option<&str> {
+        self.histories
+            .get(channel)?
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.author == self.me && m.system.is_none() && m.webhook.is_none())
+            .map(|m| m.id.as_str())
     }
 
     /// A loaded message's text as typed (its Markdown source), or a pending

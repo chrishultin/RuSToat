@@ -2,7 +2,8 @@ use std::time::Duration;
 
 use reqwest::{Client, Method};
 use revolt_models::v0::{
-    BulkMessageResponse, DataLogin, DataMessageSend, MFAResponse, Message, MessageSort,
+    BulkMessageResponse, DataEditMessage, DataLogin, DataMessageSend, MFAResponse, Message,
+    MessageSort,
     OptionsQueryMessages, ReplyIntent, ResponseLogin, User,
 };
 use serde::de::DeserializeOwned;
@@ -211,6 +212,27 @@ impl StoatClient {
             )
             .await?;
         parse(status, &bytes)
+    }
+
+    /// `PATCH /channels/{channel}/messages/{message}`: replace the text of
+    /// one of the user's messages. `content` must not be empty.
+    pub async fn edit_message(
+        &self,
+        channel: &str,
+        message: &str,
+        content: &str,
+    ) -> Result<Message, ApiError> {
+        let body = DataEditMessage {
+            content: Some(content.to_string()),
+            embeds: None,
+        };
+        let body = without_nulls(serde_json::to_value(&body).expect("edit body serialises"));
+        self.send(
+            Method::PATCH,
+            &format!("/channels/{channel}/messages/{message}"),
+            Some(&body),
+        )
+        .await
     }
 
     /// `GET /channels/{id}/messages?nearby={message}`: `message` itself (if

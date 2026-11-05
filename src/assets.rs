@@ -20,6 +20,7 @@ gpui_kit::assets::icon_assets!(
         Hash,
         House,
         Image,
+        Pencil,
         Reply,
         Users,
         Volume2,

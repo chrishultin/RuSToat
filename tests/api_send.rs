@@ -172,3 +172,41 @@ async fn a_reply_source_is_fetched_with_its_neighbours_and_authors() {
     assert_eq!(messages[0].id, MSG);
     assert_eq!(users[0].username, "me");
 }
+
+#[tokio::test]
+async fn editing_patches_the_message_with_its_new_content() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path(format!("/channels/ch-general/messages/{MSG}")))
+        .and(header("x-session-token", "tok"))
+        .and(body_json(json!({ "content": "fixed" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(created("fixed")))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let message = client(&server)
+        .edit_message("ch-general", MSG, "fixed")
+        .await
+        .unwrap();
+    assert_eq!(message.content.as_deref(), Some("fixed"));
+}
+
+#[tokio::test]
+async fn editing_someone_elses_message_is_refused() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path(format!("/channels/ch-general/messages/{MSG}")))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({ "type": "CannotEditMessage" })))
+        .mount(&server)
+        .await;
+
+    let err = client(&server)
+        .edit_message("ch-general", MSG, "mine now")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err.error_type(), Some(ErrorType::CannotEditMessage)),
+        "{err:?}"
+    );
+}

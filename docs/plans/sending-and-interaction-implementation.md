@@ -160,3 +160,46 @@ The user ran the chunk 2 build and confirmed reply previews work ("lgtm"). The l
 
 ### Manual Validation
 The user ran the chunk 3 build, used it (log: two sends in a DM), and said to continue. The log shows no errors.
+
+## Chunk 4: Editing your messages
+
+### Changes Made
+- `src/api/client.rs`: `edit_message(channel, id, content) -> Message`. It sends `PATCH /channels/{c}/messages/{m}` with `DataEditMessage { content }`, nulls removed, so the body is exactly `{"content": …}`.
+- `src/store.rs`:
+  - `apply_local_edit(channel, id, content) -> Option<LocalEdit>` sets the content, and `edited` to now (built through serde, since `Timestamp` isn't a direct dependency). It returns the previous message.
+  - `undo_local_edit(channel, id, edit)` puts back the old content and `edited` flag, but only if the content is still the edit's (no newer change).
+  - `last_own_message(channel)`: the newest loaded message by `me`, not a system or webhook message. Pending messages are separate, so they're never picked.
+- `src/draft.rs`: `EditStash` (`begin(id, current)`, `editing()`, `end()`) sets the draft aside during an edit. Switching edits keeps the first draft.
+- `src/ui/composer.rs`:
+  - Edit mode: `start_edit(id, content)` and `cancel_edit`. While editing, the "Editing message" bar replaces the reply bar.
+  - Enter emits `ComposerEvent::Edit { id, content }` and restores the draft. An empty edit shows the hint "To delete the message, use Delete." and isn't sent.
+  - Esc cancels the edit first, otherwise clears replies. Changing channel cancels an edit.
+  - Up in an empty box emits `ComposerEvent::EditLast`. It's caught by `capture_action::<MoveUp>` and stops propagation only in that case.
+  - The hint clears when the text changes.
+- `src/ui/chat.rs`:
+  - `start_edit` (from `RowAction::Edit` or `EditLast`) loads `raw_content` into the composer.
+  - `edit_message`: an unchanged edit does nothing. Otherwise it applies the edit locally, syncs and sends `PATCH`. On failure it undoes the edit and shows a toast (`edit_error_text`: `MissingPermission` or `CannotEditMessage` gives "You can't edit this message."). On success the response is ignored, because the `MessageUpdate` echo applies the same text.
+  - "Edit" was added to the right-click menu for own messages, after a separator.
+- `src/assets.rs`: registers the `Pencil` icon.
+- Tests: `tests/store_edit.rs` (new), `tests/api_send.rs` (+2).
+
+### Divergences
+- **Up arrow:** the textarea's `MoveUp` handler doesn't propagate, so the shortcut is a capture-phase action listener on the composer. It acts only when the box is empty and not already editing; otherwise Up moves the cursor as usual.
+- **`EditStash`:** the draft set-aside logic is a pure type in `draft.rs`, not composer internals, so the plan's "draft stashed and restored" check is a unit test.
+- **The PATCH response isn't applied.** The live `MessageUpdate` echo carries the same change, and a reconnect reloads history if the echo is missed.
+- **A refusal doesn't undo a newer change** (not in the plan): if the message changed again before the refusal arrived, it's left as it is.
+- **`raw_content`** was already added in chunk 3.
+
+### Verification Performed
+- `cargo test --test store_edit`: 6 passed.
+  - A local edit changes the body, `edited` and `render_key`, and a refusal restores the row exactly.
+  - A refusal after a newer change leaves the newer change.
+  - The echo (with Stoat's own edited time) leaves the timeline unchanged.
+  - Editing an unloaded message does nothing.
+  - `last_own_message` skips others' messages, our system message and pending ones.
+  - `EditStash` keeps the original draft when switching edits.
+- `cargo test --test api_send`: 8 passed. New: the PATCH path, session header and body, and a 403 `CannotEditMessage`.
+- Full suite: `cargo test`, 253 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings`: clean.
+
+### Manual Validation
+The user ran the chunk 4 build. The first launch waited on a macOS Keychain prompt for the rebuilt binary. They edited a message (log: `edited 01M6PCP7… in 01M6N0BJ…`) and confirmed "LGTM".
