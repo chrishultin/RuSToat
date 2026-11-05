@@ -314,3 +314,44 @@ The user checked the running app and confirmed "Looks right": custom emoji rende
 
 ### Manual Validation
 The user checked inline images, file cards and image-only bubbles in the running app and confirmed "Looks good".
+
+## Chunk 4b: In-app image viewer (inserted)
+
+_Added at the user's request after chunk 4: "Is clicking to view full-size on the roadmap?" It wasn't in any plan. The user asked for it now, without zoom and pan or arrowing between images. The plan file gains a chunk 4b section._
+
+### Changes Made
+- `src/attachment.rs`:
+  - `AttachmentView::Image` now carries `original: (usize, usize)`, the upload's metadata dimensions (zero if unknown).
+  - New `fit_into(w, h, max_w, max_h) -> Option<(u32, u32)>`: shrinks to fit without enlarging, rounds, gives at least 1 px, and returns `None` for zero dimensions.
+  - `fit_within` is now `fit_into` into 400×300, with the fallback box.
+- `src/ui/chat.rs`:
+  - The chunk 4 `RevealImage` callback is now `OnRowAction = Rc<dyn Fn(RowAction, &mut Window, &mut App)>`, where `RowAction` is `RevealImage(file_id)` or `ViewImage(ViewedImage { url, name, original })`. `ChatView::on_row_action` handles both and replaces `reveal_image`.
+  - New `ChatView.viewer: Option<ViewedImage>` and `viewer_focus: FocusHandle`. Opening the viewer focuses the overlay, so it gets key presses.
+  - `render_viewer` draws an absolute `inset_0` overlay over the whole `ChatView`:
+    - **Input:** the overlay uses `occlude()` and swallows scroll events, so the list underneath doesn't react.
+    - **Backdrop:** black at 85% opacity.
+    - **Top bar:** theme background, the file name, a ghost "Open in browser" button (`ExternalLink`) and a close button (`Close`).
+    - **Image:** fitted with `fit_into` to the window minus 32 px margins and the 48 px bar. Unknown dimensions fill that space, letterboxed with `ObjectFit::Contain`.
+    - **Closing:** Esc (`on_key_down`), the close button, or a left mouse-down on the backdrop. The bar and the image stop propagation, so clicking them doesn't close it.
+  - The root render is now a `relative` container, so the overlay can sit over the rail, channel list and chat.
+  - Clicking an inline image now opens the viewer instead of the browser. The browser is still one click away, in the viewer's bar.
+- `tests/store_attachments.rs`:
+  - New `the_viewer_fits_images_to_the_window`: larger than the window (wide and tall), smaller (kept at its own size), a 1×1 window, and zero dimensions giving `None`.
+  - The existing image tests now assert `original`.
+
+### Divergences
+- **Scope addition (user-directed):** not in the original plan; inserted between chunks 4 and 5.
+- **Minor:** `on_scroll_wheel` is deprecated in this gpui and renamed to `on_scroll`, so `on_scroll` is used.
+- **No effect on later chunks.** Chunk 5's embed images could open the viewer through `RowAction::ViewImage` if wanted.
+
+### Verification Performed
+- `cargo test`: 175 passed, 0 failed, 5 ignored, up from 174.
+- `cargo clippy --all-targets -- -D warnings`: clean. `cargo fmt --check`: clean.
+- Live: relaunched. `Ready` logged 5 servers, 76 channels and 41 emoji, and history loaded, with no warnings or errors.
+
+### Manual Validation
+The user checked the viewer in the running app and confirmed "lgtm":
+- opening from an inline image, fitted to the window
+- closing with Esc, the close button and a backdrop click
+- "Open in browser"
+- no interaction with the list underneath

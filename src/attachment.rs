@@ -43,6 +43,9 @@ pub enum AttachmentView {
         size_label: String,
         width: u32,
         height: u32,
+        /// The upload's own size from its metadata (zero if unknown), for the
+        /// full-size viewer.
+        original: (usize, usize),
         /// Over [`MAX_AUTO_LOAD_BYTES`] and not revealed yet: drawn as a card
         /// with a "Show image" button instead.
         too_big: bool,
@@ -65,6 +68,7 @@ impl AttachmentView {
         let url = media.file(file);
         match (&file.metadata, url) {
             (Metadata::Image { width, height, .. }, Some(url)) => {
+                let original = (*width, *height);
                 let (width, height) = fit_within(*width, *height);
                 AttachmentView::Image {
                     id: file.id.clone(),
@@ -73,6 +77,7 @@ impl AttachmentView {
                     size_label,
                     width,
                     height,
+                    original,
                     too_big: size > MAX_AUTO_LOAD_BYTES && !revealed,
                 }
             }
@@ -91,15 +96,27 @@ impl AttachmentView {
 /// rounded to whole pixels (at least 1). Missing or zero dimensions get
 /// [`FALLBACK_IMAGE_SIZE`].
 pub fn fit_within(width: usize, height: usize) -> (u32, u32) {
+    fit_into(width, height, MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT).unwrap_or(FALLBACK_IMAGE_SIZE)
+}
+
+/// `width` × `height` scaled down to fit within `max_width` × `max_height`
+/// (keeping its shape), never scaled up, and rounded to whole pixels (at
+/// least 1). `None` when a dimension is missing or zero.
+pub fn fit_into(
+    width: usize,
+    height: usize,
+    max_width: u32,
+    max_height: u32,
+) -> Option<(u32, u32)> {
     if width == 0 || height == 0 {
-        return FALLBACK_IMAGE_SIZE;
+        return None;
     }
     let (w, h) = (width as f64, height as f64);
-    let scale = (MAX_IMAGE_WIDTH as f64 / w)
-        .min(MAX_IMAGE_HEIGHT as f64 / h)
+    let scale = (f64::from(max_width) / w)
+        .min(f64::from(max_height) / h)
         .min(1.0);
     let side = |v: f64| ((v * scale).round() as u32).max(1);
-    (side(w), side(h))
+    Some((side(w), side(h)))
 }
 
 /// The card icon for a file, from its metadata, falling back to its MIME type.

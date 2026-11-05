@@ -22,7 +22,7 @@ use gpui_kit::*;
 
 use crate::api::StoatClient;
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
-use crate::attachment::{AttachmentView, FileKind};
+use crate::attachment::{AttachmentView, FileKind, fit_into};
 use crate::markdown::{JUMBO_TEXT_PX, is_external_link};
 use crate::media::MediaUrls;
 use crate::notify::{self, Delivery, Notice, Viewing};
@@ -96,6 +96,10 @@ pub struct ChatView {
     /// macOS banners still showing: channel (also the banner's tag) → the
     /// message it's for. Dismissed once the channel is read past it.
     banners: HashMap<String, String>,
+    /// The image open in the full-size viewer, over everything else.
+    viewer: Option<ViewedImage>,
+    /// Focused while the viewer is open, so Esc reaches it.
+    viewer_focus: FocusHandle,
     _connection: Connection,
     _events: Task<()>,
     _root: Task<()>,
@@ -189,6 +193,8 @@ impl ChatView {
             pending_ack: None,
             dock_badge: 0,
             banners: HashMap::new(),
+            viewer: None,
+            viewer_focus: cx.focus_handle(),
             _connection: connection,
             _events: events,
             _root: root,
@@ -341,11 +347,127 @@ impl ChatView {
         cx.notify();
     }
 
-    /// "Show image" on a large image: load it after all.
-    fn reveal_image(&mut self, channel: &str, file_id: &str, cx: &mut Context<Self>) {
-        self.store.reveal_image(file_id);
-        self.sync_pane(channel, cx);
+    fn on_row_action(
+        &mut self,
+        channel: &str,
+        action: RowAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            // "Show image" on a large image: load it after all.
+            RowAction::RevealImage(file_id) => {
+                self.store.reveal_image(&file_id);
+                self.sync_pane(channel, cx);
+            }
+            RowAction::ViewImage(image) => {
+                self.viewer = Some(image);
+                window.focus(&self.viewer_focus, cx);
+            }
+        }
         cx.notify();
+    }
+
+    fn close_viewer(&mut self, cx: &mut Context<Self>) {
+        self.viewer = None;
+        cx.notify();
+    }
+
+    /// The full-size viewer: the image fitted to the window (never enlarged)
+    /// on a dimmed backdrop, under a bar with its name and actions. It takes
+    /// every click and scroll, so the messages underneath don't react.
+    fn render_viewer(
+        &self,
+        image: &ViewedImage,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let viewport = window.viewport_size();
+        let room = |side: Pixels, taken: f32| (f32::from(side) - taken).max(1.) as u32;
+        let max_w = room(viewport.width, 2. * VIEWER_MARGIN);
+        let max_h = room(viewport.height, 2. * VIEWER_MARGIN + VIEWER_BAR);
+        // Unknown dimensions: the whole space, letterboxed.
+        let (w, h) =
+            fit_into(image.original.0, image.original.1, max_w, max_h).unwrap_or((max_w, max_h));
+        let open = image.url.clone();
+        let bar = h_flex()
+            .h(px(VIEWER_BAR))
+            .flex_none()
+            .px_4()
+            .gap_2()
+            .bg(theme.background)
+            .text_color(theme.foreground)
+            .border_b_1()
+            .border_color(theme.border)
+            // Clicks on the bar aren't clicks on the backdrop.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(image.name.clone()),
+            )
+            .child(
+                Button::new("viewer-open")
+                    .ghost()
+                    .small()
+                    .icon(IconName::ExternalLink)
+                    .label("Open in browser")
+                    .on_click(move |_, _, cx| cx.open_url(&open)),
+            )
+            .child(
+                Button::new("viewer-close")
+                    .ghost()
+                    .small()
+                    .icon(IconName::Close)
+                    .tooltip("Close (Esc)")
+                    .on_click(cx.listener(|this, _, _, cx| this.close_viewer(cx))),
+            );
+        div()
+            .id("image-viewer")
+            .track_focus(&self.viewer_focus)
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .flex_col()
+            .bg(black().opacity(0.85))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" {
+                    cx.stop_propagation();
+                    this.close_viewer(cx);
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.close_viewer(cx)),
+            )
+            .on_scroll(|_, _, cx| cx.stop_propagation())
+            .child(bar)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .w(px(w as f32))
+                            .h(px(h as f32))
+                            // Clicking the picture itself doesn't close it.
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(
+                                img(SharedUri::from(image.url.clone()))
+                                    .size_full()
+                                    .object_fit(ObjectFit::Contain),
+                            ),
+                    ),
+            )
     }
 
     fn select_place(&mut self, place: Place, cx: &mut Context<Self>) {
@@ -1037,9 +1159,11 @@ impl ChatView {
                         let rows = pane.rows.clone();
                         let view = cx.entity().downgrade();
                         let channel_id = channel.id.clone();
-                        let reveal: RevealImage = Rc::new(move |file_id, cx| {
-                            view.update(cx, |this, cx| this.reveal_image(&channel_id, file_id, cx))
-                                .ok();
+                        let on_action: OnRowAction = Rc::new(move |action, window, cx| {
+                            view.update(cx, |this, cx| {
+                                this.on_row_action(&channel_id, action, window, cx)
+                            })
+                            .ok();
                         });
                         let older = if self.loading_older.contains_key(&channel.id) {
                             Some(
@@ -1086,7 +1210,9 @@ impl ChatView {
                                 MessageScroller::new(
                                     SharedString::from(format!("messages-{}", channel.id)),
                                     pane.scroller.clone(),
-                                    move |ix, _window, _cx| render_row(&rows[ix], colors, &reveal),
+                                    move |ix, _window, _cx| {
+                                        render_row(&rows[ix], colors, &on_action)
+                                    },
                                 )
                                 // The scroller's default rows are spaced for whole
                                 // chat turns (`pb_8` under every row, plus `px_3`).
@@ -1162,8 +1288,28 @@ struct RowColors {
     image_bg: Hsla,
 }
 
-/// What "Show image" does, given the file's ID.
-type RevealImage = Rc<dyn Fn(&str, &mut App)>;
+/// Something a message row asks the view to do.
+enum RowAction {
+    /// "Show image": load a large image after all (by file ID).
+    RevealImage(String),
+    /// Open an inline image in the full-size viewer.
+    ViewImage(ViewedImage),
+}
+
+type OnRowAction = Rc<dyn Fn(RowAction, &mut Window, &mut App)>;
+
+#[derive(Clone)]
+struct ViewedImage {
+    url: String,
+    name: String,
+    /// From the upload's metadata; zero if unknown.
+    original: (usize, usize),
+}
+
+/// Space around the image in the full-size viewer.
+const VIEWER_MARGIN: f32 = 32.;
+/// Height of the viewer's top bar.
+const VIEWER_BAR: f32 = 48.;
 
 /// Matches gpui-component's message avatar slot (`size-8`).
 const AVATAR_SIZE: f32 = 32.;
@@ -1205,7 +1351,7 @@ fn avatar(url: Option<String>, name: &str, size: f32, bg: Hsla, fg: Hsla) -> Any
     }
 }
 
-fn render_row(row: &TimelineRow, colors: RowColors, reveal: &RevealImage) -> AnyElement {
+fn render_row(row: &TimelineRow, colors: RowColors, on_action: &OnRowAction) -> AnyElement {
     match row {
         TimelineRow::StartOfChannel { name } => v_flex()
             .px_4()
@@ -1226,7 +1372,7 @@ fn render_row(row: &TimelineRow, colors: RowColors, reveal: &RevealImage) -> Any
             )
             .into_any_element(),
         TimelineRow::Message(message) if message.system => render_system_row(message, colors),
-        TimelineRow::Message(message) => render_message_row(message, colors, reveal),
+        TimelineRow::Message(message) => render_message_row(message, colors, on_action),
     }
 }
 
@@ -1261,7 +1407,11 @@ const BUBBLE_RADIUS: f32 = 16.;
 /// Corner radius where consecutive bubbles from one sender meet.
 const JOINED_RADIUS: f32 = 4.;
 
-fn render_message_row(message: &MessageRow, colors: RowColors, reveal: &RevealImage) -> AnyElement {
+fn render_message_row(
+    message: &MessageRow,
+    colors: RowColors,
+    on_action: &OnRowAction,
+) -> AnyElement {
     let first = !message.continuation;
     let last = message.group_end;
     let alignment = if message.mine {
@@ -1324,7 +1474,7 @@ fn render_message_row(message: &MessageRow, colors: RowColors, reveal: &RevealIm
                             |(ix, attachment)| {
                                 let id =
                                     SharedString::from(format!("attachment-{}-{ix}", message.id));
-                                render_attachment(id, attachment, colors, reveal)
+                                render_attachment(id, attachment, colors, on_action)
                             },
                         )),
                 )
@@ -1397,13 +1547,15 @@ fn render_attachment(
     id: SharedString,
     attachment: &AttachmentView,
     colors: RowColors,
-    reveal: &RevealImage,
+    on_action: &OnRowAction,
 ) -> AnyElement {
     match attachment {
         AttachmentView::Image {
             url,
+            name,
             width,
             height,
+            original,
             too_big: false,
             ..
         } => {
@@ -1414,15 +1566,21 @@ fn render_attachment(
                     .rounded(px(ATTACHMENT_RADIUS))
                     .bg(colors.image_bg)
             };
-            let open = url.clone();
+            let on_action = on_action.clone();
+            let viewed = ViewedImage {
+                url: url.clone(),
+                name: name.clone(),
+                original: *original,
+            };
             div()
                 .id(id)
                 .w(w)
                 .h(h)
                 .flex_none()
                 .cursor_pointer()
-                // The full-size original, in the browser.
-                .on_click(move |_, _, cx| cx.open_url(&open))
+                .on_click(move |_, window, cx| {
+                    on_action(RowAction::ViewImage(viewed.clone()), window, cx)
+                })
                 .child(
                     img(SharedUri::from(url.clone()))
                         .size_full()
@@ -1449,14 +1607,16 @@ fn render_attachment(
             too_big: true,
             ..
         } => {
-            let reveal = reveal.clone();
+            let on_action = on_action.clone();
             let file_id = file_id.clone();
             file_card(id.clone(), IconName::FileImage, name, size_label, colors)
                 .child(
                     Button::new(SharedString::from(format!("{id}-show")))
                         .xsmall()
                         .label("Show image")
-                        .on_click(move |_, _, cx| reveal(&file_id, cx)),
+                        .on_click(move |_, window, cx| {
+                            on_action(RowAction::RevealImage(file_id.clone()), window, cx)
+                        }),
                 )
                 .into_any_element()
         }
@@ -1688,13 +1848,24 @@ impl Render for ChatView {
             self.dock_badge = attention;
         }
         self.dismiss_read_banners(cx);
+        let viewer = self
+            .viewer
+            .as_ref()
+            .map(|image| self.render_viewer(image, window, cx).into_any_element());
         let theme = cx.theme();
-        h_flex()
+        let (background, foreground) = (theme.background, theme.foreground);
+        div()
+            .relative()
             .size_full()
-            .bg(theme.background)
-            .text_color(theme.foreground)
-            .child(self.render_rail(cx))
-            .child(self.render_channel_list(cx))
-            .child(self.render_main(cx))
+            .child(
+                h_flex()
+                    .size_full()
+                    .bg(background)
+                    .text_color(foreground)
+                    .child(self.render_rail(cx))
+                    .child(self.render_channel_list(cx))
+                    .child(self.render_main(cx)),
+            )
+            .children(viewer)
     }
 }

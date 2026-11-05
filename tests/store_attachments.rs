@@ -4,8 +4,8 @@
 use serde_json::json;
 use stoat_gpui::api::models::{BulkMessageResponse, File, Metadata};
 use stoat_gpui::attachment::{
-    AttachmentView, FALLBACK_IMAGE_SIZE, FileKind, MAX_AUTO_LOAD_BYTES, file_kind, fit_within,
-    size_label,
+    AttachmentView, FALLBACK_IMAGE_SIZE, FileKind, MAX_AUTO_LOAD_BYTES, file_kind, fit_into,
+    fit_within, size_label,
 };
 use stoat_gpui::media::MediaUrls;
 use stoat_gpui::store::{ChatStore, RowOp, TimelineRow, diff_rows};
@@ -67,6 +67,7 @@ fn missing_dimensions_get_a_fallback_box() {
         AttachmentView::Image {
             width: 300,
             height: 200,
+            original: (0, 0),
             ..
         }
     ));
@@ -84,9 +85,24 @@ fn images_show_inline_from_the_file_server() {
             size_label: "12.1 KB".into(),
             width: 400,
             height: 300,
+            original: (640, 480),
             too_big: false,
         }
     );
+}
+
+#[test]
+fn the_viewer_fits_images_to_the_window() {
+    // Bigger than the window: scaled down to fit, keeping the shape.
+    assert_eq!(fit_into(4000, 3000, 1200, 800), Some((1067, 800)));
+    assert_eq!(fit_into(3000, 1000, 1200, 800), Some((1200, 400)));
+    // Smaller than the window: shown at its own size.
+    assert_eq!(fit_into(640, 480, 1200, 800), Some((640, 480)));
+    // A tiny window still gets a visible pixel.
+    assert_eq!(fit_into(4000, 10, 1, 1), Some((1, 1)));
+    // Unknown dimensions: the caller decides (the viewer letterboxes).
+    assert_eq!(fit_into(0, 480, 1200, 800), None);
+    assert_eq!(fit_into(640, 0, 1200, 800), None);
 }
 
 #[test]

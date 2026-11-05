@@ -195,6 +195,27 @@ This milestone widens `MessageRow` from text into a small display model: avatar 
 **Manual check:** A channel with screenshots shows them inline at the right aspect ratio, with no jumping when they finish loading. A PDF or zip shows a card that opens in the browser.
 **Shippable when:** Images show inline and other files show as cards, matching the web app's layout closely enough, and the tests pass.
 
+### Chunk 4b: In-app image viewer *(inserted at the user's request after chunk 4)*
+**Goal:** Clicking an inline image opens it full-size in the app instead of in the browser. The original is already downloaded (the CDN only serves originals), so the viewer draws the cached image larger with no new download.
+**Files likely touched:**
+- `src/attachment.rs`:
+  - `AttachmentView::Image` also carries the original dimensions.
+  - A pure `fit_into(w, h, max_w, max_h)`, which `fit_within` builds on.
+- `src/ui/chat.rs`:
+  - `ChatView.viewer: Option<ViewedImage>` and a focus handle.
+  - Row callbacks are generalised from "Show image" to a small `RowAction` enum: `RevealImage`, `ViewImage`.
+  - A full-window overlay: a dimmed backdrop, the image fitted to the window (never upscaled), and a top bar with the file name, "Open in browser" and close.
+  - Esc, the close button, or a click on the backdrop closes it.
+- `tests/store_attachments.rs`: `fit_into` cases and the original dimensions
+**Depends on:** Chunk 4
+**Out of scope (user decision):** zoom and pan, and arrowing between a channel's images.
+**Risks:**
+- **Clicks passing through:** the overlay must take every click and scroll, so the message list underneath doesn't react. A click on the image itself must not close the viewer.
+- **Esc needs focus:** the overlay is focused when it opens, so it receives key presses.
+**How to verify:** `cargo test` covers `fit_into` (larger and smaller than the window, zero dimensions, a tiny window) and checks that original dimensions reach the view.
+**Manual check:** Click a screenshot. It opens over the app at full size, or fitted to the window. Esc, the close button and a backdrop click each close it, and "Open in browser" still works. The message list underneath doesn't scroll or react while the viewer is open.
+**Shippable when:** Images open in the in-app viewer and close cleanly, and the tests pass.
+
 ### Chunk 5: Embeds (link previews and bot embeds)
 **Goal:** Show link previews and bot embeds under messages, live (they arrive after the message), with every external image going through the proxy.
 **Files likely touched:**
