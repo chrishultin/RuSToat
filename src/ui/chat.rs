@@ -30,7 +30,6 @@ use crate::api::models::ReplyIntent;
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
 use crate::attachment::{AttachmentView, fit_into};
 use crate::complete::{Query, QueryKind, Suggestion, TokenRef, rank, rank_people};
-use crate::emoji::EmojiChoice;
 use crate::draft::{AttachmentLimits, DraftAttachment, ReplyTarget};
 use crate::embed::{Description, EmbedCard, EmbedImage, EmbedView};
 use crate::markdown::{JUMBO_TEXT_PX, is_external_link};
@@ -61,6 +60,9 @@ pub enum ChatEvent {
     SessionRejected,
     /// The user clicked a notice for this account: show it.
     Activate,
+    /// The user chose a new default skin tone (it's app-wide: the owner
+    /// saves it and gives it to every account's view).
+    SkinTone(crate::prefs::Tone),
 }
 
 enum Status {
@@ -137,6 +139,8 @@ pub struct ChatView {
     members_loading: HashSet<String>,
     /// The message box, under the open channel.
     composer: Entity<Composer>,
+    /// The default skin tone for emoji (`:` suggestions use it too).
+    skin_tone: crate::prefs::Tone,
     _composer: Subscription,
     /// Others typing, and when to tell Stoat the user is.
     typing: TypingState,
@@ -260,6 +264,10 @@ impl ChatView {
                     };
                     this.suggest(&channel, query, true, cx);
                 }
+                ComposerEvent::SkinTone(tone) => {
+                    this.skin_tone = *tone;
+                    cx.emit(ChatEvent::SkinTone(*tone));
+                }
                 ComposerEvent::OpenEmojiPicker => {
                     let Some(channel) = composer.read(cx).channel().map(str::to_string) else {
                         return;
@@ -318,6 +326,7 @@ impl ChatView {
             member_fetches: HashSet::new(),
             members_loading: HashSet::new(),
             composer,
+            skin_tone: crate::prefs::Tone::default(),
             _composer: composer_events,
             typing,
             outgoing_typing: OutgoingTyping::default(),
@@ -813,7 +822,7 @@ impl ChatView {
             QueryKind::Emoji => {
                 crate::emoji::search(&query.query, &self.store.custom_emoji_for(channel))
                     .iter()
-                    .map(EmojiChoice::suggestion)
+                    .map(|choice| choice.suggestion(self.skin_tone))
                     .collect()
             }
         };
@@ -1444,6 +1453,14 @@ impl ChatView {
         for (channel, count) in self.store.attention_breakdown() {
             log::debug!("  +{count} {channel} ({})", self.account_id);
         }
+    }
+
+    /// Use `tone` for toneable emoji from now on (the app-wide preference).
+    pub fn set_skin_tone(&mut self, tone: crate::prefs::Tone, cx: &mut Context<Self>) {
+        self.skin_tone = tone;
+        self.composer
+            .update(cx, |composer, cx| composer.set_skin_tone(tone, cx));
+        self.refresh_suggestions(cx);
     }
 
     /// Show or hide this account. Only the account on screen marks things

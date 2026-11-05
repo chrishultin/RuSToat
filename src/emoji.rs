@@ -2,8 +2,14 @@
 //! (gemoji) shortcodes, from the `emojis` crate, and a server's custom
 //! emoji by their names. What's sent for a Unicode emoji is the character
 //! itself, so the shortcode set only matters for finding it.
+//!
+//! Choices always hold the base (untoned) emoji, and searching ignores skin
+//! tones; the user's default tone is applied when an emoji is drawn or
+//! inserted ([`toned`]). So changing the tone recolours everything,
+//! recently used emoji included.
 
 use crate::complete::{Insertion, MAX_SUGGESTIONS, Suggestion, TokenRef};
+use crate::prefs::Tone;
 
 /// A server's custom emoji.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,17 +39,18 @@ impl EmojiChoice {
         }
     }
 
-    /// The suggestion row: the emoji and `:shortcode:`. Picking a Unicode
-    /// emoji inserts it as text; a custom one, as a chip sent as `:id:`.
-    pub fn suggestion(&self) -> Suggestion {
+    /// The suggestion row: the emoji (in `tone`) and `:shortcode:`. Picking
+    /// a Unicode emoji inserts it as text; a custom one, as a chip sent as
+    /// `:id:`.
+    pub fn suggestion(&self, tone: Tone) -> Suggestion {
         match self {
             EmojiChoice::Unicode { emoji, shortcode } => Suggestion {
                 key: format!("emoji:{emoji}"),
                 title: format!(":{shortcode}:"),
                 detail: None,
                 image: None,
-                glyph: Some(emoji.to_string()),
-                insert: Insertion::Text(emoji.to_string()),
+                glyph: Some(toned(emoji, tone).to_string()),
+                insert: Insertion::Text(toned(emoji, tone).to_string()),
             },
             EmojiChoice::Custom(custom) => Suggestion {
                 key: format!("emoji:{}", custom.id),
@@ -123,9 +130,22 @@ fn tier<'a>(query: &str, names: impl IntoIterator<Item = &'a str>) -> Option<u8>
         .min()
 }
 
-/// The Unicode emoji whose shortcode is exactly `code` (`smile` → 😄).
-pub fn by_shortcode(code: &str) -> Option<&'static str> {
-    emojis::get_by_shortcode(code).map(|emoji| emoji.as_str())
+/// The Unicode emoji whose shortcode is exactly `code` (`smile` → 😄), in
+/// `tone` if it has skin tones (`wave` → 👋🏻 in [`Tone::Light`]).
+pub fn by_shortcode(code: &str, tone: Tone) -> Option<&'static str> {
+    emojis::get_by_shortcode(code).map(|emoji| toned(emoji.as_str(), tone))
+}
+
+/// `emoji` in `tone`, if it has skin tones; otherwise (😄, flags, custom
+/// text) unchanged. Two-person emoji (🤝, 💏…) get the same tone for both
+/// people, or stay as they are if there's no such variant.
+pub fn toned(emoji: &'static str, tone: Tone) -> &'static str {
+    if tone == Tone::Default {
+        return emoji;
+    }
+    emojis::get(emoji)
+        .and_then(|e| e.with_skin_tone(tone.skin_tone()))
+        .map_or(emoji, |e| e.as_str())
 }
 
 /// The custom emoji named exactly `name` (Stoat's names are

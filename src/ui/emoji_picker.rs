@@ -2,7 +2,8 @@
 //! emoji come first, then custom emoji (see [`ChatStore::reaction_choices`]),
 //! or only the ones a message allows. Emoji the user has already reacted
 //! with are highlighted, and picking one again takes it back. The message
-//! box's picker ([`EmojiBrowser`]) has every emoji, with search.
+//! box's picker ([`EmojiBrowser`]) has every emoji, with search, and the
+//! default skin tone beside the search field.
 //!
 //! [`ChatStore::reaction_choices`]: crate::store::ChatStore::reaction_choices
 
@@ -17,9 +18,12 @@ use gpui_kit::*;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::{Icon, Sizable, v_flex};
+use gpui_kit::component::{Icon, Sizable, h_flex, v_flex};
 
-use crate::emoji::{CustomEmoji, EmojiChoice, PickerRow, RecentEmoji, picker_rows, picker_sections};
+use crate::emoji::{
+    CustomEmoji, EmojiChoice, PickerRow, RecentEmoji, picker_rows, picker_sections, toned,
+};
+use crate::prefs::Tone;
 use crate::store::{PickerEmoji, ReactionEmoji};
 
 /// Emoji per row.
@@ -150,6 +154,14 @@ fn custom_face(id: String, url: &str) -> AnyElement {
 /// was held (to keep the browser open).
 pub type OnBrowsePick = Rc<dyn Fn(&EmojiChoice, bool, &mut Window, &mut App)>;
 
+/// What choosing a skin tone in the emoji browser does.
+pub type OnTone = Rc<dyn Fn(Tone, &mut Window, &mut App)>;
+
+/// A skin tone swatch's square, beside the search field.
+const SWATCH: f32 = 22.;
+/// The hand the swatches show, in each tone.
+const SWATCH_EMOJI: &str = "✋";
+
 /// The browser's list is this tall; it scrolls.
 const BROWSER_HEIGHT: f32 = 9. * CELL;
 
@@ -162,7 +174,10 @@ pub struct EmojiBrowser {
     custom: Vec<CustomEmoji>,
     rows: Rc<Vec<PickerRow>>,
     scroll: UniformListScrollHandle,
+    /// The default skin tone: emoji are drawn in it, and its swatch is lit.
+    tone: Tone,
     on_pick: OnBrowsePick,
+    on_tone: OnTone,
     _search: Subscription,
 }
 
@@ -171,7 +186,9 @@ impl EmojiBrowser {
     pub fn new(
         recent: RecentEmoji,
         custom: Vec<CustomEmoji>,
+        tone: Tone,
         on_pick: OnBrowsePick,
+        on_tone: OnTone,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -205,11 +222,21 @@ impl EmojiBrowser {
             custom,
             rows: Rc::default(),
             scroll: UniformListScrollHandle::new(),
+            tone,
             on_pick,
+            on_tone,
             _search: subscription,
         };
         browser.rebuild(cx);
         browser
+    }
+
+    /// Show emoji in `tone` from now on.
+    pub fn set_tone(&mut self, tone: Tone, cx: &mut Context<Self>) {
+        if self.tone != tone {
+            self.tone = tone;
+            cx.notify();
+        }
     }
 
     fn rebuild(&mut self, cx: &App) {
@@ -221,7 +248,7 @@ impl EmojiBrowser {
 
 impl Render for EmojiBrowser {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (rows, on_pick) = (self.rows.clone(), self.on_pick.clone());
+        let (rows, on_pick, tone) = (self.rows.clone(), self.on_pick.clone(), self.tone);
         let muted = cx.theme().muted_foreground;
         let list = if rows.is_empty() {
             div()
@@ -236,7 +263,7 @@ impl Render for EmojiBrowser {
         } else {
             uniform_list("emoji-browser", rows.len(), move |range, _, cx| {
                 range
-                    .map(|ix| browser_row(ix, &rows[ix], &on_pick, cx))
+                    .map(|ix| browser_row(ix, &rows[ix], tone, &on_pick, cx))
                     .collect()
             })
             .h(px(BROWSER_HEIGHT))
@@ -247,17 +274,59 @@ impl Render for EmojiBrowser {
             .w(px(COLUMNS as f32 * CELL))
             .gap_2()
             .child(
-                Input::new(&self.search)
-                    .small()
-                    .cleanable(true)
-                    .prefix(Icon::new(IconName::Search).small().text_color(muted)),
+                h_flex()
+                    .gap_1()
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            Input::new(&self.search)
+                                .small()
+                                .cleanable(true)
+                                .prefix(Icon::new(IconName::Search).small().text_color(muted)),
+                        ),
+                    )
+                    .child(tone_swatches(self.tone, &self.on_tone, cx)),
             )
             .child(list)
     }
 }
 
+/// A ✋ in each skin tone, the chosen one highlighted. Clicking one makes
+/// it the default.
+fn tone_swatches(chosen: Tone, on_tone: &OnTone, cx: &App) -> Div {
+    let theme = cx.theme();
+    let (hover, selected, ring) = (
+        theme.secondary,
+        theme.primary.opacity(0.2),
+        theme.primary,
+    );
+    h_flex().children(Tone::ALL.into_iter().map(|tone| {
+        let on_tone = on_tone.clone();
+        let label: SharedString = tone.label().into();
+        div()
+            .id(SharedString::from(format!("skin-tone-{tone:?}")))
+            .size(px(SWATCH))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_md()
+            .cursor_pointer()
+            .text_sm()
+            .when(tone == chosen, |el| el.bg(selected).border_1().border_color(ring))
+            .hover(move |style| style.bg(hover))
+            .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+            .on_click(move |_, window, cx| on_tone(tone, window, cx))
+            .child(toned(SWATCH_EMOJI, tone))
+    }))
+}
+
 /// Row `ix` of the browser: a section header, or a row of emoji.
-fn browser_row(ix: usize, row: &PickerRow, on_pick: &OnBrowsePick, cx: &App) -> AnyElement {
+fn browser_row(
+    ix: usize,
+    row: &PickerRow,
+    tone: Tone,
+    on_pick: &OnBrowsePick,
+    cx: &App,
+) -> AnyElement {
     match row {
         PickerRow::Header(title) => div()
             .h(px(CELL))
@@ -277,7 +346,7 @@ fn browser_row(ix: usize, row: &PickerRow, on_pick: &OnBrowsePick, cx: &App) -> 
                 let id = format!("browse-{ix}-{col}");
                 let (face, tooltip): (AnyElement, SharedString) = match choice {
                     EmojiChoice::Unicode { emoji, shortcode } => (
-                        div().text_xl().child(*emoji).into_any_element(),
+                        div().text_xl().child(toned(emoji, tone)).into_any_element(),
                         format!(":{shortcode}:").into(),
                     ),
                     EmojiChoice::Custom(custom) => (

@@ -20,6 +20,7 @@ pub mod math;
 pub mod media;
 pub mod notify;
 pub mod places;
+pub mod prefs;
 pub mod runtime;
 pub mod session;
 pub mod store;

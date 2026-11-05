@@ -225,3 +225,54 @@ The session on `i-d-like-to-look-into-adding-support-for-being-l-6b03` (multiple
 **Verification:** `cargo test`: 377 passed, 0 failed (their branch alone had 245 passing). `cargo clippy --all-targets -- -D warnings`: clean. No stale `chat.stoat.*` references in code, apart from the deliberate legacy constants.
 
 **State on this Mac, to fix before the final manual tests:** after chunk 1's folder migration, the other branch wrote a newer `~/Library/Application Support/chat.stoat.rustoat/accounts.json` with two per-user entries. `com.chrishultin.rustoat/accounts.json` only has the older one-entry list, and the folder migration won't run again because the new folder exists. Plan: back up the new folder's file, then copy the old folder's `accounts.json` over it. `MigratingStore` moves each token from `chat.stoat.gpui-poc` on first load.
+
+## Chunk 6: Default skin tone
+
+### Changes Made
+- `src/prefs.rs` (new):
+  - `Tone` (`Default`, `Light`, `MediumLight`, `Medium`, `MediumDark`, `Dark`; serde), with `ALL`, `skin_tone() -> emojis::SkinTone` and `label()` (for tooltips).
+  - `Prefs { skin_tone }` with `#[serde(default)]`, so missing or unknown fields load fine.
+  - `PrefsFile::{in_app_dir, at, load, save}`. It uses `places::app_dir()/prefs.json`; `load` gives the defaults for a missing, unreadable or corrupt file, and `save` writes then renames. Four unit tests.
+- `src/lib.rs`: `pub mod prefs`.
+- `src/emoji.rs`:
+  - `toned(emoji, tone) -> &'static str`: `emojis::get(emoji)?.with_skin_tone(tone)`, falling back to the base.
+  - `by_shortcode(code, tone)`.
+  - `EmojiChoice::suggestion(tone)`: the glyph and the inserted text are toned, but the row key stays base, so the selection survives a tone change.
+  - Search, groups and picker sections stay tone-free. The module doc explains this.
+- `src/ui/emoji_picker.rs`:
+  - `EmojiBrowser` takes `tone` and an `OnTone` callback, and has `set_tone`.
+  - Beside the search field (now `flex_1`), a row of 6 ✋ swatches (22 px each) in each tone, with a tooltip per tone. The chosen one has a primary tint and ring.
+  - `browser_row` draws Unicode cells with `toned`. The choices passed back stay base.
+- `src/ui/composer.rs`:
+  - A `skin_tone` field and `pub set_skin_tone` (which also updates an open picker).
+  - `insert_emoji` inserts `toned`, and recently used keeps the base. Closing-colon conversion uses `by_shortcode(code, skin_tone)`.
+  - The picker's `on_tone` calls `set_skin_tone` and emits the new `ComposerEvent::SkinTone(tone)`.
+- `src/ui/chat.rs`:
+  - A `skin_tone` field. `:` suggestions use `choice.suggestion(self.skin_tone)`.
+  - `ComposerEvent::SkinTone` sets the field and emits the new `ChatEvent::SkinTone`.
+  - `pub set_skin_tone` updates the composer and refreshes open suggestions.
+- `src/ui/app_root.rs`:
+  - `prefs` and `prefs_file` fields, loaded in `new`.
+  - `start_chat` calls `view.set_skin_tone(prefs.skin_tone)`.
+  - On `ChatEvent::SkinTone`, `set_skin_tone` saves `prefs.json` (if the tone changed) and pushes the tone to every account's `ChatView`.
+- Tests:
+  - `tests/emoji.rs`: four new tests (toned and untoned emoji; two-person emoji 🤝 👫 💏 🧑‍🤝‍🧑 get one tone or stay as they are, never panicking; toned shortcodes and suggestions with a stable key; recently used keeps the base).
+  - `tests/emoji.rs` and `tests/complete.rs`: existing call sites pass `Tone::Default`.
+
+### Divergences
+- **Prefs are owned by `AppRoot`, not `ChatView`.** After the multiple-accounts merge there's one `ChatView` per account, so the tone goes `AppRoot` → every view. The plan file was amended before this chunk.
+- **The swatches are a compact row of 22 px squares beside the search field.** The picker is only 272 px wide, so the search field shrinks to fit. As planned, but worth seeing in light and dark mode.
+- **No GUI check of the swatches yet.** Manual testing is deferred to the end.
+
+### Verification Performed
+- `cargo test --lib prefs`: 4 passed.
+- `cargo test --test emoji`: 16 passed. `cargo test --test complete`: 20 passed.
+- `cargo test`: 385 passed, 0 failed. `cargo clippy --all-targets -- -D warnings`: clean.
+
+### Manual Validation
+Deferred to the end:
+- Choosing the medium tone in the picker, then 👍, inserts 👍🏽.
+- `:wave` shows and inserts 👋🏽, and `:thumbsup:` converts to 👍🏽.
+- The tone survives a relaunch.
+- Swatches look right in light and dark mode.
+- With two accounts signed in, a tone chosen in one applies in the other.

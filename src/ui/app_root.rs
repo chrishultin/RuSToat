@@ -11,6 +11,7 @@ use gpui_kit::*;
 use crate::accounts::{self, AccountList, AccountsFile};
 use crate::api::StoatClient;
 use crate::notify;
+use crate::prefs::{Prefs, PrefsFile, Tone};
 use crate::runtime::spawn_io;
 use crate::session::{self, Restored, TokenStore};
 use crate::store::display_name;
@@ -72,6 +73,10 @@ pub struct AppRoot {
     shown: Shown,
     /// The count last shown on the Dock icon, to only touch AppKit on change.
     dock_badge: usize,
+    /// App-wide preferences (the default skin tone), shared by every
+    /// account, and where they're saved (`None` without a home directory).
+    prefs: Prefs,
+    prefs_file: Option<PrefsFile>,
     _appearance: Subscription,
 }
 
@@ -140,6 +145,9 @@ impl AppRoot {
             .ok();
         });
 
+        let prefs_file = PrefsFile::in_app_dir();
+        let prefs = prefs_file.as_ref().map(PrefsFile::load).unwrap_or_default();
+
         Self {
             default_instance,
             store,
@@ -148,6 +156,8 @@ impl AppRoot {
             states: HashMap::new(),
             shown: Shown::Loading { _task: task },
             dock_badge: 0,
+            prefs,
+            prefs_file,
             _appearance: appearance,
         }
     }
@@ -181,6 +191,30 @@ impl AppRoot {
     fn save_accounts(&self) {
         if let Err(err) = self.accounts_file.save(&self.accounts) {
             log::warn!("couldn't save the account list: {err:#}");
+        }
+    }
+
+    /// A new default skin tone, chosen in one account's emoji picker: save
+    /// it, and give it to every account.
+    fn set_skin_tone(&mut self, tone: Tone, cx: &mut Context<Self>) {
+        if self.prefs.skin_tone != tone {
+            self.prefs.skin_tone = tone;
+            if let Some(file) = &self.prefs_file
+                && let Err(err) = file.save(&self.prefs)
+            {
+                log::warn!("couldn't save preferences: {err:#}");
+            }
+        }
+        let views: Vec<Entity<ChatView>> = self
+            .states
+            .values()
+            .filter_map(|state| match state {
+                AccountState::Chat { view, .. } => Some(view.clone()),
+                _ => None,
+            })
+            .collect();
+        for view in views {
+            view.update(cx, |view, cx| view.set_skin_tone(tone, cx));
         }
     }
 
@@ -352,9 +386,11 @@ impl AppRoot {
         let client = self.client_for(id).with_token(token.clone());
         let account = id.to_string();
         let active = self.shown_account() == Some(id);
+        let tone = self.prefs.skin_tone;
         let view = cx.new(|cx| {
             let mut view = ChatView::new(client, me, account, window, cx);
             view.set_active(active, cx);
+            view.set_skin_tone(tone, cx);
             view
         });
         let changes = cx.observe(&view, |this, _, cx| this.sync_outside(cx));
@@ -364,6 +400,7 @@ impl AppRoot {
                 ChatEvent::Activate => this.show_account(&id, cx),
                 ChatEvent::LogOutRequested => this.log_out(&id, window, cx),
                 ChatEvent::SessionRejected => this.session_ended(&id, window, cx),
+                ChatEvent::SkinTone(tone) => this.set_skin_tone(*tone, cx),
             }
         });
         self.states.insert(

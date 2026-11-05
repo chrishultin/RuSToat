@@ -319,9 +319,9 @@ Keep the milestone 1–4 architecture:
   - A row of 6 tone swatches (✋ in each tone) beside the search field, with the chosen one highlighted.
   - Cells draw `toned(tone)`.
   - Choosing a tone calls back to the composer.
-- `src/ui/composer.rs`: holds the tone, uses it when inserting (picker, suggestions, closing colon), and passes it to the picker. It's saved through `ChatView`, which owns the app folder paths.
-- `src/ui/chat.rs`: loads prefs at start, gives the tone to the composer, and saves on change.
-- `src/main.rs` or `src/ui/app_root.rs`: where prefs are loaded, next to the places file.
+- `src/ui/composer.rs`: holds the tone, uses it when inserting (picker, suggestions, closing colon), and passes it to the picker. A tone change is reported up with `ComposerEvent::SkinTone(Tone)`.
+- `src/ui/chat.rs`: `set_skin_tone` hands the tone to its composer. It forwards the composer's change as `ChatEvent::SkinTone(Tone)`.
+- `src/ui/app_root.rs` *(amended after the multiple-accounts merge, where `AppRoot` owns one `ChatView` per account)*: loads `prefs.json` (`places::app_dir()`) at start, gives the tone to each `ChatView` it creates, and on `ChatEvent::SkinTone` saves prefs and pushes the tone to every account's view.
 - Tests: `tests/emoji.rs` (tones), and `src/prefs.rs` unit tests (round trip, corrupt file).
 
 **Depends on:** Chunk 1 (the app folder ID; otherwise it's independent).
@@ -359,7 +359,7 @@ Keep the milestone 1–4 architecture:
 - `src/ui/chat.rs`:
   - `upload_file` passes the path (no `spawn_blocking` read).
   - After confirmation or discard, it deletes owned temp files.
-  - At startup, it calls the sweep of stale paste folders.
+  - *(Amended after the multiple-accounts merge.)* The sweep of stale paste folders runs once per launch, from `main.rs`, not once per account view.
 - `src/draft.rs`:
   - `DraftAttachment.temporary: bool`, set by `save_pasted_image`.
   - `remove_temporary(&DraftAttachment)`, which ignores missing files.

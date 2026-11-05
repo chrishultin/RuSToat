@@ -2,7 +2,10 @@
 //! shortcodes for `:smile:` as you type.
 
 use stoat_gpui::complete::{Insertion, MAX_SUGGESTIONS, TokenRef};
-use stoat_gpui::emoji::{CustomEmoji, EmojiChoice, by_shortcode, custom_by_name, search};
+use stoat_gpui::emoji::{
+    CustomEmoji, EmojiChoice, by_shortcode, custom_by_name, search, toned,
+};
+use stoat_gpui::prefs::Tone;
 
 fn glyphs(choices: &[EmojiChoice]) -> Vec<String> {
     choices
@@ -63,12 +66,12 @@ fn custom_emoji_are_found_by_name_before_unicode_ones() {
 
 #[test]
 fn suggestions_insert_text_or_a_custom_emoji_chip() {
-    let smile = search("smile", &[])[0].suggestion();
+    let smile = search("smile", &[])[0].suggestion(Tone::Default);
     assert_eq!(smile.title, ":smile:");
     assert_eq!(smile.glyph.as_deref(), Some("😄"));
     assert_eq!(smile.insert, Insertion::Text("😄".into()));
 
-    let custom = EmojiChoice::Custom(parrot()).suggestion();
+    let custom = EmojiChoice::Custom(parrot()).suggestion(Tone::Default);
     assert_eq!(custom.title, ":smile_parrot:");
     assert_eq!(custom.image, parrot().url);
     assert_eq!(
@@ -83,10 +86,10 @@ fn suggestions_insert_text_or_a_custom_emoji_chip() {
 
 #[test]
 fn exact_shortcodes_are_looked_up() {
-    assert_eq!(by_shortcode("smile"), Some("😄"));
-    assert_eq!(by_shortcode("tada"), Some("🎉"));
-    assert_eq!(by_shortcode("nope"), None);
-    assert_eq!(by_shortcode("01M6GEW5A0CCCCCCCCCCCCCCCC"), None);
+    assert_eq!(by_shortcode("smile", Tone::Default), Some("😄"));
+    assert_eq!(by_shortcode("tada", Tone::Default), Some("🎉"));
+    assert_eq!(by_shortcode("nope", Tone::Default), None);
+    assert_eq!(by_shortcode("01M6GEW5A0CCCCCCCCCCCCCCCC", Tone::Default), None);
 }
 
 // The emoji picker.
@@ -223,4 +226,68 @@ fn custom_emoji_are_found_by_exact_name() {
     assert_eq!(custom_by_name(&custom, "part"), None);
     assert_eq!(custom_by_name(&custom, "missing"), None);
     assert_eq!(custom_by_name(&[], "party"), None);
+}
+
+// The default skin tone.
+
+#[test]
+fn toneable_emoji_take_the_tone_and_others_dont() {
+    assert_eq!(toned("👍", Tone::Medium), "👍🏽");
+    assert_eq!(toned("👋", Tone::Light), "👋🏻");
+    assert_eq!(toned("👍", Tone::Default), "👍");
+    for tone in Tone::ALL {
+        assert_eq!(toned("😄", tone), "😄", "{tone:?}");
+        assert_eq!(toned("🎉", tone), "🎉", "{tone:?}");
+    }
+    // Not an emoji the crate knows: left alone.
+    assert_eq!(toned("x", Tone::Dark), "x");
+}
+
+#[test]
+fn two_person_emoji_get_one_tone_for_both_or_stay_as_they_are() {
+    for base in ["🤝", "👫", "💏", "🧑‍🤝‍🧑"] {
+        for tone in Tone::ALL {
+            let glyph = toned(base, tone);
+            let found = emojis::get(glyph).expect("a real emoji");
+            if tone == Tone::Default {
+                assert_eq!(glyph, base);
+            } else if glyph != base {
+                // Toned: the same tone for everyone in it.
+                assert_eq!(found.skin_tone(), Some(tone.skin_tone()), "{base} {tone:?}");
+            }
+        }
+    }
+    // The handshake has single-tone variants.
+    assert_eq!(
+        emojis::get(toned("🤝", Tone::Dark)).unwrap().skin_tone(),
+        Some(emojis::SkinTone::Dark)
+    );
+}
+
+#[test]
+fn shortcodes_and_suggestions_use_the_tone() {
+    assert_eq!(by_shortcode("wave", Tone::Light), Some("👋🏻"));
+    assert_eq!(by_shortcode("+1", Tone::Medium), Some("👍🏽"));
+    assert_eq!(by_shortcode("smile", Tone::Dark), Some("😄"));
+
+    // Matching stays on shortcodes, so a toned suggestion is still found.
+    let wave = search("wave", &[])[0].clone();
+    let row = wave.suggestion(Tone::Medium);
+    assert_eq!(row.glyph.as_deref(), Some("👋🏽"));
+    assert_eq!(row.insert, Insertion::Text("👋🏽".into()));
+    // The row's key doesn't depend on the tone, so the selection survives a change.
+    assert_eq!(row.key, wave.suggestion(Tone::Default).key);
+}
+
+#[test]
+fn recently_used_keeps_the_base_emoji() {
+    let mut recent = RecentEmoji::default();
+    let thumbs = search("+1", &[])[0].clone();
+    recent.used(thumbs.clone());
+    let EmojiChoice::Unicode { emoji, .. } = &recent.list()[0] else {
+        panic!("unicode");
+    };
+    assert_eq!(*emoji, "👍");
+    // So the tone applies when it's drawn or inserted, whatever it is then.
+    assert_eq!(toned(emoji, Tone::Dark), "👍🏿");
 }

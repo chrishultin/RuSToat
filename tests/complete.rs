@@ -376,7 +376,7 @@ fn a_closing_colon_finds_the_shortcode_it_ends() {
     assert_eq!(closed("(:+1:"), Some((1..5, "+1".into())));
     // Unknown shortcodes are found here; the box leaves them as typed.
     assert_eq!(closed(":nope:"), Some((0..6, "nope".into())));
-    assert!(stoat_gpui::emoji::by_shortcode("nope").is_none());
+    assert!(stoat_gpui::emoji::by_shortcode("nope", stoat_gpui::prefs::Tone::Default).is_none());
     // Not closed, empty, times, mid-word, or in code.
     assert_eq!(closed(":smile"), None);
     assert_eq!(closed("::"), None);
@@ -387,5 +387,5 @@ fn a_closing_colon_finds_the_shortcode_it_ends() {
     // Custom emoji wire text is closed too, but isn't a shortcode.
     let wire = format!(":{PARTY}:");
     assert_eq!(closed(&wire).map(|(_, code)| code), Some(PARTY.to_string()));
-    assert!(stoat_gpui::emoji::by_shortcode(PARTY).is_none());
+    assert!(stoat_gpui::emoji::by_shortcode(PARTY, stoat_gpui::prefs::Tone::Default).is_none());
 }

@@ -25,7 +25,8 @@ use crate::complete::{
 };
 use crate::emoji::{CustomEmoji, EmojiChoice, RecentEmoji};
 use crate::media::MediaUrls;
-use crate::ui::emoji_picker::{EmojiBrowser, OnBrowsePick};
+use crate::prefs::Tone;
+use crate::ui::emoji_picker::{EmojiBrowser, OnBrowsePick, OnTone};
 use crate::draft::{
     AttachmentLimits, Draft, DraftAttachment, Drafts, EditStash, MAX_MESSAGE_CHARS, ReplyTarget,
     SendCheck, TooManyReplies, char_count, check_send, save_pasted_image,
@@ -59,6 +60,8 @@ pub enum ComposerEvent {
         range: std::ops::Range<usize>,
         code: String,
     },
+    /// The user chose a new default skin tone in the emoji picker.
+    SkinTone(Tone),
 }
 
 /// What gives a chip its label (`@Ada`) when text is loaded into the box.
@@ -104,6 +107,9 @@ pub struct Composer {
     /// The emoji picker, while it's open.
     emoji_picker: Option<Entity<EmojiBrowser>>,
     recent_emoji: RecentEmoji,
+    /// The default skin tone, for every emoji inserted (picker, `:`
+    /// suggestions, closing colon).
+    skin_tone: Tone,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -176,6 +182,7 @@ impl Composer {
             media: MediaUrls::default(),
             emoji_picker: None,
             recent_emoji: RecentEmoji::default(),
+            skin_tone: Tone::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -378,10 +385,28 @@ impl Composer {
             this.update(cx, |this, cx| this.insert_emoji(choice, keep_open, window, cx))
                 .ok();
         });
-        let recent = self.recent_emoji.clone();
-        self.emoji_picker =
-            Some(cx.new(|cx| EmojiBrowser::new(recent, custom, on_pick, window, cx)));
+        let this = cx.entity().downgrade();
+        let on_tone: OnTone = Rc::new(move |tone, _, cx| {
+            this.update(cx, |this, cx| {
+                this.set_skin_tone(tone, cx);
+                cx.emit(ComposerEvent::SkinTone(tone));
+            })
+            .ok();
+        });
+        let (recent, tone) = (self.recent_emoji.clone(), self.skin_tone);
+        self.emoji_picker = Some(cx.new(|cx| {
+            EmojiBrowser::new(recent, custom, tone, on_pick, on_tone, window, cx)
+        }));
         cx.notify();
+    }
+
+    /// Insert toneable emoji in `tone` from now on (and show them so in the
+    /// picker, if it's open).
+    pub fn set_skin_tone(&mut self, tone: Tone, cx: &mut Context<Self>) {
+        self.skin_tone = tone;
+        if let Some(picker) = &self.emoji_picker {
+            picker.update(cx, |picker, cx| picker.set_tone(tone, cx));
+        }
     }
 
     fn close_emoji_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -400,11 +425,13 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Recently used keeps the base emoji, so it follows tone changes.
         self.recent_emoji.used(choice.clone());
         match choice {
             EmojiChoice::Unicode { emoji, .. } => {
+                let emoji = crate::emoji::toned(emoji, self.skin_tone);
                 self.input
-                    .update(cx, |input, cx| input.insert(*emoji, window, cx));
+                    .update(cx, |input, cx| input.insert(emoji, window, cx));
             }
             EmojiChoice::Custom(custom) => {
                 let token = TokenRef::Emoji(custom.id.clone());
@@ -441,7 +468,7 @@ impl Composer {
         let Some((range, code)) = closed_shortcode(&self.last_text, cursor) else {
             return;
         };
-        let Some(emoji) = crate::emoji::by_shortcode(&code) else {
+        let Some(emoji) = crate::emoji::by_shortcode(&code, self.skin_tone) else {
             // Maybe one of the channel's custom emoji (only the view knows them).
             cx.emit(ComposerEvent::ClosedShortcode { range, code });
             return;
