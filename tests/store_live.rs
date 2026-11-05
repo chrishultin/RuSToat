@@ -147,6 +147,7 @@ fn row(id: &str, body: &str) -> TimelineRow {
         mine: false,
         jumbo: false,
         pending: None,
+        replies: Vec::new(),
     })
 }
 

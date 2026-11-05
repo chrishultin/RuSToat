@@ -36,7 +36,8 @@ use crate::places::{Place, Places, PlacesFile};
 use crate::runtime::spawn_io;
 use crate::store::{
     ChannelEntry, ChannelKind, ChatStore, MessageRow, PendingMessage, PendingState, PickerEmoji,
-    ReactionEmoji, RowOp, ServerEntry, TimelineRow, diff_rows, display_name,
+    ReactionEmoji, ReplyPreview, ReplyState, RowOp, ServerEntry, TimelineRow, diff_rows,
+    display_name,
 };
 use crate::ui::composer::{Composer, ComposerEvent};
 use crate::ui::emoji_picker::emoji_grid;
@@ -44,6 +45,9 @@ use crate::ui::math::MathPlugin;
 
 /// How many messages to load when a channel is opened.
 pub const HISTORY_PAGE: usize = 50;
+
+/// Most reply originals fetched at once.
+const REPLY_FETCHES: usize = 4;
 
 pub enum ChatEvent {
     LogOutRequested,
@@ -111,6 +115,8 @@ pub struct ChatView {
     /// Reaction changes waiting on the server, as (message, emoji). Another
     /// click on the same one waits, so requests can't cross.
     reacting: HashSet<(String, String)>,
+    /// Reply originals being fetched, by message ID (each once).
+    reply_fetches: HashSet<String>,
     /// The message box, under the open channel.
     composer: Entity<Composer>,
     _composer: Subscription,
@@ -233,6 +239,7 @@ impl ChatView {
             viewer_focus: cx.focus_handle(),
             picker_for: None,
             reacting: HashSet::new(),
+            reply_fetches: HashSet::new(),
             composer,
             _composer: composer_events,
             _connection: connection,
@@ -448,6 +455,16 @@ impl ChatView {
             RowAction::DiscardSend(key) => {
                 if self.store.discard_pending(channel, &key) {
                     self.sync_pane(channel, cx);
+                }
+            }
+            RowAction::JumpTo(id) => {
+                if let Some(pane) = self.panes.get(channel)
+                    && let Some(ix) = pane.rows.iter().position(
+                        |row| matches!(row, TimelineRow::Message(m) if m.id == id),
+                    )
+                {
+                    pane.scroller
+                        .update(cx, |scroller, cx| scroller.scroll_to_item(ix, cx));
                 }
             }
         }
@@ -935,6 +952,7 @@ impl ChatView {
                     }
                 }
             });
+            self.fetch_reply_sources(channel, cx);
             return;
         }
 
@@ -951,6 +969,61 @@ impl ChatView {
                 _scroll: scroll,
             },
         );
+        self.fetch_reply_sources(channel, cx);
+    }
+
+    /// Fetch originals that `channel`'s replies need, a few at a time. Each
+    /// result re-syncs the channel, which starts the next ones.
+    fn fetch_reply_sources(&mut self, channel: &str, cx: &mut Context<Self>) {
+        let missing = self.store.missing_reply_sources(channel);
+        for id in missing {
+            if self.reply_fetches.len() >= REPLY_FETCHES {
+                break;
+            }
+            if !self.reply_fetches.insert(id.clone()) {
+                continue;
+            }
+            let client = self.client.clone();
+            let request = spawn_io({
+                let (channel, id) = (channel.to_string(), id.clone());
+                // Just the message (and a neighbour each side), with its author.
+                async move { client.fetch_messages_around(&channel, &id, 1).await }
+            });
+            let channel = channel.to_string();
+            cx.spawn(async move |this, cx| {
+                let result = request.await;
+                let wait = match &result {
+                    Ok(Err(ApiError::RateLimited { retry_after_ms })) => {
+                        Some(Duration::from_millis(retry_after_ms.unwrap_or(2_000)))
+                    }
+                    _ => None,
+                };
+                if let Some(wait) = wait {
+                    log::debug!("reply source {id}: rate limited, waiting {wait:?}");
+                    cx.background_executor().timer(wait).await;
+                }
+                this.update(cx, |this, cx| {
+                    this.reply_fetches.remove(&id);
+                    match result {
+                        Ok(Ok(page)) => this.store.add_reply_sources(page, &[id]),
+                        // Tried again below, now the wait is over.
+                        Ok(Err(ApiError::RateLimited { .. })) => {}
+                        Ok(Err(err)) => {
+                            log::warn!("couldn't load reply source {id}: {err:?}");
+                            this.store.reply_source_unavailable(&id);
+                        }
+                        Err(err) => {
+                            log::warn!("reply source task failed: {err:?}");
+                            this.store.reply_source_unavailable(&id);
+                        }
+                    }
+                    this.sync_pane(&channel, cx);
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
     }
 
     /// Load the page before the oldest loaded message, if the reader is at
@@ -1626,6 +1699,8 @@ enum RowAction {
     RetrySend(String),
     /// Give up on a failed message (by its pending key).
     DiscardSend(String),
+    /// Scroll to a loaded message (a reply's original).
+    JumpTo(String),
 }
 
 type OnRowAction = Rc<dyn Fn(RowAction, &mut Window, &mut App)>;
@@ -1904,7 +1979,19 @@ fn render_message_row(
         .alignment(alignment)
         .avatar_slot(avatar_slot)
         .when_some(header, |el, header| el.header(header))
-        .content(MessageContent::new().bubble(bubble))
+        .content(
+            MessageContent::new()
+                .when(!message.replies.is_empty(), |el| {
+                    el.gap(px(REPLY_GAP)).children(
+                        message
+                            .replies
+                            .iter()
+                            .enumerate()
+                            .map(|(ix, reply)| render_reply_preview(message, ix, reply, colors, on_action)),
+                    )
+                })
+                .bubble(bubble),
+        )
         .when_some(
             render_reactions(message, colors, on_action),
             |el, footer| el.footer(footer),
@@ -1930,6 +2017,73 @@ fn render_message_row(
         })
         .child(layout)
         .into_any_element()
+}
+
+/// Height of a reply preview line, the same whatever its state, so a row
+/// doesn't change height when its original loads.
+const REPLY_LINE_HEIGHT: f32 = 18.;
+/// Space between reply previews and the bubble.
+const REPLY_GAP: f32 = 2.;
+/// The original author's avatar in a reply preview.
+const REPLY_AVATAR_SIZE: f32 = 14.;
+
+/// "↱ Name: snippet" above a reply. Clicking a loaded original scrolls to it
+/// (if it isn't loaded in the list, nothing happens).
+fn render_reply_preview(
+    message: &MessageRow,
+    ix: usize,
+    reply: &ReplyPreview,
+    colors: RowColors,
+    on_action: &OnRowAction,
+) -> AnyElement {
+    let id = SharedString::from(format!("reply-{}-{ix}", message.id));
+    let line = h_flex()
+        .id(id.clone())
+        .h(px(REPLY_LINE_HEIGHT))
+        .max_w_full()
+        .min_w_0()
+        .gap_1()
+        .text_xs()
+        .text_color(colors.muted)
+        .child(Icon::new(IconName::CornerUpRight).xsmall());
+    let line = match reply.state {
+        ReplyState::Loaded => {
+            let jump = {
+                let (on_action, target) = (on_action.clone(), reply.id.clone());
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    on_action(RowAction::JumpTo(target.clone()), window, cx)
+                }
+            };
+            let name = if reply.mentions_author {
+                format!("@{}", reply.author)
+            } else {
+                reply.author.clone()
+            };
+            line.cursor_pointer()
+                .on_click(jump)
+                .child(avatar(
+                    format!("{id}-avatar"),
+                    reply.avatar.clone(),
+                    &reply.author,
+                    REPLY_AVATAR_SIZE,
+                    colors.avatar_bg,
+                    colors.avatar_fg,
+                ))
+                .child(
+                    div()
+                        .flex_none()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(name),
+                )
+                .child(div().min_w_0().truncate().child(reply.snippet.clone()))
+        }
+        ReplyState::Loading => line.child(div().italic().child("Loading…")),
+        ReplyState::Deleted => line.child(div().italic().child("Original message was deleted")),
+        ReplyState::Unavailable => {
+            line.child(div().italic().child("Couldn't load the original message"))
+        }
+    };
+    line.into_any_element()
 }
 
 /// How faint a message is while it's being sent.

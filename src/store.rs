@@ -112,6 +112,49 @@ pub struct MessageRow {
     pub allowed_reactions: Option<Vec<PickerEmoji>>,
     /// Not on the server yet: sent and waiting, or failed. `None` for real messages.
     pub pending: Option<PendingState>,
+    /// What it replies to, in order (at most [`MAX_REPLIES`]).
+    pub replies: Vec<ReplyPreview>,
+}
+
+/// Most messages one message can reply to (Stoat's `limits.global.message_replies`).
+pub const MAX_REPLIES: usize = 5;
+
+/// Longest reply-preview snippet, in characters.
+pub const SNIPPET_CHARS: usize = 100;
+
+/// The "↱ Name: snippet" line above a reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyPreview {
+    /// The original message's ID.
+    pub id: String,
+    /// The original's author, as [`ChatStore::author_name`] names them.
+    /// Empty unless `state` is `Loaded`.
+    pub author: String,
+    pub avatar: Option<String>,
+    /// One line of the original as plain text (see [`crate::markdown::snippet`]).
+    pub snippet: String,
+    /// The reply pinged the original's author.
+    pub mentions_author: bool,
+    pub state: ReplyState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplyState {
+    Loaded,
+    /// Not loaded yet: being fetched (see [`ChatStore::missing_reply_sources`]).
+    Loading,
+    /// The original was deleted.
+    Deleted,
+    /// Fetching the original failed.
+    Unavailable,
+}
+
+/// A cached original of a reply that isn't in the loaded history.
+#[derive(Debug, Clone)]
+enum ReplySource {
+    Found(Box<Message>),
+    Deleted,
+    Unavailable,
 }
 
 /// A message the user sent that Stoat hasn't confirmed yet. It's shown at
@@ -280,6 +323,8 @@ pub struct ChatStore {
     notifications: NotificationSettings,
     /// Messages the user sent that aren't confirmed yet, by channel, in send order.
     pending: HashMap<String, Vec<PendingMessage>>,
+    /// Originals of replies that aren't in the loaded history, by message ID.
+    reply_sources: HashMap<String, ReplySource>,
 }
 
 impl ChatStore {
@@ -429,8 +474,124 @@ impl ChatStore {
     }
 
     /// Forget all loaded history (after a reconnect, to avoid gaps).
+    /// Originals that couldn't be fetched are tried again.
     pub fn clear_histories(&mut self) {
         self.histories.clear();
+        self.reply_sources
+            .retain(|_, source| !matches!(source, ReplySource::Unavailable));
+    }
+
+    /// Originals that replies in `channel` (loaded or pending) refer to but
+    /// that aren't loaded or cached, oldest reply first, each once.
+    pub fn missing_reply_sources(&self, channel: &str) -> Vec<String> {
+        let Some(history) = self.histories.get(channel) else {
+            return Vec::new();
+        };
+        let replied = history
+            .messages
+            .iter()
+            .filter_map(|m| m.replies.as_ref())
+            .flat_map(|ids| ids.iter().take(MAX_REPLIES))
+            .chain(
+                self.pending(channel)
+                    .iter()
+                    .flat_map(|p| p.replies.iter().map(|r| &r.id)),
+            );
+        let mut seen = HashSet::new();
+        replied
+            .filter(|id| {
+                self.find_message(channel, id).is_none()
+                    && !self.reply_sources.contains_key(*id)
+                    && seen.insert(id.as_str())
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Originals fetched for `wanted` replies in `channel` (with whatever
+    /// else the page brought, and its authors). Any of `wanted` not in it
+    /// has been deleted.
+    pub fn add_reply_sources(&mut self, page: BulkMessageResponse, wanted: &[String]) {
+        for message in self.absorb_page(page) {
+            self.reply_sources
+                .insert(message.id.clone(), ReplySource::Found(Box::new(message)));
+        }
+        for id in wanted {
+            self.reply_sources
+                .entry(id.clone())
+                .or_insert(ReplySource::Deleted);
+        }
+    }
+
+    /// Fetching the original `id` failed: show that, not "Loading…" forever.
+    pub fn reply_source_unavailable(&mut self, id: &str) {
+        self.reply_sources
+            .entry(id.to_string())
+            .or_insert(ReplySource::Unavailable);
+    }
+
+    /// A loaded message by ID.
+    fn find_message(&self, channel: &str, id: &str) -> Option<&Message> {
+        let messages = &self.histories.get(channel)?.messages;
+        let ix = messages
+            .binary_search_by(|m| m.id.as_str().cmp(id))
+            .ok()?;
+        Some(&messages[ix])
+    }
+
+    /// The preview of `id` for `reply`: from the loaded history, else the cache.
+    fn reply_preview(&self, reply: &Message, id: &str) -> ReplyPreview {
+        let original = match self.find_message(&reply.channel, id) {
+            Some(message) => Ok(message),
+            None => match self.reply_sources.get(id) {
+                Some(ReplySource::Found(message)) => Ok(&**message),
+                Some(ReplySource::Deleted) => Err(ReplyState::Deleted),
+                Some(ReplySource::Unavailable) => Err(ReplyState::Unavailable),
+                None => Err(ReplyState::Loading),
+            },
+        };
+        match original {
+            Ok(original) => ReplyPreview {
+                id: id.to_string(),
+                author: self.author_name(original),
+                avatar: self.avatar_url(original),
+                snippet: self.snippet(original),
+                mentions_author: reply
+                    .mentions
+                    .as_ref()
+                    .is_some_and(|m| m.contains(&original.author)),
+                state: ReplyState::Loaded,
+            },
+            Err(state) => ReplyPreview {
+                id: id.to_string(),
+                author: String::new(),
+                avatar: None,
+                snippet: String::new(),
+                mentions_author: false,
+                state,
+            },
+        }
+    }
+
+    /// One line of a message as plain text, for a reply preview.
+    fn snippet(&self, message: &Message) -> String {
+        if let Some(system) = &message.system {
+            return self.system_text(system);
+        }
+        let text = message
+            .content
+            .as_deref()
+            .map(|c| crate::markdown::snippet(c, self, SNIPPET_CHARS))
+            .unwrap_or_default();
+        if !text.is_empty() {
+            return text;
+        }
+        match message.attachments.as_deref().and_then(<[File]>::first) {
+            Some(file) if file.content_type.starts_with("image/") => "[image]".into(),
+            Some(_) => "[file]".into(),
+            None if message.embeds.as_ref().is_some_and(|e| !e.is_empty()) => "[embed]".into(),
+            None => String::new(),
+        }
     }
 
     /// A live message. It's added to its channel's history if that's loaded,
@@ -794,11 +955,16 @@ impl ChatStore {
         data: PartialMessage,
         clear: &[FieldsMessage],
     ) -> bool {
-        let Some(message) = self
+        let loaded = self
             .histories
             .get_mut(channel)
-            .and_then(|h| h.messages.iter_mut().find(|m| m.id == id))
-        else {
+            .and_then(|h| h.messages.iter_mut().find(|m| m.id == id));
+        // An original that's only cached for a reply preview: keep it fresh.
+        let cached = match self.reply_sources.get_mut(id) {
+            Some(ReplySource::Found(message)) => Some(&mut **message),
+            _ => None,
+        };
+        let Some(message) = loaded.or(cached) else {
             return false;
         };
         message.apply_options(data);
@@ -962,12 +1128,18 @@ impl ChatStore {
 
     /// Remove messages from a loaded channel. Returns true if any were removed.
     pub fn apply_delete(&mut self, channel: &str, ids: &[String]) -> bool {
+        // Replies to them say so, without fetching to find out.
+        let mut cached = false;
+        for id in ids {
+            let old = self.reply_sources.insert(id.clone(), ReplySource::Deleted);
+            cached |= matches!(old, Some(ReplySource::Found(_)));
+        }
         let Some(history) = self.histories.get_mut(channel) else {
             return false;
         };
         let before = history.messages.len();
         history.messages.retain(|m| !ids.contains(&m.id));
-        history.messages.len() != before
+        cached || history.messages.len() != before
     }
 
     fn bump_last_message(&mut self, channel: &str, id: &str) {
@@ -1270,7 +1442,10 @@ impl ChatStore {
         for (message, pending, millis) in loaded.chain(unconfirmed) {
             let author = self.author_name(message);
             let system = message.system.is_some();
+            // A reply starts a group, so its preview sits under a header.
+            let replies = message.replies.as_ref().is_some_and(|r| !r.is_empty());
             let continuation = !system
+                && !replies
                 && previous
                     .as_ref()
                     .is_some_and(|(prev_author, prev_name, prev_millis, prev_system)| {
@@ -1350,6 +1525,13 @@ impl ChatStore {
             reactions: self.reaction_chips(message),
             allowed_reactions: self.allowed_reactions(message),
             pending: None,
+            replies: message
+                .replies
+                .iter()
+                .flatten()
+                .take(MAX_REPLIES)
+                .map(|id| self.reply_preview(message, id))
+                .collect(),
         }
     }
 

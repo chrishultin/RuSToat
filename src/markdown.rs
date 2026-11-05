@@ -438,6 +438,82 @@ pub fn plain_text(content: &str, names: &impl Names) -> String {
     plain_mentions(content, names)
 }
 
+/// A one-line plain-text preview of message content (reply previews): the
+/// first line with text in it, Markdown markers removed, mentions as
+/// `@Name`, and at most `max_chars` characters (cut with "…").
+pub fn snippet(content: &str, names: &impl Names, max_chars: usize) -> String {
+    let line = content
+        .lines()
+        .map(str::trim)
+        // Code fences alone say nothing; the code under them does.
+        .find(|line| !line.is_empty() && !line.starts_with("```"))
+        .unwrap_or_default();
+    let text = plain_text(&strip_markers(strip_line_prefix(line)), names);
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match text.char_indices().nth(max_chars) {
+        Some((cut, _)) => format!("{}…", text[..cut].trim_end()),
+        None => text,
+    }
+}
+
+/// Block markers at the start of a line: headings, quotes, list bullets.
+fn strip_line_prefix(mut line: &str) -> &str {
+    loop {
+        let trimmed = line.trim_start();
+        let rest = if let Some(rest) = trimmed.strip_prefix('>') {
+            rest
+        } else if trimmed.starts_with('#') {
+            let rest = trimmed.trim_start_matches('#');
+            if !rest.starts_with(' ') {
+                return trimmed;
+            }
+            rest
+        } else if let Some(rest) = ["- ", "* ", "+ "]
+            .iter()
+            .find_map(|bullet| trimmed.strip_prefix(bullet))
+        {
+            rest
+        } else {
+            let digits = trimmed.len() - trimmed.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+            match trimmed[digits..].strip_prefix(". ") {
+                Some(rest) if digits > 0 => rest,
+                _ => return trimmed,
+            }
+        };
+        line = rest;
+    }
+}
+
+/// Inline Markdown markers removed: emphasis, strikethrough, spoilers, code
+/// ticks, `$$` math, and links (`[text](url)` → `text`). A lone `_` stays,
+/// so `snake_case` survives.
+fn strip_markers(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(c) = rest.chars().next() {
+        if c == '['
+            && let Some(close) = rest.find("](")
+            && let Some(end) = rest[close..].find(')')
+        {
+            out.push_str(&rest[1..close]);
+            rest = &rest[close + end + 1..];
+            continue;
+        }
+        if let Some(marker) = ["**", "__", "~~", "||", "$$"]
+            .iter()
+            .find(|marker| rest.starts_with(**marker))
+        {
+            rest = &rest[marker.len()..];
+            continue;
+        }
+        if !matches!(c, '*' | '`') {
+            out.push(c);
+        }
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
 /// Mentions as plain `@Name` text, for places links can't go (spoilers).
 fn plain_mentions(text: &str, names: &impl Names) -> String {
     let text = plain_emoji(text, names);

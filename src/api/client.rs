@@ -213,6 +213,34 @@ impl StoatClient {
         parse(status, &bytes)
     }
 
+    /// `GET /channels/{id}/messages?nearby={message}`: `message` itself (if
+    /// it still exists) and up to `limit / 2 + 1` messages on each side,
+    /// with their authors. Unlike `GET /channels/{id}/messages/{message}`,
+    /// this includes the authors' `users` and `members`. A deleted message is
+    /// simply missing from the result.
+    pub async fn fetch_messages_around(
+        &self,
+        channel: &str,
+        message: &str,
+        limit: i64,
+    ) -> Result<BulkMessageResponse, ApiError> {
+        let options = OptionsQueryMessages {
+            limit: Some(limit),
+            before: None,
+            after: None,
+            sort: None,
+            nearby: Some(message.to_string()),
+            include_users: Some(true),
+        };
+        let query = serde_urlencoded::to_string(&options).expect("message query is always encodable");
+        self.send(
+            Method::GET,
+            &format!("/channels/{channel}/messages?{query}"),
+            None::<&()>,
+        )
+        .await
+    }
+
     /// `PUT /channels/{channel}/ack/{message}`: the user has read `channel`
     /// up to and including `message`.
     pub async fn ack_message(&self, channel: &str, message: &str) -> Result<(), ApiError> {

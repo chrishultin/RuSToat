@@ -68,3 +68,53 @@ Supervision: continuous.
 
 ### Manual Validation
 The user ran the app (`cargo run`). They sent a message in a DM and a multi-line message. Both appeared at once and were confirmed (log: `sent 01M6PBV7… in 01M4PQSA…`, `sent 01M6PBVQ… in 01M6N0BJ…`). The user confirmed it "looks good". The offline send and Retry wasn't exercised in this session (no failure in the log). It's carried to the plan's final Manual Tests, item 2.
+
+## Chunk 2: Reply previews
+
+### Changes Made
+- `src/api/client.rs`: `fetch_messages_around(channel, message, limit) -> BulkMessageResponse`, which is `GET /channels/{id}/messages?nearby={message}&limit=…&include_users=true`.
+- `src/markdown.rs`: `snippet(content, names, max_chars)`, a one-line plain-text preview.
+  - It takes the first non-empty line, skipping lone code fences.
+  - It strips heading, quote and list prefixes (`strip_line_prefix`), and inline markers: `**`, `__`, `~~`, `||`, `$$`, `*`, backticks, and `[text](url)` becomes `text` (`strip_markers`). A lone `_` stays, so `snake_case` survives.
+  - Mentions become `@Name` (via `plain_text`). Whitespace is collapsed, and the text is cut at `max_chars` characters with "…".
+- `src/store.rs`:
+  - `MessageRow.replies: Vec<ReplyPreview { id, author, avatar, snippet, mentions_author, state }>`, with at most `MAX_REPLIES` (5). `ReplyState` is `Loaded`, `Loading`, `Deleted` or `Unavailable`.
+  - The original is looked up in the loaded history first (`find_message`, binary search), then in a new `reply_sources` cache (private `ReplySource::{Found(Box<Message>), Deleted, Unavailable}`).
+  - `missing_reply_sources(channel)` lists originals of loaded and pending replies, each once. `add_reply_sources(page, wanted)` caches the page's messages and authors, and marks any wanted ID missing from it as deleted. `reply_source_unavailable(id)` records a failed fetch.
+  - `clear_histories` drops `Unavailable` entries, so they're retried after a reconnect. `apply_delete` marks deleted IDs as deleted in the cache, with no refetch. It also returns true when a cached original was deleted. `apply_update` also updates a cached original.
+  - `snippet()` handles system messages (their text), attachment-only originals ("[image]" or "[file]"), and embed-only originals ("[embed]").
+  - A reply always starts a new group (`continuation` is false).
+- `src/ui/chat.rs`:
+  - `fetch_reply_sources(channel)` runs at the end of `sync_pane`. It keeps at most `REPLY_FETCHES` (4) in flight, tracked in `reply_fetches`, and each result re-syncs the channel, which starts the next ones. A rate-limited fetch waits for `retry_after` (2 s by default) and is tried again. Other errors mark the original unavailable.
+  - `render_reply_preview` draws the line above the bubble, inside `MessageContent`. It has a fixed `REPLY_LINE_HEIGHT` (18 px) in every state: the corner-up-right icon, a 14 px avatar, the name (`@` prefixed when the reply mentioned them), and the truncated snippet. The other states read "Loading…", "Original message was deleted" and "Couldn't load the original message".
+  - Clicking a loaded preview sends `RowAction::JumpTo(id)`, which calls `scroll_to_item` if the original is in the pane's rows.
+- `src/assets.rs`: registers the `CornerUpRight` icon.
+- Tests: `tests/store_replies.rs` (new), `tests/api_send.rs` (+1). `tests/store_live.rs`'s row helper gained `replies`.
+
+### Divergences
+- **How originals are fetched:** the plan named `fetch_message` (`GET /channels/{c}/messages/{id}`). Stoat's single-message route returns no `user` or `member`, so an original whose author isn't cached would show "Unknown user", which is common in servers.
+  - `GET …/messages?nearby={id}&limit=1&include_users=true` returns the message, its authors' users and members, and a neighbour on each side, in one request. In `revolt-database`, `nearby` runs `$gte id` limit 1 and `$lt id` limit 1.
+  - A deleted original is simply missing from the result. That replaces the plan's 404 handling (`reply_source_missing`), which became `add_reply_sources(page, wanted)`.
+- **Grouping (the plan left this open):** a reply starts a new group, so its preview sits under a name and time header and is never inside a group.
+- **Unavailable state** (not in the plan): a failed fetch (not a deleted original) says "Couldn't load the original message", rather than "Loading…" forever. It's retried after a reconnect.
+- **Live edits and deletes of cached originals** (not in the plan) keep their previews current.
+
+### Verification Performed
+- `cargo test --test store_replies`: 11 passed.
+  - A reply to a loaded message.
+  - An unloaded original listed once for two replies, then loaded with an author the cache didn't have.
+  - A fetch without the original marks it deleted, and it isn't refetched.
+  - Deleting a loaded original marks its replies with no fetch.
+  - A failed fetch shows unavailable and is retried after a reconnect.
+  - The `mentions_author` flag from `Message.mentions`.
+  - Attachment-only originals ("[image]", "[file]").
+  - At most 5 previews, and replies start a group.
+  - Snippet stripping: bold, italic, underline, strike, spoiler, code, links, headings, quotes, lists, fences, mentions, `snake_case` and whitespace.
+  - Cutting on character boundaries (é, 🦦).
+  - A live edit of a cached original.
+  - `diff_rows` gives `Remeasure` for both replies when the source arrives.
+- `cargo test --test api_send`: 6 passed. The new test checks `nearby`, `limit=1` and `include_users=true`, and that the response parses with its users.
+- Full suite: `cargo test`, 242 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings` was clean after boxing `ReplySource::Found` (`large_enum_variant`).
+
+### Manual Validation
+The user ran the chunk 2 build and confirmed reply previews work ("lgtm"). The log shows no fetch failures or rate limiting.

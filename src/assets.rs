@@ -12,6 +12,7 @@ gpui_kit::assets::icon_assets!(
     [
         AtSign,
         Bookmark,
+        CornerUpRight,
         Download,
         FileImage,
         FileMusic,

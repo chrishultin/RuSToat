@@ -5,7 +5,7 @@ use revolt_result::ErrorType;
 use serde_json::json;
 use stoat_gpui::api::models::ReplyIntent;
 use stoat_gpui::api::{ApiError, StoatClient};
-use wiremock::matchers::{body_json, header, method, path};
+use wiremock::matchers::{body_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const MSG: &str = "01JC0000000000000000000009";
@@ -133,4 +133,34 @@ async fn sending_too_fast_is_rate_limited() {
         ),
         "{err:?}"
     );
+}
+
+#[tokio::test]
+async fn a_reply_source_is_fetched_with_its_neighbours_and_authors() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/channels/ch-general/messages"))
+        .and(header("x-session-token", "tok"))
+        .and(query_param("nearby", MSG))
+        .and(query_param("limit", "1"))
+        .and(query_param("include_users", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "messages": [created("the original")],
+            "users": [{ "_id": "u-me", "username": "me", "discriminator": "0001", "relationship": "None", "online": false }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let page = client(&server)
+        .fetch_messages_around("ch-general", MSG, 1)
+        .await
+        .unwrap();
+    let stoat_gpui::api::models::BulkMessageResponse::MessagesAndUsers { messages, users, .. } =
+        page
+    else {
+        panic!("expected users with the messages");
+    };
+    assert_eq!(messages[0].id, MSG);
+    assert_eq!(users[0].username, "me");
 }
