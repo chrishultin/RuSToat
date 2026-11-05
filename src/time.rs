@@ -40,7 +40,14 @@ pub fn format_message_time(when: NaiveDateTime, now: NaiveDateTime) -> String {
 
 /// [`format_message_time`] for a ULID, in local time. Empty if it isn't one.
 pub fn message_time_label(id: &str) -> String {
-    ulid_local_time(id)
+    ulid_millis(id).map(millis_time_label).unwrap_or_default()
+}
+
+/// [`format_message_time`] for milliseconds since the Unix epoch, in local time.
+pub fn millis_time_label(millis: u64) -> String {
+    i64::try_from(millis)
+        .ok()
+        .and_then(|millis| Local.timestamp_millis_opt(millis).single())
         .map(|when| format_message_time(when.naive_local(), Local::now().naive_local()))
         .unwrap_or_default()
 }

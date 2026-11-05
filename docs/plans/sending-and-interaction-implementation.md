@@ -1,0 +1,70 @@
+# Implementation Record: Sending and interaction (milestone 3)
+
+_Plan: docs/plans/sending-and-interaction.md_
+_Started: 2026-11-05_
+
+Pre-existing uncommitted changes, kept out of every commit: `.gitignore` (a tool added a duplicate `.humanlayer/tasks/` entry) and the untracked `.shadow/`.
+
+Supervision: continuous.
+
+## Chunk 1: Message box and sending
+
+### Changes Made
+- `src/api/client.rs`: `send_message(channel, content, replies, idempotency_key) -> Message` (`POST /channels/{id}/messages`). The body is built from `DataMessageSend` with its `null` fields removed (`without_nulls`), so a message without replies is exactly `{"content": …}`. `send_raw` now delegates to `send_raw_with(…, headers)`, which adds extra headers (`Idempotency-Key`). Response parsing moved into a shared `parse` helper.
+- `src/store.rs`:
+  - `PendingMessage { key, nonce, channel, content, replies, state, sent_ms, nonce_used }` and `PendingState { Sending, Failed(String) }`, kept per channel in send order.
+  - `add_pending`, `pending`, `fail_pending(channel, key, reason, answered)`, `retry_pending(channel, key, fresh_nonce)` and `discard_pending`.
+  - `apply_message` drops the pending entry whose nonce matches a message from `me` (`confirm_pending`), whichever of the POST response or the echo comes first. `set_history` and `prepend_page` do the same for loaded pages (`confirm_pending_in_history`).
+  - `MessageRow` gained `key` (the row's identity for `diff_rows`: the nonce for the user's own messages that have one, else the ID) and `pending: Option<PendingState>`. `row_key` uses `key`.
+  - `timeline()` was refactored. Row building moved into `message_row()`. Pending messages are turned into synthetic `Message`s (`pending_as_message`) and appended after the loaded ones. Grouping now compares millisecond times, so pending rows (timed by `sent_ms`) group with the user's previous message.
+- `src/time.rs`: `millis_time_label(ms)`. `message_time_label` now uses it.
+- `src/draft.rs` (new, pure): `check_send` (whitespace-only messages are never sent; leading blank lines and trailing whitespace are trimmed; the 2000-character limit counts characters), `char_count` (shown from 1800), `Drafts` (kept per channel), and `new_nonce(now_ms)` (time, counter and a random part, at most 48 bytes).
+- `src/ui/composer.rs` (new): `Composer` view.
+  - It owns a `TextareaState` with `auto_grow(1, 8)` and `submit_on_enter(true)`.
+  - It emits `ComposerEvent::Send(text)` on `PressEnter { shift: false }`.
+  - Drafts are swapped in `set_channel`, with the cursor put at the draft's end.
+  - It shows the character count, in red with how many characters are over when past the limit.
+- `src/ui/chat.rs`:
+  - `ChatView` owns the composer and draws it under the message list for any open channel. `sync_composer` (run from `render`) points it at the current channel with a placeholder ("Message #name", "Message @name", …) and focuses it when the channel changes.
+  - `send_message` adds the pending message, syncs, scrolls to the end, then posts. `post_pending` confirms on success, treats `DuplicateNonce` as already sent, and otherwise calls `fail_pending` with `send_error_text` (`MissingPermission` gives "You can't send messages here."). `retry_send` and `RowAction::{RetrySend, DiscardSend}` handle the buttons.
+  - Pending rows are drawn at 60% opacity with "Sending…" under them. Failed rows show the reason with Retry and Discard. Pending rows have no reaction button.
+  - `close_viewer` gives focus back to the message box.
+  - `sync_pane` does nothing for a channel whose history isn't loaded, so sending during a load can't create an empty pane.
+- `src/lib.rs` and `src/ui/mod.rs`: register `draft` and `composer`.
+- Tests: `tests/api_send.rs` (new), `tests/store_pending.rs` (new). `tests/store_live.rs`'s row helper gained the new fields.
+
+### Divergences
+- **Enter in the textarea (a plan risk):** resolved with `TextareaState::submit_on_enter(true)` (public but `#[doc(hidden)]` in gpui-base 0.9). With it, Enter emits `PressEnter` without inserting a newline and Shift+Enter inserts one. None of the plan's three fallbacks were needed.
+- **Retry keys:** Stoat's `IdempotencyKey` guard (`revolt-database` `util/idempotency.rs`) records the key in a cache when the request arrives, before permission checks or creating anything. A later request with the same key gets `409 DuplicateNonce`.
+  - Retrying with the same key after Stoat answered with an error would therefore always fail, though nothing was created.
+  - So a pending message records whether the last failure was answered by Stoat (`nonce_used`). Retry keeps the key after a network failure, where the outcome is unknown and a duplicate must be impossible. It uses a fresh key after an error response, where nothing was created.
+  - A `DuplicateNonce` on retry means an earlier attempt got through, so the pending entry is dropped. The real message shows via its echo or the next history load.
+  - The row keeps a stable `key` (its first nonce), so a key change doesn't move the row.
+- **Row identity:** `MessageRow.key` was added (not in the plan) so a pending row and its confirmed message are the same list row. `diff_rows` gives `Remeasure` on confirmation, as the plan's tests require.
+- **History loads confirm pending messages too** (not in the plan). This covers a send whose echo was missed while the events connection was down and the history was then reloaded.
+- **Nonce format:** time, a counter and a random part (`rustoat-{ms}-{n}-{hex}`), not just time and a counter. Stoat's duplicate cache is shared by all clients.
+
+### Verification Performed
+- `cargo test --test api_send`: 5 passed.
+  - POST path with the session and `Idempotency-Key` headers, and the body exactly `{"content": "hello\nworld"}`.
+  - The response parsed into a `Message` with its `nonce`.
+  - The `replies` body.
+  - 403 `MissingPermission` mapped to `ApiError::Api`.
+  - 409 `DuplicateNonce`.
+  - 429 `RateLimited` with `retry_after`.
+- `cargo test --test store_pending`: 15 passed.
+  - Pending after the loaded messages.
+  - The echo confirms it.
+  - POST response then echo, and echo then POST response, each give one row.
+  - Another author's message with the same nonce doesn't confirm ours.
+  - A history load confirms it.
+  - Fail, then retry (same nonce), then discard.
+  - A retry after an answered failure gets a fresh nonce and keeps its row key.
+  - Grouping with our last message, and a new group after 7 minutes.
+  - `diff_rows` gives `Append` (plus a `Remeasure` of the previous group end) on send, and `Remeasure` on failure and on confirmation.
+  - Pending Markdown is prepared like real messages.
+  - Message box rules: blank, trimming, the character (not byte) limit, the count threshold, drafts, and nonce uniqueness and length.
+- Full suite: `cargo test`, 230 passed, 0 failed, 5 ignored (live checks). `cargo clippy --all-targets -- -D warnings`: clean.
+
+### Manual Validation
+The user ran the app (`cargo run`). They sent a message in a DM and a multi-line message. Both appeared at once and were confirmed (log: `sent 01M6PBV7… in 01M4PQSA…`, `sent 01M6PBVQ… in 01M6N0BJ…`). The user confirmed it "looks good". The offline send and Retry wasn't exercised in this session (no failure in the log). It's carried to the plan's final Manual Tests, item 2.

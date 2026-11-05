@@ -7,8 +7,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use crate::api::events::Ready;
 use crate::api::models::{
     BulkMessageResponse, Channel, Embed, Emoji, EmojiParent, FieldsChannel, FieldsMessage, File,
-    Member, Message, MessageFlags, PartialChannel, PartialMessage, Presence, Server, SystemMessage,
-    User,
+    Member, Message, MessageFlags, PartialChannel, PartialMessage, Presence, ReplyIntent, Server,
+    SystemMessage, User,
 };
 use crate::attachment::AttachmentView;
 use crate::embed::EmbedView;
@@ -70,7 +70,13 @@ pub enum TimelineRow {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageRow {
+    /// The message's ID. For a pending message, its [`PendingMessage::key`].
     pub id: String,
+    /// What identifies the row in the list (see [`diff_rows`]): the
+    /// idempotency key for the user's own messages that have one, so a
+    /// pending row and the message that confirms it are the same row.
+    /// Otherwise the ID.
+    pub key: String,
     pub author: String,
     /// Author avatar URL. `None` for system messages, or when there's no
     /// image to show (the UI draws the author's initial instead).
@@ -104,6 +110,39 @@ pub struct MessageRow {
     /// The only emoji the picker offers for this message, when its author
     /// restricted reactions. `None`: the channel's usual choices.
     pub allowed_reactions: Option<Vec<PickerEmoji>>,
+    /// Not on the server yet: sent and waiting, or failed. `None` for real messages.
+    pub pending: Option<PendingState>,
+}
+
+/// A message the user sent that Stoat hasn't confirmed yet. It's shown at
+/// once, after the loaded messages, and replaced by the real message when
+/// that arrives with a matching `nonce` (from the POST response or the live
+/// event, whichever comes first).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingMessage {
+    /// Identifies it while it's pending, even if a retry changes `nonce`.
+    /// Its first `nonce`.
+    pub key: String,
+    /// The `Idempotency-Key` it's sent with, which Stoat copies into the
+    /// created message's `nonce`.
+    pub nonce: String,
+    pub channel: String,
+    /// What the user typed (Markdown source).
+    pub content: String,
+    pub replies: Vec<ReplyIntent>,
+    pub state: PendingState,
+    /// When it was sent, in milliseconds since the Unix epoch.
+    pub sent_ms: u64,
+    /// The last attempt got an answer from Stoat (an error), so Stoat has
+    /// seen `nonce` and would refuse it as a duplicate. A retry needs a new one.
+    pub nonce_used: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingState {
+    Sending,
+    /// Why it wasn't sent, for the user.
+    Failed(String),
 }
 
 /// An emoji the reaction picker offers.
@@ -239,6 +278,8 @@ pub struct ChatStore {
     read_states: HashMap<String, ReadState>,
     /// The user's notification levels and mutes.
     notifications: NotificationSettings,
+    /// Messages the user sent that aren't confirmed yet, by channel, in send order.
+    pending: HashMap<String, Vec<PendingMessage>>,
 }
 
 impl ChatStore {
@@ -335,6 +376,7 @@ impl ChatStore {
                 exhausted,
             },
         );
+        self.confirm_pending_in_history(channel);
     }
 
     /// Merge a page of older messages (fetched with `before`) into a loaded
@@ -349,6 +391,7 @@ impl ChatStore {
         }
         history.messages.extend(older);
         sort_messages(&mut history.messages);
+        self.confirm_pending_in_history(channel);
         true
     }
 
@@ -394,6 +437,9 @@ impl ChatStore {
     /// and keeps the channel's "last message" fresh for Home ordering either
     /// way. Returns true if a loaded history changed.
     pub fn apply_message(&mut self, message: Message) -> bool {
+        // Ours, confirming a pending message (the POST response or its echo,
+        // whichever arrives first; the second just replaces it by ID).
+        self.confirm_pending(&message);
         self.bump_last_message(&message.channel, &message.id);
         if message.author == self.me {
             // Sending something means everything before it has been seen.
@@ -426,6 +472,105 @@ impl ChatStore {
             Err(ix) => history.messages.insert(ix, message),
         }
         true
+    }
+
+    /// Drop the pending message `message` confirms: the user's own, with the
+    /// same nonce. Returns true if there was one.
+    fn confirm_pending(&mut self, message: &Message) -> bool {
+        if message.author != self.me {
+            return false;
+        }
+        let Some(nonce) = message.nonce.as_deref() else {
+            return false;
+        };
+        let Some(pending) = self.pending.get_mut(&message.channel) else {
+            return false;
+        };
+        let before = pending.len();
+        pending.retain(|p| p.nonce != nonce);
+        pending.len() != before
+    }
+
+    /// Drop pending messages that a freshly loaded page already has (sent
+    /// while the events connection was down, so their echo never came).
+    fn confirm_pending_in_history(&mut self, channel: &str) {
+        let (Some(history), Some(pending)) =
+            (self.histories.get(channel), self.pending.get_mut(channel))
+        else {
+            return;
+        };
+        let me = &self.me;
+        pending.retain(|p| {
+            !history
+                .messages
+                .iter()
+                .any(|m| m.author == *me && m.nonce.as_deref() == Some(p.nonce.as_str()))
+        });
+    }
+
+    /// A message the user just sent, shown until Stoat confirms it.
+    pub fn add_pending(&mut self, message: PendingMessage) {
+        self.pending
+            .entry(message.channel.clone())
+            .or_default()
+            .push(message);
+    }
+
+    /// The channel's unconfirmed messages, in send order.
+    pub fn pending(&self, channel: &str) -> &[PendingMessage] {
+        self.pending.get(channel).map_or(&[], Vec::as_slice)
+    }
+
+    fn pending_mut(&mut self, channel: &str, key: &str) -> Option<&mut PendingMessage> {
+        self.pending
+            .get_mut(channel)?
+            .iter_mut()
+            .find(|p| p.key == key)
+    }
+
+    /// Sending failed, for `reason`. `answered`: Stoat replied (with an
+    /// error), so it has seen the nonce; if not (no connection), it may or
+    /// may not have. Returns false if there's no such pending message.
+    pub fn fail_pending(&mut self, channel: &str, key: &str, reason: String, answered: bool) -> bool {
+        let Some(pending) = self.pending_mut(channel, key) else {
+            return false;
+        };
+        pending.state = PendingState::Failed(reason);
+        pending.nonce_used = answered;
+        true
+    }
+
+    /// Send a failed message again: it's Sending again, and returned for
+    /// sending. It keeps its nonce unless Stoat answered the last attempt
+    /// (nothing was created, but the nonce is spent): then it gets
+    /// `fresh_nonce`. Keeping it otherwise means a send that did get through
+    /// can't be duplicated.
+    pub fn retry_pending(
+        &mut self,
+        channel: &str,
+        key: &str,
+        fresh_nonce: impl FnOnce() -> String,
+    ) -> Option<PendingMessage> {
+        let pending = self.pending_mut(channel, key)?;
+        if !matches!(pending.state, PendingState::Failed(_)) {
+            return None;
+        }
+        if pending.nonce_used {
+            pending.nonce = fresh_nonce();
+            pending.nonce_used = false;
+        }
+        pending.state = PendingState::Sending;
+        Some(pending.clone())
+    }
+
+    /// Forget an unconfirmed message. Returns false if there's no such one.
+    pub fn discard_pending(&mut self, channel: &str, key: &str) -> bool {
+        let Some(pending) = self.pending.get_mut(channel) else {
+            return false;
+        };
+        let before = pending.len();
+        pending.retain(|p| p.key != key);
+        pending.len() != before
     }
 
     /// The channel has been read up to `message_id` (here, or by another of
@@ -1105,71 +1250,107 @@ impl ChatStore {
             rows.push(TimelineRow::StartOfChannel { name });
         }
 
-        let mut previous: Option<(&Message, String)> = None;
-        for message in &history.messages {
+        // Unconfirmed messages go last, in send order, drawn like any other.
+        let pending: Vec<(Message, &PendingMessage)> = self
+            .pending(channel)
+            .iter()
+            .map(|p| (pending_as_message(p, &self.me), p))
+            .collect();
+        let loaded = history
+            .messages
+            .iter()
+            .map(|m| (m, None, crate::time::ulid_millis(&m.id)));
+        let unconfirmed = pending
+            .iter()
+            .map(|(m, p)| (m, Some(*p), Some(p.sent_ms)));
+
+        // The previous row's author ID and name, time, and whether it was a
+        // system message.
+        let mut previous: Option<(&str, String, Option<u64>, bool)> = None;
+        for (message, pending, millis) in loaded.chain(unconfirmed) {
             let author = self.author_name(message);
             let system = message.system.is_some();
             let continuation = !system
-                && previous.as_ref().is_some_and(|(prev, prev_author)| {
-                    prev.system.is_none()
-                        && prev.author == message.author
-                        && *prev_author == author
-                        && crate::time::minutes_between(&prev.id, &message.id)
-                            .is_some_and(|m| m < GROUP_WINDOW_MINUTES)
-                });
-            let body = match &message.system {
-                Some(system) => Some(self.system_text(system)),
-                None => message
-                    .content
-                    .as_deref()
-                    .filter(|c| !c.is_empty())
-                    .map(|c| crate::markdown::prepare(c, self)),
-            };
-            let render_key = render_key(&message.id, body.as_deref());
-            rows.push(TimelineRow::Message(MessageRow {
-                id: message.id.clone(),
-                render_key,
-                author: author.clone(),
-                avatar: self.avatar_url(message),
-                time: crate::time::message_time_label(&message.id),
-                body,
-                attachments: message
-                    .attachments
-                    .iter()
-                    .flatten()
-                    .map(|file| {
-                        let revealed = self.revealed_images.contains(&file.id);
-                        AttachmentView::new(file, &self.media, revealed)
-                    })
-                    .collect(),
-                embeds: message
-                    .embeds
-                    .iter()
-                    .flatten()
-                    .enumerate()
-                    .filter_map(|(ix, embed)| {
-                        let key = format!("{}:embed{ix}", message.id);
-                        EmbedView::new(embed, &self.media, self, &self.revealed_images, &key)
-                    })
-                    .collect(),
-                system,
-                edited: message.edited.is_some(),
-                continuation,
-                // Fixed up below, once the next row is known.
-                group_end: true,
-                mine: message.author == self.me,
-                jumbo: !system
-                    && message
-                        .content
-                        .as_deref()
-                        .is_some_and(crate::markdown::is_jumbo),
-                reactions: self.reaction_chips(message),
-                allowed_reactions: self.allowed_reactions(message),
-            }));
-            previous = Some((message, author));
+                && previous
+                    .as_ref()
+                    .is_some_and(|(prev_author, prev_name, prev_millis, prev_system)| {
+                        !prev_system
+                            && *prev_author == message.author
+                            && *prev_name == author
+                            && millis.zip(*prev_millis).is_some_and(|(at, prev)| {
+                                at.saturating_sub(prev) / 60_000 < GROUP_WINDOW_MINUTES
+                            })
+                    });
+            let mut row = self.message_row(message, author.clone(), continuation);
+            if let Some(pending) = pending {
+                row.key = pending.key.clone();
+                row.time = crate::time::millis_time_label(pending.sent_ms);
+                row.pending = Some(pending.state.clone());
+            }
+            rows.push(TimelineRow::Message(row));
+            previous = Some((&message.author, author, millis, system));
         }
         mark_group_ends(&mut rows);
         rows
+    }
+
+    /// A message's row, by `author` (its [`Self::author_name`]).
+    /// `group_end` is fixed up once the next row is known.
+    fn message_row(&self, message: &Message, author: String, continuation: bool) -> MessageRow {
+        let system = message.system.is_some();
+        let mine = message.author == self.me;
+        let body = match &message.system {
+            Some(system) => Some(self.system_text(system)),
+            None => message
+                .content
+                .as_deref()
+                .filter(|c| !c.is_empty())
+                .map(|c| crate::markdown::prepare(c, self)),
+        };
+        MessageRow {
+            id: message.id.clone(),
+            key: match &message.nonce {
+                Some(nonce) if mine => nonce.clone(),
+                _ => message.id.clone(),
+            },
+            render_key: render_key(&message.id, body.as_deref()),
+            avatar: self.avatar_url(message),
+            author,
+            time: crate::time::message_time_label(&message.id),
+            body,
+            attachments: message
+                .attachments
+                .iter()
+                .flatten()
+                .map(|file| {
+                    let revealed = self.revealed_images.contains(&file.id);
+                    AttachmentView::new(file, &self.media, revealed)
+                })
+                .collect(),
+            embeds: message
+                .embeds
+                .iter()
+                .flatten()
+                .enumerate()
+                .filter_map(|(ix, embed)| {
+                    let key = format!("{}:embed{ix}", message.id);
+                    EmbedView::new(embed, &self.media, self, &self.revealed_images, &key)
+                })
+                .collect(),
+            system,
+            edited: message.edited.is_some(),
+            continuation,
+            group_end: true,
+            mine,
+            jumbo: !system
+                && message
+                    .content
+                    .as_deref()
+                    .is_some_and(crate::markdown::is_jumbo),
+            reactions: self.reaction_chips(message),
+            allowed_reactions: self.allowed_reactions(message),
+            pending: None,
+        }
     }
 
     fn user_name(&self, id: &str) -> Option<String> {
@@ -1368,7 +1549,7 @@ pub enum RowOp {
 fn row_key(row: &TimelineRow) -> &str {
     match row {
         TimelineRow::StartOfChannel { .. } => "",
-        TimelineRow::Message(message) => &message.id,
+        TimelineRow::Message(message) => &message.key,
     }
 }
 
@@ -1465,6 +1646,34 @@ impl crate::markdown::Names for ChatStore {
 
     fn emoji_url(&self, id: &str) -> Option<String> {
         self.media.emoji(id)
+    }
+}
+
+/// A pending message as the [`Message`] it will become, so it's drawn the
+/// same way. It has no ID yet: its `key` stands in.
+fn pending_as_message(pending: &PendingMessage, me: &str) -> Message {
+    Message {
+        id: pending.key.clone(),
+        nonce: Some(pending.nonce.clone()),
+        channel: pending.channel.clone(),
+        author: me.to_string(),
+        user: None,
+        member: None,
+        webhook: None,
+        content: Some(pending.content.clone()),
+        system: None,
+        attachments: None,
+        edited: None,
+        embeds: None,
+        mentions: None,
+        role_mentions: None,
+        replies: (!pending.replies.is_empty())
+            .then(|| pending.replies.iter().map(|r| r.id.clone()).collect()),
+        reactions: Default::default(),
+        interactions: Default::default(),
+        masquerade: None,
+        pinned: None,
+        flags: 0,
     }
 }
 

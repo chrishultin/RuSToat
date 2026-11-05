@@ -9,6 +9,7 @@ pub mod assets;
 pub mod attachment;
 pub mod banners;
 pub mod dock;
+pub mod draft;
 pub mod embed;
 pub mod http;
 pub mod markdown;

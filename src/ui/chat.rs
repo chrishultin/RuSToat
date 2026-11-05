@@ -35,9 +35,10 @@ use crate::notify::{self, Delivery, Notice, Viewing};
 use crate::places::{Place, Places, PlacesFile};
 use crate::runtime::spawn_io;
 use crate::store::{
-    ChannelEntry, ChannelKind, ChatStore, MessageRow, PickerEmoji, ReactionEmoji, RowOp,
-    ServerEntry, TimelineRow, diff_rows, display_name,
+    ChannelEntry, ChannelKind, ChatStore, MessageRow, PendingMessage, PendingState, PickerEmoji,
+    ReactionEmoji, RowOp, ServerEntry, TimelineRow, diff_rows, display_name,
 };
+use crate::ui::composer::{Composer, ComposerEvent};
 use crate::ui::emoji_picker::emoji_grid;
 use crate::ui::math::MathPlugin;
 
@@ -110,6 +111,9 @@ pub struct ChatView {
     /// Reaction changes waiting on the server, as (message, emoji). Another
     /// click on the same one waits, so requests can't cross.
     reacting: HashSet<(String, String)>,
+    /// The message box, under the open channel.
+    composer: Entity<Composer>,
+    _composer: Subscription,
     _connection: Connection,
     _events: Task<()>,
     _root: Task<()>,
@@ -194,6 +198,19 @@ impl ChatView {
             .unwrap_or_default();
         let mut store = ChatStore::new(me);
         store.set_media(media.clone());
+        let composer = cx.new(|cx| Composer::new(window, cx));
+        let composer_events = cx.subscribe_in(
+            &composer,
+            window,
+            |this, composer, event: &ComposerEvent, window, cx| match event {
+                ComposerEvent::Send(text) => {
+                    let Some(channel) = composer.read(cx).channel().map(str::to_string) else {
+                        return;
+                    };
+                    this.send_message(channel, text.clone(), window, cx);
+                }
+            },
+        );
         Self {
             client,
             store,
@@ -216,6 +233,8 @@ impl ChatView {
             viewer_focus: cx.focus_handle(),
             picker_for: None,
             reacting: HashSet::new(),
+            composer,
+            _composer: composer_events,
             _connection: connection,
             _events: events,
             _root: root,
@@ -425,8 +444,137 @@ impl ChatView {
                 self.toggle_reaction(channel.to_string(), message, emoji, window, cx);
             }
             RowAction::Picker(message) => self.picker_for = message,
+            RowAction::RetrySend(key) => self.retry_send(channel, &key, window, cx),
+            RowAction::DiscardSend(key) => {
+                if self.store.discard_pending(channel, &key) {
+                    self.sync_pane(channel, cx);
+                }
+            }
         }
         cx.notify();
+    }
+
+    /// Send `content` in `channel`: shown at once as pending (and scrolled
+    /// to), then posted. Stoat's answer, or the live event if that's first,
+    /// turns it into the real message.
+    fn send_message(
+        &mut self,
+        channel: String,
+        content: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sent_ms = notify::now_ms().max(0) as u64;
+        let nonce = crate::draft::new_nonce(sent_ms);
+        let pending = PendingMessage {
+            key: nonce.clone(),
+            nonce,
+            channel: channel.clone(),
+            content,
+            replies: Vec::new(),
+            state: PendingState::Sending,
+            sent_ms,
+            nonce_used: false,
+        };
+        self.store.add_pending(pending.clone());
+        self.sync_pane(&channel, cx);
+        if let Some(pane) = self.panes.get(&channel) {
+            pane.scroller.update(cx, |scroller, cx| scroller.scroll_to_end(cx));
+        }
+        self.post_pending(pending, window, cx);
+        cx.notify();
+    }
+
+    /// Try a failed message again (with the same key, unless Stoat has
+    /// already seen that one: see [`ChatStore::retry_pending`]).
+    fn retry_send(&mut self, channel: &str, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let fresh = || crate::draft::new_nonce(notify::now_ms().max(0) as u64);
+        if let Some(pending) = self.store.retry_pending(channel, key, fresh) {
+            self.sync_pane(channel, cx);
+            self.post_pending(pending, window, cx);
+        }
+    }
+
+    /// `POST` a pending message. Success confirms it (unless its echo
+    /// already has); failure marks it failed, with the reason.
+    fn post_pending(&mut self, pending: PendingMessage, window: &mut Window, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let request = spawn_io({
+            let pending = pending.clone();
+            async move {
+                client
+                    .send_message(
+                        &pending.channel,
+                        &pending.content,
+                        &pending.replies,
+                        &pending.nonce,
+                    )
+                    .await
+            }
+        });
+        let PendingMessage { key, channel, .. } = pending;
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, _, cx| {
+                let (reason, answered) = match result {
+                    Ok(Ok(message)) => {
+                        log::debug!("sent {} in {channel}", message.id);
+                        if this.store.apply_message(message) {
+                            this.sync_pane(&channel, cx);
+                        }
+                        cx.notify();
+                        return;
+                    }
+                    // This key got through before (an earlier attempt lost
+                    // its answer): the message exists. It shows once its
+                    // echo or the next history load brings it.
+                    Ok(Err(err)) if is_duplicate(&err) => {
+                        log::info!("{key} in {channel} was already sent");
+                        if this.store.discard_pending(&channel, &key) {
+                            this.sync_pane(&channel, cx);
+                        }
+                        cx.notify();
+                        return;
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't send in {channel}: {err:?}");
+                        let answered = !matches!(err, ApiError::Network(_));
+                        (send_error_text(&err), answered)
+                    }
+                    // The request may or may not have reached Stoat.
+                    Err(err) => {
+                        log::warn!("send task failed: {err:?}");
+                        ("Something went wrong sending this.".to_string(), false)
+                    }
+                };
+                if this.store.fail_pending(&channel, &key, reason, answered) {
+                    this.sync_pane(&channel, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Point the message box at the open channel (swapping drafts), and
+    /// focus it when the channel changes.
+    fn sync_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let channel = self.current_channel();
+        let id = channel.as_ref().map(|c| c.id.as_str());
+        if self.composer.read(cx).channel() == id {
+            return;
+        }
+        let placeholder = channel
+            .as_ref()
+            .map(composer_placeholder)
+            .unwrap_or_default();
+        self.composer.update(cx, |composer, cx| {
+            composer.set_channel(id, placeholder.into(), window, cx);
+            if id.is_some() && self.viewer.is_none() {
+                composer.focus(window, cx);
+            }
+        });
     }
 
     /// Add or remove the user's reaction: shown at once, then sent. If the
@@ -497,8 +645,11 @@ impl ChatView {
         .detach();
     }
 
-    fn close_viewer(&mut self, cx: &mut Context<Self>) {
+    /// Close the full-size viewer, giving focus back to the message box.
+    fn close_viewer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.viewer = None;
+        self.composer
+            .update(cx, |composer, cx| composer.focus(window, cx));
         cx.notify();
     }
 
@@ -555,7 +706,7 @@ impl ChatView {
                     .small()
                     .icon(IconName::Close)
                     .tooltip("Close (Esc)")
-                    .on_click(cx.listener(|this, _, _, cx| this.close_viewer(cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.close_viewer(window, cx))),
             );
         div()
             .id("image-viewer")
@@ -566,15 +717,15 @@ impl ChatView {
             .flex()
             .flex_col()
             .bg(black().opacity(0.85))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
                     cx.stop_propagation();
-                    this.close_viewer(cx);
+                    this.close_viewer(window, cx);
                 }
             }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| this.close_viewer(cx)),
+                cx.listener(|this, _, window, cx| this.close_viewer(window, cx)),
             )
             .on_scroll(|_, _, cx| cx.stop_propagation())
             .child(bar)
@@ -757,6 +908,10 @@ impl ChatView {
     /// minimal scroller operations (`diff_rows`), so live messages keep the
     /// view at the bottom and older pages slide in above without a jump.
     fn sync_pane(&mut self, channel: &str, cx: &mut Context<Self>) {
+        // Not loaded yet (a message sent while it loads): the load draws it.
+        if self.store.history(channel).is_none() {
+            return;
+        }
         let rows = Rc::new(self.store.timeline(channel));
         if let Some(pane) = self.panes.get_mut(channel) {
             let ops = diff_rows(&pane.rows, &rows);
@@ -1433,6 +1588,7 @@ impl ChatView {
             })
             .child(header)
             .child(body)
+            .when(channel.is_some(), |el| el.child(self.composer.clone()))
     }
 }
 
@@ -1466,6 +1622,10 @@ enum RowAction {
     ToggleReaction { message: String, emoji: String },
     /// Open the reaction picker on a message (`Some`), or close it.
     Picker(Option<String>),
+    /// Send a failed message again (by its pending key).
+    RetrySend(String),
+    /// Give up on a failed message (by its pending key).
+    DiscardSend(String),
 }
 
 type OnRowAction = Rc<dyn Fn(RowAction, &mut Window, &mut App)>;
@@ -1709,7 +1869,10 @@ fn render_message_row(
             BubbleVariant::Secondary
         })
         .content(surface)
-        .reactions(reaction_button(message, on_action, pickers));
+        // Nothing to react to until it's on the server.
+        .when(message.pending.is_none(), |el| {
+            el.reactions(reaction_button(message, on_action, pickers))
+        });
 
     // The avatar sits beside the last bubble of a group; earlier ones keep
     // the empty slot so the bubbles line up.
@@ -1746,6 +1909,10 @@ fn render_message_row(
             render_reactions(message, colors, on_action),
             |el, footer| el.footer(footer),
         )
+        .when_some(
+            render_pending_status(message, colors, on_action),
+            |el, footer| el.footer(footer),
+        )
         // The name/time header sits right above its bubble (default gap is 10 px).
         .with_stack_style(StyleRefinement::default().gap(px(HEADER_GAP)))
         // Reactions sit just under their bubble (default gap is 10 px too).
@@ -1757,8 +1924,61 @@ fn render_message_row(
     div()
         .relative()
         .group(ROW_GROUP)
+        // Muted until Stoat has it.
+        .when(message.pending == Some(PendingState::Sending), |el| {
+            el.opacity(PENDING_OPACITY)
+        })
         .child(layout)
         .into_any_element()
+}
+
+/// How faint a message is while it's being sent.
+const PENDING_OPACITY: f32 = 0.6;
+
+/// Under a message that isn't on the server yet: "Sending…", or why it
+/// failed with Retry and Discard. `None` for real messages.
+fn render_pending_status(
+    message: &MessageRow,
+    colors: RowColors,
+    on_action: &OnRowAction,
+) -> Option<MessageFooter> {
+    let status = match message.pending.as_ref()? {
+        PendingState::Sending => div()
+            .text_xs()
+            .text_color(colors.muted)
+            .child("Sending…")
+            .into_any_element(),
+        PendingState::Failed(reason) => {
+            let key = message.id.clone();
+            let action = |make: fn(String) -> RowAction| {
+                let (on_action, key) = (on_action.clone(), key.clone());
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    on_action(make(key.clone()), window, cx)
+                }
+            };
+            h_flex()
+                .gap_2()
+                .text_xs()
+                .text_color(colors.danger)
+                .child(Icon::new(IconName::CircleAlert).xsmall())
+                .child(reason.clone())
+                .child(
+                    Button::new(SharedString::from(format!("retry-{key}")))
+                        .xsmall()
+                        .label("Retry")
+                        .on_click(action(RowAction::RetrySend)),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("discard-{key}")))
+                        .xsmall()
+                        .ghost()
+                        .label("Discard")
+                        .on_click(action(RowAction::DiscardSend)),
+                )
+                .into_any_element()
+        }
+    };
+    Some(MessageFooter::new().content_inset(false).child(status))
 }
 
 /// Group name for hovering a message row.
@@ -1871,6 +2091,35 @@ fn reaction_error_text(err: &ApiError) -> SharedString {
              may have the most reactions it can, or that emoji isn't allowed here."
             .into(),
         _ => format!("Couldn't update your reaction: {err}").into(),
+    }
+}
+
+/// The message box's placeholder in `channel`.
+fn composer_placeholder(channel: &ChannelEntry) -> String {
+    match channel.kind {
+        ChannelKind::Text { .. } => format!("Message #{}", channel.name),
+        ChannelKind::DirectMessage => format!("Message @{}", channel.name),
+        ChannelKind::Group => format!("Message {}", channel.name),
+        ChannelKind::SavedMessages => "Save a note".into(),
+    }
+}
+
+/// Stoat has seen this send's idempotency key before.
+fn is_duplicate(err: &ApiError) -> bool {
+    matches!(err.error_type(), Some(revolt_result::ErrorType::DuplicateNonce))
+}
+
+/// What a failed message says under it.
+fn send_error_text(err: &ApiError) -> String {
+    use revolt_result::ErrorType;
+    match err {
+        ApiError::Network(_) => "Couldn't reach Stoat.".into(),
+        ApiError::RateLimited { .. } => "Sending too fast. Wait a moment, then retry.".into(),
+        _ => match err.error_type() {
+            Some(ErrorType::MissingPermission { .. }) => "You can't send messages here.".into(),
+            Some(ErrorType::PayloadTooLarge) => "This message is too long.".into(),
+            _ => err.to_string(),
+        },
     }
 }
 
@@ -2587,6 +2836,7 @@ impl Render for ChatView {
             self.dock_badge = attention;
         }
         self.dismiss_read_banners(cx);
+        self.sync_composer(window, cx);
         let viewer = self
             .viewer
             .as_ref()

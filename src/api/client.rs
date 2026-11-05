@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use reqwest::{Client, Method};
 use revolt_models::v0::{
-    BulkMessageResponse, DataLogin, MFAResponse, MessageSort, OptionsQueryMessages, ResponseLogin,
-    User,
+    BulkMessageResponse, DataLogin, DataMessageSend, MFAResponse, Message, MessageSort,
+    OptionsQueryMessages, ReplyIntent, ResponseLogin, User,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -179,6 +179,40 @@ impl StoatClient {
         self.send(Method::GET, &path, None::<&()>).await
     }
 
+    /// `POST /channels/{channel}/messages`: send `content`, replying to
+    /// `replies` (if any). `idempotency_key` (at most 64 bytes) makes a retry
+    /// of the same send harmless: Stoat refuses a key it has already seen
+    /// with `DuplicateNonce`, and copies it into the new message's `nonce`.
+    pub async fn send_message(
+        &self,
+        channel: &str,
+        content: &str,
+        replies: &[ReplyIntent],
+        idempotency_key: &str,
+    ) -> Result<Message, ApiError> {
+        let body = DataMessageSend {
+            nonce: None,
+            content: Some(content.to_string()),
+            attachments: None,
+            replies: (!replies.is_empty()).then(|| replies.to_vec()),
+            embeds: None,
+            masquerade: None,
+            interactions: None,
+            flags: None,
+        };
+        // `DataMessageSend` writes unset fields as `null`; send only what's set.
+        let body = without_nulls(serde_json::to_value(&body).expect("message body serialises"));
+        let (status, bytes) = self
+            .send_raw_with(
+                Method::POST,
+                &format!("/channels/{channel}/messages"),
+                Some(&body),
+                &[("Idempotency-Key", idempotency_key)],
+            )
+            .await?;
+        parse(status, &bytes)
+    }
+
     /// `PUT /channels/{channel}/ack/{message}`: the user has read `channel`
     /// up to and including `message`.
     pub async fn ack_message(&self, channel: &str, message: &str) -> Result<(), ApiError> {
@@ -243,18 +277,29 @@ impl StoatClient {
         T: DeserializeOwned,
     {
         let (status, bytes) = self.send_raw(method, path, body).await?;
-        serde_json::from_slice(&bytes).map_err(|e| ApiError::Unexpected {
-            status: status.as_u16(),
-            detail: format!("couldn't parse response: {e}"),
-        })
+        parse(status, &bytes)
     }
 
-    /// Send a request and return the raw success body. Error statuses become [`ApiError`].
     async fn send_raw<B>(
         &self,
         method: Method,
         path: &str,
         body: Option<&B>,
+    ) -> Result<(reqwest::StatusCode, Vec<u8>), ApiError>
+    where
+        B: Serialize + ?Sized,
+    {
+        self.send_raw_with(method, path, body, &[]).await
+    }
+
+    /// Send a request with extra `headers` and return the raw success body.
+    /// Error statuses become [`ApiError`].
+    async fn send_raw_with<B>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&B>,
+        headers: &[(&str, &str)],
     ) -> Result<(reqwest::StatusCode, Vec<u8>), ApiError>
     where
         B: Serialize + ?Sized,
@@ -265,6 +310,9 @@ impl StoatClient {
         let mut request = self.http.request(method, url);
         if let Some(token) = &self.token {
             request = request.header("x-session-token", token);
+        }
+        for (name, value) in headers {
+            request = request.header(*name, *value);
         }
         if let Some(body) = body {
             request = request.json(body);
@@ -280,6 +328,28 @@ impl StoatClient {
             return Err(err);
         }
         Ok((status, bytes.to_vec()))
+    }
+}
+
+fn parse<T: DeserializeOwned>(status: reqwest::StatusCode, bytes: &[u8]) -> Result<T, ApiError> {
+    serde_json::from_slice(bytes).map_err(|e| ApiError::Unexpected {
+        status: status.as_u16(),
+        detail: format!("couldn't parse response: {e}"),
+    })
+}
+
+/// `value` with every `null` object field removed, at any depth.
+fn without_nulls(value: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .filter(|(_, v)| !v.is_null())
+                .map(|(k, v)| (k, without_nulls(v)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.into_iter().map(without_nulls).collect()),
+        other => other,
     }
 }
 
