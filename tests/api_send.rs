@@ -253,3 +253,22 @@ async fn fetching_members_gets_the_whole_list_with_users() {
     assert_eq!(members.members[0].nickname.as_deref(), Some("Cyclone"));
     assert_eq!(members.users[0].username, "cy");
 }
+
+#[tokio::test]
+async fn fetch_user_gets_one_user() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/users/u-new"))
+        .and(header("x-session-token", "tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "_id": "u-new", "username": "newbie", "discriminator": "0001",
+            "relationship": "None", "online": true
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let user = client(&server).fetch_user("u-new").await.unwrap();
+    assert_eq!(user.id, "u-new");
+    assert_eq!(user.username, "newbie");
+}

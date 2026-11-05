@@ -135,3 +135,46 @@ The user was given the steps: a bundled run with the one-time prompts, a rebuild
 - With the user's go-ahead from the earlier "run it for me", I installed the app by `ditto`ing it from the mounted DMG into `/Applications/RuSToat.app` (nothing was there before), checked it with `codesign --verify --deep --strict`, and launched it with `open`.
 - The user confirmed it signed in with no Keychain prompt and the Dock showed the icon.
 - I then quit it (`osascript … quit`) and deleted `/Applications/RuSToat.app`.
+
+## Chunk 4: Live member and user updates
+
+### Changes Made
+- `src/api/events.rs`:
+  - New `ServerEvent::{ServerMemberJoin { server, member: Box<Member> }, ServerMemberLeave { server, user }, ServerMemberUpdate { id: MemberCompositeKey, data: Box<PartialMember>, clear }, UserUpdate { id, data: Box<PartialUser>, clear }}`, decoded with `decode_as`.
+  - `ServerMemberJoin` decodes `member` as optional. Without it, it builds a bare member from `user`, with `joined_at` set to the epoch.
+  - `ServerMemberLeave` ignores `reason` entirely, so unknown reasons decode.
+  - The connection loop forwards the four events.
+  - Five new unit tests. The existing `unknown_event_types_are_kept_as_unknown` test now uses `ServerRoleUpdate`, since `ServerMemberJoin` is handled.
+- `src/store.rs`:
+  - `apply_member_join` and `apply_member_leave` (returns `user == me`).
+  - `apply_member_update`: `apply_options` plus every `FieldsMember` clear. Returns whether the nickname or avatar changed; members that aren't cached are ignored.
+  - `apply_user_update`: `apply_options` plus `FieldsUser` clears (`Avatar`, `DisplayName`, `Pronouns`, `StatusText`, `StatusPresence`; profile fields and `Internal` are no-ops). Returns whether the username, display name or avatar changed, so presence-only updates return false.
+  - `add_user` and `knows_user`.
+  - `remove_server`: drops the server, its listed channels plus any `TextChannel` pointing at it, their history, read state and pending messages, and its members. Returns the removed channel IDs that were actually known.
+  - `channels_showing(user)`: loaded channels where the user wrote or is mentioned, or DMs and groups they're in. Sorted.
+  - New private `author_member(message)`: the member cache first, then the message's `member` snapshot. `author_name` and `avatar_url` now use it.
+- `src/api/client.rs`: `StoatClient::fetch_user(id)` (`GET /users/{id}`).
+- `src/ui/chat.rs`:
+  - **Join:** cache the member. If the user is unknown and the server's member list was already fetched for `@`, `fetch_user` runs, which adds the user and refreshes suggestions. Then refresh suggestions.
+  - **Leave:** if it's the user, `leave_server`. Then refresh suggestions.
+  - **Member update:** if something shown changed, `sync_pane` each channel from `channels_showing` that's in that server, then refresh suggestions.
+  - **User update:** if something shown changed, `sync_pane` each channel from `channels_showing` and refresh suggestions. Other users' presence-only updates return early without a redraw; the user's own still redraws.
+  - New `leave_server`: removes the server from the store; drops panes, loading tasks and errors, and banners for its channels; cancels a pending ack into them; forgets the member fetch; removes `selected[Place::Server]`; then `drop_stale_selection` (falls back to Home), `remember_places` and `ensure_current_loaded`.
+- `tests/store_live.rs`: a new `members_and_users` module with 9 tests (join and leave, an unknown joiner, nickname set and clear, member cache beating the snapshot, uncached member update, user update with name and avatar plus clears, presence-only update, `channels_showing`, the user leaving).
+- `tests/api_send.rs`: `fetch_user_gets_one_user` (wiremock).
+
+### Divergences
+- **`author_name` and `avatar_url` now prefer the cached member over the message's snapshot.** Before, a message's own `member` snapshot won, so a live nickname change wouldn't have shown on messages that carry one (live messages do). The cache always holds at least the snapshot's info (`apply_message` inserts snapshots, history pages cache members), and it's now kept current by events. Minor, and needed for the chunk's goal.
+- **New `StoatClient::fetch_user`.** `ServerMemberJoin` doesn't carry the `User`, and `@` only suggests known users. A joiner is fetched only when that server's full member list was already loaded; otherwise the first `@` loads everyone anyway. Minor addition, not in the plan.
+- **No separate `refresh` of the sidebar for member or user events.** `cx.notify()` redraws it from the store. Same outcome.
+
+### Verification Performed
+- `cargo test --lib events`: 20 passed, including the 5 new decoding tests (join with and without `member`, leave with any reason, member update clears, user update clears).
+- `cargo test --test store_live`: 22 passed (the 9 new ones included).
+- `cargo test --test api_send fetch_`: `fetch_user_gets_one_user` passed.
+- `cargo test`: 341 passed, 0 failed. `cargo clippy --all-targets -- -D warnings`: clean.
+- The bundled debug build launched and reached Ready, with log `/tmp/rustoat-m5-4ae9.log`.
+- **Incident:** another worktree (`i-d-like-to-look-into-adding-support-for-being-l-6b03`, multi-account work on the old `chat.stoat.rustoat` IDs) was launching its own bundle at the same time, into the same `/tmp/rustoat-bundled.log`. Its build has recreated `~/Library/Application Support/chat.stoat.rustoat` (with an `accounts.json`) since chunk 1's migration renamed the old folder. That branch needs to move to the new IDs (`places::app_dir()`, `com.chrishultin.rustoat`) when the two are merged. From now on, this task's runs log to `/tmp/rustoat-m5-4ae9.log`.
+
+### Manual Validation
+Deferred to the end at the user's request ("we'll test at the very end"): a nickname change in the web app, someone joining (shows in `@`), and leaving a test server.

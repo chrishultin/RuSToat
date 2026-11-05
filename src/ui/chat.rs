@@ -476,6 +476,50 @@ impl ChatView {
                 self.store.remove_emoji(&id);
                 return;
             }
+            ConnectionEvent::Event(ServerEvent::ServerMemberJoin { server, member }) => {
+                let user = member.id.user.clone();
+                log::debug!("live: {user} joined {server}");
+                self.store.apply_member_join(*member);
+                // Only worth a request where `@` already loaded everyone;
+                // elsewhere the first `@` loads them along with the rest.
+                if !self.store.knows_user(&user) && self.member_fetches.contains(&server) {
+                    self.fetch_user(user, cx);
+                }
+                self.refresh_suggestions(cx);
+                return;
+            }
+            ConnectionEvent::Event(ServerEvent::ServerMemberLeave { server, user }) => {
+                log::debug!("live: {user} left {server}");
+                if self.store.apply_member_leave(&server, &user) {
+                    self.leave_server(&server, cx);
+                }
+                self.refresh_suggestions(cx);
+            }
+            ConnectionEvent::Event(ServerEvent::ServerMemberUpdate { id, data, clear }) => {
+                if !self.store.apply_member_update(&id, *data, &clear) {
+                    return;
+                }
+                log::debug!("live: member {} of {} updated", id.user, id.server);
+                for channel in self.store.channels_showing(&id.user) {
+                    if self.store.channel_server(&channel) == Some(id.server.as_str()) {
+                        self.sync_pane(&channel, cx);
+                    }
+                }
+                self.refresh_suggestions(cx);
+            }
+            ConnectionEvent::Event(ServerEvent::UserUpdate { id, data, clear }) => {
+                let shown = self.store.apply_user_update(&id, *data, &clear);
+                if shown {
+                    log::debug!("live: user {id} updated");
+                    for channel in self.store.channels_showing(&id) {
+                        self.sync_pane(&channel, cx);
+                    }
+                    self.refresh_suggestions(cx);
+                } else if id != self.store.me() {
+                    // Someone else's presence or status: nothing on screen.
+                    return;
+                }
+            }
             ConnectionEvent::Event(_) => return,
             ConnectionEvent::Disconnected { reason, retry_in } => {
                 // Their stops may never arrive now.
@@ -491,6 +535,59 @@ impl ChatView {
             }
         }
         cx.notify();
+    }
+
+    /// The user left `server` (or was kicked or banned): drop it, its
+    /// channels and everything loaded for them. If it was open, Home opens.
+    fn leave_server(&mut self, server: &str, cx: &mut Context<Self>) {
+        let removed = self.store.remove_server(server);
+        log::info!("left server {server} ({} channels)", removed.len());
+        for channel in &removed {
+            self.panes.remove(channel);
+            self.loading.remove(channel);
+            self.load_errors.remove(channel);
+            self.loading_older.remove(channel);
+            self.older_errors.remove(channel);
+            if self.banners.remove(channel).is_some() {
+                cx.dismiss_system_notification(channel);
+            }
+        }
+        if self
+            .pending_ack
+            .as_ref()
+            .is_some_and(|(channel, ..)| removed.contains(channel))
+        {
+            self.pending_ack = None;
+        }
+        self.member_fetches.remove(server);
+        self.members_loading.remove(server);
+        self.selected.remove(&Place::Server(server.to_string()));
+        self.drop_stale_selection();
+        self.remember_places();
+        self.ensure_current_loaded(cx);
+    }
+
+    /// Fetch one user the client doesn't know yet (someone who just joined),
+    /// so `@` can suggest them.
+    fn fetch_user(&mut self, user: String, cx: &mut Context<Self>) {
+        let request = spawn_io({
+            let (client, user) = (self.client.clone(), user.clone());
+            async move { client.fetch_user(&user).await }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = request.await;
+            this.update(cx, |this, cx| match result {
+                Ok(Ok(fetched)) => {
+                    this.store.add_user(fetched);
+                    this.refresh_suggestions(cx);
+                    cx.notify();
+                }
+                Ok(Err(err)) => log::warn!("couldn't load user {user}: {err}"),
+                Err(err) => log::warn!("user task failed: {err:?}"),
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// After a (re)connect, forget selections that point at things that are gone.

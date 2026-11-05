@@ -402,6 +402,13 @@ impl StoatClient {
             .await
     }
 
+    /// `GET /users/{id}`: one user (someone who just joined a server, so
+    /// they can be mentioned).
+    pub async fn fetch_user(&self, id: &str) -> Result<User, ApiError> {
+        self.send(Method::GET, &format!("/users/{id}"), None::<&()>)
+            .await
+    }
+
     /// `PUT /channels/{channel}/ack/{message}`: the user has read `channel`
     /// up to and including `message`.
     pub async fn ack_message(&self, channel: &str, message: &str) -> Result<(), ApiError> {

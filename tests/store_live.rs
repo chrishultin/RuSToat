@@ -312,3 +312,272 @@ fn channel_create_and_update_reach_the_sidebar() {
             if l == "01JC0000000000000000000010"
     ));
 }
+
+// Live member and user updates (`ServerMemberJoin`, `ServerMemberLeave`,
+// `ServerMemberUpdate`, `UserUpdate`).
+
+mod members_and_users {
+    use super::*;
+    use stoat_gpui::api::models::{
+        FieldsMember, FieldsUser, Member, MemberCompositeKey, PartialMember, PartialUser,
+    };
+    use stoat_gpui::complete::TokenRef;
+    use stoat_gpui::media::MediaUrls;
+
+    fn mentionable(store: &ChatStore, channel: &str) -> Vec<String> {
+        store
+            .mention_candidates(channel)
+            .into_iter()
+            .map(|c| c.id)
+            .collect()
+    }
+
+    fn member(server: &str, user: &str) -> Member {
+        serde_json::from_value(serde_json::json!({
+            "_id": { "server": server, "user": user },
+            "joined_at": "2026-11-05T12:00:00.000Z"
+        }))
+        .unwrap()
+    }
+
+    fn key(server: &str, user: &str) -> MemberCompositeKey {
+        MemberCompositeKey {
+            server: server.into(),
+            user: user.into(),
+        }
+    }
+
+    fn partial_member(json: serde_json::Value) -> PartialMember {
+        serde_json::from_value(json).unwrap()
+    }
+
+    fn partial_user(json: serde_json::Value) -> PartialUser {
+        serde_json::from_value(json).unwrap()
+    }
+
+    fn avatar(id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "_id": id, "tag": "avatars", "filename": "a.png",
+            "metadata": { "type": "Image", "width": 64, "height": 64 },
+            "content_type": "image/png", "size": 100
+        })
+    }
+
+    fn first_by<'a>(store: &'a ChatStore, channel: &str, author: &str) -> &'a Message {
+        store
+            .history(channel)
+            .unwrap()
+            .messages
+            .iter()
+            .find(|m| m.author == author)
+            .unwrap()
+    }
+
+    #[test]
+    fn a_join_makes_someone_mentionable_and_a_leave_removes_them() {
+        let mut store = store_with_page(50);
+        // ch-random isn't loaded: suggestions come from cached members only.
+        assert_eq!(mentionable(&store, "ch-random"), ["u-bob"]);
+
+        store.apply_member_join(member("srv-alpha", "u-ada"));
+        assert_eq!(mentionable(&store, "ch-random"), ["u-ada", "u-bob"]);
+        // Members are per server.
+        assert!(mentionable(&store, "ch-beta").is_empty());
+
+        assert!(!store.apply_member_leave("srv-alpha", "u-ada"));
+        assert_eq!(mentionable(&store, "ch-random"), ["u-bob"]);
+    }
+
+    #[test]
+    fn someone_unknown_who_joins_is_mentionable_once_their_user_is_known() {
+        let mut store = store_with_page(50);
+        store.apply_member_join(member("srv-alpha", "u-new"));
+        assert!(!store.knows_user("u-new"));
+        assert!(!mentionable(&store, "ch-random").contains(&"u-new".to_string()));
+
+        store.add_user(
+            serde_json::from_value(serde_json::json!({
+                "_id": "u-new", "username": "newbie", "discriminator": "0001",
+                "relationship": "None", "online": true
+            }))
+            .unwrap(),
+        );
+        assert!(mentionable(&store, "ch-random").contains(&"u-new".to_string()));
+    }
+
+    #[test]
+    fn a_nickname_set_or_cleared_changes_names_and_labels() {
+        let mut store = store_with_page(50);
+        let bob = first_by(&store, "ch-general", "u-bob").clone();
+        assert_eq!(store.name_in("ch-general", "u-bob"), "Bobby");
+
+        assert!(store.apply_member_update(
+            &key("srv-alpha", "u-bob"),
+            partial_member(serde_json::json!({ "nickname": "Robert" })),
+            &[],
+        ));
+        assert_eq!(store.name_in("ch-general", "u-bob"), "Robert");
+        assert_eq!(store.author_name(&bob), "Robert");
+        assert_eq!(
+            store.token_label("ch-general", &TokenRef::User("u-bob".into())),
+            "@Robert"
+        );
+        let candidates = store.mention_candidates("ch-general");
+        let candidate = candidates.iter().find(|c| c.id == "u-bob").unwrap();
+        assert_eq!(candidate.name, "Robert");
+
+        assert!(store.apply_member_update(
+            &key("srv-alpha", "u-bob"),
+            partial_member(serde_json::json!({})),
+            &[FieldsMember::Nickname],
+        ));
+        assert_eq!(store.name_in("ch-general", "u-bob"), "bob");
+        assert_eq!(store.author_name(&bob), "bob");
+    }
+
+    #[test]
+    fn a_member_update_beats_the_snapshot_a_message_came_with() {
+        let mut store = store_with_page(50);
+        let mut live: Message = serde_json::from_value(serde_json::json!({
+            "_id": LATER, "channel": "ch-general", "author": "u-ada", "content": "hi",
+            "member": {
+                "_id": { "server": "srv-alpha", "user": "u-ada" },
+                "joined_at": "2026-01-01T00:00:00.000Z",
+                "nickname": "Old Nick"
+            }
+        }))
+        .unwrap();
+        store.apply_message(live.clone());
+        assert_eq!(store.author_name(&live), "Old Nick");
+
+        assert!(store.apply_member_update(
+            &key("srv-alpha", "u-ada"),
+            partial_member(serde_json::json!({ "nickname": "New Nick" })),
+            &[],
+        ));
+        assert_eq!(store.author_name(&live), "New Nick");
+        // Without a cached member, the snapshot still counts.
+        live.channel = "ch-beta".into();
+        assert_eq!(store.author_name(&live), "Old Nick");
+    }
+
+    #[test]
+    fn a_member_update_for_someone_not_cached_is_ignored() {
+        let mut store = store_with_page(50);
+        assert!(!store.apply_member_update(
+            &key("srv-alpha", "u-stranger"),
+            partial_member(serde_json::json!({ "nickname": "X" })),
+            &[],
+        ));
+        assert!(store.member("srv-alpha", "u-stranger").is_none());
+    }
+
+    #[test]
+    fn a_user_update_changes_author_names_and_avatars() {
+        let mut store = store_with_page(50);
+        store.set_media(MediaUrls::new(
+            "https://api.example",
+            Some("https://files.example".into()),
+            None,
+        ));
+        let ada = first_by(&store, "ch-general", "u-ada").clone();
+        assert_eq!(store.author_name(&ada), "Ada L.");
+        assert_eq!(
+            store.user_avatar_url("u-ada"),
+            "https://api.example/users/u-ada/default_avatar"
+        );
+
+        assert!(store.apply_user_update(
+            "u-ada",
+            partial_user(serde_json::json!({
+                "display_name": "Ada Lovelace", "avatar": avatar("av1")
+            })),
+            &[],
+        ));
+        assert_eq!(store.author_name(&ada), "Ada Lovelace");
+        assert_eq!(
+            store.user_avatar_url("u-ada"),
+            "https://files.example/avatars/av1"
+        );
+        assert_eq!(
+            store.avatar_url(&ada).as_deref(),
+            Some("https://files.example/avatars/av1")
+        );
+        assert_eq!(store.channels_showing("u-ada"), ["ch-general"]);
+
+        // Clearing the avatar and display name goes back to the defaults.
+        assert!(store.apply_user_update(
+            "u-ada",
+            partial_user(serde_json::json!({})),
+            &[FieldsUser::Avatar, FieldsUser::DisplayName],
+        ));
+        assert_eq!(store.author_name(&ada), "ada");
+        assert_eq!(
+            store.user_avatar_url("u-ada"),
+            "https://api.example/users/u-ada/default_avatar"
+        );
+    }
+
+    #[test]
+    fn a_presence_only_update_changes_nothing_shown() {
+        let mut store = store_with_page(50);
+        assert!(!store.apply_user_update(
+            "u-ada",
+            partial_user(serde_json::json!({
+                "online": true, "status": { "presence": "Busy", "text": "heads down" }
+            })),
+            &[],
+        ));
+        assert!(!store.apply_user_update(
+            "u-ada",
+            partial_user(serde_json::json!({})),
+            &[FieldsUser::StatusText, FieldsUser::StatusPresence],
+        ));
+        // Unknown users are ignored.
+        assert!(!store.apply_user_update(
+            "u-nobody",
+            partial_user(serde_json::json!({ "display_name": "Who" })),
+            &[],
+        ));
+    }
+
+    #[test]
+    fn channels_showing_lists_loaded_channels_with_that_person() {
+        let mut store = store_with_page(50);
+        let page: BulkMessageResponse = serde_json::from_value(serde_json::json!([
+            { "_id": M1, "channel": "dm-ada", "author": "u-me", "content": "hey" }
+        ]))
+        .unwrap();
+        store.set_history("dm-ada", page, 50);
+        // dm-ada: Ada is a recipient. ch-general: she wrote there.
+        assert_eq!(store.channels_showing("u-ada"), ["ch-general", "dm-ada"]);
+        assert_eq!(store.channels_showing("u-bob"), ["ch-general"]);
+        assert!(store.channels_showing("u-nobody").is_empty());
+    }
+
+    #[test]
+    fn the_user_leaving_removes_the_server_and_its_channels() {
+        let mut store = store_with_page(50);
+        assert!(store.servers().iter().any(|s| s.id == "srv-alpha"));
+        assert!(store.apply_member_leave("srv-alpha", "u-me"));
+
+        let mut removed = store.remove_server("srv-alpha");
+        removed.sort();
+        // ch-no-access is listed by the server but the user can't see it,
+        // so it was never a known channel.
+        assert_eq!(
+            removed,
+            ["ch-general", "ch-random", "ch-voice", "ch-welcome"]
+        );
+        assert!(!store.servers().iter().any(|s| s.id == "srv-alpha"));
+        assert!(store.server_channels("srv-alpha").is_empty());
+        assert!(store.channel("ch-general").is_none());
+        assert!(store.history("ch-general").is_none());
+        assert!(store.member("srv-alpha", "u-bob").is_none());
+        // Other servers stay.
+        assert!(store.servers().iter().any(|s| s.id == "srv-beta"));
+        assert!(store.channel("ch-beta").is_some());
+        // Removing it again does nothing.
+        assert!(store.remove_server("srv-alpha").is_empty());
+    }
+}

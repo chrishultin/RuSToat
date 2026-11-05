@@ -12,8 +12,9 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
 use revolt_models::v0::{
-    Channel, ChannelUnread, Embed, Emoji, FieldsChannel, FieldsMessage, Member, Message,
-    PartialChannel, PartialMessage, Server, User,
+    Channel, ChannelUnread, Embed, Emoji, FieldsChannel, FieldsMember, FieldsMessage, FieldsUser,
+    Member, MemberCompositeKey, Message, PartialChannel, PartialMember, PartialMessage,
+    PartialUser, Server, User,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -133,6 +134,30 @@ pub enum ServerEvent {
         id: String,
         data: Box<PartialChannel>,
         clear: Vec<FieldsChannel>,
+    },
+    /// Someone joined a server (possibly the user, on another device).
+    ServerMemberJoin {
+        server: String,
+        member: Box<Member>,
+    },
+    /// `user` left `server`, or was kicked or banned from it.
+    ServerMemberLeave {
+        server: String,
+        user: String,
+    },
+    /// A member changed (nickname, avatar, roles…): merge `data`, then clear
+    /// the `clear` fields.
+    ServerMemberUpdate {
+        id: MemberCompositeKey,
+        data: Box<PartialMember>,
+        clear: Vec<FieldsMember>,
+    },
+    /// A user the client knows changed (name, avatar, presence…): merge
+    /// `data`, then clear the `clear` fields.
+    UserUpdate {
+        id: String,
+        data: Box<PartialUser>,
+        clear: Vec<FieldsUser>,
     },
     /// An event type this client doesn't handle (yet). Holds the `type` tag.
     Unknown(String),
@@ -378,6 +403,79 @@ fn decode(mut value: Value, out: &mut Vec<ServerEvent>) {
                     data: Box::new(u.data),
                     clear: u.clear,
                 }
+            }))
+        }
+        // `id` is the server. Stoat 0.16 sends the whole `member`; older
+        // servers only sent `user`, so that's the fallback.
+        "ServerMemberJoin" => {
+            #[derive(Deserialize)]
+            struct Join {
+                id: String,
+                #[serde(default)]
+                user: Option<String>,
+                #[serde(default)]
+                member: Option<Member>,
+            }
+            out.push(decode_as(value, &kind, |j: Join| {
+                let member = j.member.or_else(|| {
+                    let user = j.user?;
+                    serde_json::from_value(json!({
+                        "_id": { "server": j.id, "user": user },
+                        "joined_at": "1970-01-01T00:00:00Z",
+                    }))
+                    .ok()
+                });
+                match member {
+                    Some(member) => ServerEvent::ServerMemberJoin {
+                        server: j.id,
+                        member: Box::new(member),
+                    },
+                    None => ServerEvent::Unknown(format!("{kind} (no member)")),
+                }
+            }))
+        }
+        // `id` is the server. `reason` (leave, kick, ban) doesn't matter here.
+        "ServerMemberLeave" => {
+            #[derive(Deserialize)]
+            struct Leave {
+                id: String,
+                user: String,
+            }
+            out.push(decode_as(value, &kind, |l: Leave| {
+                ServerEvent::ServerMemberLeave {
+                    server: l.id,
+                    user: l.user,
+                }
+            }))
+        }
+        "ServerMemberUpdate" => {
+            #[derive(Deserialize)]
+            struct Update {
+                id: MemberCompositeKey,
+                data: PartialMember,
+                #[serde(default)]
+                clear: Vec<FieldsMember>,
+            }
+            out.push(decode_as(value, &kind, |u: Update| {
+                ServerEvent::ServerMemberUpdate {
+                    id: u.id,
+                    data: Box::new(u.data),
+                    clear: u.clear,
+                }
+            }))
+        }
+        "UserUpdate" => {
+            #[derive(Deserialize)]
+            struct Update {
+                id: String,
+                data: PartialUser,
+                #[serde(default)]
+                clear: Vec<FieldsUser>,
+            }
+            out.push(decode_as(value, &kind, |u: Update| ServerEvent::UserUpdate {
+                id: u.id,
+                data: Box::new(u.data),
+                clear: u.clear,
             }))
         }
         other => out.push(ServerEvent::Unknown(other.to_string())),
@@ -769,6 +867,10 @@ async fn session(
                         | ServerEvent::ChannelAck { .. }
                         | ServerEvent::ChannelCreate(_)
                         | ServerEvent::ChannelUpdate { .. }
+                        | ServerEvent::ServerMemberJoin { .. }
+                        | ServerEvent::ServerMemberLeave { .. }
+                        | ServerEvent::ServerMemberUpdate { .. }
+                        | ServerEvent::UserUpdate { .. }
                         | ServerEvent::ChannelStartTyping { .. }
                         | ServerEvent::ChannelStopTyping { .. }
                         | ServerEvent::EmojiDelete { .. }) => {
@@ -825,9 +927,9 @@ mod tests {
 
     #[test]
     fn unknown_event_types_are_kept_as_unknown() {
-        let events = parse_frame(r#"{"type":"ServerMemberJoin","id":"s","user":"u"}"#);
+        let events = parse_frame(r#"{"type":"ServerRoleUpdate","id":"s","role_id":"r"}"#);
         assert!(
-            matches!(events.as_slice(), [ServerEvent::Unknown(kind)] if kind == "ServerMemberJoin")
+            matches!(events.as_slice(), [ServerEvent::Unknown(kind)] if kind == "ServerRoleUpdate")
         );
     }
 
@@ -987,5 +1089,78 @@ mod tests {
         assert_eq!(server_order_from_settings(settings), vec!["b", "a"]);
         assert!(server_order_from_settings(json!({})).is_empty());
         assert!(server_order_from_settings(json!({ "ordering": [1, "not json"] })).is_empty());
+    }
+
+    #[test]
+    fn member_join_decodes_with_the_member() {
+        let events = parse_frame(
+            r#"{"type":"ServerMemberJoin","id":"srv-1","user":"u-new","member":{"_id":{"server":"srv-1","user":"u-new"},"joined_at":"2026-11-05T12:00:00.000Z","nickname":"Newbie"}}"#,
+        );
+        let [ServerEvent::ServerMemberJoin { server, member }] = events.as_slice() else {
+            panic!("got {events:?}");
+        };
+        assert_eq!(server, "srv-1");
+        assert_eq!(member.id.user, "u-new");
+        assert_eq!(member.nickname.as_deref(), Some("Newbie"));
+    }
+
+    #[test]
+    fn member_join_without_a_member_falls_back_to_the_user() {
+        let events =
+            parse_frame(r#"{"type":"ServerMemberJoin","id":"srv-1","user":"u-old-server"}"#);
+        let [ServerEvent::ServerMemberJoin { server, member }] = events.as_slice() else {
+            panic!("got {events:?}");
+        };
+        assert_eq!(server, "srv-1");
+        assert_eq!(member.id.server, "srv-1");
+        assert_eq!(member.id.user, "u-old-server");
+        assert_eq!(member.nickname, None);
+    }
+
+    #[test]
+    fn member_leave_decodes_whatever_the_reason() {
+        for reason in ["Leave", "Kick", "Ban", "SomethingNew"] {
+            let events = parse_frame(&format!(
+                r#"{{"type":"ServerMemberLeave","id":"srv-1","user":"u-ada","reason":"{reason}"}}"#
+            ));
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [ServerEvent::ServerMemberLeave { server, user }]
+                        if server == "srv-1" && user == "u-ada"
+                ),
+                "{reason}: got {events:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn member_update_decodes_data_and_clear() {
+        let events = parse_frame(
+            r#"{"type":"ServerMemberUpdate","id":{"server":"srv-1","user":"u-ada"},"data":{"nickname":"Countess"},"clear":["Avatar","Roles"]}"#,
+        );
+        let [ServerEvent::ServerMemberUpdate { id, data, clear }] = events.as_slice() else {
+            panic!("got {events:?}");
+        };
+        assert_eq!((id.server.as_str(), id.user.as_str()), ("srv-1", "u-ada"));
+        assert_eq!(data.nickname.as_deref(), Some("Countess"));
+        assert_eq!(clear, &[FieldsMember::Avatar, FieldsMember::Roles]);
+    }
+
+    #[test]
+    fn user_update_decodes_data_and_clear() {
+        let events = parse_frame(
+            r#"{"type":"UserUpdate","id":"u-ada","data":{"display_name":"Ada Lovelace","online":true},"clear":["Avatar","StatusText"],"event_id":"e1"}"#,
+        );
+        let [ServerEvent::UserUpdate { id, data, clear }] = events.as_slice() else {
+            panic!("got {events:?}");
+        };
+        assert_eq!(id, "u-ada");
+        assert_eq!(data.display_name.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(data.online, Some(true));
+        assert_eq!(clear, &[FieldsUser::Avatar, FieldsUser::StatusText]);
+        // No `clear` at all is fine too.
+        let events = parse_frame(r#"{"type":"UserUpdate","id":"u-ada","data":{}}"#);
+        assert!(matches!(events.as_slice(), [ServerEvent::UserUpdate { clear, .. }] if clear.is_empty()));
     }
 }

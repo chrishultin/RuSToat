@@ -6,9 +6,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::api::events::Ready;
 use crate::api::models::{
-    AllMemberResponse, BulkMessageResponse, Channel, Embed, Emoji, EmojiParent, FieldsChannel, FieldsMessage, File,
-    Member, Message, MessageFlags, PartialChannel, PartialMessage, Presence, ReplyIntent, Server,
-    SystemMessage, User,
+    AllMemberResponse, BulkMessageResponse, Channel, Embed, Emoji, EmojiParent, FieldsChannel, FieldsMember,
+    FieldsMessage, FieldsUser, File, Member, MemberCompositeKey, Message, MessageFlags, PartialChannel,
+    PartialMember, PartialMessage, PartialUser, Presence, ReplyIntent, Server, SystemMessage, User,
 };
 use crate::attachment::AttachmentView;
 use crate::complete::{Candidate, TokenRef};
@@ -1589,14 +1589,7 @@ impl ChatStore {
                 .as_deref()
                 .and_then(|id| self.media.file_by_id("avatars", id));
         }
-        let member_avatar = message
-            .member
-            .as_ref()
-            .and_then(|m| m.avatar.clone())
-            .or_else(|| {
-                let server = self.server_of(&message.channel)?;
-                self.member(server, &message.author)?.avatar.clone()
-            });
+        let member_avatar = self.author_member(message).and_then(|m| m.avatar.clone());
         if let Some(url) = member_avatar.as_ref().and_then(|f| self.media.file(f)) {
             return Some(url);
         }
@@ -1624,14 +1617,7 @@ impl ChatStore {
         if let Some(webhook) = &message.webhook {
             return webhook.name.clone();
         }
-        let nickname = message
-            .member
-            .as_ref()
-            .and_then(|m| m.nickname.clone())
-            .or_else(|| {
-                let server = self.server_of(&message.channel)?;
-                self.member(server, &message.author)?.nickname.clone()
-            });
+        let nickname = self.author_member(message).and_then(|m| m.nickname.clone());
         if let Some(nickname) = nickname
             && !nickname.trim().is_empty()
         {
@@ -1640,6 +1626,15 @@ impl ChatStore {
         self.user_name(&message.author)
             .or_else(|| message.user.as_ref().map(|u| display_name(u).to_string()))
             .unwrap_or_else(|| "Unknown user".into())
+    }
+
+    /// The author's membership in the message's server: the cached one, which
+    /// live `ServerMemberUpdate`s keep current, else the snapshot the message
+    /// came with.
+    fn author_member<'a>(&'a self, message: &'a Message) -> Option<&'a Member> {
+        self.server_of(&message.channel)
+            .and_then(|server| self.member(server, &message.author))
+            .or(message.member.as_ref())
     }
 
     /// A one-line description of a system message, with user names filled in.
@@ -1869,6 +1864,154 @@ impl ChatStore {
             self.members
                 .insert((member.id.server.clone(), member.id.user.clone()), member);
         }
+    }
+
+    /// Someone joined a server (`ServerMemberJoin`). They're mentionable
+    /// there once their user is known too (see [`Self::knows_user`]).
+    pub fn apply_member_join(&mut self, member: Member) {
+        self.members
+            .insert((member.id.server.clone(), member.id.user.clone()), member);
+    }
+
+    /// `user` left `server` (`ServerMemberLeave`). Returns true if it was the
+    /// user themselves: then the whole server goes (see [`Self::remove_server`]).
+    pub fn apply_member_leave(&mut self, server: &str, user: &str) -> bool {
+        self.members.remove(&(server.to_string(), user.to_string()));
+        user == self.me
+    }
+
+    /// A member changed (`ServerMemberUpdate`), merged with the backend's own
+    /// `Member::apply_options`. Members that aren't cached are ignored.
+    /// Returns true if something shown changed (nickname or avatar).
+    pub fn apply_member_update(
+        &mut self,
+        id: &MemberCompositeKey,
+        data: PartialMember,
+        clear: &[FieldsMember],
+    ) -> bool {
+        let Some(member) = self.members.get_mut(&(id.server.clone(), id.user.clone())) else {
+            return false;
+        };
+        let shown = |m: &Member| (m.nickname.clone(), m.avatar.as_ref().map(|f| f.id.clone()));
+        let before = shown(member);
+        member.apply_options(data);
+        for field in clear {
+            match field {
+                FieldsMember::Nickname => member.nickname = None,
+                FieldsMember::Pronouns => member.pronouns = None,
+                FieldsMember::Avatar => member.avatar = None,
+                FieldsMember::Roles => member.roles.clear(),
+                FieldsMember::Timeout => member.timeout = None,
+                FieldsMember::CanReceive => member.can_receive = true,
+                FieldsMember::CanPublish => member.can_publish = true,
+                FieldsMember::JoinedAt | FieldsMember::VoiceChannel => {}
+            }
+        }
+        before != shown(member)
+    }
+
+    /// A user changed (`UserUpdate`), merged with the backend's own
+    /// `User::apply_options`. Users that aren't cached are ignored. Returns
+    /// true if something shown changed (username, display name or avatar);
+    /// presence and status changes return false, as they come often and
+    /// don't change any message row.
+    pub fn apply_user_update(&mut self, id: &str, data: PartialUser, clear: &[FieldsUser]) -> bool {
+        let Some(user) = self.users.get_mut(id) else {
+            return false;
+        };
+        let shown = |u: &User| {
+            (
+                u.username.clone(),
+                u.display_name.clone(),
+                u.avatar.as_ref().map(|f| f.id.clone()),
+            )
+        };
+        let before = shown(user);
+        user.apply_options(data);
+        for field in clear {
+            match field {
+                FieldsUser::Avatar => user.avatar = None,
+                FieldsUser::DisplayName => user.display_name = None,
+                FieldsUser::Pronouns => user.pronouns = None,
+                FieldsUser::StatusText => {
+                    if let Some(status) = &mut user.status {
+                        status.text = None;
+                    }
+                }
+                FieldsUser::StatusPresence => {
+                    if let Some(status) = &mut user.status {
+                        status.presence = None;
+                    }
+                }
+                // Not part of `User` (profiles are fetched separately).
+                FieldsUser::ProfileContent | FieldsUser::ProfileBackground | FieldsUser::Internal => {}
+            }
+        }
+        before != shown(user)
+    }
+
+    /// Cache a user fetched on their own (someone who just joined a server).
+    pub fn add_user(&mut self, user: User) {
+        self.users.insert(user.id.clone(), user);
+    }
+
+    pub fn knows_user(&self, id: &str) -> bool {
+        self.users.contains_key(id)
+    }
+
+    /// Forget a server the user left or was removed from: the server, its
+    /// channels (and their history) and its members. Returns the IDs of the
+    /// channels removed.
+    pub fn remove_server(&mut self, id: &str) -> Vec<String> {
+        let Some(server) = self.servers.remove(id) else {
+            return Vec::new();
+        };
+        self.server_order.retain(|s| s != id);
+        // Its listed channels, and any others that point at it.
+        let strays: Vec<String> = self
+            .channels
+            .iter()
+            .filter_map(|(cid, c)| match c {
+                Channel::TextChannel { server: s, .. }
+                    if s == id && !server.channels.contains(cid) =>
+                {
+                    Some(cid.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        let mut removed: Vec<String> = server.channels.into_iter().chain(strays).collect();
+        removed.retain(|cid| self.channels.remove(cid).is_some());
+        for cid in &removed {
+            self.histories.remove(cid);
+            self.read_states.remove(cid);
+            self.pending.remove(cid);
+        }
+        self.members.retain(|(server, _), _| server != id);
+        removed
+    }
+
+    /// Loaded channels whose rows show `user`: ones with a message by or
+    /// mentioning them, and DMs or groups they're in. Rebuild these when the
+    /// user's name or avatar changes.
+    pub fn channels_showing(&self, user: &str) -> Vec<String> {
+        let mut channels: Vec<String> = self
+            .histories
+            .iter()
+            .filter(|(id, history)| {
+                matches!(
+                    self.channels.get(*id),
+                    Some(Channel::DirectMessage { recipients, .. } | Channel::Group { recipients, .. })
+                        if recipients.iter().any(|r| r == user)
+                ) || history.messages.iter().any(|m| {
+                    m.author == user
+                        || m.mentions.as_ref().is_some_and(|ids| ids.iter().any(|id| id == user))
+                })
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        channels.sort();
+        channels
     }
 
     /// The server `channel` belongs to, if it's a server channel.
