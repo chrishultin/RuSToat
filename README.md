@@ -77,6 +77,23 @@ RuSToat used to run as `chat.stoat.rustoat` with the Keychain service `chat.stoa
 - **The Application Support folder** `chat.stoat.rustoat` is renamed to `com.chrishultin.rustoat`, unless the new one already exists.
 - **macOS asks for notification permission again,** once, for the new bundle identifier. The old "RuSToat" entry in System Settings → Notifications can be removed.
 
+## Releasing
+
+```bash
+scripts/release.sh
+```
+
+This builds a release `RuSToat.app`, signs it with the hardened runtime and a secure timestamp, and packs it with a link to `/Applications` into `dist/RuSToat-<version>.dmg` (compressed, signed and checked with `hdiutil verify`). Each build's `CFBundleVersion` is `<version>.<commit count>`. The build is for this Mac's architecture only (Apple silicon here).
+
+- **Signing:** the script uses a **Developer ID Application** certificate if your keychain has one, else **Apple Development**. `RUSTOAT_SIGN_IDENTITY` overrides the choice.
+- **Without Developer ID** (the current state), the DMG runs on this Mac and others registered to your team, but Gatekeeper rejects it elsewhere (`spctl` says `rejected`). That's fine for trying out installs locally.
+- **Notarization** runs only with a Developer ID certificate and a stored `notarytool` profile. To set it up:
+  1. The team's Account Holder creates a "Developer ID Application" certificate at developer.apple.com → Certificates, and installs it in your keychain.
+  2. Store notary credentials once (an app-specific password from appleid.apple.com): `xcrun notarytool store-credentials rustoat-notary --apple-id <you@example.com> --team-id <team ID>`.
+  3. Release with `RUSTOAT_NOTARY_PROFILE=rustoat-notary scripts/release.sh`. The script submits the DMG, waits, and staples the ticket.
+- **`scripts/release.sh --dry-run`** builds nothing. It prints the identity, the DMG path and every command it would run, including the notarization steps, or says why it would skip them.
+- **Entitlements:** release builds use `scripts/entitlements.plist`, which is deliberately empty. The network, the Keychain and notifications need no hardened-runtime exceptions.
+
 ## Built on Stoat's own crates
 
 API types come straight from the Stoat backend's published crates instead of being re-declared:

@@ -93,3 +93,45 @@ The user was given the steps: a bundled run with the one-time prompts, a rebuild
 - After the flip, the bundle was relaunched and the Dock restarted:
   - It signed in from the new Keychain item with no migration and no prompt.
   - It logged `banners: allowed`, so notification permission had been re-granted for the new bundle ID.
+
+## Chunk 3: Release DMG script
+
+### Changes Made
+- `scripts/release.sh` (new):
+  - **Identity:** `RUSTOAT_SIGN_IDENTITY`, else the first "Developer ID Application:" identity, else the first "Apple Development:" one. Without any, it exits with an error, since a release isn't signed ad hoc. A non-Developer ID identity gets a warning that the DMG only runs on the team's Macs.
+  - **Bundle:** `RUSTOAT_SIGN_IDENTITY=<identity> scripts/bundle.sh release --release-signing`, then `codesign --verify --deep --strict`.
+  - **DMG:** `ditto`s the app into a `mktemp -d` staging folder (removed on exit) with an `Applications` symlink. `hdiutil create -volname RuSToat -srcfolder <staging> -format UDZO -ov dist/RuSToat-<version>.dmg`, retried 3 times for "resource busy". It then signs the DMG with `--timestamp`.
+  - **Notarization:** runs only when the identity is Developer ID and `RUSTOAT_NOTARY_PROFILE` is set (`xcrun notarytool submit … --keychain-profile … --wait`, then `xcrun stapler staple`). Otherwise it prints why it's skipping and how to enable it.
+  - **Last steps:** `hdiutil verify`, then the DMG path as the last line.
+  - **`--dry-run`:** builds nothing. Every step goes through `run()`, which prints the command (`%q`-quoted) instead of running it.
+- `scripts/entitlements.plist` (new): an empty `<dict/>`, with a comment explaining why.
+- `scripts/bundle.sh`:
+  - Arguments are now `[debug|release] [--release-signing]`, in any order.
+  - `CFBundleVersion` is `<version>.<git rev-list --count HEAD>`, falling back to `.0` outside git.
+  - `--release-signing` passes `--options runtime --timestamp --entitlements scripts/entitlements.plist` through `sign.sh`.
+- `.gitignore`: `/dist`. Only this line is committed: the index blob was built from `HEAD:.gitignore` plus `/dist`, so the pre-existing uncommitted Riptide lines stay unstaged.
+- `README.md`: a new "Releasing" section covering what `release.sh` does, how the identity is chosen, what works without Developer ID, the 3-step notarization setup, `--dry-run` and the empty entitlements.
+
+### Divergences
+- **The dry run builds nothing.** The plan only said `--dry-run` "prints the notarytool and stapler commands". Here it prints every step and skips building too, so it's instant and safe. Minor.
+- **No ad-hoc fallback for releases.** `release.sh` exits with an error when there's no certificate identity, since a secure timestamp and the hardened runtime need a real one. Minor.
+- **The DMG's own code-signing identifier** is codesign's default (`RuSToat-0`). Only the app inside carries `com.chrishultin.rustoat`. Harmless.
+
+### Verification Performed
+- `bash -n scripts/*.sh` and `shellcheck scripts/*.sh`: clean. `plutil -lint scripts/entitlements.plist`: OK.
+- `RUSTOAT_NOTARY_PROFILE=x scripts/release.sh --dry-run`: identity Apple Development, `dist/RuSToat-0.1.0.dmg`. It prints the bundle, verify, staging, `hdiutil create`, DMG signing and verify commands, plus the note that notarization needs Developer ID.
+- The same with `RUSTOAT_SIGN_IDENTITY="Developer ID Application: Test Person (TEAM123456)" RUSTOAT_NOTARY_PROFILE=rustoat-notary`: prints `xcrun notarytool submit dist/RuSToat-0.1.0.dmg --keychain-profile rustoat-notary --wait` and `xcrun stapler staple dist/RuSToat-0.1.0.dmg`.
+- `scripts/release.sh` for real (1 min 47 s, including a cold release build): exit 0, a 15.3 MB `dist/RuSToat-0.1.0.dmg`, and `hdiutil verify`: checksum VALID.
+- Mounted the DMG; it contains `RuSToat.app` and `Applications -> /Applications`. On the app:
+  - `codesign --verify --deep --strict`: valid, and satisfies its designated requirement.
+  - `codesign -dv`: `flags=0x10000(runtime)`, a secure `Timestamp`, and `Identifier=com.chrishultin.rustoat`.
+  - Entitlements: an empty `[Dict]`. `CFBundleVersion`: `0.1.0.48`.
+- `spctl -a -t exec -vv` on the mounted app: `rejected`, `origin=Apple Development: Christopher Hultin (87ATGCDMGT)`. Expected without Developer ID.
+- The DMG itself is signed (Apple Development, timestamped).
+- **The hardened-runtime risk didn't materialise.** `target/release/RuSToat.app` ran with the window open, the session restored with no Keychain prompt, `banners: allowed` and events Ready. No entitlements were needed.
+- `cargo test`: 326 passed, 0 failed. `cargo clippy --all-targets -- -D warnings`: clean.
+
+### Manual Validation
+- With the user's go-ahead from the earlier "run it for me", I installed the app by `ditto`ing it from the mounted DMG into `/Applications/RuSToat.app` (nothing was there before), checked it with `codesign --verify --deep --strict`, and launched it with `open`.
+- The user confirmed it signed in with no Keychain prompt and the Dock showed the icon.
+- I then quit it (`osascript … quit`) and deleted `/Applications/RuSToat.app`.

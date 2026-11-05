@@ -6,25 +6,40 @@
 # instead. The bundle is signed by scripts/sign.sh (your Apple Development
 # identity, or ad hoc without one), which is enough to run locally.
 #
-# Usage: scripts/bundle.sh [debug|release]   (default: debug)
+# --release-signing adds what distribution needs: the hardened runtime, a
+# secure timestamp and scripts/entitlements.plist (scripts/release.sh uses it).
+#
+# Usage: scripts/bundle.sh [debug|release] [--release-signing]   (default: debug)
 # Prints the bundle's path as the last line of output.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-profile="${1:-debug}"
+usage() {
+  echo "usage: $0 [debug|release] [--release-signing]" >&2
+  exit 2
+}
+
+profile=debug
+release_signing=0
+for arg in "$@"; do
+  case "$arg" in
+    debug | release) profile="$arg" ;;
+    --release-signing) release_signing=1 ;;
+    *) usage ;;
+  esac
+done
+
 case "$profile" in
   debug) cargo build ;;
   release) cargo build --release ;;
-  *)
-    echo "usage: $0 [debug|release]" >&2
-    exit 2
-    ;;
 esac
 
 target="${CARGO_TARGET_DIR:-target}/$profile"
 app="$target/RuSToat.app"
 version="$(cargo pkgid | sed 's/.*[#@]//')"
+# A build number that grows with every commit, so each release is distinct.
+build="$version.$(git rev-list --count HEAD 2>/dev/null || echo 0)"
 
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$target/stoat-gpui" "$app/Contents/MacOS/stoat-gpui"
@@ -52,7 +67,7 @@ cat > "$app/Contents/Info.plist" <<EOF
   <key>CFBundleShortVersionString</key>
   <string>$version</string>
   <key>CFBundleVersion</key>
-  <string>$version</string>
+  <string>$build</string>
   <key>LSMinimumSystemVersion</key>
   <string>11.0</string>
   <key>NSHighResolutionCapable</key>
@@ -61,7 +76,12 @@ cat > "$app/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-identity="$(scripts/sign.sh "$app")"
+if [ "$release_signing" = 1 ]; then
+  identity="$(scripts/sign.sh "$app" --options runtime --timestamp \
+    --entitlements scripts/entitlements.plist)"
+else
+  identity="$(scripts/sign.sh "$app")"
+fi
 # Finder and the Dock cache icons by bundle; a fresh modification date
 # nudges them to look again.
 touch "$app"
