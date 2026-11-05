@@ -288,7 +288,7 @@ _Completed: 2026-11-05 (code). Manual testing was deferred by the user to the en
   - Picker search shows up to 64 results.
   - Recently used is global.
 - **At completion:** `tests/api_login.rs`'s live `GET /` check now also asserts that `limits` parse from the live shape for both account types.
-- **Process:** only chunk 1 is committed so far. The chunk 2 commit timed out waiting for signing approval (Secretive or Touch ID: `communication with agent failed`). Chunks 2–6 are complete in the working tree. Each chunk's files were saved at its green state in `/tmp/rustoat-snapshots/chunk{3,4,5,6}` (chunk 2 is staged in the index), to be committed one per chunk once signing can be approved.
+- **Process:** the first chunk 2 commit timed out waiting for signing approval (Secretive or Touch ID: `communication with agent failed`). Work went on in the working tree, saving each chunk's files at its green state. Chunks 2–6 were then committed one per chunk from those snapshots, all signed: `19570c5`, `68a50a0`, `f4a4ca2`, `d77382f` and `ee84622`. Each intermediate commit was checked out on its own and passed `cargo test` (288, 303, 308 and 315 tests), and `ee84622` is the final, verified tree (320).
 
 ### Definition of Done
 - [x] **Attaching:** the attach button, paste (images and files) and drag-and-drop add files to a tray with thumbnails and ×. Files over the size limit (20 MB) or past the count limit (5) are refused with a toast. Text pastes unchanged. Implemented and unit-tested. Only the button was used live (chunk 1); paste, drop and the toasts **still need manual checks**.
@@ -301,8 +301,7 @@ _Completed: 2026-11-05 (code). Manual testing was deferred by the user to the en
 - [x] **Checks:** `cargo test && cargo clippy --all-targets -- -D warnings` gives 320 passed, 0 failed, 5 ignored, and clippy is clean. `cargo test -- --ignored`: all 5 live checks pass (Keychain round trip, live `GET /` against the pinned models, now including `limits`, the events handshake, the default avatar, the media proxy).
 
 ### Remaining Manual Steps
-1. **Approve the signed commits** for chunks 2–6 (one Touch ID prompt each).
-2. **Plan Manual Tests**, all deferred by the user:
+1. **Plan Manual Tests**, all deferred by the user:
    1. Attach a PNG, a PDF and a short video with a caption, and send. Watch the progress and compare with the web app.
    2. Paste a screenshot (⌘⌃⇧4), paste copied Finder files, drag a file onto the message list (the overlay should show), and paste plain text (it should stay text).
    3. Send with Wi-Fi off, then Retry once back online. It should send exactly once, with its files. (Also outstanding from milestone 3.)
