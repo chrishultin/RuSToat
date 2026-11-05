@@ -54,6 +54,14 @@ pub const HISTORY_PAGE: usize = 50;
 /// Most reply originals fetched at once.
 const REPLY_FETCHES: usize = 4;
 
+/// How long a message stays highlighted after a jump lands on it.
+const HIGHLIGHT_FOR: Duration = Duration::from_secs(2);
+
+/// Away from the present, newer messages are fetched once the view is this
+/// many rows from the end of the list, so they're usually there before the
+/// reader gets to the bottom.
+const NEWER_PREFETCH_ROWS: usize = 12;
+
 pub enum ChatEvent {
     LogOutRequested,
     /// The server no longer accepts our session.
@@ -80,6 +88,9 @@ enum Status {
 /// back to a channel keeps its position.
 struct Pane {
     rows: Rc<Vec<TimelineRow>>,
+    /// The rows end at the channel's newest message (see
+    /// [`ChatStore::is_at_present`]) as of the last sync.
+    at_present: bool,
     scroller: Entity<MessageScrollerState>,
     /// Watches scrolling, to load older messages at the top.
     _scroll: Subscription,
@@ -108,6 +119,15 @@ pub struct ChatView {
     /// Older-page requests in flight, and the last failure, by channel.
     loading_older: HashMap<String, Task<()>>,
     older_errors: HashMap<String, SharedString>,
+    /// The same for the page after the newest loaded message, which only
+    /// happens in a window that isn't at the present.
+    loading_newer: HashMap<String, Task<()>>,
+    newer_errors: HashMap<String, SharedString>,
+    /// Jumps to a message that isn't loaded, in flight by channel. A new one
+    /// replaces (cancels) the old.
+    jumps: HashMap<String, Task<()>>,
+    /// Clears the highlight of the message last jumped to.
+    highlight_task: Option<Task<()>>,
     /// The one read-acknowledgement waiting to go out: (channel, message, task).
     /// Replacing it (newer message, other channel) cancels the old one.
     pending_ack: Option<(String, String, Task<()>)>,
@@ -313,6 +333,10 @@ impl ChatView {
             load_errors: HashMap::new(),
             loading_older: HashMap::new(),
             older_errors: HashMap::new(),
+            loading_newer: HashMap::new(),
+            newer_errors: HashMap::new(),
+            jumps: HashMap::new(),
+            highlight_task: None,
             pending_ack: None,
             account_id,
             active: true,
@@ -362,6 +386,9 @@ impl ChatView {
                     self.loading.clear();
                     self.loading_older.clear();
                     self.older_errors.clear();
+                    self.loading_newer.clear();
+                    self.newer_errors.clear();
+                    self.jumps.clear();
                 }
                 self.ensure_current_loaded(cx);
             }
@@ -565,6 +592,9 @@ impl ChatView {
             self.load_errors.remove(channel);
             self.loading_older.remove(channel);
             self.older_errors.remove(channel);
+            self.loading_newer.remove(channel);
+            self.newer_errors.remove(channel);
+            self.jumps.remove(channel);
             if self.banners.remove(channel).is_some() {
                 cx.dismiss_system_notification(&notify::banner_tag(&self.account_id, channel));
             }
@@ -680,18 +710,146 @@ impl ChatView {
                     cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
                 }
             }
-            RowAction::JumpTo(id) => {
-                if let Some(pane) = self.panes.get(channel)
-                    && let Some(ix) = pane.rows.iter().position(
-                        |row| matches!(row, TimelineRow::Message(m) if m.id == id),
-                    )
-                {
-                    pane.scroller
-                        .update(cx, |scroller, cx| scroller.scroll_to_item(ix, cx));
-                }
-            }
+            RowAction::JumpTo(id) => self.jump_to_message(channel, id, window, cx),
         }
         cx.notify();
+    }
+
+    /// Scroll to message `id` in `channel` and highlight it. If it isn't
+    /// loaded, the channel's history is replaced by a window around it
+    /// first (see [`ChatStore::set_window`]).
+    fn jump_to_message(
+        &mut self,
+        channel: &str,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.store.has_message(channel, &id) {
+            self.jumps.remove(channel);
+            self.land_jump(channel, &id, cx);
+            return;
+        }
+        let client = self.client.clone();
+        let request = spawn_io({
+            let (channel, id) = (channel.to_string(), id.clone());
+            async move {
+                client
+                    .fetch_messages_around(&channel, &id, HISTORY_PAGE as i64)
+                    .await
+            }
+        });
+        let channel = channel.to_string();
+        let task = cx.spawn_in(window, {
+            let channel = channel.clone();
+            async move |this, cx| {
+                let result = request.await;
+                this.update_in(cx, |this, window, cx| {
+                    this.jumps.remove(&channel);
+                    let error = match result {
+                        Ok(Ok(page)) if page_has_message(&page, &id) => {
+                            this.store.set_window(&channel, page, &id, HISTORY_PAGE);
+                            // Pages fetched for the old rows would leave a gap here.
+                            this.loading_older.remove(&channel);
+                            this.loading_newer.remove(&channel);
+                            this.older_errors.remove(&channel);
+                            this.newer_errors.remove(&channel);
+                            this.land_jump_in_window(&channel, &id, cx);
+                            cx.notify();
+                            return;
+                        }
+                        Ok(Ok(_)) => "That message has been deleted.".to_string(),
+                        Ok(Err(err)) => {
+                            log::warn!("couldn't load messages around {id} in {channel}: {err:?}");
+                            "Couldn't load that message.".to_string()
+                        }
+                        Err(err) => {
+                            log::warn!("jump task failed: {err:?}");
+                            "Couldn't load that message.".to_string()
+                        }
+                    };
+                    window.push_notification(Notification::error(error), cx);
+                })
+                .ok();
+            }
+        });
+        self.jumps.insert(channel, task);
+    }
+
+    /// `id` is loaded in `channel`: scroll to it and highlight it.
+    fn land_jump(&mut self, channel: &str, id: &str, cx: &mut Context<Self>) {
+        self.highlight(id, channel, cx);
+        self.sync_pane(channel, cx);
+        self.scroll_to_row(channel, id, cx);
+    }
+
+    /// `channel`'s history was just replaced by a window around `id`: show it,
+    /// from `id`, with nothing left over from the old rows.
+    fn land_jump_in_window(&mut self, channel: &str, id: &str, cx: &mut Context<Self>) {
+        self.highlight(id, channel, cx);
+        self.reset_pane(channel, Some(id), cx);
+    }
+
+    /// Highlight `id` (in `channel`) for [`HIGHLIGHT_FOR`], and only it. The
+    /// rows are updated by the caller's next sync.
+    fn highlight(&mut self, id: &str, channel: &str, cx: &mut Context<Self>) {
+        self.store.set_highlight(id);
+        let (id, channel) = (id.to_string(), channel.to_string());
+        self.highlight_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(HIGHLIGHT_FOR).await;
+            this.update(cx, |this, cx| {
+                if this.store.clear_highlight(&id) {
+                    this.sync_pane(&channel, cx);
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Scroll `channel`'s list so that message `id` is at the top.
+    fn scroll_to_row(&mut self, channel: &str, id: &str, cx: &mut Context<Self>) {
+        let Some(pane) = self.panes.get(channel) else {
+            return;
+        };
+        if let Some(ix) = row_index(&pane.rows, id) {
+            pane.scroller
+                .update(cx, |scroller, cx| scroller.scroll_to_item(ix, cx));
+        }
+    }
+
+    /// Start `channel`'s list over from its store rows, instead of diffing
+    /// from the old ones (which can't keep a reader's place when the whole
+    /// history was swapped): at message `target` if given, else the end.
+    ///
+    /// `MessageScrollerState::reset` turns tail following back on, so the
+    /// scroll that follows it must be the last thing to touch the state:
+    /// `scroll_to_item` ends following (and leaves it off until the reader
+    /// reaches the bottom by hand), `scroll_to_end` resumes it.
+    fn reset_pane(&mut self, channel: &str, target: Option<&str>, cx: &mut Context<Self>) {
+        // Makes the pane if there isn't one yet.
+        self.sync_pane(channel, cx);
+        let Some(history) = self.store.history(channel) else {
+            return;
+        };
+        let at_present = history.at_present;
+        let rows = Rc::new(self.store.timeline(channel));
+        let Some(pane) = self.panes.get_mut(channel) else {
+            return;
+        };
+        let ix = target.and_then(|id| row_index(&rows, id));
+        pane.rows = rows.clone();
+        pane.at_present = at_present;
+        pane.scroller.update(cx, |scroller, cx| {
+            scroller.reset(rows.len(), cx);
+            match ix {
+                Some(ix) => {
+                    scroller.scroll_to_item(ix, cx);
+                }
+                None => scroller.scroll_to_end(cx),
+            }
+        });
+        self.fetch_reply_sources(channel, cx);
     }
 
     /// Send `content` and `attachments` in `channel`: shown at once as
@@ -725,8 +883,15 @@ impl ChatView {
         };
         self.store.add_pending(pending.clone());
         self.sync_pane(&channel, cx);
-        if let Some(pane) = self.panes.get(&channel) {
-            pane.scroller.update(cx, |scroller, cx| scroller.scroll_to_end(cx));
+        if self.store.is_at_present(&channel) {
+            if let Some(pane) = self.panes.get(&channel) {
+                pane.scroller
+                    .update(cx, |scroller, cx| scroller.scroll_to_end(cx));
+            }
+        } else {
+            // The message belongs after the newest one, not after a gap: go
+            // back to the present, where it'll show up.
+            self.jump_to_present(channel.clone(), cx);
         }
         self.post_pending(pending, window, cx);
         cx.notify();
@@ -1556,12 +1721,24 @@ impl ChatView {
                     this.loading.remove(&channel);
                     match result {
                         Ok(Ok(page)) => {
+                            let was_away = !this.store.is_at_present(&channel);
                             this.store.set_history(&channel, page, HISTORY_PAGE);
                             log::debug!(
                                 "loaded {} messages for {channel}",
                                 this.store.history(&channel).map_or(0, |h| h.messages.len())
                             );
-                            this.sync_pane(&channel, cx);
+                            if was_away {
+                                // Back from a window: the old rows don't lead
+                                // to the new ones, and neither do pages still
+                                // on their way for them.
+                                this.loading_older.remove(&channel);
+                                this.loading_newer.remove(&channel);
+                                this.older_errors.remove(&channel);
+                                this.newer_errors.remove(&channel);
+                                this.reset_pane(&channel, None, cx);
+                            } else {
+                                this.sync_pane(&channel, cx);
+                            }
                         }
                         Ok(Err(err)) => {
                             log::warn!("loading messages for {channel} failed: {err:?}");
@@ -1590,9 +1767,15 @@ impl ChatView {
             return;
         }
         let rows = Rc::new(self.store.timeline(channel));
+        let at_present = self.store.is_at_present(channel);
         if let Some(pane) = self.panes.get_mut(channel) {
             let ops = diff_rows(&pane.rows, &rows);
+            // Rows added at the end of a window away from the present are
+            // newer pages. The reader being at its bottom must not carry them
+            // to the new bottom, so the place is kept.
+            let was_away = !pane.at_present;
             pane.rows = rows;
+            pane.at_present = at_present;
             pane.scroller.update(cx, |scroller, cx| {
                 for op in ops {
                     let applied = match op {
@@ -1602,6 +1785,12 @@ impl ChatView {
                             true
                         }
                         RowOp::Prepend(count) => scroller.prepend(count, cx),
+                        RowOp::Append(count) if was_away && scroller.is_following_tail() => {
+                            let top = scroller.logical_scroll_top().item_ix;
+                            let appended = scroller.append(count, cx);
+                            scroller.scroll_to_item(top, cx);
+                            appended
+                        }
                         RowOp::Append(count) => scroller.append(count, cx),
                         RowOp::Remove { at, count } => scroller.splice(at..at + count, 0, cx),
                         RowOp::Insert { at, count } => scroller.splice(at..at, count, cx),
@@ -1619,12 +1808,14 @@ impl ChatView {
         let scroller = cx.new(|cx| MessageScrollerState::new(rows.len(), cx));
         let watched = channel.to_string();
         let scroll = cx.observe(&scroller, move |this, _, cx| {
-            this.maybe_load_older(&watched, cx)
+            this.maybe_load_older(&watched, cx);
+            this.maybe_load_newer(&watched, cx);
         });
         self.panes.insert(
             channel.to_string(),
             Pane {
                 rows,
+                at_present,
                 scroller,
                 _scroll: scroll,
             },
@@ -1759,6 +1950,121 @@ impl ChatView {
         cx.notify();
     }
 
+    /// Load the page after the newest loaded message, if `channel` is a window
+    /// away from the present and the reader is near its bottom.
+    ///
+    /// "Not scrolled up" is also true of a list too short to scroll, so this
+    /// can be asked again right after a page lands. It never repeats itself:
+    /// a request is in flight at most once, it stops at the present, and a
+    /// page that adds nothing without reaching the present is an error that
+    /// waits for Retry.
+    fn maybe_load_newer(&mut self, channel: &str, cx: &mut Context<Self>) {
+        if self.loading_newer.contains_key(channel)
+            || self.newer_errors.contains_key(channel)
+            || self.loading.contains_key(channel)
+            || self.jumps.contains_key(channel)
+        {
+            return;
+        }
+        let Some(history) = self.store.history(channel) else {
+            return;
+        };
+        if history.at_present || history.messages.is_empty() {
+            return;
+        }
+        let Some(pane) = self.panes.get(channel) else {
+            return;
+        };
+        let near_end = {
+            let scroller = pane.scroller.read(cx);
+            let count = scroller.item_count();
+            let top = scroller.logical_scroll_top().item_ix;
+            count > 0
+                && (!scroller.is_scrolled_up() || count.saturating_sub(top) <= NEWER_PREFETCH_ROWS)
+        };
+        if near_end {
+            self.load_newer(channel.to_string(), cx);
+        }
+    }
+
+    fn load_newer(&mut self, channel: String, cx: &mut Context<Self>) {
+        let Some(after) = self.store.newest_message_id(&channel).map(str::to_string) else {
+            return;
+        };
+        self.newer_errors.remove(&channel);
+        let client = self.client.clone();
+        let request = spawn_io({
+            let (channel, after) = (channel.clone(), after.clone());
+            async move {
+                client
+                    .fetch_messages_after(&channel, &after, HISTORY_PAGE as i64)
+                    .await
+            }
+        });
+        let task = cx.spawn({
+            let channel = channel.clone();
+            async move |this, cx| {
+                let result = request.await;
+                this.update(cx, |this, cx| {
+                    this.loading_newer.remove(&channel);
+                    match result {
+                        // The history changed under the request (a jump, a
+                        // reload): this page doesn't follow what's loaded.
+                        Ok(Ok(_))
+                            if this.store.newest_message_id(&channel) != Some(after.as_str()) => {}
+                        Ok(Ok(page)) => {
+                            let added = this.store.append_page(&channel, page, HISTORY_PAGE);
+                            log::debug!(
+                                "loaded newer messages for {channel} ({} total, at present: {})",
+                                this.store.history(&channel).map_or(0, |h| h.messages.len()),
+                                this.store.is_at_present(&channel)
+                            );
+                            if !added && !this.store.is_at_present(&channel) {
+                                // Nothing new, yet not the present: asking
+                                // again would get the same answer.
+                                this.newer_errors.insert(
+                                    channel.clone(),
+                                    "Couldn't load newer messages.".into(),
+                                );
+                            }
+                            this.sync_pane(&channel, cx);
+                        }
+                        Ok(Err(err)) => {
+                            log::warn!("loading newer messages for {channel} failed: {err:?}");
+                            this.newer_errors.insert(channel, err.to_string().into());
+                        }
+                        Err(err) => {
+                            log::warn!("newer-messages task failed: {err:?}");
+                            this.newer_errors
+                                .insert(channel, "Couldn't load newer messages.".into());
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }
+        });
+        self.loading_newer.insert(channel, task);
+        cx.notify();
+    }
+
+    fn retry_newer(&mut self, channel: String, cx: &mut Context<Self>) {
+        self.newer_errors.remove(&channel);
+        self.load_newer(channel, cx);
+    }
+
+    /// Leave a window for the present: reload the latest page, then show the
+    /// end of the list (see [`Self::load_history`]).
+    fn jump_to_present(&mut self, channel: String, cx: &mut Context<Self>) {
+        if self.loading.contains_key(&channel) {
+            return;
+        }
+        self.loading_newer.remove(&channel);
+        self.newer_errors.remove(&channel);
+        self.load_history(channel, cx);
+        cx.notify();
+    }
+
     /// Mark the open channel read on Stoat, if the user can actually see its
     /// newest message: the window is active and the list is at the bottom.
     /// Debounced by [`ACK_DELAY`]; at most one acknowledgement is pending.
@@ -1769,6 +2075,11 @@ impl ChatView {
         let Some(channel) = self.current_channel().map(|c| c.id) else {
             return;
         };
+        // What's on screen isn't the newest message, so reading it says
+        // nothing about the messages after it.
+        if !self.store.is_at_present(&channel) {
+            return;
+        }
         // "Not scrolled up" covers following the tail, being scrolled to the
         // end by hand, and content too short to scroll at all.
         let at_bottom = self
@@ -2205,6 +2516,7 @@ impl ChatView {
             mine_bg: theme.primary.opacity(0.15),
             card_bg: theme.background,
             image_bg: theme.secondary,
+            highlight: theme.accent.opacity(0.5),
         };
         let placeholder = |text: SharedString| {
             v_flex()
@@ -2272,6 +2584,57 @@ impl ChatView {
                                     .into_any_element()
                             })
                         };
+                        // Away from the present, "scroll to the end" would only
+                        // reach the end of the window: the pill below takes
+                        // over from the scroller's own button.
+                        let away = !self.store.is_at_present(&channel.id);
+                        let newer = if away {
+                            let (id, retry_id) = (channel.id.clone(), channel.id.clone());
+                            let error = self.newer_errors.get(&channel.id).map(|error| {
+                                h_flex()
+                                    .gap_2()
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_full()
+                                    .text_xs()
+                                    .bg(theme.secondary)
+                                    .text_color(colors.danger)
+                                    .child(error.clone())
+                                    .child(
+                                        Button::new("retry-newer")
+                                            .xsmall()
+                                            .label("Retry")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.retry_newer(retry_id.clone(), cx)
+                                            })),
+                                    )
+                            });
+                            let reloading = self.loading.contains_key(&channel.id);
+                            Some(
+                                v_flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .children(error)
+                                    .child(
+                                        Button::new("jump-to-present")
+                                            .secondary()
+                                            .small()
+                                            .rounded(theme.radius_full())
+                                            .icon(IconName::ArrowDown)
+                                            .label(if reloading {
+                                                "Loading…"
+                                            } else {
+                                                "Jump to present"
+                                            })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.jump_to_present(id.clone(), cx)
+                                            })),
+                                    )
+                                    .into_any_element(),
+                            )
+                        } else {
+                            None
+                        };
                         div()
                             .relative()
                             .flex_1()
@@ -2290,8 +2653,21 @@ impl ChatView {
                                 // chat turns (`pb_8` under every row, plus `px_3`).
                                 // Ours are single messages, which space themselves.
                                 .with_row_style(StyleRefinement::default().pb(px(0.)).px(px(0.)))
+                                .jump_button(!away)
                                 .flex_1(),
                             )
+                            .when_some(newer, |el, pill| {
+                                el.child(
+                                    div()
+                                        .absolute()
+                                        .bottom_2()
+                                        .left_0()
+                                        .right_0()
+                                        .flex()
+                                        .justify_center()
+                                        .child(pill),
+                                )
+                            })
                             .when_some(older, |el, pill| {
                                 el.child(
                                     div()
@@ -2365,6 +2741,20 @@ impl ChatView {
     }
 }
 
+/// The list's row for message `id`, if it's among `rows`.
+fn row_index(rows: &[TimelineRow], id: &str) -> Option<usize> {
+    rows.iter()
+        .position(|row| matches!(row, TimelineRow::Message(m) if m.id == id))
+}
+
+/// Whether a fetched page holds message `id`.
+fn page_has_message(page: &crate::api::models::BulkMessageResponse, id: &str) -> bool {
+    use crate::api::models::BulkMessageResponse;
+    let (BulkMessageResponse::JustMessages(messages)
+    | BulkMessageResponse::MessagesAndUsers { messages, .. }) = page;
+    messages.iter().any(|m| m.id == id)
+}
+
 /// Group name for the conversation, which files can be dropped on.
 const DROP_GROUP: &str = "conversation-drop";
 
@@ -2411,6 +2801,8 @@ struct RowColors {
     card_bg: Hsla,
     /// Behind an image while it loads, or if it fails.
     image_bg: Hsla,
+    /// Behind the message a jump just landed on.
+    highlight: Hsla,
 }
 
 /// Something a message row asks the view to do.
@@ -2429,7 +2821,8 @@ enum RowAction {
     RetrySend(String),
     /// Give up on a failed message (by its pending key).
     DiscardSend(String),
-    /// Scroll to a loaded message (a reply's original).
+    /// Scroll to a message (a reply's original), loading the messages around
+    /// it first if it isn't loaded.
     JumpTo(String),
     /// Reply to a message (from the hover toolbar or the right-click menu).
     Reply(ReplyTarget),
@@ -2755,6 +3148,7 @@ fn render_message_row(
         .when(message.pending == Some(PendingState::Sending), |el| {
             el.opacity(PENDING_OPACITY)
         })
+        .when(message.highlighted, |el| el.bg(colors.highlight))
         .child(layout);
     if message.pending.is_some() {
         return row.into_any_element();
@@ -2833,8 +3227,8 @@ const REPLY_GAP: f32 = 2.;
 /// The original author's avatar in a reply preview.
 const REPLY_AVATAR_SIZE: f32 = 14.;
 
-/// "↱ Name: snippet" above a reply. Clicking a loaded original scrolls to it
-/// (if it isn't loaded in the list, nothing happens).
+/// "↱ Name: snippet" above a reply. Clicking an original that's been fetched
+/// scrolls to it, loading the messages around it if it's not in the list.
 fn render_reply_preview(
     message: &MessageRow,
     ix: usize,
@@ -3939,6 +4333,7 @@ impl Render for ChatView {
         if let Some(channel) = self.current_channel().map(|c| c.id) {
             cx.defer_in(window, move |this, window, cx| {
                 this.maybe_load_older(&channel, cx);
+                this.maybe_load_newer(&channel, cx);
                 this.maybe_ack_current(window, cx);
             });
         }

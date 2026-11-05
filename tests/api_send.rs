@@ -174,6 +174,35 @@ async fn a_reply_source_is_fetched_with_its_neighbours_and_authors() {
 }
 
 #[tokio::test]
+async fn newer_messages_are_fetched_after_an_id_oldest_first() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/channels/ch-general/messages"))
+        .and(header("x-session-token", "tok"))
+        .and(query_param("after", MSG))
+        .and(query_param("sort", "Oldest"))
+        .and(query_param("limit", "50"))
+        .and(query_param("include_users", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "messages": [created("the next one")],
+            "users": []
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let page = client(&server)
+        .fetch_messages_after("ch-general", MSG, 50)
+        .await
+        .unwrap();
+    let stoat_gpui::api::models::BulkMessageResponse::MessagesAndUsers { messages, .. } = page
+    else {
+        panic!("expected users with the messages");
+    };
+    assert_eq!(messages.len(), 1);
+}
+
+#[tokio::test]
 async fn editing_patches_the_message_with_its_new_content() {
     let server = MockServer::start().await;
     Mock::given(method("PATCH"))

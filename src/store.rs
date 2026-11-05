@@ -56,6 +56,10 @@ pub struct History {
     pub messages: Vec<Message>,
     /// The server returned fewer than requested: there's nothing older.
     pub exhausted: bool,
+    /// The newest loaded message is the channel's newest. False in a window
+    /// around an old message (see [`ChatStore::set_window`]) until newer
+    /// pages reach the present.
+    pub at_present: bool,
 }
 
 /// One row of a channel's message view.
@@ -117,6 +121,8 @@ pub struct MessageRow {
     pub pending: Option<PendingState>,
     /// What it replies to, in order (at most [`MAX_REPLIES`]).
     pub replies: Vec<ReplyPreview>,
+    /// Just jumped to: drawn tinted for a moment (see [`ChatStore::set_highlight`]).
+    pub highlighted: bool,
 }
 
 /// Most messages one message can reply to (Stoat's `limits.global.message_replies`).
@@ -405,6 +411,8 @@ pub struct ChatStore {
     released_files: Vec<DraftAttachment>,
     /// Originals of replies that aren't in the loaded history, by message ID.
     reply_sources: HashMap<String, ReplySource>,
+    /// The message just jumped to, whose row is highlighted.
+    highlight: Option<String>,
 }
 
 impl ChatStore {
@@ -499,9 +507,106 @@ impl ChatStore {
             History {
                 messages,
                 exhausted,
+                at_present: true,
             },
         );
         self.confirm_pending_in_history(channel);
+    }
+
+    /// Replace `channel`'s history with a window around `target` (fetched
+    /// with `nearby`, asking for `limit` messages): the target and up to
+    /// `limit / 2 + 1` messages on each side. A side that came back short
+    /// has nothing further: nothing older (`exhausted`), or nothing newer
+    /// (`at_present`). The window is also at the present if it holds the
+    /// channel's newest message.
+    pub fn set_window(
+        &mut self,
+        channel: &str,
+        page: BulkMessageResponse,
+        target: &str,
+        limit: usize,
+    ) {
+        let mut messages = self.absorb_page(page);
+        sort_messages(&mut messages);
+        let side = limit / 2 + 1;
+        let older = messages.iter().filter(|m| m.id.as_str() < target).count();
+        let newer = messages.len() - older;
+        let at_present = newer < side || self.contains_last_message(channel, &messages);
+        self.histories.insert(
+            channel.to_string(),
+            History {
+                messages,
+                exhausted: older < side,
+                at_present,
+            },
+        );
+        self.confirm_pending_in_history(channel);
+    }
+
+    /// Merge a page of newer messages (fetched with `after` the newest
+    /// loaded one, `limit` asked for) into a loaded channel. A short page, or
+    /// one that reaches the channel's newest message, means the history is
+    /// at the present again. Returns whether any message was added; false
+    /// with the history still away from the present means the page made no
+    /// progress, and asking again would only repeat it.
+    pub fn append_page(&mut self, channel: &str, page: BulkMessageResponse, limit: usize) -> bool {
+        let newer = self.absorb_page(page);
+        let reaches_present = self.contains_last_message(channel, &newer);
+        let Some(history) = self.histories.get_mut(channel) else {
+            return false;
+        };
+        let before = history.messages.len();
+        let short = newer.len() < limit;
+        history.messages.extend(newer);
+        sort_messages(&mut history.messages);
+        if short || reaches_present {
+            history.at_present = true;
+        }
+        let added = history.messages.len() > before;
+        self.confirm_pending_in_history(channel);
+        added
+    }
+
+    /// Whether `messages` include `channel`'s newest message.
+    fn contains_last_message(&self, channel: &str, messages: &[Message]) -> bool {
+        self.channels
+            .get(channel)
+            .and_then(last_message_id)
+            .is_some_and(|last| messages.iter().any(|m| m.id == last))
+    }
+
+    /// Whether the newest loaded message in `channel` is its newest message.
+    /// True for a channel that isn't loaded: there's no gap to speak of.
+    pub fn is_at_present(&self, channel: &str) -> bool {
+        self.histories.get(channel).is_none_or(|h| h.at_present)
+    }
+
+    /// The newest loaded message, for fetching the page after it.
+    pub fn newest_message_id(&self, channel: &str) -> Option<&str> {
+        self.histories
+            .get(channel)?
+            .messages
+            .last()
+            .map(|m| m.id.as_str())
+    }
+
+    /// Whether `id` is loaded in `channel`.
+    pub fn has_message(&self, channel: &str, id: &str) -> bool {
+        self.find_message(channel, id).is_some()
+    }
+
+    /// Draw `id`'s row highlighted (a jump just landed on it), and no other.
+    pub fn set_highlight(&mut self, id: &str) {
+        self.highlight = Some(id.to_string());
+    }
+
+    /// Stop highlighting `id`, unless a later jump has moved it elsewhere.
+    pub fn clear_highlight(&mut self, id: &str) -> bool {
+        if self.highlight.as_deref() == Some(id) {
+            self.highlight = None;
+            return true;
+        }
+        false
     }
 
     /// Merge a page of older messages (fetched with `before`) into a loaded
@@ -790,9 +895,10 @@ impl ChatStore {
         }
     }
 
-    /// A live message. It's added to its channel's history if that's loaded,
-    /// and keeps the channel's "last message" fresh for Home ordering either
-    /// way. Returns true if a loaded history changed.
+    /// A live message. It's added to its channel's history if that's loaded
+    /// and at the present, and keeps the channel's "last message" (so unread
+    /// state) fresh for Home ordering either way. Returns true if a loaded
+    /// history changed.
     pub fn apply_message(&mut self, message: Message) -> bool {
         // Ours, confirming a pending message (the POST response or its echo,
         // whichever arrives first; the second just replaces it by ID).
@@ -826,6 +932,9 @@ impl ChatStore {
             .binary_search_by(|m| m.id.as_str().cmp(&message.id))
         {
             Ok(ix) => history.messages[ix] = message,
+            // Away from the present a new message would sit after a gap. It
+            // shows when newer pages reach it (`append_page`).
+            Err(_) if !history.at_present => return false,
             Err(ix) => history.messages.insert(ix, message),
         }
         true
@@ -1723,9 +1832,12 @@ impl ChatStore {
         }
 
         // Unconfirmed messages go last, in send order, drawn like any other.
+        // Away from the present they'd sit after a gap, so they wait for the
+        // present to be loaded again.
         let pending: Vec<(Message, &PendingMessage)> = self
             .pending(channel)
             .iter()
+            .filter(|_| history.at_present)
             .map(|p| (self.pending_message(p), p))
             .collect();
         let loaded = history
@@ -1833,6 +1945,7 @@ impl ChatStore {
                 .take(MAX_REPLIES)
                 .map(|id| self.reply_preview(message, id))
                 .collect(),
+            highlighted: self.highlight.as_deref() == Some(message.id.as_str()),
         }
     }
 

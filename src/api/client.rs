@@ -236,7 +236,23 @@ impl StoatClient {
     ) -> Result<BulkMessageResponse, ApiError> {
         let path = format!(
             "/channels/{channel}/messages?{}",
-            messages_query(before, limit)
+            messages_query(before, None, MessageSort::Latest, limit)
+        );
+        self.send(Method::GET, &path, None::<&()>).await
+    }
+
+    /// `GET /channels/{id}/messages?after={message}&sort=Oldest`: up to
+    /// `limit` messages newer than `after`, oldest first, with their authors.
+    /// This is how a window that isn't at the present catches up with it.
+    pub async fn fetch_messages_after(
+        &self,
+        channel: &str,
+        after: &str,
+        limit: i64,
+    ) -> Result<BulkMessageResponse, ApiError> {
+        let path = format!(
+            "/channels/{channel}/messages?{}",
+            messages_query(None, Some(after), MessageSort::Oldest, limit)
         );
         self.send(Method::GET, &path, None::<&()>).await
     }
@@ -610,12 +626,17 @@ fn encode_path_segment(segment: &str) -> String {
 /// Query string for message history, built from the backend's own
 /// `OptionsQueryMessages`. `sort` must be explicit: the server defaults to
 /// `Relevance`, which is for search.
-fn messages_query(before: Option<&str>, limit: i64) -> String {
+fn messages_query(
+    before: Option<&str>,
+    after: Option<&str>,
+    sort: MessageSort,
+    limit: i64,
+) -> String {
     let options = OptionsQueryMessages {
         limit: Some(limit),
         before: before.map(str::to_string),
-        after: None,
-        sort: Some(MessageSort::Latest),
+        after: after.map(str::to_string),
+        sort: Some(sort),
         nearby: None,
         include_users: Some(true),
     };
@@ -624,17 +645,37 @@ fn messages_query(before: Option<&str>, limit: i64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use revolt_models::v0::MessageSort;
+
     use super::messages_query;
 
     #[test]
     fn messages_query_is_latest_first_with_users() {
         assert_eq!(
-            messages_query(None, 50),
+            messages_query(None, None, MessageSort::Latest, 50),
             "limit=50&sort=Latest&include_users=true"
         );
         assert_eq!(
-            messages_query(Some("01JC0000000000000000000009"), 50),
+            messages_query(
+                Some("01JC0000000000000000000009"),
+                None,
+                MessageSort::Latest,
+                50
+            ),
             "limit=50&before=01JC0000000000000000000009&sort=Latest&include_users=true"
+        );
+    }
+
+    #[test]
+    fn messages_query_after_is_oldest_first() {
+        assert_eq!(
+            messages_query(
+                None,
+                Some("01JC0000000000000000000009"),
+                MessageSort::Oldest,
+                50
+            ),
+            "limit=50&after=01JC0000000000000000000009&sort=Oldest&include_users=true"
         );
     }
 }
