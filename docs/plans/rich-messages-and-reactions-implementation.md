@@ -355,3 +355,75 @@ The user checked the viewer in the running app and confirmed "lgtm":
 - closing with Esc, the close button and a backdrop click
 - "Open in browser"
 - no interaction with the list underneath
+
+## Chunk 5: Embeds (link previews and bot embeds)
+
+### Changes Made
+- `src/embed.rs` (new, pure). `EmbedView::new(embed, media, names, revealed, key)` gives one of:
+  - `Card(EmbedCard)`, a card with:
+    - a colour bar, `0xRRGGBBAA`, parsed with `math::parse_color` (`#rgb`, `#rrggbb` and CSS names). Anything else, such as a gradient, uses the theme border.
+    - a proxied icon, the site name and the title
+    - `link`, http(s) only, from `url` and then `original_url`
+    - `description`, either `Plain` (websites) or `Markdown { source, render_key }` (bot embeds, run through `markdown::prepare`)
+    - a `thumbnail` (`ImageSize::Preview`, fit into 80×80) or a large `image` (`ImageSize::Large`, fit into 400×300)
+    - `playable`, when there's an image and the site has a `video`, or `special` is YouTube, Twitch, Lightspeed or Streamable
+    - `media`: a bot embed's uploaded file, as an `AttachmentView` that respects "Show image".
+  - `Image(EmbedImage)` for `Embed::Image`, and for websites with `special: GIF`.
+  - `Video { url }` for `Embed::Video`, and for a GIF that only has a video.
+  - Nothing (`None`) for `Embed::None`, and for cards with nothing beyond a colour.
+  - Every remote picture goes through `MediaUrls::external` (the January proxy). Without a proxy, pictures are left out. Missing image dimensions get the fallback box, clamped to the slot.
+- `src/api/events.rs`:
+  - New `ServerEvent::MessageAppend { id, channel, embeds }`, decoded and forwarded.
+  - Embeds are decoded one by one with `lenient_list`, so an embed with an unknown `special` is skipped and logged without losing the others.
+  - `lenient_list`'s log message is now generic, so callers pass labels like "user in Ready" or "embed in MessageAppend".
+- `src/store.rs`:
+  - `apply_append(channel, id, embeds)` extends `message.embeds`. It returns false for an unloaded message or an empty list.
+  - New `MessageRow.embeds: Vec<EmbedView>`, keyed `"{message}:embed{ix}"`.
+- `src/ui/chat.rs`:
+  - Handles `MessageAppend` by calling `apply_append`, then `sync_pane`; `diff_rows` remeasures the row.
+  - Chunk 4's image element is factored into `inline_image(id, url, size, colors)`, shared by attachments and embeds.
+  - New `render_embed` / `render_embed_card`:
+    - the colour bar, plus a site row (16 px icon and name)
+    - a bot embed's icon next to its title when there's no site name
+    - a linked title (theme `link` colour, underline on hover, opens in the browser)
+    - a plain description clamped to 4 lines, or Markdown via `TextView` with the same link handling as messages
+    - a thumbnail to the right, a large image below, and media below that
+    - large images open in the 4b viewer. Playable ones get a 48 px play badge and open the link instead.
+  - Bare image embeds open in the viewer. Video embeds are cards (`FileVideoCamera`, "Video", `ExternalLink`) that open the URL.
+  - Embeds stack under any attachments in the bubble. A message with embeds but no text gets the invisible bubble surface.
+  - `RowColors` gains `link`.
+- `src/lib.rs`: `pub mod embed`.
+- `tests/store_embeds.rs` (new), 12 tests:
+  - `MessageAppend` decoding, including an unknown `special` and a missing `append.embeds`
+  - a full website card (proxied icon and image, colour, sizing)
+  - Preview thumbnails
+  - the YouTube play badge, and none without a picture
+  - GIF, GIF video and image-link embeds, plus the zero-dimension fallback
+  - video links (web only)
+  - bot embeds: Markdown with HTML escaped, colour name, media
+  - missing and odd fields: empty cards, title-only previews, colour formats, `javascript:`/`mailto:` links, the `original_url` fallback
+  - no proxy, so no pictures
+  - a live append through `parse_frame`, `apply_append` and `timeline`, giving a `Remeasure`
+  - ignored appends
+  - the order of embeds already on a message
+- `tests/store_live.rs`: the row helper sets `embeds`.
+
+### Divergences
+- **Minor, location:** the embed model lives in its own `src/embed.rs`, like chunk 4's `attachment.rs`, not in `store.rs`.
+- **Minor, extended colour parsing:** the plan said hex only. Reusing `math::parse_color` also accepts CSS colour names, at no extra cost. CSS4 names such as `rebeccapurple` aren't known to `svgtypes`.
+- **Minor, additions:**
+  - GIF websites show as the bare picture.
+  - Video previews get a play badge.
+  - Embed pictures open in the 4b viewer.
+  - Unknown embed kinds are skipped individually.
+- **Process: another session in this worktree.** Partway through the chunk, a separate session made uncommitted "remember the open place" changes here and then committed them as `03288e3`. I paused, the user said to continue, and I confirmed that commit contains none of this chunk's changes and that what remained uncommitted was only this chunk. The full suite then passed on top of `03288e3`. Its 4 unit tests in `places.rs` are why the library's unit test count went from 40 to 44.
+- **No effect on later chunks.**
+
+### Verification Performed
+- `cargo test --test store_embeds`: 12 passed. The first run had one failure in the test itself: `svgtypes` doesn't know `rebeccapurple`, so it was changed to `teal`.
+- `cargo test`: 191 passed, 0 failed, 5 ignored. That's +12 from `store_embeds` and +4 from the other session's `places` unit tests.
+- `cargo clippy --all-targets -- -D warnings`: clean. `cargo fmt --check`: clean.
+- Live: relaunched on top of `03288e3`. `Ready` logged 5 servers, 76 channels and 41 emoji, and three channels loaded, with no warnings or errors.
+
+### Manual Validation
+The user checked embeds in the running app and confirmed "Embeds look good".

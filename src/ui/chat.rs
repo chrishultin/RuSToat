@@ -23,6 +23,7 @@ use gpui_kit::*;
 use crate::api::StoatClient;
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
 use crate::attachment::{AttachmentView, FileKind, fit_into};
+use crate::embed::{Description, EmbedCard, EmbedImage, EmbedView};
 use crate::markdown::{JUMBO_TEXT_PX, is_external_link};
 use crate::media::MediaUrls;
 use crate::notify::{self, Delivery, Notice, Viewing};
@@ -281,6 +282,16 @@ impl ChatView {
             ConnectionEvent::Event(ServerEvent::MessageDelete { id, channel }) => {
                 log::debug!("live: delete {id} in {channel}");
                 if self.store.apply_delete(&channel, &[id]) {
+                    self.sync_pane(&channel, cx);
+                }
+            }
+            ConnectionEvent::Event(ServerEvent::MessageAppend {
+                id,
+                channel,
+                embeds,
+            }) => {
+                log::debug!("live: {} embed(s) for {id} in {channel}", embeds.len());
+                if self.store.apply_append(&channel, &id, embeds) {
                     self.sync_pane(&channel, cx);
                 }
             }
@@ -1163,6 +1174,7 @@ impl ChatView {
             avatar_bg: theme.secondary,
             avatar_fg: theme.secondary_foreground,
             border: theme.border,
+            link: theme.link,
             card_bg: theme.background,
             image_bg: theme.secondary,
         };
@@ -1310,6 +1322,7 @@ struct RowColors {
     avatar_bg: Hsla,
     avatar_fg: Hsla,
     border: Hsla,
+    link: Hsla,
     /// File cards, so they stand out inside a bubble.
     card_bg: Hsla,
     /// Behind an image while it loads, or if it fails.
@@ -1507,6 +1520,20 @@ fn render_message_row(
                         )),
                 )
             })
+            .when(!message.embeds.is_empty(), |el| {
+                el.child(
+                    v_flex()
+                        .gap_1()
+                        .when(
+                            message.body.is_some() || !message.attachments.is_empty(),
+                            |el| el.mt_1(),
+                        )
+                        .children(message.embeds.iter().enumerate().map(|(ix, embed)| {
+                            let id = SharedString::from(format!("embed-{}-{ix}", message.id));
+                            render_embed(id, embed, colors, on_action)
+                        })),
+                )
+            })
             .when(message.edited, |el| {
                 el.child(div().text_xs().text_color(colors.muted).child("(edited)"))
             });
@@ -1516,7 +1543,9 @@ fn render_message_row(
     // `BubbleVariant::Ghost`: gpui-component stretches ghost bubbles to the
     // full row width, which left-aligned emoji-only messages even when they
     // were ours.
-    let bare = message.jumbo || (message.body.is_none() && !message.attachments.is_empty());
+    let bare = message.jumbo
+        || (message.body.is_none()
+            && (!message.attachments.is_empty() || !message.embeds.is_empty()));
     let surface = surface.when(bare, |el| el.bg(transparent_black()).p_0());
     let bubble = Bubble::new()
         .with_variant(if message.mine {
@@ -1587,45 +1616,17 @@ fn render_attachment(
             too_big: false,
             ..
         } => {
-            let (w, h) = (px(*width as f32), px(*height as f32));
-            let backdrop = move || {
-                div()
-                    .size_full()
-                    .rounded(px(ATTACHMENT_RADIUS))
-                    .bg(colors.image_bg)
-            };
-            let on_action = on_action.clone();
             let viewed = ViewedImage {
                 url: url.clone(),
                 name: name.clone(),
                 original: *original,
             };
-            div()
-                .id(id)
-                .w(w)
-                .h(h)
-                .flex_none()
+            let on_action = on_action.clone();
+            inline_image(id, url, (*width, *height), colors)
                 .cursor_pointer()
                 .on_click(move |_, window, cx| {
                     on_action(RowAction::ViewImage(viewed.clone()), window, cx)
                 })
-                .child(
-                    img(SharedUri::from(url.clone()))
-                        .size_full()
-                        .rounded(px(ATTACHMENT_RADIUS))
-                        .object_fit(ObjectFit::Contain)
-                        .with_loading(move || backdrop().into_any_element())
-                        .with_fallback(move || {
-                            backdrop()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_xs()
-                                .text_color(colors.muted)
-                                .child("Couldn't load image")
-                                .into_any_element()
-                        }),
-                )
                 .into_any_element()
         }
         AttachmentView::Image {
@@ -1670,6 +1671,275 @@ fn render_attachment(
                 .into_any_element()
         }
     }
+}
+
+/// A picture at exactly its display size (so its row never changes height
+/// when it loads), with a backdrop while loading or if it fails. Callers add
+/// what clicking it does.
+fn inline_image(
+    id: SharedString,
+    url: &str,
+    (width, height): (u32, u32),
+    colors: RowColors,
+) -> Stateful<Div> {
+    let backdrop = move || {
+        div()
+            .size_full()
+            .rounded(px(ATTACHMENT_RADIUS))
+            .bg(colors.image_bg)
+    };
+    div()
+        .id(id)
+        .relative()
+        .w(px(width as f32))
+        .h(px(height as f32))
+        .flex_none()
+        .child(
+            img(SharedUri::from(url.to_string()))
+                .size_full()
+                .rounded(px(ATTACHMENT_RADIUS))
+                .object_fit(ObjectFit::Contain)
+                .with_loading(move || backdrop().into_any_element())
+                .with_fallback(move || {
+                    backdrop()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_xs()
+                        .text_color(colors.muted)
+                        .child("Couldn't load image")
+                        .into_any_element()
+                }),
+        )
+}
+
+/// An embed picture that opens in the full-size viewer.
+fn viewable_embed_image(
+    id: SharedString,
+    image: &EmbedImage,
+    colors: RowColors,
+    on_action: &OnRowAction,
+) -> Stateful<Div> {
+    let viewed = ViewedImage {
+        url: image.url.clone(),
+        name: "Image".into(),
+        original: image.original,
+    };
+    let on_action = on_action.clone();
+    inline_image(id, &image.url, (image.width, image.height), colors)
+        .cursor_pointer()
+        .on_click(move |_, window, cx| on_action(RowAction::ViewImage(viewed.clone()), window, cx))
+}
+
+/// Widest an embed card gets: a large image plus the card's padding and bar.
+const EMBED_CARD_MAX_WIDTH: f32 = 432.;
+/// Width of an embed card's colour bar.
+const EMBED_BAR_WIDTH: f32 = 4.;
+/// Lines of a website's description shown before it's cut off.
+const EMBED_DESCRIPTION_LINES: usize = 4;
+
+fn render_embed(
+    id: SharedString,
+    embed: &EmbedView,
+    colors: RowColors,
+    on_action: &OnRowAction,
+) -> AnyElement {
+    match embed {
+        EmbedView::Image(image) => {
+            viewable_embed_image(id, image, colors, on_action).into_any_element()
+        }
+        EmbedView::Video { url } => {
+            let open = url.clone();
+            let shown = url
+                .trim_start_matches("https://")
+                .trim_start_matches("http://");
+            file_card(id, IconName::FileVideoCamera, shown, "Video", colors)
+                .cursor_pointer()
+                .on_click(move |_, _, cx| cx.open_url(&open))
+                .child(Icon::new(IconName::ExternalLink).text_color(colors.muted))
+                .into_any_element()
+        }
+        EmbedView::Card(card) => render_embed_card(id, card, colors, on_action),
+    }
+}
+
+/// A link preview or bot embed: colour bar, site, title (linked), description,
+/// and a picture beside or under the text.
+fn render_embed_card(
+    id: SharedString,
+    card: &EmbedCard,
+    colors: RowColors,
+    on_action: &OnRowAction,
+) -> AnyElement {
+    let bar = card
+        .colour
+        .map(|colour| Hsla::from(rgba(colour)))
+        .unwrap_or(colors.border);
+
+    let site = card.site_name.clone().map(|name| {
+        h_flex()
+            .gap_1p5()
+            .text_xs()
+            .text_color(colors.muted)
+            .when_some(card.icon.clone(), |el, icon| {
+                el.child(
+                    img(SharedUri::from(icon))
+                        .size(px(16.))
+                        .flex_none()
+                        .rounded_sm()
+                        .object_fit(ObjectFit::Contain),
+                )
+            })
+            .child(div().truncate().child(name))
+    });
+    // Bot embeds have an icon but no site name: it goes by the title instead.
+    let title_icon = card
+        .site_name
+        .is_none()
+        .then(|| card.icon.clone())
+        .flatten();
+    let title = card.title.clone().map(|title| {
+        let text = div()
+            .id(SharedString::from(format!("{id}-title")))
+            .text_sm()
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(title);
+        let text = match card.link.clone() {
+            Some(link) => text
+                .text_color(colors.link)
+                .cursor_pointer()
+                .hover(|style| style.underline())
+                .on_click(move |_, _, cx| cx.open_url(&link)),
+            None => text,
+        };
+        h_flex()
+            .gap_1p5()
+            .items_start()
+            .when_some(title_icon, |el, icon| {
+                el.child(
+                    img(SharedUri::from(icon))
+                        .size(px(20.))
+                        .flex_none()
+                        .rounded_full()
+                        .object_fit(ObjectFit::Cover),
+                )
+            })
+            .child(text)
+    });
+    let description = card
+        .description
+        .clone()
+        .map(|description| match description {
+            Description::Plain(text) => div()
+                .text_sm()
+                .text_color(colors.muted)
+                .line_clamp(EMBED_DESCRIPTION_LINES)
+                .child(text)
+                .into_any_element(),
+            Description::Markdown { source, render_key } => {
+                TextView::markdown(SharedString::from(render_key), source)
+                    .plugin(MathPlugin)
+                    .text_sm()
+                    .selectable(true)
+                    .on_link_click(|url, _, _, cx| {
+                        if is_external_link(url) {
+                            cx.open_url(url);
+                        }
+                    })
+                    .into_any_element()
+            }
+        });
+    let thumbnail = card
+        .thumbnail
+        .as_ref()
+        .map(|image| viewable_embed_image(format!("{id}-thumb").into(), image, colors, on_action));
+    let image = card.image.as_ref().map(|image| {
+        let picture = inline_image(
+            format!("{id}-image").into(),
+            &image.url,
+            (image.width, image.height),
+            colors,
+        )
+        .cursor_pointer();
+        match (card.playable, card.link.clone()) {
+            // A video's picture: a play badge, and a click opens the video.
+            (true, Some(link)) => picture
+                .on_click(move |_, _, cx| cx.open_url(&link))
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            div()
+                                .size(px(48.))
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .bg(black().opacity(0.6))
+                                .text_color(white())
+                                .child(Icon::new(IconName::Play).large()),
+                        ),
+                )
+                .into_any_element(),
+            _ => {
+                let viewed = ViewedImage {
+                    url: image.url.clone(),
+                    name: card.title.clone().unwrap_or_else(|| "Image".into()),
+                    original: image.original,
+                };
+                let on_action = on_action.clone();
+                picture
+                    .on_click(move |_, window, cx| {
+                        on_action(RowAction::ViewImage(viewed.clone()), window, cx)
+                    })
+                    .into_any_element()
+            }
+        }
+    });
+    let media = card
+        .media
+        .as_ref()
+        .map(|media| render_attachment(format!("{id}-media").into(), media, colors, on_action));
+
+    div()
+        .flex()
+        .flex_row()
+        .max_w(px(EMBED_CARD_MAX_WIDTH))
+        .rounded(px(ATTACHMENT_RADIUS))
+        .overflow_hidden()
+        .border_1()
+        .border_color(colors.border)
+        .bg(colors.card_bg)
+        .child(div().w(px(EMBED_BAR_WIDTH)).flex_none().bg(bar))
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .p_3()
+                .gap_1()
+                .child(
+                    h_flex()
+                        .items_start()
+                        .gap_3()
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_1()
+                                .children(site)
+                                .children(title)
+                                .children(description),
+                        )
+                        .children(thumbnail),
+                )
+                .children(image)
+                .children(media),
+        )
+        .into_any_element()
 }
 
 /// A bordered row with a file icon, name and size; callers add what's on the right.

@@ -6,10 +6,11 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::api::events::Ready;
 use crate::api::models::{
-    BulkMessageResponse, Channel, Emoji, FieldsChannel, FieldsMessage, File, Member, Message,
-    MessageFlags, PartialChannel, PartialMessage, Presence, Server, SystemMessage, User,
+    BulkMessageResponse, Channel, Embed, Emoji, FieldsChannel, FieldsMessage, File, Member,
+    Message, MessageFlags, PartialChannel, PartialMessage, Presence, Server, SystemMessage, User,
 };
 use crate::attachment::AttachmentView;
+use crate::embed::EmbedView;
 use crate::media::MediaUrls;
 use crate::notify::{self, NotificationSettings};
 
@@ -80,6 +81,8 @@ pub struct MessageRow {
     /// keeps its parse per element ID and only reads the source the first time.
     pub render_key: String,
     pub attachments: Vec<AttachmentView>,
+    /// Link previews and bot embeds, in order.
+    pub embeds: Vec<EmbedView>,
     pub system: bool,
     pub edited: bool,
     /// Same author as the previous message, soon after it: drawn without a
@@ -568,6 +571,23 @@ impl ChatStore {
         true
     }
 
+    /// Link previews that arrived after their message (`MessageAppend`).
+    /// Returns true if a loaded message changed.
+    pub fn apply_append(&mut self, channel: &str, id: &str, embeds: Vec<Embed>) -> bool {
+        if embeds.is_empty() {
+            return false;
+        }
+        let Some(message) = self
+            .histories
+            .get_mut(channel)
+            .and_then(|h| h.messages.iter_mut().find(|m| m.id == id))
+        else {
+            return false;
+        };
+        message.embeds.get_or_insert_default().extend(embeds);
+        true
+    }
+
     /// Remove messages from a loaded channel. Returns true if any were removed.
     pub fn apply_delete(&mut self, channel: &str, ids: &[String]) -> bool {
         let Some(history) = self.histories.get_mut(channel) else {
@@ -893,6 +913,16 @@ impl ChatStore {
                     .map(|file| {
                         let revealed = self.revealed_images.contains(&file.id);
                         AttachmentView::new(file, &self.media, revealed)
+                    })
+                    .collect(),
+                embeds: message
+                    .embeds
+                    .iter()
+                    .flatten()
+                    .enumerate()
+                    .filter_map(|(ix, embed)| {
+                        let key = format!("{}:embed{ix}", message.id);
+                        EmbedView::new(embed, &self.media, self, &self.revealed_images, &key)
                     })
                     .collect(),
                 system,
