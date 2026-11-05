@@ -286,3 +286,64 @@ The user deleted two messages: one through the dialog and one with Shift (log: `
 
 ### Manual Validation
 The user typed in both clients and confirmed the indicators appear and clear both ways ("lgtm"). The log shows `typing: Begin(…)` at 17:58:46 and `typing: End(…)` at 17:58:52.
+
+## Summary
+
+_Completed: 2026-11-05_
+
+### Chunks Completed
+1. Message box and sending (`24b109a`): a composer with Enter to send, drafts per channel and a character count. Pending messages are confirmed by nonce, with Retry and Discard on failure.
+2. Reply previews (`55227fd`): "↱ Name: snippet" above replies. Unloaded originals are fetched four at a time, with fixed-height placeholders, deleted and unavailable states, and click to jump.
+3. Message actions and replying (`0e5f0fd`): a hover toolbar (react, reply), a right-click menu (Reply, Copy text), and a "Replying to" bar with a mention toggle per reply, a limit of 5, and Esc to clear.
+4. Editing your messages (`ac79fb3`): Edit from the menu, or Up in an empty box. The edit shows at once and rolls back if refused, and the draft is set aside and restored.
+5. Deleting your messages (`60b37e5`): a confirmation dialog that Shift skips. The message is removed at once and restored in place if refused.
+6. Typing indicators (`1bd94f4`): an outbound queue on the events connection, pure incoming and outgoing typing state, and a fixed-height "is typing…" line.
+
+### Divergences
+- **Chunk 1:**
+  - The Enter risk was resolved with `TextareaState::submit_on_enter(true)`; no fallback was needed.
+  - Stoat spends an idempotency key on any request it receives, so a retry keeps the key after a network failure and uses a fresh one after an error response. `DuplicateNonce` counts as already sent.
+  - Added `MessageRow.key`, which stays the same for a row from pending to confirmed.
+  - History loads also confirm pending messages.
+  - The nonce has a random part.
+- **Chunk 2:**
+  - Originals are fetched with `GET …/messages?nearby={id}&limit=1&include_users=true`, not the single-message GET, so their authors' names are known. A deleted original is missing from the result.
+  - Replies start a new group.
+  - Added an `Unavailable` state for failed fetches, retried after a reconnect.
+  - Cached originals follow live edits and deletes.
+- **Chunk 3:**
+  - Right-click on `TextView` wasn't taken, so the menu is on the whole row.
+  - Replying to your own message starts with the mention off.
+  - `raw_content` was brought forward from chunk 4.
+- **Chunk 4:**
+  - Up is a capture-phase `MoveUp` listener, acting only on an empty box.
+  - `EditStash` is pure, so it's unit-tested.
+  - The PATCH response isn't applied; the echo does that.
+  - A refusal doesn't undo a newer change.
+- **Chunk 5:**
+  - `remove_local` returns the message (restoring is by ID order) and marks it deleted in the reply-source cache.
+  - A 404 counts as success.
+  - Deleting the message being edited cancels the edit.
+  - The plan's chunk 5 note was corrected.
+- **Chunk 6:**
+  - Typing also ends when an edit starts.
+  - The timing values (3 s, 5 s, 5 s) were confirmed live, which resolves the plan's Open Question.
+
+### Definition of Done
+- [x] **Sending:** a message box under every channel. Enter sends and Shift+Enter adds a new line. Whitespace-only messages aren't sent. Over 2000 characters is blocked with a visible count (shown from 1800). Drafts are kept per channel. Checked by `store_pending` and manually in chunk 1.
+- [x] **Pending messages:** shown at once and confirmed by `Idempotency-Key`/`nonce` matching, with no duplicates in either order. Tests: `the_post_response_then_the_echo_give_one_row` and `the_echo_then_the_post_response_give_one_row`.
+- [x] **Failures:** a failed send shows the reason with Retry and Discard. `MissingPermission` reads "You can't send messages here." Retry is sent at most once: the same key after a network failure, a fresh one only after Stoat answered with an error, and `DuplicateNonce` treated as sent (see the chunk 1 divergence). Covered by unit and API tests. **Not yet exercised live** (see Remaining Manual Steps).
+- [x] **Reply previews:** "↱ Name: snippet" above the bubble. Unloaded originals are fetched without duplicates, with fixed-height placeholders, and deleted ones say so. Clicking jumps to a loaded original. Checked by `store_replies` and manually in chunk 2.
+- [x] **Replying:** Reply is in the hover toolbar and the right-click menu. The bar has a per-reply mention toggle and a limit of 5, and Esc cancels. The `replies` body is tested with mentions on and off.
+- [x] **Copy text:** the right-click menu copies the raw content (`copy_text_gives_the_typed_markdown`).
+- [x] **Editing:** Edit (menu) and Up (empty box) edit your own messages in the box, saved with `PATCH`. Refusals roll back, and drafts survive starting and cancelling. Checked by `store_edit` and manually in chunk 4.
+- [x] **Deleting:** with confirmation that Shift skips, removed at once and restored in place on failure. Checked by `store_delete` and manually in chunk 5.
+- [x] **Typing:** others' typing shows and clears on stop, send or a 5 s timeout. Ours is throttled and ends on send, clear, channel switch, edit or idle. Checked live in chunk 6.
+- [x] **Checks:** `cargo test && cargo clippy --all-targets -- -D warnings` passes (268 passed, 0 failed, 5 ignored; clippy clean). `cargo test -- --ignored` passes all 5 live checks: Keychain round trip, live root config against the pinned models, events handshake, default avatar, media proxy.
+
+### Remaining Manual Steps
+These items from the plan's Manual Tests were offered at completion but not run (the log shows no sends with the final build):
+1. **Manual Test 1:** send plain, multi-line and Markdown messages in a **server channel**. Only a DM was tested.
+2. **Manual Test 2:** offline send, then Retry once back online. It should send exactly once. This live check of the retry path is outstanding.
+3. **Manual Test 7:** send in a read-only channel. It should show "You can't send messages here." and Discard should work.
+4. **Manual Test 8:** light and dark mode readability of the message box, the reply and edit bars, pending and failed rows, the typing line, and the Delete menu item.
