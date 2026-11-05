@@ -9,6 +9,7 @@ use crate::api::models::{
     BulkMessageResponse, Channel, FieldsMessage, File, Member, Message, PartialMessage, Server,
     SystemMessage, User,
 };
+use crate::media::MediaUrls;
 
 /// One entry in the channel list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +17,8 @@ pub struct ChannelEntry {
     pub id: String,
     pub name: String,
     pub kind: ChannelKind,
+    /// The other person's avatar for DMs, the group icon for groups.
+    pub avatar: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +61,9 @@ pub enum TimelineRow {
 pub struct MessageRow {
     pub id: String,
     pub author: String,
+    /// Author avatar URL. `None` for system messages, or when there's no
+    /// image to show (the UI draws the author's initial instead).
+    pub avatar: Option<String>,
     /// "Today at 14:05" etc.
     pub time: String,
     /// Plain text with mentions resolved. For system messages, the description.
@@ -95,6 +101,8 @@ pub struct ChatStore {
     members: HashMap<(String, String), Member>,
     /// Loaded message history, by channel ID.
     histories: HashMap<String, History>,
+    /// Where images come from. Set once `GET /` has loaded.
+    media: MediaUrls,
 }
 
 impl ChatStore {
@@ -288,6 +296,68 @@ impl ChatStore {
         }
     }
 
+    pub fn set_media(&mut self, media: MediaUrls) {
+        self.media = media;
+    }
+
+    pub fn media(&self) -> &MediaUrls {
+        &self.media
+    }
+
+    /// A user's own avatar, or their generated default.
+    pub fn user_avatar_url(&self, user_id: &str) -> String {
+        self.users
+            .get(user_id)
+            .and_then(|u| u.avatar.as_ref())
+            .and_then(|file| self.media.file(file))
+            .unwrap_or_else(|| self.media.default_avatar(user_id))
+    }
+
+    /// Which picture to show for a message's author, in the same order as
+    /// [`Self::author_name`]: masquerade avatar (external, so proxied),
+    /// webhook avatar, server member avatar, user avatar, generated default.
+    pub fn avatar_url(&self, message: &Message) -> Option<String> {
+        if message.system.is_some() {
+            return None;
+        }
+        if let Some(url) = message
+            .masquerade
+            .as_ref()
+            .and_then(|m| m.avatar.as_deref())
+            .filter(|url| !url.trim().is_empty())
+        {
+            return self.media.external(url);
+        }
+        if let Some(webhook) = &message.webhook {
+            // Webhooks aren't users, so there's no generated default for them.
+            return webhook
+                .avatar
+                .as_deref()
+                .and_then(|id| self.media.file_by_id("avatars", id));
+        }
+        let member_avatar = message
+            .member
+            .as_ref()
+            .and_then(|m| m.avatar.clone())
+            .or_else(|| {
+                let server = self.server_of(&message.channel)?;
+                self.member(server, &message.author)?.avatar.clone()
+            });
+        if let Some(url) = member_avatar.as_ref().and_then(|f| self.media.file(f)) {
+            return Some(url);
+        }
+        if let Some(url) = message
+            .user
+            .as_ref()
+            .filter(|_| !self.users.contains_key(&message.author))
+            .and_then(|u| u.avatar.as_ref())
+            .and_then(|f| self.media.file(f))
+        {
+            return Some(url);
+        }
+        Some(self.user_avatar_url(&message.author))
+    }
+
     /// Who to show as a message's author. In order: a masquerade name
     /// (bridges and bots), the webhook's name, the author's nickname in this
     /// server, their display name, their username.
@@ -418,6 +488,7 @@ impl ChatStore {
             rows.push(TimelineRow::Message(MessageRow {
                 id: message.id.clone(),
                 author: author.clone(),
+                avatar: self.avatar_url(message),
                 time: crate::time::message_time_label(&message.id),
                 body,
                 attachments: message
@@ -553,28 +624,37 @@ impl ChatStore {
     }
 
     fn entry_for(&self, channel: &Channel) -> Option<ChannelEntry> {
-        let (name, kind) = match channel {
+        let (name, kind, avatar) = match channel {
             Channel::TextChannel { name, voice, .. } => (
                 name.clone(),
                 ChannelKind::Text {
                     voice: voice.is_some(),
                 },
+                None,
             ),
-            Channel::SavedMessages { .. } => ("Saved Notes".into(), ChannelKind::SavedMessages),
-            Channel::Group { name, .. } => (name.clone(), ChannelKind::Group),
+            Channel::SavedMessages { .. } => {
+                ("Saved Notes".into(), ChannelKind::SavedMessages, None)
+            }
+            Channel::Group { name, icon, .. } => (
+                name.clone(),
+                ChannelKind::Group,
+                icon.as_ref().and_then(|f| self.media.file(f)),
+            ),
             Channel::DirectMessage { recipients, .. } => {
                 let other = recipients.iter().find(|id| **id != self.me);
                 let name = other
                     .and_then(|id| self.users.get(id))
                     .map(|u| display_name(u).to_string())
                     .unwrap_or_else(|| "Unknown user".into());
-                (name, ChannelKind::DirectMessage)
+                let avatar = other.map(|id| self.user_avatar_url(id));
+                (name, ChannelKind::DirectMessage, avatar)
             }
         };
         Some(ChannelEntry {
             id: channel_id(channel).to_string(),
             name,
             kind,
+            avatar,
         })
     }
 }

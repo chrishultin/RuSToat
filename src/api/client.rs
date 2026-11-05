@@ -36,6 +36,9 @@ pub struct RootFeatures {
     /// The file server ("Autumn"): icons, avatars, attachments.
     #[serde(default)]
     pub autumn: Option<ServiceFeature>,
+    /// The media proxy ("January"): external images, fetched on the user's behalf.
+    #[serde(default)]
+    pub january: Option<ServiceFeature>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -47,12 +50,20 @@ pub struct ServiceFeature {
 impl RootConfig {
     /// Base URL of the file server, e.g. `https://cdn.stoatusercontent.com`.
     pub fn file_server(&self) -> Option<&str> {
-        self.features
-            .autumn
-            .as_ref()
-            .filter(|autumn| autumn.enabled)
-            .map(|autumn| autumn.url.as_str())
+        enabled_url(&self.features.autumn)
     }
+
+    /// Base URL of the media proxy, e.g. `https://proxy.stoatusercontent.com`.
+    pub fn proxy_server(&self) -> Option<&str> {
+        enabled_url(&self.features.january)
+    }
+}
+
+fn enabled_url(feature: &Option<ServiceFeature>) -> Option<&str> {
+    feature
+        .as_ref()
+        .filter(|f| f.enabled)
+        .map(|f| f.url.as_str())
 }
 
 /// Where a file (server icon, avatar, attachment) is served: `{server}/{tag}/{id}`.

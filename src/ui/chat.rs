@@ -13,8 +13,9 @@ use gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
+use crate::api::StoatClient;
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
-use crate::api::{StoatClient, file_url};
+use crate::media::MediaUrls;
 use crate::runtime::spawn_io;
 use crate::store::{
     ChannelEntry, ChannelKind, ChatStore, MessageRow, RowOp, ServerEntry, TimelineRow, diff_rows,
@@ -66,7 +67,8 @@ pub struct ChatView {
     /// Last channel picked in each place, so switching servers comes back to it.
     selected: HashMap<Place, String>,
     /// File server base URL for icons, from `GET /`. `None` until loaded.
-    file_server: Option<String>,
+    /// Where images come from. Only the API base is known until `GET /` loads.
+    media: MediaUrls,
     panes: HashMap<String, Pane>,
     /// History requests in flight, by channel. Results always land in their
     /// own channel, so a slow one can't overwrite the channel being viewed.
@@ -89,20 +91,19 @@ impl ChatView {
             let client = client.clone();
             async move { client.root_config().await }
         });
-        let root = cx.spawn(async move |this, cx| match root.await {
-            Ok(Ok(root)) => {
-                let file_server = root.file_server().map(str::to_string);
-                log::debug!("file server: {file_server:?}");
-                this.update(cx, |this, cx| {
-                    this.file_server = file_server;
-                    cx.notify();
-                })
-                .ok();
+        let api = client.base_url().to_string();
+        let root = cx.spawn({
+            let api = api.clone();
+            async move |this, cx| match root.await {
+                Ok(Ok(root)) => {
+                    let media = MediaUrls::from_root(&api, &root);
+                    log::debug!("media: {media:?}");
+                    this.update(cx, |this, cx| this.set_media(media, cx)).ok();
+                }
+                Ok(Err(err)) => log::warn!("couldn't load API config (no images): {err}"),
+                Err(err) => log::warn!("API config task failed: {err:?}"),
             }
-            Ok(Err(err)) => log::warn!("couldn't load API config (no server icons): {err}"),
-            Err(err) => log::warn!("API config task failed: {err:?}"),
         });
-
         let (connection, mut events) = events::connect(client.clone());
         let events = cx.spawn(async move |this, cx| {
             while let Some(event) = events.next().await {
@@ -114,14 +115,18 @@ impl ChatView {
                 }
             }
         });
+        // Until `GET /` loads, only the API base (default avatars) is known.
+        let media = MediaUrls::new(api, None, None);
+        let mut store = ChatStore::new(me);
+        store.set_media(media.clone());
         Self {
             client,
-            store: ChatStore::new(me),
+            store,
             has_ready: false,
             status: Status::Connecting { attempt: 1 },
             place: Place::Home,
             selected: HashMap::new(),
-            file_server: None,
+            media,
             panes: HashMap::new(),
             loading: HashMap::new(),
             load_errors: HashMap::new(),
@@ -208,6 +213,17 @@ impl ChatView {
         }
         self.selected
             .retain(|_, channel| self.store.channel(channel).is_some());
+    }
+
+    /// Image URLs are known: give them to the store and redraw anything loaded.
+    fn set_media(&mut self, media: MediaUrls, cx: &mut Context<Self>) {
+        self.media = media.clone();
+        self.store.set_media(media);
+        let loaded: Vec<String> = self.panes.keys().cloned().collect();
+        for channel in loaded {
+            self.sync_pane(&channel, cx);
+        }
+        cx.notify();
     }
 
     fn select_place(&mut self, place: Place, cx: &mut Context<Self>) {
@@ -455,7 +471,7 @@ impl ChatView {
             .map(|server| {
                 let place = Place::Server(server.id.clone());
                 let selected = self.place == place;
-                let icon = server_icon(&server, self.file_server.as_deref(), selected);
+                let icon = server_icon(&server, &self.media, selected);
                 rail_button(
                     SharedString::from(format!("rail-{}", server.id)),
                     icon,
@@ -600,7 +616,18 @@ impl ChatView {
                     .hover(move |style| style.bg(hover_bg).text_color(hover_fg))
             })
             .on_click(cx.listener(move |this, _, _, cx| this.select_channel(id.clone(), cx)))
-            .child(Icon::new(channel_icon(channel.kind)).small())
+            .child(match channel.avatar.clone() {
+                Some(url) => avatar(
+                    Some(url),
+                    &channel.name,
+                    20.,
+                    theme.secondary,
+                    theme.secondary_foreground,
+                ),
+                None => Icon::new(channel_icon(channel.kind))
+                    .small()
+                    .into_any_element(),
+            })
             .child(div().truncate().child(channel.name))
     }
 
@@ -613,6 +640,13 @@ impl ChatView {
             .unwrap_or_else(|| "…".into())
             .into();
         let online = matches!(self.status, Status::Connected);
+        let me_avatar = avatar(
+            Some(self.store.user_avatar_url(self.store.me())),
+            &name,
+            32.,
+            theme.secondary,
+            theme.secondary_foreground,
+        );
         h_flex()
             .h(px(56.))
             .flex_none()
@@ -622,25 +656,27 @@ impl ChatView {
             .border_t_1()
             .border_color(theme.sidebar_border)
             .child(
-                v_flex()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .truncate()
-                            .child(name),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .when(!online, |el| {
-                                el.child(Icon::new(IconName::WifiOff).xsmall())
-                            })
-                            .child(self.status_line()),
-                    ),
+                h_flex().gap_2().min_w_0().child(me_avatar).child(
+                    v_flex()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .truncate()
+                                .child(name),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .when(!online, |el| {
+                                    el.child(Icon::new(IconName::WifiOff).xsmall())
+                                })
+                                .child(self.status_line()),
+                        ),
+                ),
             )
             .child(
                 Button::new("log-out")
@@ -690,6 +726,8 @@ impl ChatView {
             muted: theme.muted_foreground,
             system: theme.muted_foreground,
             danger: theme.danger,
+            avatar_bg: theme.secondary,
+            avatar_fg: theme.secondary_foreground,
         };
         let placeholder = |text: SharedString| {
             v_flex()
@@ -818,6 +856,48 @@ struct RowColors {
     muted: Hsla,
     system: Hsla,
     danger: Hsla,
+    avatar_bg: Hsla,
+    avatar_fg: Hsla,
+}
+
+/// Width of the avatar column in the message list.
+const AVATAR_SIZE: f32 = 36.;
+
+/// A round avatar, falling back to the name's initial while it loads, if it
+/// fails, or if there's no image.
+fn avatar(url: Option<String>, name: &str, size: f32, bg: Hsla, fg: Hsla) -> AnyElement {
+    let initial: SharedString = name
+        .chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_uppercase().collect::<String>())
+        .unwrap_or_else(|| "?".into())
+        .into();
+    let placeholder = move || {
+        div()
+            .size(px(size))
+            .flex_none()
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(bg)
+            .text_color(fg)
+            .text_size(px(size * 0.45))
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(initial.clone())
+            .into_any_element()
+    };
+    match url {
+        Some(url) => img(SharedUri::from(url))
+            .size(px(size))
+            .flex_none()
+            .rounded_full()
+            .object_fit(ObjectFit::Cover)
+            .with_fallback(placeholder.clone())
+            .with_loading(placeholder)
+            .into_any_element(),
+        None => placeholder(),
+    }
 }
 
 fn render_row(row: &TimelineRow, colors: RowColors) -> AnyElement {
@@ -849,10 +929,17 @@ fn render_system_row(message: &MessageRow, colors: RowColors) -> AnyElement {
     h_flex()
         .px_4()
         .py_1()
-        .gap_2()
+        .gap_3()
         .text_sm()
         .text_color(colors.system)
-        .child(div().child("→"))
+        .child(
+            div()
+                .w(px(AVATAR_SIZE))
+                .flex_none()
+                .flex()
+                .justify_center()
+                .child("→"),
+        )
         .child(
             div()
                 .italic()
@@ -863,12 +950,22 @@ fn render_system_row(message: &MessageRow, colors: RowColors) -> AnyElement {
 }
 
 fn render_message_row(message: &MessageRow, colors: RowColors) -> AnyElement {
-    v_flex()
-        .w_full()
+    // Continuation rows keep an empty gutter so their text lines up.
+    let gutter = div()
+        .w(px(AVATAR_SIZE))
+        .flex_none()
+        .when(!message.continuation, |el| {
+            el.child(avatar(
+                message.avatar.clone(),
+                &message.author,
+                AVATAR_SIZE,
+                colors.avatar_bg,
+                colors.avatar_fg,
+            ))
+        });
+    let content = v_flex()
+        .flex_1()
         .min_w_0()
-        .px_4()
-        .when(!message.continuation, |el| el.pt_3())
-        .pb_0p5()
         .when(!message.continuation, |el| {
             el.child(
                 h_flex()
@@ -904,7 +1001,16 @@ fn render_message_row(message: &MessageRow, colors: RowColors) -> AnyElement {
                 .text_sm()
                 .text_color(colors.muted)
                 .child(format!("[attachment: {name}]"))
-        }))
+        }));
+    h_flex()
+        .w_full()
+        .items_start()
+        .gap_3()
+        .px_4()
+        .when(!message.continuation, |el| el.pt_3())
+        .pb_0p5()
+        .child(gutter)
+        .child(content)
         .into_any_element()
 }
 
@@ -920,10 +1026,10 @@ fn channel_icon(kind: ChannelKind) -> IconName {
 
 /// The server's uploaded icon, or its initials while that loads, if it fails,
 /// or if there isn't one.
-fn server_icon(server: &ServerEntry, file_server: Option<&str>, selected: bool) -> AnyElement {
+fn server_icon(server: &ServerEntry, media: &MediaUrls, selected: bool) -> AnyElement {
     let initials = server.initials.clone();
-    match (file_server, &server.icon) {
-        (Some(file_server), Some(icon)) => img(SharedUri::from(file_url(file_server, icon)))
+    match server.icon.as_ref().and_then(|icon| media.file(icon)) {
+        Some(url) => img(SharedUri::from(url))
             .size(px(48.))
             .object_fit(ObjectFit::Cover)
             .map(|img| {
@@ -935,7 +1041,7 @@ fn server_icon(server: &ServerEntry, file_server: Option<&str>, selected: bool) 
             })
             .with_fallback(move || div().child(initials.clone()).into_any_element())
             .into_any_element(),
-        _ => div().child(initials).into_any_element(),
+        None => div().child(initials).into_any_element(),
     }
 }
 

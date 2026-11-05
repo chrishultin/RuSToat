@@ -7,6 +7,7 @@
 pub mod api;
 pub mod assets;
 pub mod http;
+pub mod media;
 pub mod runtime;
 pub mod session;
 pub mod store;

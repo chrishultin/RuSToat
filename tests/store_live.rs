@@ -131,6 +131,7 @@ fn row(id: &str, body: &str) -> TimelineRow {
     TimelineRow::Message(MessageRow {
         id: id.into(),
         author: "a".into(),
+        avatar: None,
         time: String::new(),
         body: Some(body.into()),
         attachments: Vec::new(),
