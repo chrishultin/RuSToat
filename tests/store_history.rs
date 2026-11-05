@@ -3,6 +3,7 @@
 
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::api::models::BulkMessageResponse;
+use stoat_gpui::attachment::{AttachmentView, FileKind};
 use stoat_gpui::store::{ChatStore, MessageRow, TimelineRow};
 
 fn fixture(name: &str) -> String {
@@ -90,7 +91,16 @@ fn attachments_and_edits_are_flagged() {
     let rows = store_with_page(50).timeline("ch-general");
     let look = messages(&rows)[4];
     assert_eq!(look.body.as_deref(), Some("look at this"));
-    assert_eq!(look.attachments, vec!["cat.png"]);
+    // No file server in this store, so even the image is a card without a link.
+    assert_eq!(
+        look.attachments,
+        vec![AttachmentView::File {
+            name: "cat.png".into(),
+            size_label: "12.1 KB".into(),
+            url: None,
+            kind: FileKind::Image,
+        }]
+    );
     assert!(look.edited);
 }
 

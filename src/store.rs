@@ -9,6 +9,7 @@ use crate::api::models::{
     BulkMessageResponse, Channel, Emoji, FieldsChannel, FieldsMessage, File, Member, Message,
     MessageFlags, PartialChannel, PartialMessage, Presence, Server, SystemMessage, User,
 };
+use crate::attachment::AttachmentView;
 use crate::media::MediaUrls;
 use crate::notify::{self, NotificationSettings};
 
@@ -78,7 +79,7 @@ pub struct MessageRow {
     /// mention), so the Markdown view's cached parse is replaced. The view
     /// keeps its parse per element ID and only reads the source the first time.
     pub render_key: String,
-    pub attachments: Vec<String>,
+    pub attachments: Vec<AttachmentView>,
     pub system: bool,
     pub edited: bool,
     /// Same author as the previous message, soon after it: drawn without a
@@ -135,6 +136,8 @@ pub struct ChatStore {
     media: MediaUrls,
     /// Custom emoji of the user's servers, by ID.
     emojis: HashMap<String, Emoji>,
+    /// Large images the user chose to load ("Show image"), by file ID.
+    revealed_images: HashSet<String>,
     /// Read positions by channel ID.
     read_states: HashMap<String, ReadState>,
     /// The user's notification levels and mutes.
@@ -719,6 +722,12 @@ impl ChatStore {
         &self.media
     }
 
+    /// Load a large image the user asked to see, despite its size. Its row
+    /// changes from a card to the image.
+    pub fn reveal_image(&mut self, file_id: &str) {
+        self.revealed_images.insert(file_id.to_string());
+    }
+
     /// A user's own avatar, or their generated default.
     pub fn user_avatar_url(&self, user_id: &str) -> String {
         self.users
@@ -881,7 +890,10 @@ impl ChatStore {
                     .attachments
                     .iter()
                     .flatten()
-                    .map(|f| f.filename.clone())
+                    .map(|file| {
+                        let revealed = self.revealed_images.contains(&file.id);
+                        AttachmentView::new(file, &self.media, revealed)
+                    })
                     .collect(),
                 system,
                 edited: message.edited.is_some(),

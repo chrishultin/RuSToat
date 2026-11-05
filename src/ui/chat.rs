@@ -22,6 +22,7 @@ use gpui_kit::*;
 
 use crate::api::StoatClient;
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
+use crate::attachment::{AttachmentView, FileKind};
 use crate::markdown::{JUMBO_TEXT_PX, is_external_link};
 use crate::media::MediaUrls;
 use crate::notify::{self, Delivery, Notice, Viewing};
@@ -337,6 +338,13 @@ impl ChatView {
         for channel in loaded {
             self.sync_pane(&channel, cx);
         }
+        cx.notify();
+    }
+
+    /// "Show image" on a large image: load it after all.
+    fn reveal_image(&mut self, channel: &str, file_id: &str, cx: &mut Context<Self>) {
+        self.store.reveal_image(file_id);
+        self.sync_pane(channel, cx);
         cx.notify();
     }
 
@@ -1004,6 +1012,9 @@ impl ChatView {
             danger: theme.danger,
             avatar_bg: theme.secondary,
             avatar_fg: theme.secondary_foreground,
+            border: theme.border,
+            card_bg: theme.background,
+            image_bg: theme.secondary,
         };
         let placeholder = |text: SharedString| {
             v_flex()
@@ -1024,6 +1035,12 @@ impl ChatView {
                         placeholder("No messages yet.".into())
                     } else {
                         let rows = pane.rows.clone();
+                        let view = cx.entity().downgrade();
+                        let channel_id = channel.id.clone();
+                        let reveal: RevealImage = Rc::new(move |file_id, cx| {
+                            view.update(cx, |this, cx| this.reveal_image(&channel_id, file_id, cx))
+                                .ok();
+                        });
                         let older = if self.loading_older.contains_key(&channel.id) {
                             Some(
                                 div()
@@ -1069,7 +1086,7 @@ impl ChatView {
                                 MessageScroller::new(
                                     SharedString::from(format!("messages-{}", channel.id)),
                                     pane.scroller.clone(),
-                                    move |ix, _window, _cx| render_row(&rows[ix], colors),
+                                    move |ix, _window, _cx| render_row(&rows[ix], colors, &reveal),
                                 )
                                 // The scroller's default rows are spaced for whole
                                 // chat turns (`pb_8` under every row, plus `px_3`).
@@ -1138,7 +1155,15 @@ struct RowColors {
     danger: Hsla,
     avatar_bg: Hsla,
     avatar_fg: Hsla,
+    border: Hsla,
+    /// File cards, so they stand out inside a bubble.
+    card_bg: Hsla,
+    /// Behind an image while it loads, or if it fails.
+    image_bg: Hsla,
 }
+
+/// What "Show image" does, given the file's ID.
+type RevealImage = Rc<dyn Fn(&str, &mut App)>;
 
 /// Matches gpui-component's message avatar slot (`size-8`).
 const AVATAR_SIZE: f32 = 32.;
@@ -1180,7 +1205,7 @@ fn avatar(url: Option<String>, name: &str, size: f32, bg: Hsla, fg: Hsla) -> Any
     }
 }
 
-fn render_row(row: &TimelineRow, colors: RowColors) -> AnyElement {
+fn render_row(row: &TimelineRow, colors: RowColors, reveal: &RevealImage) -> AnyElement {
     match row {
         TimelineRow::StartOfChannel { name } => v_flex()
             .px_4()
@@ -1201,7 +1226,7 @@ fn render_row(row: &TimelineRow, colors: RowColors) -> AnyElement {
             )
             .into_any_element(),
         TimelineRow::Message(message) if message.system => render_system_row(message, colors),
-        TimelineRow::Message(message) => render_message_row(message, colors),
+        TimelineRow::Message(message) => render_message_row(message, colors, reveal),
     }
 }
 
@@ -1236,7 +1261,7 @@ const BUBBLE_RADIUS: f32 = 16.;
 /// Corner radius where consecutive bubbles from one sender meet.
 const JOINED_RADIUS: f32 = 4.;
 
-fn render_message_row(message: &MessageRow, colors: RowColors) -> AnyElement {
+fn render_message_row(message: &MessageRow, colors: RowColors, reveal: &RevealImage) -> AnyElement {
     let first = !message.continuation;
     let last = message.group_end;
     let alignment = if message.mine {
@@ -1263,47 +1288,58 @@ fn render_message_row(message: &MessageRow, colors: RowColors) -> AnyElement {
             .rounded_tl(top)
             .rounded_bl(bottom)
     };
-    let surface = surface
-        .when_some(message.body.clone(), |el, body| {
-            el.child(
-                // Keyed by `render_key`, so an edit (or a renamed mention)
-                // gets a fresh parse instead of the cached one.
-                TextView::markdown(SharedString::from(message.render_key.clone()), body)
-                    // `$$…$$` formatting (colour, size), drawn natively.
-                    .plugin(MathPlugin)
-                    // Emoji-only messages are drawn big (custom ones are sized
-                    // in the Markdown itself).
-                    .map(|text| {
-                        if message.jumbo {
-                            text.text_size(px(JUMBO_TEXT_PX))
-                        } else {
-                            text.text_sm()
-                        }
-                    })
-                    .selectable(true)
-                    .on_link_click(|url, _, _, cx| {
-                        // Mentions are internal `stoat:` links: nothing to open yet.
-                        if is_external_link(url) {
-                            cx.open_url(url);
-                        }
-                    }),
-            )
-        })
-        .children(message.attachments.iter().map(|name| {
-            div()
-                .text_sm()
-                .text_color(colors.muted)
-                .child(format!("[attachment: {name}]"))
-        }))
-        .when(message.edited, |el| {
-            el.child(div().text_xs().text_color(colors.muted).child("(edited)"))
-        });
+    let surface =
+        surface
+            .when_some(message.body.clone(), |el, body| {
+                el.child(
+                    // Keyed by `render_key`, so an edit (or a renamed mention)
+                    // gets a fresh parse instead of the cached one.
+                    TextView::markdown(SharedString::from(message.render_key.clone()), body)
+                        // `$$…$$` formatting (colour, size), drawn natively.
+                        .plugin(MathPlugin)
+                        // Emoji-only messages are drawn big (custom ones are sized
+                        // in the Markdown itself).
+                        .map(|text| {
+                            if message.jumbo {
+                                text.text_size(px(JUMBO_TEXT_PX))
+                            } else {
+                                text.text_sm()
+                            }
+                        })
+                        .selectable(true)
+                        .on_link_click(|url, _, _, cx| {
+                            // Mentions are internal `stoat:` links: nothing to open yet.
+                            if is_external_link(url) {
+                                cx.open_url(url);
+                            }
+                        }),
+                )
+            })
+            .when(!message.attachments.is_empty(), |el| {
+                el.child(
+                    v_flex()
+                        .gap_1()
+                        .when(message.body.is_some(), |el| el.mt_1())
+                        .children(message.attachments.iter().enumerate().map(
+                            |(ix, attachment)| {
+                                let id =
+                                    SharedString::from(format!("attachment-{}-{ix}", message.id));
+                                render_attachment(id, attachment, colors, reveal)
+                            },
+                        )),
+                )
+            })
+            .when(message.edited, |el| {
+                el.child(div().text_xs().text_color(colors.muted).child("(edited)"))
+            });
 
-    // Big emoji stand on their own: same bubble (so it keeps its width and
-    // side), with the surface made invisible. Not `BubbleVariant::Ghost`:
-    // gpui-component stretches ghost bubbles to the full row width, which
-    // left-aligned emoji-only messages even when they were ours.
-    let surface = surface.when(message.jumbo, |el| el.bg(transparent_black()).p_0());
+    // Big emoji and bare attachments stand on their own: same bubble (so it
+    // keeps its width and side), with the surface made invisible. Not
+    // `BubbleVariant::Ghost`: gpui-component stretches ghost bubbles to the
+    // full row width, which left-aligned emoji-only messages even when they
+    // were ours.
+    let bare = message.jumbo || (message.body.is_none() && !message.attachments.is_empty());
+    let surface = surface.when(bare, |el| el.bg(transparent_black()).p_0());
     let bubble = Bubble::new()
         .with_variant(if message.mine {
             BubbleVariant::Tinted
@@ -1348,6 +1384,138 @@ fn render_message_row(message: &MessageRow, colors: RowColors) -> AnyElement {
         // Space between groups; bubbles within a group sit close together.
         .pt(px(if first { GROUP_GAP } else { BUBBLE_GAP }))
         .into_any_element()
+}
+
+/// Corner radius of inline images and file cards.
+const ATTACHMENT_RADIUS: f32 = 8.;
+/// File cards' width (they shrink in a narrow bubble).
+const FILE_CARD_WIDTH: f32 = 320.;
+
+/// An inline image at its precomputed size (so the row never changes height
+/// when it loads), or a file card. `id` is unique within the list.
+fn render_attachment(
+    id: SharedString,
+    attachment: &AttachmentView,
+    colors: RowColors,
+    reveal: &RevealImage,
+) -> AnyElement {
+    match attachment {
+        AttachmentView::Image {
+            url,
+            width,
+            height,
+            too_big: false,
+            ..
+        } => {
+            let (w, h) = (px(*width as f32), px(*height as f32));
+            let backdrop = move || {
+                div()
+                    .size_full()
+                    .rounded(px(ATTACHMENT_RADIUS))
+                    .bg(colors.image_bg)
+            };
+            let open = url.clone();
+            div()
+                .id(id)
+                .w(w)
+                .h(h)
+                .flex_none()
+                .cursor_pointer()
+                // The full-size original, in the browser.
+                .on_click(move |_, _, cx| cx.open_url(&open))
+                .child(
+                    img(SharedUri::from(url.clone()))
+                        .size_full()
+                        .rounded(px(ATTACHMENT_RADIUS))
+                        .object_fit(ObjectFit::Contain)
+                        .with_loading(move || backdrop().into_any_element())
+                        .with_fallback(move || {
+                            backdrop()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_xs()
+                                .text_color(colors.muted)
+                                .child("Couldn't load image")
+                                .into_any_element()
+                        }),
+                )
+                .into_any_element()
+        }
+        AttachmentView::Image {
+            id: file_id,
+            name,
+            size_label,
+            too_big: true,
+            ..
+        } => {
+            let reveal = reveal.clone();
+            let file_id = file_id.clone();
+            file_card(id.clone(), IconName::FileImage, name, size_label, colors)
+                .child(
+                    Button::new(SharedString::from(format!("{id}-show")))
+                        .xsmall()
+                        .label("Show image")
+                        .on_click(move |_, _, cx| reveal(&file_id, cx)),
+                )
+                .into_any_element()
+        }
+        AttachmentView::File {
+            name,
+            size_label,
+            url,
+            kind,
+        } => {
+            let icon = match kind {
+                FileKind::Image => IconName::FileImage,
+                FileKind::Video => IconName::FileVideoCamera,
+                FileKind::Audio => IconName::FileMusic,
+                FileKind::Text => IconName::FileText,
+                FileKind::File => IconName::File,
+            };
+            file_card(id, icon, name, size_label, colors)
+                .when_some(url.clone(), |card, url| {
+                    card.cursor_pointer()
+                        .on_click(move |_, _, cx| cx.open_url(&url))
+                        .child(Icon::new(IconName::Download).text_color(colors.muted))
+                })
+                .into_any_element()
+        }
+    }
+}
+
+/// A bordered row with a file icon, name and size; callers add what's on the right.
+fn file_card(
+    id: SharedString,
+    icon: IconName,
+    name: &str,
+    size_label: &str,
+    colors: RowColors,
+) -> Stateful<Div> {
+    h_flex()
+        .id(id)
+        .w(px(FILE_CARD_WIDTH))
+        .max_w_full()
+        .gap_3()
+        .px_3()
+        .py_2()
+        .rounded(px(ATTACHMENT_RADIUS))
+        .border_1()
+        .border_color(colors.border)
+        .bg(colors.card_bg)
+        .child(Icon::new(icon).large().text_color(colors.muted))
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(div().text_sm().truncate().child(name.to_string()))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.muted)
+                        .child(size_label.to_string()),
+                ),
+        )
 }
 
 fn channel_icon(kind: ChannelKind) -> IconName {

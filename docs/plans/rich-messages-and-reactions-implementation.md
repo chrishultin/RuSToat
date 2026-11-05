@@ -259,3 +259,58 @@ The user checked the running app and confirmed "Looks right": custom emoji rende
   - `cargo test`: 134 passed, 0 failed, 5 ignored.
   - `cargo clippy --all-targets -- -D warnings`: clean. `cargo fmt --check`: clean.
 - **Manual validation:** the user checked Peter's messages in the running app and confirmed "Looks right".
+
+## Chunk 4: Image attachments and file cards
+
+### Changes Made
+- `src/attachment.rs` (new, pure):
+  - `AttachmentView` is one of two things:
+    - `Image { id, url, name, size_label, width, height, too_big }`, drawn inline.
+    - `File { name, size_label, url: Option, kind }`, drawn as a card.
+  - `AttachmentView::new(file, media, revealed)`: `Metadata::Image` with a file server becomes `Image`. Everything else becomes `File`, including images before `GET /` has loaded (no URL yet).
+  - `fit_within(w, h)`: fits within `MAX_IMAGE_WIDTH` × `MAX_IMAGE_HEIGHT` (400×300), never scales up, rounds to whole pixels, and gives at least 1 px. Zero or missing dimensions give `FALLBACK_IMAGE_SIZE` (300×200).
+  - `MAX_AUTO_LOAD_BYTES` = 8 MiB. A larger image is `too_big` until revealed.
+  - `file_kind(metadata, content_type)`: Image, Video, Audio, Text or File. It uses the metadata first, then the MIME type for uncategorised uploads.
+  - `size_label(bytes)`: 1024-based, `B`/`KB`/`MB`/`GB` with one decimal place. Moves up a unit instead of showing `1024.0 KB`.
+- `src/store.rs`:
+  - `MessageRow.attachments` is now `Vec<AttachmentView>`, replacing the file names.
+  - New `revealed_images` set and `reveal_image(file_id)`.
+- `src/ui/chat.rs`:
+  - `render_attachment` handles three cases:
+    - **Images:** `img()` in a box of exactly the precomputed size, `ObjectFit::Contain`, 8 px corners. A blank backdrop shows while loading, and "Couldn't load image" on failure. A click opens the original in the browser.
+    - **Large images:** a card with a "Show image" button.
+    - **Files:** a card (`file_card`: icon, name, size, a `Download` icon) that opens the file URL on click.
+  - Attachments are stacked in a `v_flex` inside the bubble, below the text.
+  - A message with attachments but no text gets the invisible surface already used for jumbo emoji (`bg(transparent_black()).p_0()`), not `Ghost`.
+  - `ChatView::reveal_image(channel, file)` updates the store, then `sync_pane`. The row is remeasured via `diff_rows`. `render_row` gets a `RevealImage` callback, built in `render_main` from a weak handle to the view.
+  - `RowColors` gains `border`, `card_bg` and `image_bg`.
+- `src/assets.rs`: adds Lucide `Download`, `FileImage`, `FileMusic` and `FileVideoCamera`. `File` and `FileText` are already default icons. The icon test now covers two of the new ones.
+- `src/lib.rs`: `pub mod attachment`.
+- `tests/store_attachments.rs` (new), 9 tests:
+  - sizing for exact, wide, tall, rounding, no-upscale and extreme shapes
+  - the zero-dimension fallback
+  - the inline image view
+  - the 8 MB guard: at the limit, over it, and revealed
+  - file cards for PDF and video, and no link without a file server
+  - file kinds from metadata and MIME type
+  - size labels
+  - timeline order
+  - "Show image" flipping the view and giving `RowOp::Remeasure`
+- `tests/store_history.rs`: the attachment assertion now expects an `AttachmentView::File` (the fixture store has no file server).
+
+### Divergences
+- **Minor, location:** the sizing, guard, kind and label logic lives in a new `src/attachment.rs`, not `store.rs`. Chunk 5 can reuse `fit_within` from there for embed images.
+- **Minor, reveal state:** the revealed set is in `ChatStore`, not `ChatView`, so revealing goes through `timeline()` and `diff_rows` like any other row change.
+- **Minor, icon names:** Lucide has no `FileVideo` or `FileAudio`, so `FileVideoCamera` and `FileMusic` are used. Text files get `FileText`, which adds a fifth kind beyond the plan's four.
+- **Minor, addition:** clicking an inline image opens the original in the browser.
+- **Minor:** a message that has only file cards also gets the invisible surface, because the cards have their own border.
+- **No effect on later chunks.** Chunk 5 uses `attachment::fit_within` where it planned to use "the chunk 4 sizing helper". The plan file isn't changed.
+
+### Verification Performed
+- `cargo test --test store_attachments`: 9 passed. `cargo test --test store_history`: 11 passed.
+- `cargo test`: 174 passed, 0 failed, 5 ignored, up from 165.
+- `cargo clippy --all-targets -- -D warnings`: clean. `cargo fmt --check`: clean.
+- Live: launched `./target/debug/stoat-gpui`. `Ready` logged 5 servers, 76 channels and 41 emoji; history loaded; there were no warnings or errors beyond GPUI's usual duplicate-font notices.
+
+### Manual Validation
+The user checked inline images, file cards and image-only bubbles in the running app and confirmed "Looks good".

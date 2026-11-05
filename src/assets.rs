@@ -9,7 +9,19 @@ use gpui_kit::{AssetSource, Result, SharedString};
 
 gpui_kit::assets::icon_assets!(
     pub ExtraIcons,
-    [AtSign, Bookmark, Hash, House, Users, Volume2, WifiOff]
+    [
+        AtSign,
+        Bookmark,
+        Download,
+        FileImage,
+        FileMusic,
+        FileVideoCamera,
+        Hash,
+        House,
+        Users,
+        Volume2,
+        WifiOff
+    ]
 );
 
 pub struct AppAssets;
@@ -39,7 +51,12 @@ mod tests {
 
     #[test]
     fn extra_and_default_icons_both_load() {
-        for path in [IconName::Hash.path(), IconName::Volume2.path()] {
+        for path in [
+            IconName::Hash.path(),
+            IconName::Volume2.path(),
+            IconName::FileImage.path(),
+            IconName::Download.path(),
+        ] {
             assert!(AppAssets.load(&path).unwrap().is_some(), "{path} missing");
         }
         // A default component icon (used by the button spinner).
