@@ -1,11 +1,13 @@
 //! The signed-in UI: server rail, channel list, and the selected channel.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::Duration;
 
 use futures::StreamExt;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
@@ -14,7 +16,12 @@ use gpui_kit::*;
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
 use crate::api::{StoatClient, file_url};
 use crate::runtime::spawn_io;
-use crate::store::{ChannelEntry, ChannelKind, ChatStore, ServerEntry, display_name};
+use crate::store::{
+    ChannelEntry, ChannelKind, ChatStore, MessageRow, ServerEntry, TimelineRow, display_name,
+};
+
+/// How many messages to load when a channel is opened.
+pub const HISTORY_PAGE: usize = 50;
 
 pub enum ChatEvent {
     LogOutRequested,
@@ -40,7 +47,15 @@ enum Status {
     },
 }
 
+/// A loaded channel's display rows and its own scroll state, so switching
+/// back to a channel keeps its position.
+struct Pane {
+    rows: Rc<Vec<TimelineRow>>,
+    scroller: Entity<MessageScrollerState>,
+}
+
 pub struct ChatView {
+    client: StoatClient,
     store: ChatStore,
     has_ready: bool,
     status: Status,
@@ -49,6 +64,11 @@ pub struct ChatView {
     selected: HashMap<Place, String>,
     /// File server base URL for icons, from `GET /`. `None` until loaded.
     file_server: Option<String>,
+    panes: HashMap<String, Pane>,
+    /// History requests in flight, by channel. Results always land in their
+    /// own channel, so a slow one can't overwrite the channel being viewed.
+    loading: HashMap<String, Task<()>>,
+    load_errors: HashMap<String, SharedString>,
     _connection: Connection,
     _events: Task<()>,
     _root: Task<()>,
@@ -77,7 +97,7 @@ impl ChatView {
             Err(err) => log::warn!("API config task failed: {err:?}"),
         });
 
-        let (connection, mut events) = events::connect(client);
+        let (connection, mut events) = events::connect(client.clone());
         let events = cx.spawn(async move |this, cx| {
             while let Some(event) = events.next().await {
                 if this
@@ -89,12 +109,16 @@ impl ChatView {
             }
         });
         Self {
+            client,
             store: ChatStore::new(me),
             has_ready: false,
             status: Status::Connecting { attempt: 1 },
             place: Place::Home,
             selected: HashMap::new(),
             file_server: None,
+            panes: HashMap::new(),
+            loading: HashMap::new(),
+            load_errors: HashMap::new(),
             _connection: connection,
             _events: events,
             _root: root,
@@ -110,6 +134,12 @@ impl ChatView {
                 self.has_ready = true;
                 self.status = Status::Connected;
                 self.drop_stale_selection();
+                // Names may have changed; redraw anything already loaded.
+                let loaded: Vec<String> = self.panes.keys().cloned().collect();
+                for channel in loaded {
+                    self.rebuild_pane(&channel, cx);
+                }
+                self.ensure_current_loaded(cx);
             }
             // Message events arrive in chunk 6.
             ConnectionEvent::Event(_) => return,
@@ -140,12 +170,97 @@ impl ChatView {
 
     fn select_place(&mut self, place: Place, cx: &mut Context<Self>) {
         self.place = place;
+        self.ensure_current_loaded(cx);
         cx.notify();
     }
 
     fn select_channel(&mut self, id: String, cx: &mut Context<Self>) {
         self.selected.insert(self.place.clone(), id);
+        self.ensure_current_loaded(cx);
         cx.notify();
+    }
+
+    /// Start loading the current channel's history if it isn't loaded or loading.
+    fn ensure_current_loaded(&mut self, cx: &mut Context<Self>) {
+        if !self.has_ready {
+            return;
+        }
+        if let Some(channel) = self.current_channel()
+            && self.store.history(&channel.id).is_none()
+            && !self.loading.contains_key(&channel.id)
+        {
+            self.load_history(channel.id, cx);
+        }
+    }
+
+    fn load_history(&mut self, channel: String, cx: &mut Context<Self>) {
+        self.load_errors.remove(&channel);
+        let client = self.client.clone();
+        let request = spawn_io({
+            let channel = channel.clone();
+            async move {
+                client
+                    .fetch_messages(&channel, None, HISTORY_PAGE as i64)
+                    .await
+            }
+        });
+        let task = cx.spawn({
+            let channel = channel.clone();
+            async move |this, cx| {
+                let result = request.await;
+                this.update(cx, |this, cx| {
+                    this.loading.remove(&channel);
+                    match result {
+                        Ok(Ok(page)) => {
+                            this.store.set_history(&channel, page, HISTORY_PAGE);
+                            log::debug!(
+                                "loaded {} messages for {channel}",
+                                this.store.history(&channel).map_or(0, |h| h.messages.len())
+                            );
+                            this.rebuild_pane(&channel, cx);
+                        }
+                        Ok(Err(err)) => {
+                            log::warn!("loading messages for {channel} failed: {err:?}");
+                            this.load_errors.insert(channel, err.to_string().into());
+                        }
+                        Err(err) => {
+                            log::warn!("message load task failed: {err:?}");
+                            this.load_errors
+                                .insert(channel, "Something went wrong loading messages.".into());
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }
+        });
+        self.loading.insert(channel, task);
+    }
+
+    /// Recompute a loaded channel's rows. A changed row count resets its
+    /// scroller to the newest message; the same count just remeasures.
+    fn rebuild_pane(&mut self, channel: &str, cx: &mut Context<Self>) {
+        let rows = Rc::new(self.store.timeline(channel));
+        let count = rows.len();
+        match self.panes.get_mut(channel) {
+            Some(pane) => {
+                let same_count = pane.rows.len() == count;
+                pane.rows = rows;
+                pane.scroller.update(cx, |scroller, cx| {
+                    if same_count {
+                        scroller.remeasure(cx);
+                    } else {
+                        scroller.reset(count, cx);
+                        scroller.scroll_to_end(cx);
+                    }
+                });
+            }
+            None => {
+                let scroller = cx.new(|cx| MessageScrollerState::new(count, cx));
+                self.panes
+                    .insert(channel.to_string(), Pane { rows, scroller });
+            }
+        }
     }
 
     fn sections(&self) -> Vec<(Option<String>, Vec<ChannelEntry>)> {
@@ -432,10 +547,55 @@ impl ChatView {
                 )),
             });
 
-        let body_text: SharedString = match &channel {
-            Some(channel) => format!("Messages in {} will show up here.", channel.name).into(),
-            None if self.has_ready => "Pick a conversation from the sidebar.".into(),
-            None => "Loading your servers and conversations…".into(),
+        let colors = RowColors {
+            muted: theme.muted_foreground,
+            system: theme.muted_foreground,
+            danger: theme.danger,
+        };
+        let placeholder = |text: SharedString| {
+            v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(colors.muted)
+                .child(text)
+                .into_any_element()
+        };
+        let body = match &channel {
+            None if self.has_ready => placeholder("Pick a conversation from the sidebar.".into()),
+            None => placeholder("Loading your servers and conversations…".into()),
+            Some(channel) => {
+                if let Some(pane) = self.panes.get(&channel.id) {
+                    if pane.rows.is_empty() {
+                        placeholder("No messages yet.".into())
+                    } else {
+                        let rows = pane.rows.clone();
+                        MessageScroller::new(
+                            SharedString::from(format!("messages-{}", channel.id)),
+                            pane.scroller.clone(),
+                            move |ix, _window, _cx| render_row(&rows[ix], colors),
+                        )
+                        .flex_1()
+                        .into_any_element()
+                    }
+                } else if let Some(error) = self.load_errors.get(&channel.id) {
+                    let id = channel.id.clone();
+                    v_flex()
+                        .flex_1()
+                        .items_center()
+                        .justify_center()
+                        .gap_2()
+                        .text_sm()
+                        .child(div().text_color(colors.danger).child(error.clone()))
+                        .child(Button::new("retry-history").label("Retry").on_click(
+                            cx.listener(move |this, _, _, cx| this.load_history(id.clone(), cx)),
+                        ))
+                        .into_any_element()
+                } else {
+                    placeholder("Loading messages…".into())
+                }
+            }
         };
 
         v_flex()
@@ -455,16 +615,103 @@ impl ChatView {
                 )
             })
             .child(header)
-            .child(
-                v_flex()
-                    .flex_1()
-                    .items_center()
-                    .justify_center()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child(body_text),
-            )
+            .child(body)
     }
+}
+
+#[derive(Clone, Copy)]
+struct RowColors {
+    muted: Hsla,
+    system: Hsla,
+    danger: Hsla,
+}
+
+fn render_row(row: &TimelineRow, colors: RowColors) -> AnyElement {
+    match row {
+        TimelineRow::StartOfChannel { name } => v_flex()
+            .px_4()
+            .pt_6()
+            .pb_2()
+            .gap_1()
+            .child(
+                div()
+                    .text_lg()
+                    .font_weight(FontWeight::BOLD)
+                    .child(format!("This is the start of {name}")),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(colors.muted)
+                    .child("There are no older messages."),
+            )
+            .into_any_element(),
+        TimelineRow::Message(message) if message.system => render_system_row(message, colors),
+        TimelineRow::Message(message) => render_message_row(message, colors),
+    }
+}
+
+fn render_system_row(message: &MessageRow, colors: RowColors) -> AnyElement {
+    h_flex()
+        .px_4()
+        .py_1()
+        .gap_2()
+        .text_sm()
+        .text_color(colors.system)
+        .child(div().child("→"))
+        .child(
+            div()
+                .italic()
+                .child(message.body.clone().unwrap_or_default()),
+        )
+        .child(div().text_xs().child(message.time.clone()))
+        .into_any_element()
+}
+
+fn render_message_row(message: &MessageRow, colors: RowColors) -> AnyElement {
+    v_flex()
+        .w_full()
+        .min_w_0()
+        .px_4()
+        .when(!message.continuation, |el| el.pt_3())
+        .pb_0p5()
+        .when(!message.continuation, |el| {
+            el.child(
+                h_flex()
+                    .gap_2()
+                    .items_baseline()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(message.author.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.muted)
+                            .child(message.time.clone()),
+                    ),
+            )
+        })
+        .when_some(message.body.clone(), |el, body| {
+            el.child(
+                div()
+                    .w_full()
+                    .text_sm()
+                    .child(body)
+                    .when(message.edited, |el| {
+                        el.child(div().text_xs().text_color(colors.muted).child("(edited)"))
+                    }),
+            )
+        })
+        .children(message.attachments.iter().map(|name| {
+            div()
+                .text_sm()
+                .text_color(colors.muted)
+                .child(format!("[attachment: {name}]"))
+        }))
+        .into_any_element()
 }
 
 fn channel_icon(kind: ChannelKind) -> IconName {

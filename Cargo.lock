@@ -7452,6 +7452,7 @@ name = "stoat-gpui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "env_logger 0.11.11",
  "futures",
  "gpui-kit",
@@ -7462,6 +7463,7 @@ dependencies = [
  "revolt-result",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "thiserror 2.0.21",
  "tokio",
  "tokio-tungstenite",

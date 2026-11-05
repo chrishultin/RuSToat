@@ -253,3 +253,55 @@ All passed on 2026-11-04 with the user's real account:
 ### Manual Validation
 - The user confirmed the sidebar populates. They reported missing server pictures, which are now implemented.
 - After the fixes, the user confirmed "Looks right": server pictures show, and the sidebar matches the web app (server order, channels and categories, DMs).
+
+## Chunk 5: Channel message history view
+
+### Changes Made
+- `Cargo.toml`: added `serde_urlencoded 0.7` and `chrono 0.4` (`clock`, `std`).
+- `src/api/client.rs`: `fetch_messages(channel, before, limit) -> BulkMessageResponse` calls `GET /channels/{id}/messages`. The query string is serialized from the backend's own `OptionsQueryMessages`: `limit`, optional `before`, `sort=Latest` and `include_users=true`. `sort` must be explicit, because the server defaults to `Relevance`, which is for search. A unit test checks the exact query.
+- `src/time.rs` (new):
+  - `ulid_millis`: Crockford base32 decoding of the 48-bit time prefix, case-insensitive.
+  - `ulid_local_time`, `message_time_label`, `minutes_between`.
+  - `format_message_time`: "Today at 14:05", "Yesterday at 09:12", "1 Nov 2026 at 23:59".
+- `src/store.rs`:
+  - `History { messages (oldest first), exhausted }`.
+  - `set_history`: caches the page's `users` and `members`, sorts and dedups by ULID, and sets `exhausted` when the page is shorter than the limit.
+  - `author_name`: masquerade name, then webhook name, then server nickname (embedded member or store), then display name, then username, then "Unknown user".
+  - `system_text`: name-aware wording such as "Carol joined" or "Ada pinned a message". Anything else falls back to the backend's `String::from(SystemMessage)`.
+  - `render_content`: resolves `<@user>` and `<#channel>` mentions and leaves other `<…>` text alone.
+  - `timeline(channel) -> Vec<TimelineRow>`: a `StartOfChannel` marker when exhausted, then `MessageRow { author, time, body, attachments, system, edited, continuation }`. `continuation` means the same author as the previous message, within 7 minutes.
+- `src/ui/chat.rs`:
+  - Per-channel `Pane { rows: Rc<Vec<TimelineRow>>, scroller: Entity<MessageScrollerState> }`, plus a `loading` map of tasks and a `load_errors` map, all keyed by channel.
+  - `ensure_current_loaded` runs on `Ready`, on server or channel switch, and on startup.
+  - `load_history` keeps each result in its own channel, so a slow response can't overwrite the one on screen.
+  - `rebuild_pane` resets and scrolls to the end when the row count changes, and only remeasures otherwise. On reconnect `Ready`, loaded panes are rebuilt because names may have changed.
+  - The main area shows "Loading messages…", an error with **Retry**, "No messages yet.", or gpui-component's `MessageScroller` (virtualized, follows the tail, opens at the bottom, has a jump-to-latest button).
+  - Row renderers: a start-of-channel header; system rows as an italic muted "→ text" with the time; message rows with an author and time header, which continuations omit. The body text wraps, and rows show "(edited)" and "[attachment: name]" lines.
+- Tests:
+  - `tests/fixtures/messages_page.json` has 7 messages with real ULIDs at known times, newest first, plus users and a member nickname. It covers a mention, a grouped follow-up, a nickname, a system `user_joined`, an attachment with an edit, a masquerade and a webhook. `messages_bare.json` is the bare-array shape.
+  - `tests/store_history.rs`: 8 tests.
+  - Unit tests: 4 for `time` and 1 for the query.
+
+### Divergences
+- **Minor: used gpui-component's `MessageScroller`** instead of a hand-rolled GPUI `list()`. It already handles tail-following, prepending with the anchor kept, and jump-to-latest, which takes care of chunk 6's main risk. The plan's chunk 6 risk note is updated.
+- **Minor: the author fallback is the plain username**, not `username#discriminator`, to match the sidebar's DM names and the web app. Masquerade and webhook names were added at the top of the order, because bridges and bots rely on them.
+- **Minor: fetches are keyed by channel** instead of a "drop stale results" guard. Each response lands in its own channel's history and pane, so it can never replace the channel being viewed. This sits inside the GPUI view, so there's no separate unit test for it. The store-side guarantees (per-channel histories) are tested.
+- **Minor, extras:**
+  - mention rendering (`<@id>` becomes `@name`, `<#id>` becomes `#name`)
+  - same-author grouping
+  - the start-of-channel marker shown already when the first page is short (planned for chunk 6)
+- **Test fix, not a code fix:** my first ULID test used the wrong expected value for `01ARZ3NDEK…`. The decoder was right. The test now uses the ULID README's `decodeTime("01ARYZ6S41…") = 1469918176385` example, which I checked independently.
+
+### Verification Performed
+- `cargo test`: 67 passed, 0 failed, 3 ignored:
+  - 25 unit tests
+  - 9 `api_login`
+  - 7 contract
+  - 10 `session_restore`
+  - 8 `store_ready`
+  - 8 `store_history`
+- `cargo clippy --all-targets -- -D warnings`: clean. `cargo fmt --check`: clean.
+- Live: after `Ready`, the app requested `GET /channels/<first Home conversation>/messages?limit=50&sort=Latest&include_users=true` and logged `loaded 0 messages` (the first conversation is empty). No warnings or errors.
+
+### Manual Validation
+The user opened channels and a DM in the running app and confirmed "Looks right": the content and order match the web app.

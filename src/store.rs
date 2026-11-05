@@ -5,7 +5,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::api::events::Ready;
-use crate::api::models::{Channel, File, Member, Server, User};
+use crate::api::models::{
+    BulkMessageResponse, Channel, File, Member, Message, Server, SystemMessage, User,
+};
 
 /// One entry in the channel list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +35,43 @@ pub struct ChannelSection {
     pub channels: Vec<ChannelEntry>,
 }
 
+/// A channel's loaded messages, oldest first.
+#[derive(Debug, Default)]
+pub struct History {
+    pub messages: Vec<Message>,
+    /// The server returned fewer than requested: there's nothing older.
+    pub exhausted: bool,
+}
+
+/// One row of a channel's message view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimelineRow {
+    /// Shown above the oldest message once there's no more history.
+    StartOfChannel {
+        name: String,
+    },
+    Message(MessageRow),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageRow {
+    pub id: String,
+    pub author: String,
+    /// "Today at 14:05" etc.
+    pub time: String,
+    /// Plain text with mentions resolved. For system messages, the description.
+    pub body: Option<String>,
+    pub attachments: Vec<String>,
+    pub system: bool,
+    pub edited: bool,
+    /// Same author as the previous message, soon after it: drawn without a
+    /// name/time header.
+    pub continuation: bool,
+}
+
+/// Consecutive messages from one author closer together than this share a header.
+pub const GROUP_WINDOW_MINUTES: u64 = 7;
+
 /// One icon in the server rail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerEntry {
@@ -53,6 +92,8 @@ pub struct ChatStore {
     channels: HashMap<String, Channel>,
     /// Keyed by (server, user).
     members: HashMap<(String, String), Member>,
+    /// Loaded message history, by channel ID.
+    histories: HashMap<String, History>,
 }
 
 impl ChatStore {
@@ -94,6 +135,202 @@ impl ChatStore {
             .chain(ready_order)
             .filter(|id| self.servers.contains_key(id) && seen.insert(id.clone()))
             .collect();
+    }
+
+    /// Store a freshly fetched page of the latest messages for `channel`,
+    /// replacing what was there. The authors that come with it are cached too.
+    /// `limit` is what was requested, so a short page means "no more history".
+    pub fn set_history(&mut self, channel: &str, page: BulkMessageResponse, limit: usize) {
+        let (mut messages, users, members) = match page {
+            BulkMessageResponse::JustMessages(messages) => (messages, Vec::new(), Vec::new()),
+            BulkMessageResponse::MessagesAndUsers {
+                messages,
+                users,
+                members,
+            } => (messages, users, members.unwrap_or_default()),
+        };
+        for user in users {
+            self.users.insert(user.id.clone(), user);
+        }
+        for member in members {
+            self.members
+                .insert((member.id.server.clone(), member.id.user.clone()), member);
+        }
+        let exhausted = messages.len() < limit;
+        // The API returns newest first. ULIDs sort by time, so sorting by ID
+        // gives oldest-first display order.
+        messages.sort_by(|a, b| a.id.cmp(&b.id));
+        messages.dedup_by(|a, b| a.id == b.id);
+        self.histories.insert(
+            channel.to_string(),
+            History {
+                messages,
+                exhausted,
+            },
+        );
+    }
+
+    pub fn history(&self, channel: &str) -> Option<&History> {
+        self.histories.get(channel)
+    }
+
+    /// Who to show as a message's author. In order: a masquerade name
+    /// (bridges and bots), the webhook's name, the author's nickname in this
+    /// server, their display name, their username.
+    pub fn author_name(&self, message: &Message) -> String {
+        if let Some(name) = message.masquerade.as_ref().and_then(|m| m.name.as_deref())
+            && !name.trim().is_empty()
+        {
+            return name.to_string();
+        }
+        if let Some(webhook) = &message.webhook {
+            return webhook.name.clone();
+        }
+        let nickname = message
+            .member
+            .as_ref()
+            .and_then(|m| m.nickname.clone())
+            .or_else(|| {
+                let server = self.server_of(&message.channel)?;
+                self.member(server, &message.author)?.nickname.clone()
+            });
+        if let Some(nickname) = nickname
+            && !nickname.trim().is_empty()
+        {
+            return nickname;
+        }
+        self.user_name(&message.author)
+            .or_else(|| message.user.as_ref().map(|u| display_name(u).to_string()))
+            .unwrap_or_else(|| "Unknown user".into())
+    }
+
+    /// A one-line description of a system message, with user names filled in.
+    /// Variants this client doesn't describe use the backend's own wording.
+    pub fn system_text(&self, system: &SystemMessage) -> String {
+        let name = |id: &str| self.user_name(id).unwrap_or_else(|| "Someone".into());
+        match system {
+            SystemMessage::Text { content } => content.clone(),
+            SystemMessage::UserAdded { id, by } => format!("{} added {}", name(by), name(id)),
+            SystemMessage::UserRemove { id, by } => format!("{} removed {}", name(by), name(id)),
+            SystemMessage::UserJoined { id } => format!("{} joined", name(id)),
+            SystemMessage::UserLeft { id } => format!("{} left", name(id)),
+            SystemMessage::UserKicked { id } => format!("{} was kicked", name(id)),
+            SystemMessage::UserBanned { id } => format!("{} was banned", name(id)),
+            SystemMessage::ChannelRenamed { name: new, by } => {
+                format!("{} renamed the channel to {new}", name(by))
+            }
+            SystemMessage::ChannelDescriptionChanged { by } => {
+                format!("{} changed the channel description", name(by))
+            }
+            SystemMessage::ChannelIconChanged { by } => {
+                format!("{} changed the channel icon", name(by))
+            }
+            SystemMessage::ChannelOwnershipChanged { from, to } => {
+                format!("{} gave ownership to {}", name(from), name(to))
+            }
+            SystemMessage::MessagePinned { by, .. } => format!("{} pinned a message", name(by)),
+            SystemMessage::MessageUnpinned { by, .. } => {
+                format!("{} unpinned a message", name(by))
+            }
+            other => String::from(other.clone()),
+        }
+    }
+
+    /// Message text with `<@user>` and `<#channel>` mentions replaced by names.
+    pub fn render_content(&self, content: &str) -> String {
+        let mut out = String::with_capacity(content.len());
+        let mut rest = content;
+        while let Some(start) = rest.find('<') {
+            out.push_str(&rest[..start]);
+            let tail = &rest[start..];
+            let replacement = tail.find('>').and_then(|end| {
+                let inner = &tail[1..end];
+                let text = match (inner.strip_prefix('@'), inner.strip_prefix('#')) {
+                    (Some(user), _) => format!("@{}", self.user_name(user)?),
+                    (_, Some(channel)) => format!("#{}", self.channel_entry(channel)?.name),
+                    _ => return None,
+                };
+                Some((text, end + 1))
+            });
+            match replacement {
+                Some((text, consumed)) => {
+                    out.push_str(&text);
+                    rest = &tail[consumed..];
+                }
+                None => {
+                    out.push('<');
+                    rest = &tail[1..];
+                }
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// Display rows for a loaded channel, oldest first. Empty if not loaded.
+    pub fn timeline(&self, channel: &str) -> Vec<TimelineRow> {
+        let Some(history) = self.histories.get(channel) else {
+            return Vec::new();
+        };
+        let mut rows = Vec::with_capacity(history.messages.len() + 1);
+        if history.exhausted {
+            let name = self
+                .channel_entry(channel)
+                .map(|c| c.name)
+                .unwrap_or_else(|| "this conversation".into());
+            rows.push(TimelineRow::StartOfChannel { name });
+        }
+
+        let mut previous: Option<(&Message, String)> = None;
+        for message in &history.messages {
+            let author = self.author_name(message);
+            let system = message.system.is_some();
+            let continuation = !system
+                && previous.as_ref().is_some_and(|(prev, prev_author)| {
+                    prev.system.is_none()
+                        && prev.author == message.author
+                        && *prev_author == author
+                        && crate::time::minutes_between(&prev.id, &message.id)
+                            .is_some_and(|m| m < GROUP_WINDOW_MINUTES)
+                });
+            let body = match &message.system {
+                Some(system) => Some(self.system_text(system)),
+                None => message
+                    .content
+                    .as_deref()
+                    .filter(|c| !c.is_empty())
+                    .map(|c| self.render_content(c)),
+            };
+            rows.push(TimelineRow::Message(MessageRow {
+                id: message.id.clone(),
+                author: author.clone(),
+                time: crate::time::message_time_label(&message.id),
+                body,
+                attachments: message
+                    .attachments
+                    .iter()
+                    .flatten()
+                    .map(|f| f.filename.clone())
+                    .collect(),
+                system,
+                edited: message.edited.is_some(),
+                continuation,
+            }));
+            previous = Some((message, author));
+        }
+        rows
+    }
+
+    fn user_name(&self, id: &str) -> Option<String> {
+        self.users.get(id).map(|u| display_name(u).to_string())
+    }
+
+    /// The server a channel belongs to, if it's a server channel.
+    fn server_of(&self, channel: &str) -> Option<&str> {
+        match self.channels.get(channel)? {
+            Channel::TextChannel { server, .. } => Some(server),
+            _ => None,
+        }
     }
 
     pub fn user(&self, id: &str) -> Option<&User> {

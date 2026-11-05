@@ -1,0 +1,99 @@
+{
+  "messages": [
+    {
+      "_id": "01M6GEW5A0GGGGGGGGGGGGGGGG",
+      "channel": "ch-general",
+      "author": "01JCWEBHOOK000000000000000",
+      "content": "Build passed",
+      "webhook": {
+        "name": "GitHub",
+        "avatar": null
+      }
+    },
+    {
+      "_id": "01M6GETAQ0FFFFFFFFFFFFFFFF",
+      "channel": "ch-general",
+      "author": "u-bot",
+      "content": "relayed",
+      "masquerade": {
+        "name": "Bridge Bot"
+      }
+    },
+    {
+      "_id": "01M6GERG40EEEEEEEEEEEEEEEE",
+      "channel": "ch-general",
+      "author": "u-ada",
+      "content": "look at this",
+      "attachments": [
+        {
+          "_id": "file-cat",
+          "tag": "attachments",
+          "filename": "cat.png",
+          "metadata": {
+            "type": "Image",
+            "width": 640,
+            "height": 480
+          },
+          "content_type": "image/png",
+          "size": 12345
+        }
+      ],
+      "edited": "2026-11-04T12:00:00.000Z"
+    },
+    {
+      "_id": "01M6GDV6M0DDDDDDDDDDDDDDDD",
+      "channel": "ch-general",
+      "author": "00000000000000000000000000",
+      "system": {
+        "type": "user_joined",
+        "id": "u-carol"
+      }
+    },
+    {
+      "_id": "01M6GDSC10CCCCCCCCCCCCCCCC",
+      "channel": "ch-general",
+      "author": "u-bob",
+      "content": "hi!"
+    },
+    {
+      "_id": "01M6GDQHE0BBBBBBBBBBBBBBBB",
+      "channel": "ch-general",
+      "author": "u-ada",
+      "content": "second message from Ada"
+    },
+    {
+      "_id": "01M6GDKW80AAAAAAAAAAAAAAAA",
+      "channel": "ch-general",
+      "author": "u-ada",
+      "content": "Hello <@u-bob>, see <#ch-random> <not a mention>"
+    }
+  ],
+  "users": [
+    {
+      "_id": "u-carol",
+      "username": "carol",
+      "discriminator": "7777",
+      "display_name": "Carol",
+      "relationship": "None",
+      "online": false
+    },
+    {
+      "_id": "u-bot",
+      "username": "bridge",
+      "discriminator": "0002",
+      "relationship": "None",
+      "online": true
+    }
+  ],
+  "members": [
+    {
+      "_id": {
+        "server": "srv-alpha",
+        "user": "u-bob"
+      },
+      "joined_at": "2026-01-01T00:00:00.000Z",
+      "nickname": "Bobby",
+      "roles": []
+    }
+  ]
+}

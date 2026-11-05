@@ -173,7 +173,8 @@ Key API facts, checked on 2026-11-04 against `https://api.stoat.chat/openapi.jso
 - `src/api/events.rs`: forwarding these events
 **Depends on:** Chunk 5
 **Risks:**
-- Keeping the scroll position while prepending variable-height rows in a GPUI list is the hardest UI problem in this plan. `gpui-component`'s virtual list or GPUI's `ListState` may need scroll offset adjustments. If it fights back, the fallback is a "Load older messages" button at the top.
+- Keeping the scroll position while prepending variable-height rows was the hardest UI problem in this plan. *(Updated after chunk 5: the message list is `gpui-component`'s `MessageScroller`. Its `MessageScrollerState::prepend(count)` keeps the scroll anchor, `append` with tail-following handles sticking to the bottom, and `logical_scroll_top().item_ix == 0` signals that the user reached the top, which triggers the next page. Use those rather than hand-rolled offsets. The fallback is still a "Load older messages" button at the top.)*
+- The start-of-channel marker already exists (chunk 5 shows it when a page comes back short); chunk 6 only has to add it when paging reaches the end.
 - A live message arriving while an older page is in flight must not be lost or duplicated. Merge by ID and keep the list sorted by ULID.
 - `MessageUpdate` carries a `PartialMessage` plus a `clear` list. Merge only the fields present (`content`, `edited`) and remove the fields named in `clear`. Check whether `revolt-models` already provides an `apply_options`-style merge for `Message` before writing one.
 - Live messages for channels that haven't been loaded are ignored. They load fresh when opened, per Assumption 4.

@@ -1,7 +1,10 @@
 use std::time::Duration;
 
 use reqwest::{Client, Method};
-use revolt_models::v0::{DataLogin, MFAResponse, ResponseLogin, User};
+use revolt_models::v0::{
+    BulkMessageResponse, DataLogin, MFAResponse, MessageSort, OptionsQueryMessages, ResponseLogin,
+    User,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -149,6 +152,22 @@ impl StoatClient {
         self.send(Method::GET, "/users/@me", None::<&()>).await
     }
 
+    /// `GET /channels/{id}/messages`: up to `limit` messages, newest first,
+    /// optionally only those older than `before`. Includes the authors
+    /// (`users`, and `members` in server channels).
+    pub async fn fetch_messages(
+        &self,
+        channel: &str,
+        before: Option<&str>,
+        limit: i64,
+    ) -> Result<BulkMessageResponse, ApiError> {
+        let path = format!(
+            "/channels/{channel}/messages?{}",
+            messages_query(before, limit)
+        );
+        self.send(Method::GET, &path, None::<&()>).await
+    }
+
     /// `POST /auth/session/logout`: end this client's session on the server.
     ///
     /// A token the server already rejects counts as logged out.
@@ -208,5 +227,37 @@ impl StoatClient {
             return Err(err);
         }
         Ok((status, bytes.to_vec()))
+    }
+}
+
+/// Query string for message history, built from the backend's own
+/// `OptionsQueryMessages`. `sort` must be explicit: the server defaults to
+/// `Relevance`, which is for search.
+fn messages_query(before: Option<&str>, limit: i64) -> String {
+    let options = OptionsQueryMessages {
+        limit: Some(limit),
+        before: before.map(str::to_string),
+        after: None,
+        sort: Some(MessageSort::Latest),
+        nearby: None,
+        include_users: Some(true),
+    };
+    serde_urlencoded::to_string(&options).expect("message query is always encodable")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::messages_query;
+
+    #[test]
+    fn messages_query_is_latest_first_with_users() {
+        assert_eq!(
+            messages_query(None, 50),
+            "limit=50&sort=Latest&include_users=true"
+        );
+        assert_eq!(
+            messages_query(Some("01JC0000000000000000000009"), 50),
+            "limit=50&before=01JC0000000000000000000009&sort=Latest&include_users=true"
+        );
     }
 }

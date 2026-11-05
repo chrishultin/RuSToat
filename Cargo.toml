@@ -20,6 +20,9 @@ reqwest = { version = "0.13", features = ["json"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_urlencoded = "0.7"
+# Local-time formatting for message timestamps.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 thiserror = "2"
 # Session token storage: macOS Keychain (Windows/Linux stores come along with the v1 feature).
 keyring = "4.2"
