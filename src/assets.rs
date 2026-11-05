@@ -24,6 +24,7 @@ gpui_kit::assets::icon_assets!(
         Paperclip,
         Pencil,
         Reply,
+        SendHorizontal,
         Trash,
         Users,
         Volume2,

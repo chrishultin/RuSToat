@@ -1,6 +1,6 @@
-//! The message box under a conversation. Enter sends, Shift+Enter adds a
-//! new line, and each channel keeps its own draft, replies and attached
-//! files included. `@` suggests people, and mentions show as chips.
+//! The message box under a conversation. Enter or the send button sends,
+//! Shift+Enter adds a new line, and each channel keeps its own draft,
+//! replies and attached files included. `@` suggests people, and mentions show as chips.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -29,7 +29,7 @@ use crate::prefs::Tone;
 use crate::ui::emoji_picker::{EmojiBrowser, OnBrowsePick, OnTone};
 use crate::draft::{
     AttachmentLimits, Draft, DraftAttachment, Drafts, EditStash, MAX_MESSAGE_CHARS, ReplyTarget,
-    SendCheck, TooManyReplies, char_count, check_send, save_pasted_image,
+    SendCheck, TooManyReplies, can_send, char_count, check_send, save_pasted_image,
 };
 
 pub enum ComposerEvent {
@@ -1199,6 +1199,26 @@ impl Render for Composer {
             .tooltip("Attach files")
             .disabled(editing)
             .on_click(cx.listener(|this, _, window, cx| this.pick_files(window, cx)));
+        // Does what Enter does, so it's off when Enter wouldn't send.
+        let sendable = can_send(
+            &self.input.read(cx).value(),
+            !self.draft.attachments.is_empty(),
+            editing,
+        );
+        let send = Button::new("send")
+            .ghost()
+            .icon(if editing {
+                IconName::Check
+            } else {
+                IconName::SendHorizontal
+            })
+            .tooltip(if editing { "Save edit" } else { "Send" })
+            .disabled(!sendable)
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.submit(window, cx);
+                // The click took focus from the box: give it back.
+                this.focus(window, cx);
+            }));
         let theme = cx.theme();
         v_flex()
             .flex_none()
@@ -1237,6 +1257,7 @@ impl Render for Composer {
                         ),
                     )
                     .child(emoji)
+                    .child(send)
                     .children(suggestions),
             )
             .children(tray)

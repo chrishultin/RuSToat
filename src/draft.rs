@@ -42,6 +42,16 @@ pub fn check_send(text: &str, has_attachments: bool) -> SendCheck {
     SendCheck::Ready(text.to_string())
 }
 
+/// Whether sending (or, when `editing`, saving) would do anything: what
+/// the send button's disabled state follows. It's [`check_send`] being
+/// ready, except that an edit can't have files, so it needs text.
+pub fn can_send(text: &str, has_attachments: bool, editing: bool) -> bool {
+    matches!(
+        check_send(text, has_attachments && !editing),
+        SendCheck::Ready(_)
+    )
+}
+
 /// Trailing whitespace and leading blank lines go; leading spaces on the
 /// first line stay (they may be indentation).
 fn trim_message(text: &str) -> &str {
@@ -449,6 +459,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn can_send_needs_text_or_files() {
+        assert!(can_send("hello", false, false));
+        assert!(!can_send("", false, false));
+        assert!(!can_send("  \n\t ", false, false));
+        // Files go without text.
+        assert!(can_send("", true, false));
+        assert!(can_send("  \n ", true, false));
+    }
+
+    #[test]
+    fn can_send_stops_at_the_length_limit() {
+        assert!(can_send(&"a".repeat(MAX_MESSAGE_CHARS), false, false));
+        assert!(!can_send(&"a".repeat(MAX_MESSAGE_CHARS + 1), false, false));
+        // Files don't make a too-long text sendable.
+        assert!(!can_send(&"a".repeat(MAX_MESSAGE_CHARS + 1), true, false));
+    }
+
+    #[test]
+    fn can_send_while_editing_needs_text_within_the_limit() {
+        assert!(can_send("fixed", false, true));
+        assert!(!can_send("", false, true));
+        assert!(!can_send("   ", false, true));
+        // An edit changes text only: files don't count.
+        assert!(!can_send("", true, true));
+        assert!(can_send(&"a".repeat(MAX_MESSAGE_CHARS), false, true));
+        assert!(!can_send(&"a".repeat(MAX_MESSAGE_CHARS + 1), false, true));
     }
 
     #[test]
