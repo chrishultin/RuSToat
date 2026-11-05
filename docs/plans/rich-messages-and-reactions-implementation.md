@@ -115,3 +115,44 @@ The user checked the running app and confirmed "Looks right": avatars match the 
 
 ### Manual Validation
 The first check found the multi-byte crash, now fixed. After the fix, the user reopened the channel that crashed and confirmed "Looks right": formatting renders correctly in the running app.
+
+## Chunk 2b: Message bubbles and grouping (inserted)
+
+_Added at the user's request before chunk 3: "a 'bubble' or some other identifier around messages, including some signifier/grouping of sequential messages by one user." Asked to pick a style (chat bubbles, group cards, or an accent bar), the user chose **chat bubbles**._
+
+### Changes Made
+- `src/store.rs`:
+  - New `MessageRow.group_end` (the next row doesn't continue this one) and `MessageRow.mine` (`author == me`).
+  - `mark_group_ends()` fixes up `group_end` after the timeline is built.
+  - Appending a live message to a group flips the previous row's `group_end`, so `diff_rows` remeasures that row; no special handling is needed.
+- `src/ui/chat.rs`:
+  - **Message rows** are built from gpui-component's `Message` (aliased `MessageLayout`, to avoid confusion with the API model), `MessageAvatar`, `MessageHeader`, `MessageContent`, `Bubble` and `BubbleContent`.
+    - Others are left-aligned with `BubbleVariant::Secondary`. Yours are right-aligned with `BubbleVariant::Tinted`, and the header says "You".
+    - The header is shown only on a group's first bubble. The 32 px avatar is on the group's last bubble (`AVATAR_SIZE` was 36 and now matches the component's `size-8` slot). Earlier bubbles get an empty `MessageAvatar` slot, so they align.
+    - Corners: `BUBBLE_RADIUS` 16 px outside, and `JOINED_RADIUS` 4 px on the sender's side wherever bubbles from one person touch (top when not first, bottom when not last).
+    - Spacing is 12 px above a group's first bubble and 2 px between bubbles within a group.
+    - The Markdown `TextView`, attachment placeholders and "(edited)" now live inside the bubble surface. The `TextView` no longer forces `w_full`, so short messages can get short bubbles.
+  - **System rows** are centred, small, italic and muted, with the time.
+- `tests/store_history.rs`: `groups_know_where_they_end` checks (continuation, group_end) for every fixture row. `own_messages_are_marked_mine` checks the same history from "u-me" (none mine) and from "u-ada" (her three messages mine).
+- `tests/store_live.rs`: the row helper sets the new fields.
+- `docs/plans/rich-messages-and-reactions.md`: added chunk 2b. Look-ahead amendments:
+  - Chunk 4: images go inside the bubble, and image-only messages use the `Ghost` variant.
+  - Chunk 6: reaction chips use `Bubble::reactions(BubbleReactions)`.
+
+### Divergences
+- **Scope addition (user-directed):** this chunk wasn't in the plan. It was inserted between chunks 2 and 3, and the plan file is updated.
+- **Fix after user feedback ("too much space between the messages"):**
+  - `MessageScroller` wraps every row in `px_3` and `pb_8`, which is 32 px under every row. That spacing is designed for whole chat turns, not single messages, and with the original 12 px / 2 px it put at least 34 px between consecutive bubbles. It's now overridden with `.with_row_style(StyleRefinement::default().pb(0).px(0))`.
+  - `Message`'s header-to-bubble gap is cut from its default 10 px (`rems(0.625)`) to `HEADER_GAP` = 2 px via `with_stack_style`.
+  - Spacing is now named constants: `GROUP_GAP` = 8 px between senders, `BUBBLE_GAP` = 2 px within a group.
+- **Minor:** `BubbleGroup`/`MessageGroup` from gpui-component aren't used. Both are plain vertical stacks with no corner shaping, and `MessageScroller` renders one row per message, so a group can't be a single element. Grouping is done per row with corner radii and spacing instead.
+
+### Verification Performed
+- `cargo test`: 101 passed, 0 failed, 5 ignored. That's 2 more than before: the new `store_history` tests.
+- `cargo clippy --all-targets -- -D warnings`: clean. `cargo fmt --check`: clean.
+- Live: relaunched; connected (`Ready`: 5 servers, 75 channels); no warnings, errors or panics.
+- Not verifiable by me: how it looks. In particular, whether bubbles shrink to short messages or always take the 80% maximum width depends on how gpui's layout measures `TextView`.
+
+### Manual Validation
+- **First look:** the user reported "too much space between the messages", which was fixed as described under Divergences.
+- **After the fix:** the user confirmed "Looks right" in the running app.

@@ -139,6 +139,8 @@ fn row(id: &str, body: &str) -> TimelineRow {
         system: false,
         edited: false,
         continuation: false,
+        group_end: true,
+        mine: false,
     })
 }
 

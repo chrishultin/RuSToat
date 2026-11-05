@@ -79,6 +79,11 @@ pub struct MessageRow {
     /// Same author as the previous message, soon after it: drawn without a
     /// name/time header.
     pub continuation: bool,
+    /// The next message doesn't continue this one: the last bubble of its
+    /// group (where the avatar goes, and the corner rounds off).
+    pub group_end: bool,
+    /// Sent by the logged-in user: drawn on the right.
+    pub mine: bool,
 }
 
 /// Consecutive messages from one author closer together than this share a header.
@@ -476,9 +481,13 @@ impl ChatStore {
                 system,
                 edited: message.edited.is_some(),
                 continuation,
+                // Fixed up below, once the next row is known.
+                group_end: true,
+                mine: message.author == self.me,
             }));
             previous = Some((message, author));
         }
+        mark_group_ends(&mut rows);
         rows
     }
 
@@ -716,6 +725,19 @@ pub fn diff_rows(old: &[TimelineRow], new: &[TimelineRow]) -> Vec<RowOp> {
         ops.push(RowOp::Append(new.len() - j));
     }
     ops
+}
+
+/// A message row ends its group unless the next row continues it.
+fn mark_group_ends(rows: &mut [TimelineRow]) {
+    for i in 0..rows.len() {
+        let next_continues = matches!(
+            rows.get(i + 1),
+            Some(TimelineRow::Message(next)) if next.continuation
+        );
+        if let TimelineRow::Message(row) = &mut rows[i] {
+            row.group_end = !next_continues;
+        }
+    }
 }
 
 /// `"{id}:{hash of body}"`, see [`MessageRow::render_key`].

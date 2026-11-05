@@ -136,6 +136,17 @@ This milestone widens `MessageRow` from text into a small display model: avatar 
 **Manual check:** In a channel with formatted messages, bold, italics, links, lists, quotes and code look right. Clicking a link opens the browser. Editing a message from another client updates the formatting live.
 **Shippable when:** Formatted messages render as formatted text, links open, and the tests pass.
 
+### Chunk 2b: Message bubbles and grouping *(inserted at the user's request after chunk 2)*
+**Goal:** Put each message in a chat bubble, built from gpui-component's `Message` / `MessageAvatar` / `MessageHeader` / `MessageContent` / `Bubble` / `BubbleContent` components. Your own messages go on the right; consecutive messages from one sender stack as one unit.
+**Files likely touched:** `src/store.rs` (`MessageRow.group_end`, `MessageRow.mine`, `mark_group_ends`), `src/ui/chat.rs` (`render_message_row` and `render_system_row`), `tests/store_history.rs`
+**Depends on:** Chunks 1 and 2
+**Design (the user chose "Chat bubbles"):**
+- Others' messages are left-aligned with `BubbleVariant::Secondary`. Yours are right-aligned with `BubbleVariant::Tinted`; `Tinted` rather than `Filled`, so link colours in Markdown stay readable.
+- The header (name and time, or "You") appears only on a group's first bubble. The avatar sits beside the group's last bubble (gpui-component anchors it to the bottom). Earlier bubbles keep an empty `MessageAvatar` slot, so they line up.
+- Corners are 16 px, except on the sender's side where bubbles meet (4 px). Each row knows its position from `continuation` (not first) and `group_end` (last). gpui-component's `BubbleGroup`/`MessageGroup` are plain stacks with no corner shaping, and a group can't be one element anyway, because `MessageScroller` renders one row per message.
+- System messages are centred, small and muted.
+**Shippable when:** Messages render as bubbles with grouping and own-message alignment, and the tests for `group_end` and `mine` pass.
+
 ### Chunk 3: Custom emoji
 **Goal:** Show server custom emoji inline in messages (`:ULID:`) instead of raw IDs, with larger "jumbo" emoji when a message is only emoji. Chunk 7's picker reuses this.
 **Files likely touched:**
@@ -164,6 +175,7 @@ This milestone widens `MessageRow` from text into a small display model: avatar 
   - `File { name, size_label, url, kind }`, where `kind` is image, video, audio or file
 - `src/ui/chat.rs`:
   - `img(url)`, sized exactly to the precomputed dimensions, with a shimmer or blank placeholder while loading
+  - *(After chunk 2b)* images go inside the message's bubble surface. A message that's only an image uses `BubbleVariant::Ghost` (no surface), so the picture isn't framed by a coloured box.
   - a file card with icon, name and size, opening in the browser on click
   - "Show image" for images over 8 MB, with per-message "revealed" state in `ChatView`
 - `src/assets.rs`: extra Lucide icons for file kinds (`File`, `FileImage`, `FileVideo`, `FileAudio`, `Download`)
@@ -215,7 +227,7 @@ This milestone widens `MessageRow` from text into a small display model: avatar 
 - `src/store.rs`:
   - `apply_react(channel, id, user, emoji, add)` and `apply_remove_reaction`
   - `ReactionChip { emoji: Unicode(String) | Custom { id, url, name }, count, mine }`, in `Message.reactions` order
-- `src/ui/chat.rs`: a chip row under the body; custom emoji chips use the chunk 3 image path
+- `src/ui/chat.rs`: reaction chips under the bubble, using gpui-component's `Bubble::reactions(BubbleReactions)` slot (which positions them on the bubble edge) added in chunk 2b. Custom emoji chips use the chunk 3 image path.
 - `tests/store_live.rs`: reaction cases
 **Depends on:** Chunk 3 (custom emoji rendering)
 **Risks:**

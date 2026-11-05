@@ -137,3 +137,50 @@ fn render_key_changes_when_the_drawn_text_changes() {
     assert_ne!(render_key(id, Some("hi")), render_key(id, None));
     assert!(render_key(id, Some("hi")).starts_with(id));
 }
+
+#[test]
+fn groups_know_where_they_end() {
+    let rows = store_with_page(50).timeline("ch-general");
+    let shape: Vec<(bool, bool)> = messages(&rows)
+        .iter()
+        .map(|m| (m.continuation, m.group_end))
+        .collect();
+    // (continues the previous one, ends its group)
+    assert_eq!(
+        shape,
+        vec![
+            (false, false), // Ada starts a group…
+            (true, true),   // …and her follow-up ends it.
+            (false, true),  // Bob, alone.
+            (false, true),  // system message
+            (false, true),  // Ada again, 16 minutes later: a new group
+            (false, true),  // bot
+            (false, true),  // webhook
+        ]
+    );
+}
+
+#[test]
+fn own_messages_are_marked_mine() {
+    let mut store = store_with_page(50);
+    // Same history, seen as Ada.
+    let mut as_ada = ChatStore::new("u-ada");
+    let Some(ServerEvent::Ready(ready)) = parse_frame(&fixture("ready.json")).pop() else {
+        panic!("ready fixture");
+    };
+    as_ada.apply_ready(*ready);
+    let page: BulkMessageResponse = serde_json::from_str(&fixture("messages_page.json")).unwrap();
+    as_ada.set_history("ch-general", page, 50);
+
+    let mine = |store: &mut ChatStore| -> Vec<bool> {
+        messages(&store.timeline("ch-general"))
+            .iter()
+            .map(|m| m.mine)
+            .collect()
+    };
+    assert!(mine(&mut store).iter().all(|m| !m));
+    assert_eq!(
+        mine(&mut as_ada),
+        vec![true, true, false, false, true, false, false]
+    );
+}

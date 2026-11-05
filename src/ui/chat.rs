@@ -6,7 +6,11 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use gpui_kit::assets::IconName;
+use gpui_kit::component::bubble::{Bubble, BubbleContent, BubbleVariant};
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::message::{
+    Message as MessageLayout, MessageAlignment, MessageAvatar, MessageContent, MessageHeader,
+};
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::tooltip::Tooltip;
@@ -797,6 +801,10 @@ impl ChatView {
                                     pane.scroller.clone(),
                                     move |ix, _window, _cx| render_row(&rows[ix], colors),
                                 )
+                                // The scroller's default rows are spaced for whole
+                                // chat turns (`pb_8` under every row, plus `px_3`).
+                                // Ours are single messages, which space themselves.
+                                .with_row_style(StyleRefinement::default().pb(px(0.)).px(px(0.)))
                                 .flex_1(),
                             )
                             .when_some(older, |el, pill| {
@@ -862,8 +870,8 @@ struct RowColors {
     avatar_fg: Hsla,
 }
 
-/// Width of the avatar column in the message list.
-const AVATAR_SIZE: f32 = 36.;
+/// Matches gpui-component's message avatar slot (`size-8`).
+const AVATAR_SIZE: f32 = 32.;
 
 /// A round avatar, falling back to the name's initial while it loads, if it
 /// fails, or if there's no image.
@@ -928,71 +936,69 @@ fn render_row(row: &TimelineRow, colors: RowColors) -> AnyElement {
 }
 
 fn render_system_row(message: &MessageRow, colors: RowColors) -> AnyElement {
+    // Centred between the two sides of the conversation.
     h_flex()
+        .w_full()
+        .justify_center()
         .px_4()
-        .py_1()
-        .gap_3()
-        .text_sm()
+        .py_1p5()
+        .gap_2()
+        .text_xs()
         .text_color(colors.system)
-        .child(
-            div()
-                .w(px(AVATAR_SIZE))
-                .flex_none()
-                .flex()
-                .justify_center()
-                .child("→"),
-        )
         .child(
             div()
                 .italic()
                 .child(message.body.clone().unwrap_or_default()),
         )
-        .child(div().text_xs().child(message.time.clone()))
+        .child(div().child(message.time.clone()))
         .into_any_element()
 }
 
+/// Vertical space above the first bubble of a group (between senders).
+const GROUP_GAP: f32 = 8.;
+/// Vertical space between consecutive bubbles from one sender.
+const BUBBLE_GAP: f32 = 2.;
+/// Space between a group's name/time header and its first bubble.
+const HEADER_GAP: f32 = 2.;
+
+/// Corner radius where a bubble isn't touching a neighbour from its sender.
+const BUBBLE_RADIUS: f32 = 16.;
+/// Corner radius where consecutive bubbles from one sender meet.
+const JOINED_RADIUS: f32 = 4.;
+
 fn render_message_row(message: &MessageRow, colors: RowColors) -> AnyElement {
-    // Continuation rows keep an empty gutter so their text lines up.
-    let gutter = div()
-        .w(px(AVATAR_SIZE))
-        .flex_none()
-        .when(!message.continuation, |el| {
-            el.child(avatar(
-                message.avatar.clone(),
-                &message.author,
-                AVATAR_SIZE,
-                colors.avatar_bg,
-                colors.avatar_fg,
-            ))
-        });
-    let content = v_flex()
-        .flex_1()
-        .min_w_0()
-        .when(!message.continuation, |el| {
-            el.child(
-                h_flex()
-                    .gap_2()
-                    .items_baseline()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(message.author.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.muted)
-                            .child(message.time.clone()),
-                    ),
-            )
-        })
+    let first = !message.continuation;
+    let last = message.group_end;
+    let alignment = if message.mine {
+        MessageAlignment::End
+    } else {
+        MessageAlignment::Start
+    };
+
+    // The corners on the sender's side flatten where bubbles from the same
+    // person stack, so a group reads as one unit.
+    let round = px(BUBBLE_RADIUS);
+    let top = px(if first { BUBBLE_RADIUS } else { JOINED_RADIUS });
+    let bottom = px(if last { BUBBLE_RADIUS } else { JOINED_RADIUS });
+    let surface = if message.mine {
+        BubbleContent::new()
+            .rounded_tl(round)
+            .rounded_bl(round)
+            .rounded_tr(top)
+            .rounded_br(bottom)
+    } else {
+        BubbleContent::new()
+            .rounded_tr(round)
+            .rounded_br(round)
+            .rounded_tl(top)
+            .rounded_bl(bottom)
+    };
+    let surface = surface
         .when_some(message.body.clone(), |el, body| {
             el.child(
                 // Keyed by `render_key`, so an edit (or a renamed mention)
                 // gets a fresh parse instead of the cached one.
                 TextView::markdown(SharedString::from(message.render_key.clone()), body)
-                    .w_full()
                     .text_sm()
                     .selectable(true)
                     .on_link_click(|url, _, _, cx| {
@@ -1002,25 +1008,60 @@ fn render_message_row(message: &MessageRow, colors: RowColors) -> AnyElement {
                         }
                     }),
             )
-            .when(message.edited, |el| {
-                el.child(div().text_xs().text_color(colors.muted).child("(edited)"))
-            })
         })
         .children(message.attachments.iter().map(|name| {
             div()
                 .text_sm()
                 .text_color(colors.muted)
                 .child(format!("[attachment: {name}]"))
-        }));
-    h_flex()
-        .w_full()
-        .items_start()
-        .gap_3()
+        }))
+        .when(message.edited, |el| {
+            el.child(div().text_xs().text_color(colors.muted).child("(edited)"))
+        });
+
+    let bubble = Bubble::new()
+        .with_variant(if message.mine {
+            BubbleVariant::Tinted
+        } else {
+            BubbleVariant::Secondary
+        })
+        .content(surface);
+
+    // The avatar sits beside the last bubble of a group; earlier ones keep
+    // the empty slot so the bubbles line up.
+    let avatar_slot = if last {
+        MessageAvatar::new().child(avatar(
+            message.avatar.clone(),
+            &message.author,
+            AVATAR_SIZE,
+            colors.avatar_bg,
+            colors.avatar_fg,
+        ))
+    } else {
+        MessageAvatar::new()
+    };
+
+    let header = first.then(|| {
+        let name = if message.mine {
+            "You".to_string()
+        } else {
+            message.author.clone()
+        };
+        MessageHeader::new()
+            .child(div().font_weight(FontWeight::SEMIBOLD).child(name))
+            .child(div().text_color(colors.muted).child(message.time.clone()))
+    });
+
+    MessageLayout::new()
+        .alignment(alignment)
+        .avatar_slot(avatar_slot)
+        .when_some(header, |el, header| el.header(header))
+        .content(MessageContent::new().bubble(bubble))
+        // The name/time header sits right above its bubble (default gap is 10 px).
+        .with_stack_style(StyleRefinement::default().gap(px(HEADER_GAP)))
         .px_4()
-        .when(!message.continuation, |el| el.pt_3())
-        .pb_0p5()
-        .child(gutter)
-        .child(content)
+        // Space between groups; bubbles within a group sit close together.
+        .pt(px(if first { GROUP_GAP } else { BUBBLE_GAP }))
         .into_any_element()
 }
 
