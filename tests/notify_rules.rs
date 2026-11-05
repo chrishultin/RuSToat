@@ -317,3 +317,39 @@ fn muted_channels_hide_their_dot_but_keep_mentions() {
     assert!(!alpha.unread);
     assert_eq!(alpha.mentions, 1);
 }
+
+#[test]
+fn attention_count_is_mentions_plus_unread_conversations() {
+    // The fixture has no read positions, so dm-ada, dm-bob and grp-weekend
+    // (all with messages, level "all" by default) are unread: 3.
+    let mut store = default_store();
+    assert_eq!(store.attention_count(), 3);
+
+    // A server mention adds one; a plain server message doesn't.
+    store.apply_message(message("ch-random", "u-ada", mention()));
+    let mut plain = message("ch-general", "u-ada", serde_json::json!({}));
+    plain.id = "01JC00000000000000000000ZY".into();
+    store.apply_message(plain);
+    assert_eq!(store.attention_count(), 4);
+
+    // A DM with two mentions counts as two, not three.
+    let mut second = message("dm-ada", "u-ada", mention());
+    second.id = "01JC00000000000000000000ZX".into();
+    store.apply_message(message("dm-ada", "u-ada", mention()));
+    store.apply_message(second);
+    assert_eq!(store.attention_count(), 5);
+
+    // Reading it drops it.
+    store.apply_ack("dm-ada", "01JC00000000000000000000ZZ");
+    assert_eq!(store.attention_count(), 3);
+}
+
+#[test]
+fn attention_count_skips_muted_and_mention_only_conversations() {
+    let store = store(
+        r#"{"channel_mutes":{"dm-bob":{}},"channel":{"grp-weekend":"mention"}}"#,
+        None,
+    );
+    // Only dm-ada is left: dm-bob is muted, the group only counts mentions.
+    assert_eq!(store.attention_count(), 1);
+}

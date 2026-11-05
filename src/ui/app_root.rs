@@ -194,6 +194,8 @@ impl AppRoot {
         })
         .detach();
 
+        // Nothing to attend to once logged out.
+        crate::dock::set_badge(0);
         // Replacing the chat screen drops its events connection.
         self.screen = Self::login_screen(&self.client, window, cx);
         cx.notify();

@@ -183,15 +183,34 @@ impl ChatStore {
             .into_iter()
             .filter(|u| u.id.user == self.me)
             .map(|u| {
+                // A mention at or before the read position has been read.
+                let mentions = u
+                    .mentions
+                    .into_iter()
+                    .filter(|m| u.last_id.as_deref().is_none_or(|last| m.as_str() > last))
+                    .collect();
                 (
                     u.id.channel,
                     ReadState {
                         last_id: u.last_id,
-                        mentions: u.mentions.into_iter().collect(),
+                        mentions,
                     },
                 )
             })
             .collect();
+        for (id, state) in &self.read_states {
+            if !state.mentions.is_empty()
+                && matches!(
+                    self.channels.get(id),
+                    Some(Channel::DirectMessage { active: false, .. })
+                )
+            {
+                log::debug!(
+                    "closed DM {id} has {} unread mention(s); not counted",
+                    state.mentions.len()
+                );
+            }
+        }
 
         let mut seen = HashSet::new();
         self.server_order = ready
@@ -434,6 +453,73 @@ impl ChatStore {
         }
         let online = self.users.get(&self.me).is_some_and(|u| u.online);
         online && has_flag(message.flags, MessageFlags::MentionsOnline)
+    }
+
+    /// The Dock badge count: unread mentions everywhere, plus each unread DM
+    /// or group whose level is "all" (once, even if it also has mentions).
+    /// Muted channels don't count.
+    pub fn attention_count(&self) -> usize {
+        self.attention_breakdown().iter().map(|(_, n)| n).sum()
+    }
+
+    /// What [`Self::attention_count`] is made of: (channel label, count) for
+    /// every channel that contributes. For debugging the Dock badge.
+    pub fn attention_breakdown(&self) -> Vec<(String, usize)> {
+        let mut parts: Vec<(String, usize)> = self
+            .channels
+            .iter()
+            .map(|(id, channel)| (id, self.attention_for(id, channel)))
+            .filter(|(_, n)| *n > 0)
+            .map(|(id, n)| {
+                let entry = self.channel_entry(id);
+                let label = match (entry, self.server_of(id).and_then(|s| self.servers.get(s))) {
+                    (Some(entry), Some(server)) => format!("#{} ({})", entry.name, server.name),
+                    (Some(entry), None) => format!("{:?} {}", entry.kind, entry.name),
+                    (None, _) => id.clone(),
+                };
+                let read = self
+                    .read_states
+                    .get(id.as_str())
+                    .map_or("no read position", |s| {
+                        if s.last_id.is_some() {
+                            "behind"
+                        } else {
+                            "never read"
+                        }
+                    });
+                (
+                    format!(
+                        "{label} [{id}, {read}, {} mentions]",
+                        self.mention_count(id)
+                    ),
+                    n,
+                )
+            })
+            .collect();
+        parts.sort();
+        parts
+    }
+
+    /// One channel's share of [`Self::attention_count`].
+    fn attention_for(&self, id: &str, channel: &Channel) -> usize {
+        // Closed DMs aren't listed anywhere, so the user can't read them; an
+        // old mention left in one must not pin the badge.
+        if self.is_muted(id) || matches!(channel, Channel::DirectMessage { active: false, .. }) {
+            return 0;
+        }
+        let mentions = self.mention_count(id);
+        let conversation = matches!(
+            channel,
+            Channel::DirectMessage { .. } | Channel::Group { .. }
+        );
+        if conversation
+            && self.is_unread(id)
+            && self.notifications.level(id, None) == notify::Level::All
+        {
+            mentions.max(1)
+        } else {
+            mentions
+        }
     }
 
     /// Unread state for the Home button: open DMs and groups.

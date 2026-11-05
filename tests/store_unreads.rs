@@ -250,3 +250,34 @@ fn a_server_ack_clears_every_channel_in_it() {
     // DMs aren't part of a server.
     assert!(store.is_unread("dm-ada"));
 }
+
+#[test]
+fn a_closed_dm_with_an_old_mention_doesnt_pin_the_badge() {
+    // Seen live: a closed DM (not listed anywhere, so it can't be read) still
+    // had one unread mention in Stoat's read state, keeping the badge at 1.
+    let base = store().attention_count();
+    let with_closed = store_with(ready(), |r| {
+        r.unreads.push(unread(
+            "dm-closed",
+            "u-me",
+            Some("01JC0000000000000000000001"),
+            &["01JC0000000000000000000003"],
+        ))
+    });
+    assert_eq!(with_closed.mention_count("dm-closed"), 1);
+    assert_eq!(with_closed.attention_count(), base);
+}
+
+#[test]
+fn mentions_at_or_before_the_read_position_are_already_read() {
+    let store = store_with(ready(), |r| {
+        r.unreads[1] = unread(
+            "dm-ada",
+            "u-me",
+            Some(DM_ADA_LAST),
+            &["01JC0000000000000000000002", DM_ADA_LAST],
+        )
+    });
+    assert_eq!(store.mention_count("dm-ada"), 0);
+    assert!(!store.is_unread("dm-ada"));
+}

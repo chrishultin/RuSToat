@@ -167,3 +167,44 @@ _Same worktree and branch as chunk 2 (`feature/mark-as-read`), stacked on `8df2c
 
 ### Manual Validation
 The user tested toasts in the running worktree build and confirmed "Works".
+
+## Chunk 4: Dock badge
+
+_Same worktree and branch (`feature/mark-as-read`), stacked on `5f075fb`._
+
+### Changes Made
+- `Cargo.toml`: macOS-only target dependencies at the versions GPUI already uses, so nothing new is built:
+  - `objc2 = "0.6"`
+  - `objc2-foundation` 0.3 with `NSString`
+  - `objc2-app-kit` 0.3 with `NSApplication`, `NSDockTile` and `NSResponder`
+- `src/dock.rs` (new):
+  - `badge_label(count)`: nothing at 0, the number for 1 to 99, "99+" past 99.
+  - `set_badge(count)`: `NSApplication::sharedApplication(mtm).dockTile().setBadgeLabel(…)`. It needs a `MainThreadMarker` and logs and skips if it isn't on the main thread. All the AppKit calls used are safe in objc2-app-kit 0.3, so there's no `unsafe`. It's a no-op off macOS.
+  - Unit test for the labels.
+- `src/store.rs`: `attention_count()` (Assumption 5) is the sum over channels of:
+  - 0 if muted
+  - otherwise the unread mention count, except that an unread DM or group whose level is `All` counts `max(mentions, 1)`, so it's counted once even with mentions
+- `src/ui/chat.rs`: `ChatView.dock_badge` remembers the last count shown. `render` recomputes `attention_count()` and calls `dock::set_badge` only when it changes. Every unread or ack change already re-renders.
+- `src/ui/app_root.rs`: `log_out` clears the badge.
+- `tests/notify_rules.rs`: +2 tests:
+  - `attention_count_is_mentions_plus_unread_conversations`: the base of 3 unread conversations, a server mention adds 1, a plain server message adds 0, a DM with 2 mentions counts 2, and reading it drops it
+  - `…_skips_muted_and_mention_only_conversations`
+
+### Divergences
+- None in approach. Main-thread safety is by construction: badge updates happen in `render`, which GPUI runs on the main thread. `MainThreadMarker::new()` guards it anyway.
+- **Bug found in live testing, fixed: the badge stuck at 1.** The user marked everything read, and the badge still showed 1.
+  - **Diagnosis:** I added a debug breakdown (`ChatStore::attention_breakdown()`, logged as `dock badge: N` plus `+n <channel> [id, read state, mentions]` on each change). It showed a single contributor: `+1 DirectMessage <contact> [<closed-DM-id>, behind, 1 mentions]`.
+  - **Cause:** a **closed DM** (`active: false`). It isn't listed in Home, so it can't be opened and read, yet it kept an unread mention in Stoat's read state. `attention_for` skipped closed DMs' unread dot but still counted their mentions.
+  - **Fixes:**
+    - Closed DMs contribute 0.
+    - In `apply_ready`, mentions at or before a channel's `last_id` are dropped as already read, a defensive fix for a second possible cause.
+    - A debug line names any closed DM whose mentions are being ignored.
+  - **Regression tests:** `a_closed_dm_with_an_old_mention_doesnt_pin_the_badge` (it fails without the fix, because the closed DM adds 1) and `mentions_at_or_before_the_read_position_are_already_read`.
+
+### Verification Performed
+- `cargo test`: 146 passed, 0 failed, 5 ignored. That's 144 before the stuck-badge fix, plus its 2 regression tests. `cargo clippy --all-targets -- -D warnings`: clean. `cargo fmt`: applied.
+- Live: relaunched the worktree build (`cargo run`, not bundled). The first run showed the stuck badge described above. On the relaunch with the fix, Ready logged `closed DM <closed-DM-id> has 1 unread mention(s); not counted`, and no `dock badge:` line followed, so the count stayed at 0.
+
+### Manual Validation
+- The user saw the Dock badge appear. It first showed the wrong count, because of the stuck-at-1 bug above.
+- After the fix, with everything read, the user confirmed the badge is cleared ("lgtm").

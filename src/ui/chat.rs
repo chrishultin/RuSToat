@@ -89,6 +89,8 @@ pub struct ChatView {
     /// The one read-acknowledgement waiting to go out: (channel, message, task).
     /// Replacing it (newer message, other channel) cancels the old one.
     pending_ack: Option<(String, String, Task<()>)>,
+    /// The count last shown on the Dock icon, to only touch AppKit on change.
+    dock_badge: usize,
     _connection: Connection,
     _events: Task<()>,
     _root: Task<()>,
@@ -161,6 +163,7 @@ impl ChatView {
             loading_older: HashMap::new(),
             older_errors: HashMap::new(),
             pending_ack: None,
+            dock_badge: 0,
             _connection: connection,
             _events: events,
             _root: root,
@@ -1438,6 +1441,16 @@ impl Render for ChatView {
                 this.maybe_load_older(&channel, cx);
                 this.maybe_ack_current(window, cx);
             });
+        }
+        // Every unread change re-renders, so the Dock badge follows along.
+        let attention = self.store.attention_count();
+        if attention != self.dock_badge {
+            log::debug!("dock badge: {attention}");
+            for (channel, count) in self.store.attention_breakdown() {
+                log::debug!("  +{count} {channel}");
+            }
+            crate::dock::set_badge(attention);
+            self.dock_badge = attention;
         }
         let theme = cx.theme();
         h_flex()
