@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use gpui_kit::*;
+use stoat_gpui::accounts::{AccountsFile, FileAccounts, MemoryAccounts};
 use stoat_gpui::session::{KeychainStore, TokenStore};
 use stoat_gpui::{runtime, ui};
 
@@ -47,8 +48,18 @@ fn main() {
             };
 
             let store: Arc<dyn TokenStore> = Arc::new(KeychainStore::new());
+            let accounts: Arc<dyn AccountsFile> = match FileAccounts::in_config_dir() {
+                Some(file) => {
+                    log::debug!("account list: {}", file.path().display());
+                    Arc::new(file)
+                }
+                None => {
+                    log::warn!("no config directory; accounts won't be remembered");
+                    Arc::new(MemoryAccounts::default())
+                }
+            };
             let (window, root) = gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| ui::AppRoot::new(store, window, cx))
+                cx.new(|cx| ui::AppRoot::new(store, accounts, window, cx))
             })
             .expect("failed to open the main window");
 

@@ -48,13 +48,15 @@ The app talks to the official instance, `https://api.stoat.chat`, by default. Po
 STOAT_API_URL=https://stoat.example.com/api cargo run
 ```
 
-Saved sessions are stored per API URL, so switching instances never sends one server's token to another.
+Each saved session remembers its own instance, so a token is never sent to another server. While there's a saved account, the app restores that one; `STOAT_API_URL` only picks the instance you log in to.
 
 ## Your session and the Keychain
 
-After you log in, the session token is saved in your login Keychain under the service `chat.stoat.gpui-poc`, with the API URL as the account. The next launch signs you in automatically.
+After you log in, the session token is saved in your login Keychain under the service `chat.stoat.gpui-poc`, with `{API URL}#{user ID}` as the account. The next launch signs you in automatically. A session saved by an older version (whose Keychain account is just the API URL) is picked up as it is.
 
-- **Log Out** (in the Stoat menu, or the button in the window) removes the Keychain item and ends the session on Stoat. If Stoat can't be reached, you're still logged out locally; revoke the session from Stoat's Settings → Sessions, where it's listed as "Stoat GPUI POC".
+The list of accounts is kept, without tokens, in `~/Library/Application Support/chat.stoat.rustoat/accounts.json`.
+
+- **Log Out** (in the Stoat menu, or the button in the window) removes the account, deletes its Keychain item and ends the session on Stoat. If Stoat can't be reached, you're still logged out locally; revoke the session from Stoat's Settings → Sessions, where it's listed as "Stoat GPUI POC".
 - **Expect a Keychain prompt during development.** macOS ties Keychain access to the app's code signature, and every `cargo build` produces a new unsigned binary. After a rebuild, macOS may ask whether `stoat-gpui` can use the saved item. Choose **Always Allow**. This is expected and won't happen with a signed release build.
 - If your saved session can't be checked at startup (offline, or a Stoat outage), the app keeps it and offers **Retry**. It only discards a saved session that Stoat itself rejects.
 

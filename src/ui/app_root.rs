@@ -4,15 +4,17 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{ActiveTheme, Theme, h_flex, v_flex};
 use gpui_kit::*;
 
+use crate::accounts::{self, AccountList, AccountsFile};
 use crate::api::StoatClient;
 use crate::runtime::spawn_io;
 use crate::session::{self, Restored, TokenStore};
+use crate::store::display_name;
 use crate::ui::chat::{ChatEvent, ChatView};
 use crate::ui::login::{LoginEvent, LoginView};
 
 /// What the main window is showing.
 enum Screen {
-    /// Checking a saved session token at startup.
+    /// Loading the account list, then checking a saved session token.
     Restoring { _task: Task<()> },
     Login {
         view: Entity<LoginView>,
@@ -29,14 +31,24 @@ enum Screen {
 
 /// Top-level view for the main window: routes between login and chat.
 pub struct AppRoot {
+    /// The default instance, for logging in (`STOAT_API_URL`, or the official one).
     client: StoatClient,
     store: Arc<dyn TokenStore>,
+    accounts_file: Arc<dyn AccountsFile>,
+    accounts: AccountList,
+    /// The account on screen (its ID), once there is one.
+    current: Option<String>,
     screen: Screen,
     _appearance: Subscription,
 }
 
 impl AppRoot {
-    pub fn new(store: Arc<dyn TokenStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        store: Arc<dyn TokenStore>,
+        accounts_file: Arc<dyn AccountsFile>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // Follow the macOS light/dark setting, now and when it changes.
         Theme::sync_system_appearance(Some(window), cx);
         let appearance = cx.observe_window_appearance(window, |_, window, cx| {
@@ -44,28 +56,86 @@ impl AppRoot {
         });
 
         let client = StoatClient::from_env();
-        log::info!("using Stoat API at {}", client.base_url());
-        let screen = Self::restoring_screen(&client, &store, window, cx);
+        log::info!("default Stoat API: {}", client.base_url());
+        // Read here (it's a small file). Only a first launch needs the
+        // Keychain, to adopt a session saved by an older version. An
+        // unreadable list is left as it is until something is saved.
+        let (saved, first_launch) = match accounts_file.load() {
+            Ok(Some(list)) => (list, false),
+            Ok(None) => (AccountList::default(), true),
+            Err(err) => {
+                log::warn!("couldn't read the account list; starting without one: {err:#}");
+                (AccountList::default(), false)
+            }
+        };
+        let migrate = first_launch.then(|| {
+            spawn_io(accounts::migrate_legacy(
+                store.clone(),
+                client.base_url().into(),
+            ))
+        });
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let adopted = match migrate {
+                Some(migrate) => Some(migrate.await.unwrap_or_default()),
+                None => None,
+            };
+            this.update_in(cx, |this, window, cx| {
+                if let Some(accounts) = adopted {
+                    this.accounts = accounts;
+                    this.save_accounts();
+                }
+                this.show_active(window, cx);
+            })
+            .ok();
+        });
 
         Self {
             client,
             store,
-            screen,
+            accounts_file,
+            accounts: saved,
+            current: None,
+            screen: Screen::Restoring { _task: task },
             _appearance: appearance,
         }
     }
 
-    fn restoring_screen(
-        client: &StoatClient,
-        store: &Arc<dyn TokenStore>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Screen {
-        let request = spawn_io(session::restore(store.clone(), client.clone()));
+    /// Write the account list. It's tiny, so this runs here rather than on the
+    /// IO runtime, which also keeps writes in order. A failure is logged: the
+    /// accounts work for now but won't be restored next launch.
+    fn save_accounts(&self) {
+        if let Err(err) = self.accounts_file.save(&self.accounts) {
+            log::warn!("couldn't save the account list: {err:#}");
+        }
+    }
+
+    /// A client for an account's instance, without a token.
+    fn client_for(&self, id: &str) -> StoatClient {
+        match self.accounts.get(id) {
+            Some(entry) => StoatClient::new(entry.instance.clone()),
+            None => self.client.clone(),
+        }
+    }
+
+    /// Show the active account (restoring its session), or the login screen
+    /// if there are none.
+    fn show_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.current = self.accounts.active_entry().map(|entry| entry.id.clone());
+        self.screen = match self.current.clone() {
+            Some(id) => self.restoring_screen(id, window, cx),
+            None => Self::login_screen(&self.client, window, cx),
+        };
+        cx.notify();
+    }
+
+    fn restoring_screen(&self, id: String, window: &mut Window, cx: &mut Context<Self>) -> Screen {
+        let client = self.client_for(&id);
+        log::info!("restoring {id}");
+        let request = spawn_io(session::restore(self.store.clone(), client, id.clone()));
         let task = cx.spawn_in(window, async move |this, cx| {
             let restored = request.await;
             this.update_in(cx, |this, window, cx| {
-                this.finish_restore(restored, window, cx)
+                this.finish_restore(id, restored, window, cx)
             })
             .ok();
         });
@@ -74,13 +144,27 @@ impl AppRoot {
 
     fn finish_restore(
         &mut self,
+        id: String,
         restored: anyhow::Result<Restored>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.screen = match restored {
-            Ok(Restored::SignedIn { token, user }) => self.chat_screen(token, user.id, window, cx),
-            Ok(Restored::NeedsLogin) => Self::login_screen(&self.client, window, cx),
+            Ok(Restored::SignedIn { token, user }) => {
+                if self.accounts.set_user(&id, &user.id, display_name(&user)) {
+                    self.save_accounts();
+                }
+                self.chat_screen(&id, token, user.id, window, cx)
+            }
+            Ok(Restored::NeedsLogin) => {
+                // An adopted old session we never identified has nothing left
+                // to show once its token is gone, so forget it.
+                if self.accounts.get(&id).is_some_and(|a| a.user_id.is_none()) {
+                    self.accounts.remove(&id);
+                    self.save_accounts();
+                }
+                Self::login_screen(&self.client, window, cx)
+            }
             Ok(Restored::Unverified { token, error }) => Screen::Offline {
                 token,
                 error: error.to_string().into(),
@@ -108,12 +192,13 @@ impl AppRoot {
 
     fn chat_screen(
         &self,
+        id: &str,
         token: String,
         me: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Screen {
-        let client = self.client.with_token(token.clone());
+        let client = self.client_for(id).with_token(token.clone());
         let view = cx.new(|cx| ChatView::new(client, me, window, cx));
         let events = cx.subscribe_in(&view, window, |this, _, event, window, cx| match event {
             ChatEvent::LogOutRequested => this.log_out(window, cx),
@@ -134,7 +219,7 @@ impl AppRoot {
         }
     }
 
-    /// Fresh login: remember the token and open the chat.
+    /// Fresh login: add the account, remember the token and open the chat.
     fn logged_in(
         &mut self,
         token: String,
@@ -142,9 +227,16 @@ impl AppRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let id = self
+            .accounts
+            .add_or_update(self.client.base_url(), &me, None);
+        self.accounts.set_active(&id);
+        self.save_accounts();
+        self.current = Some(id.clone());
+
         let save = spawn_io(session::remember(
             self.store.clone(),
-            self.client.base_url().to_string(),
+            id.clone(),
             token.clone(),
         ));
         cx.spawn(async move |_, _| match save.await {
@@ -156,26 +248,36 @@ impl AppRoot {
         })
         .detach();
 
-        self.screen = self.chat_screen(token, me, window, cx);
+        self.screen = self.chat_screen(&id, token, me, window, cx);
         cx.notify();
     }
 
     fn retry_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.screen = Self::restoring_screen(&self.client, &self.store, window, cx);
+        let Some(id) = self.current.clone() else {
+            return;
+        };
+        self.screen = self.restoring_screen(id, window, cx);
         cx.notify();
     }
 
-    /// Forget the saved session, end it on the server, and show the login screen.
+    /// Forget the account and its saved session, end it on the server, and
+    /// show the login screen.
     pub fn log_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let token = match &self.screen {
             Screen::Chat { token, .. } | Screen::Offline { token, .. } => token.clone(),
             Screen::Restoring { .. } | Screen::Login { .. } => return,
         };
+        let Some(id) = self.current.take() else {
+            return;
+        };
 
         let request = spawn_io(session::log_out(
             self.store.clone(),
-            self.client.with_token(token),
+            self.client_for(&id).with_token(token),
+            id.clone(),
         ));
+        self.accounts.remove(&id);
+        self.save_accounts();
         // Keep the IO alive after the screen changes; dropping it would cancel it.
         cx.spawn(async move |_, _| match request.await {
             Ok((server, local)) => {
