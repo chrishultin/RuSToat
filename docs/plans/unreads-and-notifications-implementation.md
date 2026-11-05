@@ -237,7 +237,7 @@ _Same worktree and branch (`feature/mark-as-read`), stacked on `5f075fb`._
 ### Divergences
 - **Permission is requested at login, not on the first banner.** GPUI requests authorization lazily inside its first `show_system_notification`. A banner posted while the prompt is still up is likely refused, so the first notification would be lost. `banners::request_permission()` asks up front instead, using the crate GPUI uses. It also gives the "detect what's possible and log it" from the plan's Risks: a denial is logged and routes notices to toasts rather than silently dropping them.
 - **Dismissal is keyed on the read position, not "the channel was acked".** The view tracks channel → bannered message and dismisses once `has_read` passes it. That covers every way a channel gets read (here, other sessions, posting, server Mark as read) without hooking each path. It also avoids `is_unread`, which is always false for closed DMs and would dismiss their banners at once.
-- **Merged `main` before this chunk** (`858ba36`) at the user's request, to bring in the formatting session's `2482a73`: line breaks, quote endings and `$$` KaTeX. The only conflict was `Cargo.lock`'s dependency list. After the merge: 160 tests passed, and clippy was clean.
+- **Merged `main` before this chunk** (`c4873e2`) at the user's request, to bring in the formatting session's `2482a73`: line breaks, quote endings and `$$` KaTeX. The only conflict was `Cargo.lock`'s dependency list. After the merge: 160 tests passed, and clippy was clean.
 - **Bug found in the manual check, fixed: a DM opened just now never notified.** The user's test DM came from another account opening a brand-new DM. The log showed three `live: new message … in <new-DM-id>` lines, but no `notify:` or `banner:` line. Going by its ULID, the channel was created about 4 s before its first message.
   - **Cause:** RuSToat ignored `ChannelCreate` and `ChannelUpdate`. Unknown events are only logged at `trace`. So the store never learned about the channel, and `should_notify` returned early (`store.channel(&message.channel)?`). The new DM also never appeared in Home. Stoat creates a DM closed and opens it as the first message goes out, which RuSToat also missed.
   - **Fix:**
@@ -262,15 +262,17 @@ _Same worktree and branch (`feature/mark-as-read`), stacked on `5f075fb`._
 
 ## Summary
 
-_Completed: 2026-11-04, on `feature/mark-as-read` (worktree `.claude/worktrees/mark-as-read`). Not yet merged into `main`, and not pushed._
+_Completed: 2026-11-04, on `feature/mark-as-read` (worktree `.claude/worktrees/mark-as-read`). Fast-forwarded into `main` afterwards; the worktree and branch were then removed._
+
+_Before the first push to the public GitHub repo, history was rewritten (`git filter-branch`, then re-signed with `git commit-tree -S`) to replace personal details copied from live logs with placeholders: `<contact>`, `<closed-DM-id>`, `<new-DM-id>` and `<test-account>`. Commits whose content didn't change keep their original hashes and signatures. The four that changed got new hashes: chunk 4, the merge, chunk 5 and this summary. The hashes below are the rewritten ones._
 
 ### Chunks Completed
 1. Unread indicators: bold and dot, plus mention counts per channel, server and Home, from `Ready.channel_unreads` and live messages (`efda345`).
 2. Mark as read: a debounced auto-ack while viewing at the bottom of a focused window, `ChannelAck` from other sessions, and server Mark as read (`8df2cfe`).
 3. Notification rules and in-app toasts, following the web client's settings, mutes, presence and skip rules (`5f075fb`).
-4. Dock badge for the attention count; closed DMs and stale mentions excluded (`cb7769e`).
-5. macOS banners from an ad-hoc-signed app bundle, with click-to-open and dismiss-on-read, plus `ChannelCreate`/`ChannelUpdate` handling (`4f85ecf`).
-- Plus `858ba36`, which merges `main` (the formatting session's `2482a73`) into the branch before chunk 5.
+4. Dock badge for the attention count; closed DMs and stale mentions excluded (`f7a3f03`).
+5. macOS banners from an ad-hoc-signed app bundle, with click-to-open and dismiss-on-read, plus `ChannelCreate`/`ChannelUpdate` handling (`73a5040`).
+- Plus `c4873e2`, which merges `main` (the formatting session's `2482a73`) into the branch before chunk 5.
 
 ### Divergences
 - **Chunk 1:**
@@ -309,7 +311,7 @@ The user confirmed all eight plan-level manual tests:
 - Tests 2, 3, 4, 5 and 8 in a final unbundled run ("All pass"). That run's log shows the toast fallback (`notify: @<test-account> | …`), the badge going 1 → 0, and the ack.
 
 ### Remaining Manual Steps
-- Merge `feature/mark-as-read` into `main`, when the user decides to.
+- None for this plan.
 - Known limits, deliberately out of scope:
   - Presence changes mid-session apply after a reconnect (`UserUpdate` isn't handled).
   - `ChannelDelete` isn't handled; a deleted channel stays listed until a restart.
