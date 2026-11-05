@@ -8,6 +8,10 @@ pub const MAX_QUERY_CHARS: usize = 64;
 /// no "load more": a search that matches more than this shows the first page.
 pub const RESULT_LIMIT: i64 = 50;
 
+/// How many pinned messages are asked for (the most Stoat allows). A channel
+/// with more shows its newest.
+pub const PINS_LIMIT: i64 = 100;
+
 /// What a search box's text amounts to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryCheck {

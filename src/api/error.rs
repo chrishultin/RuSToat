@@ -60,6 +60,15 @@ impl ApiError {
         }
     }
 
+    /// Stoat says the message is already in the state a pin or unpin asked
+    /// for (`AlreadyPinned`, `NotPinned`): someone else got there first.
+    pub fn pin_already_done(&self) -> bool {
+        matches!(
+            self.error_type(),
+            Some(ErrorType::AlreadyPinned | ErrorType::NotPinned)
+        )
+    }
+
     /// The Stoat error type, if the server sent one.
     pub fn error_type(&self) -> Option<&ErrorType> {
         match self {
@@ -85,6 +94,8 @@ fn describe(error: &ErrorType) -> String {
         ErrorType::CaptchaFailed => {
             "Stoat asked for a captcha, which this client can't show yet.".into()
         }
+        ErrorType::AlreadyPinned => "That message is already pinned.".into(),
+        ErrorType::NotPinned => "That message isn't pinned.".into(),
         other => {
             let name: &'static str = other.into();
             format!("Stoat returned an error: {name}")
@@ -153,5 +164,19 @@ mod tests {
     fn unmapped_error_types_fall_back_to_variant_name() {
         let err = ApiError::from_response(StatusCode::FORBIDDEN, br#"{"type":"Blacklisted"}"#);
         assert_eq!(err.to_string(), "Stoat returned an error: Blacklisted");
+    }
+
+    #[test]
+    fn pin_errors_are_told_apart_from_the_rest() {
+        let pinned =
+            ApiError::from_response(StatusCode::BAD_REQUEST, br#"{"type":"AlreadyPinned"}"#);
+        let unpinned = ApiError::from_response(StatusCode::BAD_REQUEST, br#"{"type":"NotPinned"}"#);
+        let other =
+            ApiError::from_response(StatusCode::BAD_REQUEST, br#"{"type":"InvalidOperation"}"#);
+        assert!(pinned.pin_already_done());
+        assert!(unpinned.pin_already_done());
+        assert!(!other.pin_already_done());
+        assert!(!ApiError::Unauthorized.pin_already_done());
+        assert_eq!(pinned.to_string(), "That message is already pinned.");
     }
 }

@@ -54,6 +54,20 @@ pub fn can_view(store: &ChatStore, user: &str, channel: &str) -> bool {
     )
 }
 
+/// Whether `user` can pin and unpin messages in `channel`: anyone in a DM
+/// (either person may), otherwise those with Manage Messages. Stoat decides
+/// in the same way when the request arrives.
+pub fn can_pin(store: &ChatStore, user: &str, channel: &str) -> bool {
+    match store.channel(channel) {
+        Some(Channel::DirectMessage { .. }) => true,
+        Some(_) => has(
+            channel_permissions(store, user, channel),
+            ChannelPermission::ManageMessages,
+        ),
+        None => false,
+    }
+}
+
 /// The store, asked the questions `revolt-permissions` has about `user`
 /// in `channel`.
 struct StoreQuery<'a> {

@@ -466,6 +466,38 @@ impl StoatClient {
         .await
     }
 
+    /// `POST /channels/{channel}/search` with `pinned: true` and no query:
+    /// up to `limit` (1 to 100) of the channel's pinned messages, newest
+    /// first, with their authors. There's no endpoint just for pins.
+    pub async fn fetch_pins(
+        &self,
+        channel: &str,
+        limit: i64,
+    ) -> Result<BulkMessageResponse, ApiError> {
+        self.send(
+            Method::POST,
+            &format!("/channels/{channel}/search"),
+            Some(&pins_body(limit)),
+        )
+        .await
+    }
+
+    /// `POST /channels/{channel}/messages/{message}/pin`: pin a message.
+    /// Needs Manage Messages (not in a DM). Stoat also posts a "pinned a
+    /// message" system message. An already pinned one is `AlreadyPinned`.
+    pub async fn pin_message(&self, channel: &str, message: &str) -> Result<(), ApiError> {
+        self.send_raw(Method::POST, &pin_path(channel, message), None::<&()>)
+            .await
+            .map(|_| ())
+    }
+
+    /// `DELETE` on the same path: unpin it. One that isn't pinned is `NotPinned`.
+    pub async fn unpin_message(&self, channel: &str, message: &str) -> Result<(), ApiError> {
+        self.send_raw(Method::DELETE, &pin_path(channel, message), None::<&()>)
+            .await
+            .map(|_| ())
+    }
+
     /// `GET /servers/{server}/members`: every member of `server`, with
     /// their users. Stoat 0.16.2 has no member search, so it's the whole list.
     /// `exclude_offline` asks for the online members only (the web client
@@ -668,6 +700,25 @@ fn search_body(query: &str, sort: MessageSort, limit: i64) -> serde_json::Value 
     without_nulls(serde_json::to_value(&body).expect("search body serialises"))
 }
 
+/// The body of a search for pinned messages: no `query`, because Stoat
+/// refuses `pinned` together with one. Newest first, with authors.
+fn pins_body(limit: i64) -> serde_json::Value {
+    let body = DataMessageSearch {
+        query: None,
+        pinned: Some(true),
+        limit: Some(limit),
+        before: None,
+        after: None,
+        sort: MessageSort::Latest,
+        include_users: Some(true),
+    };
+    without_nulls(serde_json::to_value(&body).expect("pins body serialises"))
+}
+
+fn pin_path(channel: &str, message: &str) -> String {
+    format!("/channels/{channel}/messages/{message}/pin")
+}
+
 /// Path of a server's member list, online members only if asked.
 fn members_path(server: &str, exclude_offline: bool) -> String {
     if exclude_offline {
@@ -703,7 +754,7 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{members_path, messages_query, search_body};
+    use super::{members_path, messages_query, pin_path, pins_body, search_body};
 
     #[test]
     fn members_path_asks_for_online_members_only_when_told_to() {
@@ -768,5 +819,25 @@ mod tests {
         ] {
             assert_eq!(search_body("x", sort, 50)["sort"], name);
         }
+    }
+
+    #[test]
+    fn pins_body_is_pinned_with_no_query() {
+        let body = pins_body(100);
+        assert_eq!(
+            body,
+            json!({
+                "pinned": true,
+                "limit": 100,
+                "sort": "Latest",
+                "include_users": true
+            })
+        );
+        assert!(body.get("query").is_none());
+    }
+
+    #[test]
+    fn pin_path_is_under_the_message() {
+        assert_eq!(pin_path("c", "m"), "/channels/c/messages/m/pin");
     }
 }

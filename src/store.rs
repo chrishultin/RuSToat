@@ -123,6 +123,11 @@ pub struct MessageRow {
     pub replies: Vec<ReplyPreview>,
     /// Just jumped to: drawn tinted for a moment (see [`ChatStore::set_highlight`]).
     pub highlighted: bool,
+    /// Pinned to the channel.
+    pub pinned: bool,
+    /// The user may pin or unpin it (see [`ChatStore::can_pin`]): the
+    /// right-click menu offers it. Always false in search results and pins.
+    pub can_pin: bool,
 }
 
 /// Most messages one message can reply to (Stoat's `limits.global.message_replies`).
@@ -1457,6 +1462,19 @@ impl ChatStore {
         true
     }
 
+    /// Record that Stoat says message `id` is (or isn't) pinned, when a
+    /// pin or unpin found it already so (`AlreadyPinned`, `NotPinned`) and the
+    /// update that would have told us was missed. Returns true if a loaded
+    /// message changed.
+    pub fn set_pinned(&mut self, channel: &str, id: &str, pinned: bool) -> bool {
+        let Some(message) = self.message_mut(channel, id) else {
+            return false;
+        };
+        let changed = message.pinned.unwrap_or(false) != pinned;
+        message.pinned = pinned.then_some(true);
+        changed
+    }
+
     /// Link previews that arrived after their message (`MessageAppend`).
     /// Returns true if a loaded message changed.
     pub fn apply_append(&mut self, channel: &str, id: &str, embeds: Vec<Embed>) -> bool {
@@ -1917,6 +1935,9 @@ impl ChatStore {
             rows.push(TimelineRow::StartOfChannel { name });
         }
 
+        // The same for every message in the channel.
+        let can_pin = self.can_pin(channel);
+
         // Unconfirmed messages go last, in send order, drawn like any other.
         // Away from the present they'd sit after a gap, so they wait for the
         // present to be loaded again.
@@ -1955,6 +1976,7 @@ impl ChatStore {
                             })
                     });
             let mut row = self.message_row(message, author.clone(), continuation);
+            row.can_pin = can_pin && pending.is_none() && !system;
             if let Some(pending) = pending {
                 row.key = pending.key.clone();
                 row.time = crate::time::millis_time_label(pending.sent_ms);
@@ -2032,6 +2054,8 @@ impl ChatStore {
                 .map(|id| self.reply_preview(message, id))
                 .collect(),
             highlighted: self.highlight.as_deref() == Some(message.id.as_str()),
+            pinned: message.pinned.unwrap_or(false),
+            can_pin: false,
         }
     }
 
@@ -2117,6 +2141,12 @@ impl ChatStore {
             Some(Channel::Group { recipients, .. }) => recipients.iter().any(|id| id == user),
             _ => false,
         }
+    }
+
+    /// Whether the user can pin and unpin messages in `channel`
+    /// (see [`crate::permissions::can_pin`]).
+    pub fn can_pin(&self, channel: &str) -> bool {
+        crate::permissions::can_pin(self, &self.me, channel)
     }
 
     /// Whether the right-hand panel can list `channel`'s people: server

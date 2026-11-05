@@ -6,7 +6,7 @@ use revolt_permissions::{
 };
 use serde_json::{Value, json};
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
-use stoat_gpui::permissions::{can_view, channel_permissions, has};
+use stoat_gpui::permissions::{can_pin, can_view, channel_permissions, has};
 use stoat_gpui::store::ChatStore;
 
 const VIEW: u64 = ChannelPermission::ViewChannel as u64;
@@ -286,4 +286,70 @@ fn a_group_gives_its_members_the_groups_permissions() {
     assert!(has(bits, ChannelPermission::SendMessage));
     // Not in the group: nothing.
     assert_eq!(channel_permissions(&store, "u-blocked", "grp"), 0);
+}
+
+#[test]
+fn only_those_who_manage_messages_can_pin_in_a_server() {
+    let store = server_store();
+    assert!(can_pin(&store, "u-owner", "ch-open"));
+    assert!(can_pin(&store, "u-mod", "ch-open"));
+    // `rookie` also holds `mod`, which outranks the role that denies it.
+    assert!(can_pin(&store, "u-rookie", "ch-open"));
+    assert!(!can_pin(&store, "u-plain", "ch-open"));
+    assert!(!can_pin(&store, "u-staff", "ch-open"));
+    assert!(!can_pin(&store, "u-timed", "ch-open"));
+    assert!(!can_pin(&store, "u-stranger", "ch-open"));
+}
+
+#[test]
+fn a_channel_override_can_take_pinning_away() {
+    let channels = json!([
+        { "channel_type": "TextChannel", "_id": "ch-open", "server": "srv", "name": "open" },
+        {
+            "channel_type": "TextChannel", "_id": "ch-no-pins", "server": "srv", "name": "no-pins",
+            "role_permissions": { "mod": { "a": 0, "d": MANAGE } }
+        }
+    ]);
+    let store = store_with(
+        channels,
+        vec![user("u-mod", json!({}))],
+        vec![
+            member("u-me", &[], json!({})),
+            member("u-mod", &["mod"], json!({})),
+        ],
+    );
+    assert!(can_pin(&store, "u-mod", "ch-open"));
+    assert!(!can_pin(&store, "u-mod", "ch-no-pins"));
+}
+
+#[test]
+fn the_user_can_pin_in_a_dm_and_in_their_saved_notes() {
+    let store = conversations();
+    // Either person in a DM may, whatever the DM's permissions.
+    assert!(can_pin(&store, "u-me", "dm-friend"));
+    assert!(can_pin(&store, "u-me", "dm-blocked"));
+    assert!(can_pin(&store, "u-me", "ch-saved"));
+    // Not someone else's notes.
+    assert!(!can_pin(&store, "u-me", "ch-saved-other"));
+    assert!(!can_pin(&store, "u-me", "ch-nope"));
+}
+
+#[test]
+fn a_group_owner_can_pin_but_a_plain_member_cannot() {
+    let store = conversations();
+    assert!(can_pin(&store, "u-me", "grp-mine"));
+    assert!(!can_pin(&store, "u-me", "grp"));
+    assert!(!can_pin(&store, "u-me", "grp-quiet"));
+}
+
+#[test]
+fn the_store_asks_about_the_logged_in_user() {
+    let store = conversations();
+    assert!(store.can_pin("dm-friend"));
+    assert!(store.can_pin("grp-mine"));
+    assert!(!store.can_pin("grp"));
+    assert!(!store.can_pin("ch-nope"));
+    // `u-me` is a plain member of the server channels.
+    let store = server_store();
+    assert!(!store.can_pin("ch-open"));
 }

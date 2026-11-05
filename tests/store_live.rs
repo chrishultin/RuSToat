@@ -85,6 +85,88 @@ fn update_merges_only_the_fields_sent() {
     assert!(!store.apply_update("ch-general", "nope", data, &[]));
 }
 
+fn row_of(store: &ChatStore, channel: &str, id: &str) -> MessageRow {
+    store
+        .timeline(channel)
+        .into_iter()
+        .find_map(|row| match row {
+            TimelineRow::Message(row) if row.id == id => Some(row),
+            _ => None,
+        })
+        .expect("row")
+}
+
+#[test]
+fn an_update_pins_and_unpins_a_row() {
+    let mut store = store_with_page(50);
+    assert!(!row_of(&store, "ch-general", M3).pinned);
+
+    let data: PartialMessage =
+        serde_json::from_value(serde_json::json!({ "pinned": true })).unwrap();
+    assert!(store.apply_update("ch-general", M3, data, &[]));
+    assert!(row_of(&store, "ch-general", M3).pinned);
+    assert!(!row_of(&store, "ch-general", M1).pinned, "only that one");
+
+    // Unpinning sends `clear: ["Pinned"]`, not `pinned: false`.
+    assert!(store.apply_update(
+        "ch-general",
+        M3,
+        PartialMessage::default(),
+        &[FieldsMessage::Pinned]
+    ));
+    assert!(!row_of(&store, "ch-general", M3).pinned);
+}
+
+#[test]
+fn a_pin_change_remeasures_just_that_row() {
+    let mut store = store_with_page(50);
+    let before = store.timeline("ch-general");
+    let data: PartialMessage =
+        serde_json::from_value(serde_json::json!({ "pinned": true })).unwrap();
+    store.apply_update("ch-general", M3, data, &[]);
+    let after = store.timeline("ch-general");
+    let ops = diff_rows(&before, &after);
+    assert_eq!(ops.len(), 1, "{ops:?}");
+    assert!(matches!(ops[0], RowOp::Remeasure { .. }), "{ops:?}");
+}
+
+#[test]
+fn set_pinned_catches_up_with_what_stoat_says() {
+    let mut store = store_with_page(50);
+    assert!(store.set_pinned("ch-general", M3, true));
+    assert!(row_of(&store, "ch-general", M3).pinned);
+    assert!(!store.set_pinned("ch-general", M3, true), "already so");
+    assert!(store.set_pinned("ch-general", M3, false));
+    assert!(!row_of(&store, "ch-general", M3).pinned);
+    assert!(!store.set_pinned("ch-general", "nope", true));
+}
+
+#[test]
+fn the_timeline_marks_which_rows_the_user_may_pin() {
+    // In the Ready fixture's server channel the user is a plain member, but
+    // anyone may pin in a DM.
+    let mut store = store_with_page(50);
+    let dm_page: BulkMessageResponse = BulkMessageResponse::JustMessages(vec![message(
+        "01M6GDKW80AAAAAAAAAAAAAAAB",
+        "dm-ada",
+        "u-ada",
+        "hi",
+    )]);
+    store.set_history("dm-ada", dm_page, 50);
+    let can_pin = |channel: &str| {
+        store
+            .timeline(channel)
+            .into_iter()
+            .filter_map(|row| match row {
+                TimelineRow::Message(row) => Some(row.can_pin),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(can_pin("dm-ada"), vec![true]);
+    assert!(can_pin("ch-general").iter().all(|can| !can));
+}
+
 #[test]
 fn deletes_remove_messages() {
     let mut store = store_with_page(50);
@@ -149,6 +231,8 @@ fn row(id: &str, body: &str) -> TimelineRow {
         pending: None,
         replies: Vec::new(),
         highlighted: false,
+        pinned: false,
+        can_pin: false,
     })
 }
 

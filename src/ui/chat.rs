@@ -28,7 +28,7 @@ use gpui_kit::*;
 use crate::api::ApiError;
 use crate::api::StoatClient;
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
-use crate::api::models::{BulkMessageResponse, MessageSort, ReplyIntent};
+use crate::api::models::{BulkMessageResponse, FieldsMessage, MessageSort, ReplyIntent};
 use crate::attachment::{AttachmentView, fit_into};
 use crate::complete::{Query, QueryKind, Suggestion, TokenRef, rank, rank_people};
 use crate::draft::{AttachmentLimits, DraftAttachment, ReplyTarget};
@@ -38,7 +38,7 @@ use crate::media::MediaUrls;
 use crate::notify::{self, Delivery, Notice, Viewing};
 use crate::places::{Place, Places, PlacesFile};
 use crate::runtime::spawn_io;
-use crate::search::{MAX_QUERY_CHARS, QueryCheck, RESULT_LIMIT, check_query};
+use crate::search::{MAX_QUERY_CHARS, PINS_LIMIT, QueryCheck, RESULT_LIMIT, check_query};
 use crate::typing::{OutgoingTyping, TypingSignal, TypingState, typing_label};
 use crate::store::{
     ChannelEntry, ChannelKind, ChatStore, MemberList, MemberListRow, MessageRow, PendingAttachment,
@@ -101,11 +101,29 @@ struct Pane {
 }
 
 /// What the right-hand panel shows. The member list is also subject to
-/// [`ChatView::member_list_open`]; search is temporary and belongs to the
-/// channel it was run in.
+/// [`ChatView::member_list_open`]; search and pins are temporary and belong
+/// to the channel they were opened in.
 enum SidePanel {
     Members,
     Search(SearchPanel),
+    Pins(PinsPanel),
+}
+
+/// The pinned messages of one channel, and how loading them went.
+struct PinsPanel {
+    /// The channel, the only one the panel is shown in.
+    channel: String,
+    /// Which request this panel is waiting for (see [`ChatView::pins_seq`]).
+    seq: u64,
+    state: PinsState,
+}
+
+enum PinsState {
+    Loading,
+    /// Newest first.
+    Results(Rc<Vec<MessageRow>>),
+    Empty,
+    Error(SharedString),
 }
 
 /// The search panel: the query as sent, and how it went.
@@ -210,6 +228,14 @@ pub struct ChatView {
     search_seq: u64,
     /// The search in flight. Replacing or dropping it cancels the request.
     search_task: Option<Task<()>>,
+    /// The same for the pinned messages list: counts requests (including
+    /// refreshes), so that an old answer is dropped.
+    pins_seq: u64,
+    /// The pins request in flight.
+    pins_task: Option<Task<()>>,
+    /// A refresh of the pins list waiting out its delay (see
+    /// [`PINS_REFRESH_DELAY`]); the next pin or unpin replaces it.
+    pins_refresh: Option<Task<()>>,
     /// The channel the panel and search box were last drawn for, to notice
     /// when it changes and start them over.
     panel_channel: Option<String>,
@@ -229,6 +255,10 @@ pub struct ChatView {
     _root: Task<()>,
     _activation: Subscription,
 }
+
+/// How long after a message is pinned or unpinned the open pins list is
+/// fetched again, so that a burst of changes makes one request.
+const PINS_REFRESH_DELAY: Duration = Duration::from_millis(500);
 
 /// Height of the "is typing…" line above the message box.
 const TYPING_LINE_HEIGHT: f32 = 16.;
@@ -425,6 +455,9 @@ impl ChatView {
             search_input,
             search_seq: 0,
             search_task: None,
+            pins_seq: 0,
+            pins_task: None,
+            pins_refresh: None,
             panel_channel: None,
             composer,
             skin_tone: crate::prefs::Tone::default(),
@@ -471,6 +504,11 @@ impl ChatView {
                     self.loading_newer.clear();
                     self.newer_errors.clear();
                     self.jumps.clear();
+                    // Pins changed while offline are missed the same way.
+                    if let SidePanel::Pins(panel) = &self.side_panel {
+                        let channel = panel.channel.clone();
+                        self.start_pins(channel, true, cx);
+                    }
                 }
                 self.ensure_current_loaded(cx);
             }
@@ -515,12 +553,19 @@ impl ChatView {
                 clear,
             }) => {
                 log::debug!("live: edit {id} in {channel}");
+                // Pinned or unpinned (by anyone): the pins list is out of date.
+                let pin_change = data.pinned.is_some()
+                    || clear.iter().any(|f| matches!(f, FieldsMessage::Pinned));
                 if self.store.apply_update(&channel, &id, *data, &clear) {
                     self.sync_pane(&channel, cx);
+                }
+                if pin_change {
+                    self.schedule_pins_refresh(&channel, cx);
                 }
             }
             ConnectionEvent::Event(ServerEvent::MessageDelete { id, channel }) => {
                 log::debug!("live: delete {id} in {channel}");
+                self.drop_pins(&channel, std::slice::from_ref(&id));
                 if self.store.apply_delete(&channel, &[id]) {
                     self.sync_pane(&channel, cx);
                 }
@@ -561,6 +606,7 @@ impl ChatView {
                 }
             }
             ConnectionEvent::Event(ServerEvent::BulkMessageDelete { channel, ids }) => {
+                self.drop_pins(&channel, &ids);
                 if self.store.apply_delete(&channel, &ids) {
                     self.sync_pane(&channel, cx);
                 }
@@ -584,8 +630,10 @@ impl ChatView {
             ConnectionEvent::Event(ServerEvent::ChannelUpdate { id, data, clear }) => {
                 log::debug!("live: channel {id} updated");
                 self.store.apply_channel_update(&id, *data, &clear);
-                // Permission overrides decide who sees the channel.
+                // Permission overrides decide who sees the channel, and who
+                // may pin in it.
                 self.forget_member_lists();
+                self.sync_pane(&id, cx);
             }
             ConnectionEvent::Event(ServerEvent::ChannelStartTyping { channel, user }) => {
                 self.typing.start(&channel, &user, std::time::Instant::now());
@@ -807,6 +855,16 @@ impl ChatView {
                 id,
                 confirmed: false,
             } => self.confirm_delete(channel.to_string(), id, window, cx),
+            RowAction::TogglePin {
+                id,
+                pin,
+                confirmed: true,
+            } => self.toggle_pin(channel.to_string(), id, pin, window, cx),
+            RowAction::TogglePin {
+                id,
+                pin,
+                confirmed: false,
+            } => self.confirm_pin(channel.to_string(), id, pin, window, cx),
             RowAction::CopyText(id) => {
                 if let Some(text) = self.store.raw_content(channel, &id) {
                     cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
@@ -1234,6 +1292,9 @@ impl ChatView {
         self.panel_channel = channel;
         self.search_task = None;
         self.search_seq += 1;
+        self.pins_task = None;
+        self.pins_refresh = None;
+        self.pins_seq += 1;
         self.side_panel = SidePanel::Members;
         self.search_input
             .update(cx, |input, cx| input.set_value("", window, cx));
@@ -1349,12 +1410,18 @@ impl ChatView {
         cx.notify();
     }
 
-    /// What the panel shows for a search's `page` in `channel`.
-    fn search_results(&mut self, channel: &str, page: BulkMessageResponse) -> SearchState {
+    /// Rows for a search's or pins request's `page` in `channel`, taking in
+    /// the authors that came with it.
+    fn result_rows(&mut self, channel: &str, page: BulkMessageResponse) -> Vec<MessageRow> {
         let messages = self.store.absorb_results(page);
         // Authors (and members) may be new.
         self.forget_member_lists();
-        let rows = self.store.result_rows(channel, &messages);
+        self.store.result_rows(channel, &messages)
+    }
+
+    /// What the panel shows for a search's `page` in `channel`.
+    fn search_results(&mut self, channel: &str, page: BulkMessageResponse) -> SearchState {
+        let rows = self.result_rows(channel, page);
         if rows.is_empty() {
             SearchState::Empty
         } else {
@@ -1367,7 +1434,10 @@ impl ChatView {
     fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search_task = None;
         self.search_seq += 1;
-        self.side_panel = SidePanel::Members;
+        // Pins showing instead are not the search's to close.
+        if matches!(self.side_panel, SidePanel::Search(_)) {
+            self.side_panel = SidePanel::Members;
+        }
         self.search_input
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.composer
@@ -1378,6 +1448,249 @@ impl ChatView {
     fn on_search_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
         self.close_search(window, cx);
+    }
+
+    /// The header's pin button: show the open channel's pinned messages in
+    /// the panel, or put them away if they're showing.
+    fn toggle_pins(&mut self, cx: &mut Context<Self>) {
+        let Some(channel) = self.current_channel().map(|c| c.id) else {
+            return;
+        };
+        if matches!(&self.side_panel, SidePanel::Pins(panel) if panel.channel == channel) {
+            self.close_pins(cx);
+        } else {
+            self.start_pins(channel, false, cx);
+        }
+    }
+
+    /// Give the panel back to the member list.
+    fn close_pins(&mut self, cx: &mut Context<Self>) {
+        self.pins_task = None;
+        self.pins_refresh = None;
+        self.pins_seq += 1;
+        self.side_panel = SidePanel::Members;
+        cx.notify();
+    }
+
+    /// Ask Stoat for `channel`'s pinned messages. With `keep_rows`, a list
+    /// already showing stays up until the new one arrives (a refresh);
+    /// otherwise the panel opens waiting, replacing any search. An answer
+    /// lands only if no later request (or channel change) has replaced this
+    /// one meanwhile.
+    fn start_pins(&mut self, channel: String, keep_rows: bool, cx: &mut Context<Self>) {
+        self.pins_seq += 1;
+        let seq = self.pins_seq;
+        self.pins_refresh = None;
+        match &mut self.side_panel {
+            SidePanel::Pins(panel) if keep_rows && panel.channel == channel => panel.seq = seq,
+            _ => {
+                self.search_task = None;
+                self.search_seq += 1;
+                self.side_panel = SidePanel::Pins(PinsPanel {
+                    channel: channel.clone(),
+                    seq,
+                    state: PinsState::Loading,
+                });
+            }
+        }
+        let client = self.client.clone();
+        let request = spawn_io({
+            let channel = channel.clone();
+            async move { client.fetch_pins(&channel, PINS_LIMIT).await }
+        });
+        self.pins_task = Some(cx.spawn(async move |this, cx| {
+            let result = request.await;
+            this.update(cx, |this, cx| {
+                if !matches!(&this.side_panel, SidePanel::Pins(panel) if panel.seq == seq) {
+                    return;
+                }
+                let state = match result {
+                    Ok(Ok(page)) => {
+                        let rows = this.result_rows(&channel, page);
+                        if rows.is_empty() {
+                            PinsState::Empty
+                        } else {
+                            PinsState::Results(Rc::new(rows))
+                        }
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("loading pins of {channel} failed: {err:?}");
+                        PinsState::Error(pins_error_text(&err))
+                    }
+                    Err(err) => {
+                        log::warn!("pins task failed: {err:?}");
+                        PinsState::Error("Something went wrong loading pins.".into())
+                    }
+                };
+                if let SidePanel::Pins(panel) = &mut this.side_panel {
+                    panel.state = state;
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// Fetch the pins list again now, if `channel`'s is showing.
+    fn refresh_pins(&mut self, channel: &str, cx: &mut Context<Self>) {
+        if matches!(&self.side_panel, SidePanel::Pins(panel) if panel.channel == channel) {
+            self.start_pins(channel.to_string(), true, cx);
+        }
+    }
+
+    /// A message in `channel` was pinned or unpinned: fetch the pins list
+    /// again, if it's showing, once things have settled.
+    fn schedule_pins_refresh(&mut self, channel: &str, cx: &mut Context<Self>) {
+        if !matches!(&self.side_panel, SidePanel::Pins(panel) if panel.channel == channel) {
+            return;
+        }
+        let channel = channel.to_string();
+        self.pins_refresh = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PINS_REFRESH_DELAY).await;
+            this.update(cx, |this, cx| this.refresh_pins(&channel, cx))
+                .ok();
+        }));
+    }
+
+    /// Messages were deleted: take them off the pins list, if it's showing.
+    fn drop_pins(&mut self, channel: &str, ids: &[String]) {
+        let SidePanel::Pins(panel) = &mut self.side_panel else {
+            return;
+        };
+        let PinsState::Results(rows) = &panel.state else {
+            return;
+        };
+        if panel.channel != channel || !rows.iter().any(|row| ids.contains(&row.id)) {
+            return;
+        }
+        let kept: Vec<MessageRow> = rows
+            .iter()
+            .filter(|row| !ids.contains(&row.id))
+            .cloned()
+            .collect();
+        panel.state = if kept.is_empty() {
+            PinsState::Empty
+        } else {
+            PinsState::Results(Rc::new(kept))
+        };
+    }
+
+    /// Ask before pinning or unpinning: a dialog showing the message, with
+    /// Cancel and Pin / Unpin (Enter confirms, Esc cancels). Pinning posts a
+    /// message everyone in the channel sees.
+    fn confirm_pin(
+        &mut self,
+        channel: String,
+        id: String,
+        pin: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let snippet: SharedString = self
+            .store
+            .message_snippet(&channel, &id)
+            .unwrap_or_default()
+            .into();
+        let (title, ok_text) = if pin {
+            ("Pin message", "Pin")
+        } else {
+            ("Unpin message", "Unpin")
+        };
+        let description = if pin {
+            "Everyone in this channel will see that you pinned it. Hold Shift when choosing Pin message to skip this."
+        } else {
+            "Everyone in this channel will see that you unpinned it. Hold Shift when choosing Unpin message to skip this."
+        };
+        let view = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let theme = cx.theme();
+            let (view, channel, id) = (view.clone(), channel.clone(), id.clone());
+            alert
+                .confirm()
+                .title(title)
+                .description(description)
+                .child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.secondary)
+                        .text_sm()
+                        .line_clamp(3)
+                        .child(snippet.clone()),
+                )
+                .ok_text(ok_text)
+                .cancel_text("Cancel")
+                .on_ok(move |_, window, cx| {
+                    let (channel, id) = (channel.clone(), id.clone());
+                    view.update(cx, |this, cx| this.toggle_pin(channel, id, pin, window, cx))
+                        .ok();
+                    true
+                })
+        });
+    }
+
+    /// Pin (`pin`) or unpin message `id`. Stoat answers with the update,
+    /// which changes the row and the pins list; nothing is shown before it.
+    /// A message already in the state asked for counts as done. Anything
+    /// else gets a toast.
+    fn toggle_pin(
+        &mut self,
+        channel: String,
+        id: String,
+        pin: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let client = self.client.clone();
+        let request = spawn_io({
+            let (channel, id) = (channel.clone(), id.clone());
+            async move {
+                if pin {
+                    client.pin_message(&channel, &id).await
+                } else {
+                    client.unpin_message(&channel, &id).await
+                }
+            }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                let error = match result {
+                    Ok(Ok(())) => {
+                        log::debug!("pin={pin} of {id} in {channel} accepted");
+                        return;
+                    }
+                    // Someone got there first: what we wanted. The update that
+                    // said so was missed, so catch up.
+                    Ok(Err(err)) if err.pin_already_done() => {
+                        if this.store.set_pinned(&channel, &id, pin) {
+                            this.sync_pane(&channel, cx);
+                        }
+                        this.refresh_pins(&channel, cx);
+                        return;
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't pin={pin} {id} in {channel}: {err:?}");
+                        pin_error_text(pin, &err)
+                    }
+                    Err(err) => {
+                        log::warn!("pin task failed: {err:?}");
+                        if pin {
+                            "Couldn't pin the message.".into()
+                        } else {
+                            "Couldn't unpin the message.".into()
+                        }
+                    }
+                };
+                window.push_notification(Notification::error(error), cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Suggest again for what the message box is completing (something it
@@ -2872,6 +3185,21 @@ impl ChatView {
             // Right side: search in every channel, but DMs and Saved Notes
             // have no member list to toggle.
             .when(channel.is_some(), |el| el.child(search_box))
+            // Pins are in every channel.
+            .when(channel.is_some(), |el| {
+                let open = matches!(
+                    (&self.side_panel, &channel),
+                    (SidePanel::Pins(panel), Some(c)) if panel.channel == c.id
+                );
+                el.child(
+                    Button::new("toggle-pins")
+                        .ghost()
+                        .icon(IconName::Pin)
+                        .selected(open)
+                        .tooltip("Pinned messages")
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_pins(cx))),
+                )
+            })
             .when(
                 channel
                     .as_ref()
@@ -3143,8 +3471,8 @@ impl ChatView {
         }
     }
 
-    /// The right-hand panel for `channel`: its search, else its people if the
-    /// member list is open. `None` when there's nothing to show.
+    /// The right-hand panel for `channel`: its search or pins, else its
+    /// people if the member list is open. `None` when there's nothing to show.
     fn render_side_panel(
         &self,
         channel: &ChannelEntry,
@@ -3153,6 +3481,9 @@ impl ChatView {
         match &self.side_panel {
             SidePanel::Search(panel) if panel.channel == channel.id => {
                 Some(self.render_search_panel(panel, channel, cx))
+            }
+            SidePanel::Pins(panel) if panel.channel == channel.id => {
+                Some(self.render_pins_panel(panel, channel, cx))
             }
             _ => (self.member_list_open && self.store.has_member_list(&channel.id))
                 .then(|| self.render_member_panel(channel, cx)),
@@ -3216,20 +3547,6 @@ impl ChatView {
             ),
             SearchState::Error(error) => note(error.clone(), colors.danger),
             SearchState::Results(rows) => {
-                let view = cx.entity().downgrade();
-                let channel_id = channel.id.clone();
-                // Clicking a result asks to jump to it; nothing else on a
-                // result is live (they're not kept up to date).
-                let on_action: OnRowAction = Rc::new(move |action, window, cx| {
-                    view.update(cx, |this, cx| {
-                        this.on_row_action(&channel_id, action, window, cx)
-                    })
-                    .ok();
-                });
-                let pickers = Pickers {
-                    choices: Rc::default(),
-                    open_for: None,
-                };
                 let count = if rows.len() as i64 >= RESULT_LIMIT {
                     format!("The first {} matches", rows.len())
                 } else if rows.len() == 1 {
@@ -3237,32 +3554,7 @@ impl ChatView {
                 } else {
                     format!("{} matches", rows.len())
                 };
-                v_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .child(
-                        div()
-                            .px_3()
-                            .pb_1()
-                            .flex_none()
-                            .text_xs()
-                            .text_color(colors.muted)
-                            .child(count),
-                    )
-                    .child(
-                        v_flex()
-                            .id("search-results")
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .pb_2()
-                            .children(
-                                rows.iter().map(|row| {
-                                    render_preview_row(row, colors, &on_action, &pickers)
-                                }),
-                            ),
-                    )
-                    .into_any_element()
+                self.render_result_list("search-results", rows, count, channel, cx)
             }
         };
         v_flex()
@@ -3302,6 +3594,149 @@ impl ChatView {
                     ),
             )
             .child(sort_buttons)
+            .child(body)
+            .into_any_element()
+    }
+
+    /// A count and `rows` as compact messages, for the search and pins
+    /// panels. Clicking one asks to jump to it; nothing else on them is live
+    /// (they're not kept up to date message by message).
+    fn render_result_list(
+        &self,
+        id: &'static str,
+        rows: &Rc<Vec<MessageRow>>,
+        count: String,
+        channel: &ChannelEntry,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let colors = row_colors(cx);
+        let view = cx.entity().downgrade();
+        let channel_id = channel.id.clone();
+        let on_action: OnRowAction = Rc::new(move |action, window, cx| {
+            view.update(cx, |this, cx| {
+                this.on_row_action(&channel_id, action, window, cx)
+            })
+            .ok();
+        });
+        let pickers = Pickers {
+            choices: Rc::default(),
+            open_for: None,
+        };
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .child(
+                div()
+                    .px_3()
+                    .pb_1()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child(count),
+            )
+            .child(
+                v_flex()
+                    .id(id)
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .pb_2()
+                    .children(
+                        rows.iter()
+                            .map(|row| render_preview_row(row, colors, &on_action, &pickers)),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// The pins panel: the channel's pinned messages, newest first, as
+    /// compact rows that jump to the message when clicked.
+    fn render_pins_panel(
+        &self,
+        panel: &PinsPanel,
+        channel: &ChannelEntry,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let colors = row_colors(cx);
+        let theme = cx.theme();
+        let (foreground, border, background) = (
+            theme.sidebar_foreground,
+            theme.sidebar_border,
+            theme.sidebar,
+        );
+        let note = |text: SharedString, colour: Hsla| {
+            div()
+                .px_3()
+                .py_1()
+                .text_sm()
+                .text_color(colour)
+                .child(text)
+                .into_any_element()
+        };
+        let body = match &panel.state {
+            PinsState::Loading => note("Loading pinned messages…".into(), colors.muted),
+            PinsState::Empty => note(
+                "No messages are pinned in this channel.".into(),
+                colors.muted,
+            ),
+            PinsState::Error(error) => v_flex()
+                .child(note(error.clone(), colors.danger))
+                .child(
+                    div()
+                        .px_3()
+                        .child(Button::new("retry-pins").xsmall().label("Retry").on_click(
+                            cx.listener(|this, _, _, cx| {
+                                if let Some(channel) = this.current_channel() {
+                                    this.start_pins(channel.id, false, cx);
+                                }
+                            }),
+                        )),
+                )
+                .into_any_element(),
+            PinsState::Results(rows) => {
+                let count = if rows.len() as i64 >= PINS_LIMIT {
+                    format!("The newest {} pinned messages", rows.len())
+                } else if rows.len() == 1 {
+                    "1 pinned message".to_string()
+                } else {
+                    format!("{} pinned messages", rows.len())
+                };
+                self.render_result_list("pinned-messages", rows, count, channel, cx)
+            }
+        };
+        v_flex()
+            .id("pins-panel")
+            .w(px(MEMBER_PANEL_WIDTH))
+            .h_full()
+            .flex_none()
+            .bg(background)
+            .text_color(foreground)
+            .border_l_1()
+            .border_color(border)
+            .child(
+                h_flex()
+                    .px_3()
+                    .pt_2()
+                    .pb_1()
+                    .flex_none()
+                    .justify_between()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(colors.muted)
+                            .child("PINNED MESSAGES"),
+                    )
+                    .child(
+                        Button::new("pins-close")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Close)
+                            .tooltip("Close pinned messages")
+                            .on_click(cx.listener(|this, _, _, cx| this.close_pins(cx))),
+                    ),
+            )
             .child(body)
             .into_any_element()
     }
@@ -3640,6 +4075,13 @@ enum RowAction {
     /// Delete one of the user's messages, after asking (unless Shift was
     /// held: `confirmed`).
     Delete { id: String, confirmed: bool },
+    /// Pin (`pin`) or unpin a message, after asking (unless Shift was held:
+    /// `confirmed`).
+    TogglePin {
+        id: String,
+        pin: bool,
+        confirmed: bool,
+    },
 }
 
 type OnRowAction = Rc<dyn Fn(RowAction, &mut Window, &mut App)>;
@@ -4006,6 +4448,7 @@ fn render_message_row(
     }
     // Right-click anywhere on the row (text, padding, avatar).
     let (on_action, id, mine) = (on_action.clone(), message.id.clone(), message.mine);
+    let (can_pin, pinned) = (message.can_pin, message.pinned);
     let reply = reply_target(message);
     row.context_menu(move |menu, _, _| {
         let act = |action: RowAction| {
@@ -4024,6 +4467,26 @@ fn render_message_row(
                 .icon(IconName::Copy)
                 .on_click(act(RowAction::CopyText(id.clone()))),
         )
+        .when(can_pin, |menu| {
+            let toggle = {
+                let (on_action, id) = (on_action.clone(), id.clone());
+                move |event: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let confirmed = event.modifiers().shift;
+                    let action = RowAction::TogglePin {
+                        id: id.clone(),
+                        pin: !pinned,
+                        confirmed,
+                    };
+                    on_action(action, window, cx)
+                }
+            };
+            let (label, icon) = if pinned {
+                ("Unpin message", IconName::PinOff)
+            } else {
+                ("Pin message", IconName::Pin)
+            };
+            menu.item(PopupMenuItem::new(label).icon(icon).on_click(toggle))
+        })
         .when(mine, |menu| {
             let delete = {
                 let (on_action, id) = (on_action.clone(), id.clone());
@@ -4405,6 +4868,42 @@ fn delete_error_text(err: &ApiError) -> SharedString {
     match err.error_type() {
         Some(ErrorType::MissingPermission { .. }) => "You can't delete this message.".into(),
         _ => format!("Couldn't delete the message: {err}").into(),
+    }
+}
+
+/// What the pins panel says when loading them fails.
+fn pins_error_text(err: &ApiError) -> SharedString {
+    use revolt_result::ErrorType;
+    match err {
+        ApiError::RateLimited { .. } => "Too many requests. Wait a moment, then try again.".into(),
+        _ => match err.error_type() {
+            Some(ErrorType::MissingPermission { .. }) => {
+                "You can't see this channel's pins.".into()
+            }
+            Some(ErrorType::IsBot) => "Bots can't list pinned messages.".into(),
+            _ => format!("Couldn't load pins: {err}").into(),
+        },
+    }
+}
+
+/// What a refused pin's (`pin`) or unpin's toast says.
+fn pin_error_text(pin: bool, err: &ApiError) -> SharedString {
+    use revolt_result::ErrorType;
+    let (done, doing) = if pin {
+        ("pin", "pinning")
+    } else {
+        ("unpin", "unpinning")
+    };
+    match err {
+        ApiError::RateLimited { .. } => {
+            format!("Too many requests while {doing}. Wait a moment, then try again.").into()
+        }
+        _ => match err.error_type() {
+            Some(ErrorType::MissingPermission { .. }) => {
+                format!("You can't {done} messages here.").into()
+            }
+            _ => format!("Couldn't {done} the message: {err}").into(),
+        },
     }
 }
 

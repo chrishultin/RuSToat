@@ -23,6 +23,8 @@ gpui_kit::assets::icon_assets!(
         Image,
         Paperclip,
         Pencil,
+        Pin,
+        PinOff,
         Reply,
         SendHorizontal,
         Trash,
