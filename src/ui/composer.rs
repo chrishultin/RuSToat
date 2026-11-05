@@ -148,6 +148,13 @@ impl Composer {
         cx.notify();
     }
 
+    /// Stop editing `id` (it's being deleted), putting the draft back.
+    pub fn stop_editing(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editing.editing() == Some(id) {
+            self.cancel_edit(window, cx);
+        }
+    }
+
     /// Leave edit mode, putting back what was being typed. Returns false if
     /// there was no edit.
     fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {

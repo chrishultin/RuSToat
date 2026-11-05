@@ -22,6 +22,7 @@ gpui_kit::assets::icon_assets!(
         Image,
         Pencil,
         Reply,
+        Trash,
         Users,
         Volume2,
         WifiOff

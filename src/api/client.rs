@@ -235,6 +235,18 @@ impl StoatClient {
         .await
     }
 
+    /// `DELETE /channels/{channel}/messages/{message}`: delete one of the
+    /// user's messages.
+    pub async fn delete_message(&self, channel: &str, message: &str) -> Result<(), ApiError> {
+        self.send_raw(
+            Method::DELETE,
+            &format!("/channels/{channel}/messages/{message}"),
+            None::<&()>,
+        )
+        .await
+        .map(|_| ())
+    }
+
     /// `GET /channels/{id}/messages?nearby={message}`: `message` itself (if
     /// it still exists) and up to `limit / 2 + 1` messages on each side,
     /// with their authors. Unlike `GET /channels/{id}/messages/{message}`,

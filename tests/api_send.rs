@@ -210,3 +210,20 @@ async fn editing_someone_elses_message_is_refused() {
         "{err:?}"
     );
 }
+
+#[tokio::test]
+async fn deleting_sends_delete_with_the_session() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("/channels/ch-general/messages/{MSG}")))
+        .and(header("x-session-token", "tok"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client(&server)
+        .delete_message("ch-general", MSG)
+        .await
+        .unwrap();
+}

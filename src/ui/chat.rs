@@ -8,7 +8,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::bubble::{Bubble, BubbleContent, BubbleReactions, BubbleVariant};
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::component::message::{
     Message as MessageLayout, MessageAlignment, MessageAvatar, MessageContent, MessageFooter,
@@ -482,6 +482,13 @@ impl ChatView {
                 }
             }
             RowAction::Edit(id) => self.start_edit(channel, id, window, cx),
+            RowAction::Delete { id, confirmed: true } => {
+                self.delete_message(channel.to_string(), id, window, cx)
+            }
+            RowAction::Delete {
+                id,
+                confirmed: false,
+            } => self.confirm_delete(channel.to_string(), id, window, cx),
             RowAction::CopyText(id) => {
                 if let Some(text) = self.store.raw_content(channel, &id) {
                     cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
@@ -581,6 +588,106 @@ impl ChatView {
                     }
                 };
                 if this.store.undo_local_edit(&channel, &id, edit) {
+                    this.sync_pane(&channel, cx);
+                }
+                window.push_notification(Notification::error(error), cx);
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Ask before deleting: a dialog showing the message, with Cancel and
+    /// Delete (Enter confirms, Esc cancels).
+    fn confirm_delete(
+        &mut self,
+        channel: String,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let snippet: SharedString = self
+            .store
+            .message_snippet(&channel, &id)
+            .unwrap_or_default()
+            .into();
+        let view = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let theme = cx.theme();
+            let (view, channel, id) = (view.clone(), channel.clone(), id.clone());
+            alert
+                .confirm()
+                .title("Delete message")
+                .description("This can't be undone. Hold Shift when choosing Delete to skip this.")
+                .child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.secondary)
+                        .text_sm()
+                        .line_clamp(3)
+                        .child(snippet.clone()),
+                )
+                .ok_text("Delete")
+                .ok_variant(ButtonVariant::Danger)
+                .cancel_text("Cancel")
+                .on_ok(move |_, window, cx| {
+                    let (channel, id) = (channel.clone(), id.clone());
+                    view.update(cx, |this, cx| this.delete_message(channel, id, window, cx))
+                        .ok();
+                    true
+                })
+        });
+    }
+
+    /// Delete one of the user's messages: gone at once, then sent. If Stoat
+    /// refuses, it's put back in place and a toast says why. The echo
+    /// (`MessageDelete`) changes nothing by then.
+    fn delete_message(
+        &mut self,
+        channel: String,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Editing it makes no sense any more.
+        self.composer
+            .update(cx, |composer, cx| composer.stop_editing(&id, window, cx));
+        let Some(removed) = self.store.remove_local(&channel, &id) else {
+            return;
+        };
+        self.sync_pane(&channel, cx);
+        let client = self.client.clone();
+        let request = spawn_io({
+            let (channel, id) = (channel.clone(), id.clone());
+            async move { client.delete_message(&channel, &id).await }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                let error = match result {
+                    Ok(Ok(())) => {
+                        log::debug!("deleted {id} in {channel}");
+                        return;
+                    }
+                    // Already gone (deleted elsewhere): what we wanted.
+                    Ok(Err(err)) if matches!(err.error_type(), Some(revolt_result::ErrorType::NotFound)) => {
+                        return;
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't delete {id} in {channel}: {err:?}");
+                        delete_error_text(&err)
+                    }
+                    Err(err) => {
+                        log::warn!("delete task failed: {err:?}");
+                        "Couldn't delete the message.".into()
+                    }
+                };
+                if this.store.restore_local(&channel, removed) {
                     this.sync_pane(&channel, cx);
                 }
                 window.push_notification(Notification::error(error), cx);
@@ -1796,6 +1903,9 @@ enum RowAction {
     CopyText(String),
     /// Edit one of the user's messages in the message box.
     Edit(String),
+    /// Delete one of the user's messages, after asking (unless Shift was
+    /// held: `confirmed`).
+    Delete { id: String, confirmed: bool },
 }
 
 type OnRowAction = Rc<dyn Fn(RowAction, &mut Window, &mut App)>;
@@ -2136,11 +2246,30 @@ fn render_message_row(
                 .on_click(act(RowAction::CopyText(id.clone()))),
         )
         .when(mine, |menu| {
-            menu.separator().item(
-                PopupMenuItem::new("Edit")
-                    .icon(IconName::Pencil)
-                    .on_click(act(RowAction::Edit(id.clone()))),
-            )
+            let delete = {
+                let (on_action, id) = (on_action.clone(), id.clone());
+                move |event: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let confirmed = event.modifiers().shift;
+                    on_action(RowAction::Delete { id: id.clone(), confirmed }, window, cx)
+                }
+            };
+            menu.separator()
+                .item(
+                    PopupMenuItem::new("Edit")
+                        .icon(IconName::Pencil)
+                        .on_click(act(RowAction::Edit(id.clone()))),
+                )
+                .item(
+                    PopupMenuItem::element(|_, cx| {
+                        let danger = cx.theme().danger;
+                        h_flex()
+                            .gap_2()
+                            .text_color(danger)
+                            .child(Icon::new(IconName::Trash).text_color(danger))
+                            .child("Delete message")
+                    })
+                    .on_click(delete),
+                )
         })
     })
     .into_any_element()
@@ -2410,6 +2539,15 @@ fn composer_placeholder(channel: &ChannelEntry) -> String {
         ChannelKind::DirectMessage => format!("Message @{}", channel.name),
         ChannelKind::Group => format!("Message {}", channel.name),
         ChannelKind::SavedMessages => "Save a note".into(),
+    }
+}
+
+/// What a refused delete's toast says.
+fn delete_error_text(err: &ApiError) -> SharedString {
+    use revolt_result::ErrorType;
+    match err.error_type() {
+        Some(ErrorType::MissingPermission { .. }) => "You can't delete this message.".into(),
+        _ => format!("Couldn't delete the message: {err}").into(),
     }
 }
 

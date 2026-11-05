@@ -203,3 +203,41 @@ The user ran the chunk 3 build, used it (log: two sends in a DM), and said to co
 
 ### Manual Validation
 The user ran the chunk 4 build. The first launch waited on a macOS Keychain prompt for the rebuilt binary. They edited a message (log: `edited 01M6PCP7… in 01M6N0BJ…`) and confirmed "LGTM".
+
+## Chunk 5: Deleting your messages
+
+### Changes Made
+- `src/api/client.rs`: `delete_message(channel, id)`, which sends `DELETE /channels/{c}/messages/{m}`.
+- `src/store.rs`:
+  - `remove_local(channel, id) -> Option<Message>` takes a loaded message out and marks it `Deleted` in the reply-source cache.
+  - `restore_local(channel, message)` puts it back in ID order (its exact place), clears the cache mark, and doesn't add it twice.
+  - `message_snippet(channel, id)` gives the dialog's preview.
+- `src/ui/chat.rs`:
+  - The right-click menu on own messages gained a red **Delete message** item (an element item with the `Trash` icon). Its click sends `RowAction::Delete { id, confirmed: event.modifiers().shift }`.
+  - `confirm_delete` opens an `AlertDialog`: `.confirm()`, the title "Delete message", a description mentioning Shift, the snippet in a bordered box (at most 3 lines), and a `Danger` Delete button. gpui-base binds Enter to confirm and Esc to cancel.
+  - `delete_message` stops any edit of that message (`Composer::stop_editing`), removes the message locally, syncs, then sends `DELETE`.
+    - Success, or a 404 `NotFound` (already gone), keeps it removed.
+    - Other failures restore it, sync, and show a toast (`delete_error_text`: `MissingPermission` gives "You can't delete this message.").
+    - The `MessageDelete` echo is a no-op afterwards.
+- `src/ui/composer.rs`: `stop_editing(id)`.
+- `src/assets.rs`: registers the `Trash` icon.
+- `docs/plans/sending-and-interaction.md`: corrected chunk 5's reply-preview risk note to match.
+- Tests: `tests/store_delete.rs` (new), `tests/api_send.rs` (+1).
+
+### Divergences
+- **`remove_local` returns `Option<Message>`**, not `(index, Message)`. Restoring by ID order makes the index unnecessary.
+- **Reply-source mark:** `remove_local` marks the message deleted in the reply-source cache, so replies don't fetch it while the delete is in progress, and `restore_local` clears the mark. My chunk 2 note in the plan had said the opposite; it was corrected.
+- **A 404 on delete counts as success**, and **deleting a message being edited cancels the edit** (neither was in the plan).
+
+### Verification Performed
+- `cargo test --test store_delete`: 5 passed.
+  - Remove then restore returns the history and timeline exactly to before. `diff_rows` gives `Remove { at: 2 }` plus a `Remeasure` of the reply, then `Insert { at: 2 }` plus a `Remeasure`.
+  - The `MessageDelete` echo after a local remove returns false and leaves the timeline unchanged.
+  - The reply's preview goes Loaded, then Deleted (with no missing source, so no fetch), then Loaded on restore.
+  - Removing unloaded messages does nothing, and restoring twice adds the message once.
+  - The dialog snippet.
+- `cargo test --test api_send`: 9 passed. New: `DELETE` with the session header.
+- Full suite: `cargo test`, 259 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings`: clean.
+
+### Manual Validation
+The user deleted two messages: one through the dialog and one with Shift (log: `deleted 01M6PCP7…`, `deleted 01M6PCBG…`). They confirmed it works ("beautiful").

@@ -570,6 +570,45 @@ impl ChatStore {
         true
     }
 
+    /// Take a loaded message out at once, before Stoat confirms the delete.
+    /// Replies to it say it was deleted. Returns it, to put back with
+    /// [`Self::restore_local`] if Stoat refuses.
+    pub fn remove_local(&mut self, channel: &str, id: &str) -> Option<Message> {
+        let messages = &mut self.histories.get_mut(channel)?.messages;
+        let ix = messages.binary_search_by(|m| m.id.as_str().cmp(id)).ok()?;
+        let message = messages.remove(ix);
+        self.reply_sources
+            .insert(id.to_string(), ReplySource::Deleted);
+        Some(message)
+    }
+
+    /// Put a message taken out by [`Self::remove_local`] back where it was
+    /// (IDs sort by time, so its place is exact). Returns false if the
+    /// channel isn't loaded any more, or the message is already back.
+    pub fn restore_local(&mut self, channel: &str, message: Message) -> bool {
+        if matches!(self.reply_sources.get(&message.id), Some(ReplySource::Deleted)) {
+            self.reply_sources.remove(&message.id);
+        }
+        let Some(history) = self.histories.get_mut(channel) else {
+            return false;
+        };
+        match history
+            .messages
+            .binary_search_by(|m| m.id.as_str().cmp(&message.id))
+        {
+            Ok(_) => false,
+            Err(ix) => {
+                history.messages.insert(ix, message);
+                true
+            }
+        }
+    }
+
+    /// One line of a loaded message as plain text (for the delete dialog).
+    pub fn message_snippet(&self, channel: &str, id: &str) -> Option<String> {
+        Some(self.snippet(self.find_message(channel, id)?))
+    }
+
     /// The newest loaded message the user wrote (not a system message):
     /// what Up in an empty message box edits.
     pub fn last_own_message(&self, channel: &str) -> Option<&str> {
