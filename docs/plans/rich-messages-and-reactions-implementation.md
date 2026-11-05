@@ -220,3 +220,42 @@ The user checked the running app and confirmed "Looks right": custom emoji rende
   - Relaunched; `Ready` parsed 41 emoji, with no errors.
   - The user confirmed the emoji-only message is now on the right ("it's correctly aligned").
 - **Size tweak (user request, "the emoji by itself should be 2x larger"):** `JUMBO_EMOJI_PX` went from 48 to 96 px for custom emoji. For consistency, Unicode emoji in jumbo messages went from `text_3xl` (30 px) to `JUMBO_TEXT_PX` = 60 px. Tests are updated, and 111 pass. The user confirmed the emoji is bigger in the running app.
+
+## Side fix (between chunks 3 and 4): Stoat formatting in a review bot's messages
+- **Reported by the user:** "advanced formatting" from a user named Peter didn't come through. Peter is a code-review bot. Logging the raw `content` of its messages showed three things RuSToat got wrong, compared against the web client's pipeline (`stoatchat/for-web` `components/markdown`: `remark-breaks`, `remark-math` with `singleDollarTextMath: false`, `rehype-katex`, and a `sanitise` pass):
+  - **Line breaks.** `TextView` collapses a single newline (a CommonMark soft break) to a space. Stoat shows every newline. This affected every multi-line message, not just Peter's.
+  - **Quote endings.** A plain line after `> …` lines was pulled into the quote by CommonMark's lazy continuation. Stoat's `sanitise` adds a blank line after a quote's last `>` line.
+  - **`$$…$$` KaTeX** (`$$\color{gray}\scriptsize \textsf{17.7s}$$` step timings) showed as raw TeX.
+- `src/markdown.rs` `prepare()`:
+  - A newline between two non-blank lines becomes a hard break (two trailing spaces) unless it already is one. `\r\n` is normalised first.
+  - A quote's last line gets a blank line after it.
+  - New `Segment::Math` for `$$…$$` within one line: two or more dollars, closed by the same count, not escaped. Only `<` is escaped inside (`\<`). Mentions, emoji and spoilers aren't rewritten there. A single `$` stays prose, as on Stoat.
+- `src/math.rs` (new, pure): `interpret()` reads the formatting part of KaTeX into styled `Run`s, or returns `None`, which leaves the formula as typed. It supports:
+  - colours: CSS names via `svgtypes` (already in the tree), `#rgb` and `#rrggbb`
+  - size commands, at KaTeX's 1.21× base scale
+  - `\text*`/`\math*` fonts and switches
+  - TeX inter-atom spacing and explicit spaces
+  - `^` and `_` as raised or lowered runs
+  - underline and strikethrough, `\left`/`\right`, `\operatorname`
+  - Greek letters and common symbols
+- `src/ui/math.rs` (new): `MathPlugin`, an inline `MarkdownPlugin`. gpui-base calls the hook an "inline parser"; it claims `InlineMath` nodes whose source starts with `$$`. It draws the runs as one native element (a flex row of text divs) and reports a baseline worked out from font metrics, so each run lines up with the surrounding text. `src/ui/chat.rs` adds `.plugin(MathPlugin)` to the message `TextView`.
+- **New `TextView` facts:**
+  - Soft breaks collapse to spaces.
+  - Inline plugins can claim whole AST nodes (`InlineMath` here) and return any element, which has its own colour and size, unlike HTML or Markdown text.
+  - Unclaimed inline math is re-parsed as prose and shown as typed.
+  - Block `$$` math becomes a code block unless a block plugin claims it.
+- **Limits:**
+  - A formula is one element and doesn't wrap. That's fine for short labels, but a long coloured sentence would overflow.
+  - Fractions, roots, matrices, accents, `\\` and `\mathbb` are shown as typed.
+  - Block `$$` math still renders as a code block.
+  - Stoat's extra-blank-line preservation (`​` paragraphs) isn't replicated.
+  - Math text uses Times New Roman in place of KaTeX_Main.
+- **Tests:**
+  - `tests/markdown_prepare.rs`: +5. They cover line breaks (blank lines, existing breaks, escaped backslashes, CRLF), breaks next to lists, headings, tables and code blocks, quote endings, `$$` handling (escaping, single `$`, escaped, unclosed and multi-line cases), and a full review-bot message. The multi-byte sweep now includes `$$`, `\r\n` and a quote.
+  - New dev-dependency `markdown` (the parser inside `TextView`, already in the tree). The tests use it to check that the prepared output parses into the intended nodes.
+  - `tests/markdown_math.rs` (new): 8 tests covering the caption itself, dot-separated captions, colours, sizes and fonts, spacing, symbols and scripts, unsupported input, and a substring sweep.
+  - Unit test: `segments` splits `$$…$$`.
+- **Verification:**
+  - `cargo test`: 134 passed, 0 failed, 5 ignored.
+  - `cargo clippy --all-targets -- -D warnings`: clean. `cargo fmt --check`: clean.
+- **Manual validation:** the user checked Peter's messages in the running app and confirmed "Looks right".

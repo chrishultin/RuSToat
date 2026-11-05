@@ -9,6 +9,7 @@ pub mod assets;
 pub mod dock;
 pub mod http;
 pub mod markdown;
+pub mod math;
 pub mod media;
 pub mod notify;
 pub mod runtime;

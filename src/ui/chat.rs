@@ -30,6 +30,7 @@ use crate::store::{
     ChannelEntry, ChannelKind, ChatStore, MessageRow, RowOp, ServerEntry, TimelineRow, diff_rows,
     display_name,
 };
+use crate::ui::math::MathPlugin;
 
 /// How many messages to load when a channel is opened.
 pub const HISTORY_PAGE: usize = 50;
@@ -1204,6 +1205,8 @@ fn render_message_row(message: &MessageRow, colors: RowColors) -> AnyElement {
                 // Keyed by `render_key`, so an edit (or a renamed mention)
                 // gets a fresh parse instead of the cached one.
                 TextView::markdown(SharedString::from(message.render_key.clone()), body)
+                    // `$$…$$` formatting (colour, size), drawn natively.
+                    .plugin(MathPlugin)
                     // Emoji-only messages are drawn big (custom ones are sized
                     // in the Markdown itself).
                     .map(|text| {
