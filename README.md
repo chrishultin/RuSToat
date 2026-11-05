@@ -51,20 +51,38 @@ This builds `target/debug/RuSToat.app` (identifier `com.chrishultin.rustoat`, si
 
 ### Self-hosted instances
 
-The app talks to the official instance, `https://api.stoat.chat`, by default. Point it somewhere else with:
+The login screen has a **Server** field, set to the official instance (`https://api.stoat.chat`) by default. To use a self-hosted instance, enter its address, e.g. `stoat.example.com`:
+
+- `https://` is added if you leave it out. Type `http://` yourself for a local server.
+- The app looks for Stoat's API at that address, then under `/api`, where self-hosted instances usually serve it. Once you log in, the field shows the address it found.
+- If the API is somewhere else, such as its own subdomain, enter that address instead.
+
+To change the field's default:
 
 ```bash
 STOAT_API_URL=https://stoat.example.com/api cargo run
 ```
 
-Saved sessions are stored per API URL, so switching instances never sends one server's token to another.
+Each saved session remembers its own instance, so a token is never sent to another server. While there's a saved account, the app restores that one.
+
+### Multiple accounts
+
+You can be signed in to several accounts at once, on one instance or several. They appear in a column on the far left, as Slack's workspaces do:
+
+- **+** (or **Add Account…** in the Stoat menu) logs in to another account. Each account remembers its own instance.
+- Click an account to switch to it. Every account stays connected, so unreads, notifications and the Dock badge cover all of them. Clicking a notification for another account switches to it.
+- An account you aren't looking at never marks anything as read.
+- **Log Out** (in the Stoat menu, or the button in the window) applies to the account on screen. Right-click an account to log out of it from the switcher.
+- If Stoat ends an account's session, the account stays in the switcher, dimmed. Select it to log in again.
 
 ## Your session and the Keychain
 
-After you log in, the session token is saved in your login Keychain under the service `com.chrishultin.rustoat`, with the API URL as the account. The next launch signs you in automatically.
+After you log in, the session token is saved in your login Keychain under the service `com.chrishultin.rustoat`, with `{API URL}#{user ID}` as the account. The next launch signs you in automatically. A session saved by an older version (whose Keychain account is just the API URL) is picked up as it is.
 
-- **Log Out** (in the Stoat menu, or the button in the window) removes the Keychain item and ends the session on Stoat. If Stoat can't be reached, you're still logged out locally; revoke the session from Stoat's Settings → Sessions, where it's listed as "RuSToat" (sessions from before the rename keep the name "Stoat GPUI POC").
-- **One Keychain prompt, then none.** macOS ties Keychain access to the app's code signature. The first run asks whether RuSToat can use its item; choose **Always Allow**. Because builds are signed with a stable identity (see [Code signing](#code-signing)), rebuilds don't ask again.
+The list of accounts is kept, without tokens, in `~/Library/Application Support/com.chrishultin.rustoat/accounts.json`.
+
+- **Log Out** (in the Stoat menu, or the button in the window) removes the account, deletes its Keychain item and ends the session on Stoat. If Stoat can't be reached, you're still logged out locally; revoke the session from Stoat's Settings → Sessions, where it's listed as "RuSToat" (sessions from before the rename keep the name "Stoat GPUI POC").
+- **One Keychain prompt per account, then none.** macOS ties Keychain access to the app's code signature. The first run asks whether RuSToat can use each account's item; choose **Always Allow**. Because builds are signed with a stable identity (see [Code signing](#code-signing)), rebuilds don't ask again.
 - If your saved session can't be checked at startup (offline, or a Stoat outage), the app keeps it and offers **Retry**. It only discards a saved session that Stoat itself rejects.
 
 The app also remembers where you were: the open server, and the last channel you viewed in each server and in Home. Switching back to a server returns you to its channel, and the next launch opens where you left off. This is saved in `~/Library/Application Support/com.chrishultin.rustoat/places.json`, per instance and account. Deleting the file just starts you at Home.

@@ -59,6 +59,8 @@ pub enum ChatEvent {
     LogOutRequested,
     /// The server no longer accepts our session.
     SessionRejected,
+    /// The user clicked a notice for this account: show it.
+    Activate,
 }
 
 enum Status {
@@ -107,10 +109,16 @@ pub struct ChatView {
     /// The one read-acknowledgement waiting to go out: (channel, message, task).
     /// Replacing it (newer message, other channel) cancels the old one.
     pending_ack: Option<(String, String, Task<()>)>,
-    /// The count last shown on the Dock icon, to only touch AppKit on change.
-    dock_badge: usize,
-    /// macOS banners still showing: channel (also the banner's tag) → the
-    /// message it's for. Dismissed once the channel is read past it.
+    /// This account's ID, in its banners' and toasts' tags.
+    account_id: String,
+    /// Whether this account is the one on screen. A hidden account keeps
+    /// receiving events and notifying, but never marks anything read.
+    active: bool,
+    /// Added to notice titles to say which account they're for, when
+    /// several are signed in.
+    account_label: Option<String>,
+    /// macOS banners still showing: channel → the message it's for.
+    /// Dismissed once the channel is read past it.
     banners: HashMap<String, String>,
     /// The image open in the full-size viewer, over everything else.
     viewer: Option<ViewedImage>,
@@ -151,10 +159,15 @@ const ACK_DELAY: Duration = Duration::from_secs(1);
 impl EventEmitter<ChatEvent> for ChatView {}
 
 impl ChatView {
-    /// `client` must carry the session token. `me` is the logged-in user's ID.
+    /// `client` must carry the session token. `me` is the logged-in user's
+    /// ID, and `account_id` the account's (see [`crate::accounts`]).
+    ///
+    /// Banner clicks and the Dock badge are app-wide, so the owner handles
+    /// them: [`Self::open_channel`], [`Self::sync_outside`].
     pub fn new(
         client: StoatClient,
         me: String,
+        account_id: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -162,25 +175,6 @@ impl ChatView {
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             this.maybe_ack_current(window, cx)
         });
-        // Banners: ask for permission up front, and make clicking one bring
-        // the window forward on its channel (the banner's tag).
-        crate::banners::request_permission();
-        if crate::banners::available() {
-            let view = cx.weak_entity();
-            let handle = window.window_handle();
-            cx.on_system_notification_response(move |response, cx| {
-                let channel = response.tag.to_string();
-                log::debug!("banner: clicked {channel}");
-                cx.activate(true);
-                handle
-                    .update(cx, |_, window, cx| {
-                        window.activate_window();
-                        view.update(cx, |this, cx| this.open_channel(&channel, cx))
-                            .ok();
-                    })
-                    .ok();
-            });
-        }
         let root = spawn_io({
             let client = client.clone();
             async move { client.root_config().await }
@@ -312,7 +306,9 @@ impl ChatView {
             loading_older: HashMap::new(),
             older_errors: HashMap::new(),
             pending_ack: None,
-            dock_badge: 0,
+            account_id,
+            active: true,
+            account_label: None,
             banners: HashMap::new(),
             viewer: None,
             viewer_focus: cx.focus_handle(),
@@ -365,8 +361,9 @@ impl ChatView {
                 // Sending ends their typing.
                 self.typing.stop(&channel, &message.author);
                 log::debug!("live: new message {} in {channel}", message.id);
-                // Decide before applying: what the user was looking at when it arrived.
-                let current = self.current_channel().map(|c| c.id);
+                // Decide before applying: what the user was looking at when
+                // it arrived. A hidden account isn't being looked at.
+                let current = self.current_channel().map(|c| c.id).filter(|_| self.active);
                 let viewing = Viewing {
                     channel: current.as_deref(),
                     window_active: window.is_window_active(),
@@ -560,7 +557,7 @@ impl ChatView {
             self.loading_older.remove(channel);
             self.older_errors.remove(channel);
             if self.banners.remove(channel).is_some() {
-                cx.dismiss_system_notification(channel);
+                cx.dismiss_system_notification(&notify::banner_tag(&self.account_id, channel));
             }
         }
         if self
@@ -1356,28 +1353,37 @@ impl ChatView {
     /// An in-app toast for a notifying message; one per channel (a newer
     /// message replaces the older toast). Clicking it opens the channel.
     fn show_toast(&mut self, notice: Notice, window: &mut Window, cx: &mut Context<Self>) {
+        let notice = self.labelled(notice);
         log::debug!("notify: {} | {}", notice.title, notice.body);
         let view = cx.entity().downgrade();
         let channel = notice.channel.clone();
         let toast = Notification::new()
-            .id1::<ChatView>(SharedString::from(notice.tag))
+            .id1::<ChatView>(SharedString::from(notify::banner_tag(
+                &self.account_id,
+                &notice.tag,
+            )))
             .title(notice.title)
             .message(notice.body)
             .on_click(move |_, _, cx| {
-                view.update(cx, |this, cx| this.open_channel(&channel, cx))
-                    .ok();
+                view.update(cx, |this, cx| {
+                    this.open_channel(&channel, cx);
+                    cx.emit(ChatEvent::Activate);
+                })
+                .ok();
             });
         window.push_notification(toast, cx);
     }
 
     /// A macOS banner for a notifying message while RuSToat is in the
-    /// background. The channel is the tag, so a newer message replaces the
-    /// channel's older banner, and a click opens it (see `new`). Reading the
-    /// channel takes the banner away (`dismiss_read_banners`).
+    /// background. Tagged with the channel and account, so a newer message
+    /// replaces the channel's older banner, and the owner can route a click
+    /// ([`notify::parse_banner_tag`]). Reading the channel takes the banner
+    /// away ([`Self::sync_outside`]).
     fn show_banner(&mut self, notice: Notice, message_id: String, cx: &mut Context<Self>) {
+        let notice = self.labelled(notice);
         log::debug!("banner: {} | {}", notice.title, notice.body);
         cx.show_system_notification(SystemNotification {
-            tag: notice.channel.clone().into(),
+            tag: notify::banner_tag(&self.account_id, &notice.channel).into(),
             title: notice.title.into(),
             body: notice.body.into(),
             actions: Vec::new(),
@@ -1385,18 +1391,74 @@ impl ChatView {
         self.banners.insert(notice.channel, message_id);
     }
 
-    /// Take away banners for channels read since (here, in another session,
-    /// by posting, or with Mark as read).
-    fn dismiss_read_banners(&mut self, cx: &mut Context<Self>) {
+    /// Keep what's shown outside the window in step with this account, after
+    /// any change: take away banners for channels read since (here, in
+    /// another session, by posting, or with Mark as read), and return how
+    /// many things need attention, for the Dock badge. The owner calls this
+    /// whenever the view notifies, which hidden views do too.
+    pub fn sync_outside(&mut self, cx: &mut Context<Self>) -> usize {
         let store = &self.store;
+        let account = &self.account_id;
         self.banners.retain(|channel, message| {
             let read = store.has_read(channel, message);
             if read {
                 log::debug!("banner: dismissing {channel} (read)");
-                cx.dismiss_system_notification(channel);
+                cx.dismiss_system_notification(&notify::banner_tag(account, channel));
             }
             !read
         });
+        self.store.attention_count()
+    }
+
+    /// `notice`, with the account's label (if any) added to its title.
+    fn labelled(&self, mut notice: Notice) -> Notice {
+        if let Some(label) = &self.account_label {
+            notice.title = format!("{} · {label}", notice.title);
+        }
+        notice
+    }
+
+    /// Say which account notices are for (see [`Self::labelled`]), or not.
+    pub fn set_account_label(&mut self, label: Option<String>) {
+        self.account_label = label;
+    }
+
+    /// For the account's switcher button: anything unread, and how many
+    /// unread mentions (see [`ChatStore::account_summary`]).
+    pub fn account_summary(&self) -> (bool, usize) {
+        self.store.account_summary()
+    }
+
+    /// The signed-in user's display name and avatar, once `Ready` has them.
+    pub fn me_summary(&self) -> Option<(String, String)> {
+        let me = self.store.me();
+        let user = self.store.user(me)?;
+        Some((
+            display_name(user).to_string(),
+            self.store.user_avatar_url(me),
+        ))
+    }
+
+    /// Log what makes up [`Self::sync_outside`]'s count.
+    pub fn log_attention(&self) {
+        for (channel, count) in self.store.attention_breakdown() {
+            log::debug!("  +{count} {channel} ({})", self.account_id);
+        }
+    }
+
+    /// Show or hide this account. Only the account on screen marks things
+    /// read, and its open channel doesn't count as being looked at while
+    /// hidden.
+    pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        if self.active == active {
+            return;
+        }
+        self.active = active;
+        if !active {
+            self.pending_ack = None;
+        }
+        // Showing it again re-renders, which acks what's now on screen.
+        cx.notify();
     }
 
     /// Show `channel`: switch to its server (or Home) and select it.
@@ -1679,7 +1741,7 @@ impl ChatView {
     /// newest message: the window is active and the list is at the bottom.
     /// Debounced by [`ACK_DELAY`]; at most one acknowledgement is pending.
     fn maybe_ack_current(&mut self, window: &Window, cx: &mut Context<Self>) {
-        if !self.has_ready || !window.is_window_active() {
+        if !self.has_ready || !self.active || !window.is_window_active() {
             return;
         }
         let Some(channel) = self.current_channel().map(|c| c.id) else {
@@ -1819,7 +1881,7 @@ impl ChatView {
                 let icon = server_icon(&server, &self.media, selected);
                 let view = cx.entity().downgrade();
                 let server_id = server.id.clone();
-                let mark_read: MarkRead = Rc::new(move |_, _, cx| {
+                let mark_read: MenuAction = Rc::new(move |_, _, cx| {
                     let server_id = server_id.clone();
                     view.update(cx, |this, cx| this.mark_server_read(server_id, cx))
                         .ok();
@@ -1831,7 +1893,7 @@ impl ChatView {
                     selected,
                     server.unread,
                     server.mentions,
-                    Some(mark_read),
+                    Some(("Mark as read", mark_read)),
                     cx.listener(move |this, _, _, cx| this.select_place(place.clone(), cx)),
                     cx,
                 )
@@ -2358,7 +2420,7 @@ const AVATAR_SIZE: f32 = 32.;
 /// fails, or if there's no image.
 /// `id` must be unique among the avatars on screen: the image keeps its
 /// loading state under it (without one, the initial never shows while loading).
-fn avatar(
+pub(crate) fn avatar(
     id: impl Into<SharedString>,
     url: Option<String>,
     name: &str,
@@ -3710,20 +3772,21 @@ fn server_icon(server: &ServerEntry, media: &MediaUrls, selected: bool) -> AnyEl
     }
 }
 
-/// A rail button, with a marker on the left edge when selected (an icon image
-/// covers the button's own highlight colour).
-/// What a rail button's "Mark as read" menu item does.
-type MarkRead = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+/// What a rail button's right-click menu item does.
+pub(crate) type MenuAction = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
+/// A rail button, with a marker on the left edge when selected (an icon image
+/// covers the button's own highlight colour). Also used by the account
+/// switcher. `menu` is a right-click menu item: its label and action.
 #[allow(clippy::too_many_arguments)]
-fn rail_button(
+pub(crate) fn rail_button(
     id: impl Into<ElementId>,
     content: AnyElement,
     tooltip: impl Into<SharedString>,
     selected: bool,
     unread: bool,
     mentions: usize,
-    mark_read: Option<MarkRead>,
+    menu: Option<(&'static str, MenuAction)>,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> Div {
@@ -3757,14 +3820,14 @@ fn rail_button(
         .on_click(on_click)
         .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         .child(content);
-    // Right-click: "Mark as read" (servers only).
-    let button = match mark_read {
-        Some(mark_read) => button
+    // Right-click: e.g. "Mark as read" on servers.
+    let button = match menu {
+        Some((label, action)) => button
             .context_menu(move |menu, _, _| {
-                let mark_read = mark_read.clone();
+                let action = action.clone();
                 menu.item(
-                    PopupMenuItem::new("Mark as read")
-                        .on_click(move |event, window, cx| mark_read(event, window, cx)),
+                    PopupMenuItem::new(label)
+                        .on_click(move |event, window, cx| action(event, window, cx)),
                 )
             })
             .into_any_element(),
@@ -3806,7 +3869,7 @@ fn rail_button(
 }
 
 /// A red pill with an unread-mention count ("99+" past 99).
-fn mention_badge(count: usize, cx: &App) -> Div {
+pub(crate) fn mention_badge(count: usize, cx: &App) -> Div {
     let theme = cx.theme();
     let label = if count > 99 {
         "99+".to_string()
@@ -3838,17 +3901,6 @@ impl Render for ChatView {
                 this.maybe_ack_current(window, cx);
             });
         }
-        // Every unread change re-renders, so the Dock badge follows along.
-        let attention = self.store.attention_count();
-        if attention != self.dock_badge {
-            log::debug!("dock badge: {attention}");
-            for (channel, count) in self.store.attention_breakdown() {
-                log::debug!("  +{count} {channel}");
-            }
-            crate::dock::set_badge(attention);
-            self.dock_badge = attention;
-        }
-        self.dismiss_read_banners(cx);
         self.sync_composer(window, cx);
         let viewer = self
             .viewer

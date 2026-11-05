@@ -4,6 +4,7 @@ pub mod composer;
 pub mod emoji_picker;
 pub mod login;
 pub mod math;
+pub mod switcher;
 pub mod thumbhash;
 
 pub use app_root::AppRoot;

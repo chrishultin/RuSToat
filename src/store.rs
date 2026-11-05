@@ -1193,6 +1193,17 @@ impl ChatStore {
             })
     }
 
+    /// The whole account, for its switcher button: whether anything shows an
+    /// unread dot (Home or any server), and all unread mentions. Muted
+    /// channels add mentions but no dot, as on the rail.
+    pub fn account_summary(&self) -> (bool, usize) {
+        self.servers()
+            .iter()
+            .fold(self.home_summary(), |(unread, mentions), server| {
+                (unread || server.unread, mentions + server.mentions)
+            })
+    }
+
     /// An edit, merged with the backend's own `Message::apply_options`.
     /// Returns true if a loaded message changed.
     pub fn apply_update(

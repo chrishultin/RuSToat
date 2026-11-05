@@ -1,9 +1,11 @@
-//! Remembering the login between launches.
+//! Remembering logins between launches.
 //!
-//! The session token lives in the macOS Keychain, keyed by API URL, so a
-//! token for one Stoat instance is never sent to another. Startup and logout
-//! logic sits behind the [`TokenStore`] trait so it can be tested without
-//! touching the real Keychain.
+//! Session tokens live in the macOS Keychain, one item per account. The item's
+//! name (the Keychain "account") is the account's ID in [`crate::accounts`]:
+//! `{api_url}#{user_id}`, or just the API URL for a session saved before
+//! multiple accounts. Each token is only ever sent to its own instance.
+//! Startup and logout logic sits behind the [`TokenStore`] trait so it can be
+//! tested without touching the real Keychain.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -20,17 +22,17 @@ pub const KEYCHAIN_SERVICE: &str = "com.chrishultin.rustoat";
 /// Items found there are moved to [`KEYCHAIN_SERVICE`] on first load.
 pub const LEGACY_KEYCHAIN_SERVICE: &str = "chat.stoat.gpui-poc";
 
-/// Somewhere to keep one session token per Stoat instance (API base URL).
+/// Somewhere to keep one session token per account, by the account's ID.
 ///
 /// Calls may block (Keychain), so async code runs them on a blocking thread.
 pub trait TokenStore: Send + Sync + 'static {
-    fn load(&self, instance: &str) -> anyhow::Result<Option<String>>;
-    fn save(&self, instance: &str, token: &str) -> anyhow::Result<()>;
+    fn load(&self, key: &str) -> anyhow::Result<Option<String>>;
+    fn save(&self, key: &str, token: &str) -> anyhow::Result<()>;
     /// Remove the token. Not an error if there wasn't one.
-    fn clear(&self, instance: &str) -> anyhow::Result<()>;
+    fn clear(&self, key: &str) -> anyhow::Result<()>;
 }
 
-/// The real store: one generic-password item per instance in the login Keychain.
+/// The real store: one generic-password item per account in the login Keychain.
 pub struct KeychainStore {
     service: String,
 }
@@ -47,8 +49,8 @@ impl KeychainStore {
         }
     }
 
-    fn entry(&self, instance: &str) -> anyhow::Result<keyring::Entry> {
-        keyring::Entry::new(&self.service, instance).context("opening Keychain entry")
+    fn entry(&self, key: &str) -> anyhow::Result<keyring::Entry> {
+        keyring::Entry::new(&self.service, key).context("opening Keychain entry")
     }
 }
 
@@ -59,22 +61,22 @@ impl Default for KeychainStore {
 }
 
 impl TokenStore for KeychainStore {
-    fn load(&self, instance: &str) -> anyhow::Result<Option<String>> {
-        match self.entry(instance)?.get_password() {
+    fn load(&self, key: &str) -> anyhow::Result<Option<String>> {
+        match self.entry(key)?.get_password() {
             Ok(token) => Ok(Some(token)),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(err) => Err(err).context("reading session token from Keychain"),
         }
     }
 
-    fn save(&self, instance: &str, token: &str) -> anyhow::Result<()> {
-        self.entry(instance)?
+    fn save(&self, key: &str, token: &str) -> anyhow::Result<()> {
+        self.entry(key)?
             .set_password(token)
             .context("saving session token to Keychain")
     }
 
-    fn clear(&self, instance: &str) -> anyhow::Result<()> {
-        match self.entry(instance)?.delete_credential() {
+    fn clear(&self, key: &str) -> anyhow::Result<()> {
+        match self.entry(key)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(err) => Err(err).context("deleting session token from Keychain"),
         }
@@ -107,20 +109,20 @@ impl MigratingStore<KeychainStore, KeychainStore> {
 }
 
 impl<C: TokenStore, L: TokenStore> TokenStore for MigratingStore<C, L> {
-    fn load(&self, instance: &str) -> anyhow::Result<Option<String>> {
-        load_migrating(&self.current, &self.legacy, instance)
+    fn load(&self, key: &str) -> anyhow::Result<Option<String>> {
+        load_migrating(&self.current, &self.legacy, key)
     }
 
-    fn save(&self, instance: &str, token: &str) -> anyhow::Result<()> {
-        self.current.save(instance, token)
+    fn save(&self, key: &str, token: &str) -> anyhow::Result<()> {
+        self.current.save(key, token)
     }
 
-    fn clear(&self, instance: &str) -> anyhow::Result<()> {
-        self.current.clear(instance)
+    fn clear(&self, key: &str) -> anyhow::Result<()> {
+        self.current.clear(key)
     }
 }
 
-/// Load `instance`'s token from `current`, or move it there from `legacy`.
+/// Load the token saved under `key` from `current`, or move it there from `legacy`.
 ///
 /// A token already in `current` wins, and `legacy` isn't touched. Otherwise
 /// a legacy token is saved to `current` and then deleted from `legacy`. If
@@ -129,12 +131,12 @@ impl<C: TokenStore, L: TokenStore> TokenStore for MigratingStore<C, L> {
 pub fn load_migrating(
     current: &dyn TokenStore,
     legacy: &dyn TokenStore,
-    instance: &str,
+    key: &str,
 ) -> anyhow::Result<Option<String>> {
-    if let Some(token) = current.load(instance)? {
+    if let Some(token) = current.load(key)? {
         return Ok(Some(token));
     }
-    let token = match legacy.load(instance) {
+    let token = match legacy.load(key) {
         Ok(Some(token)) => token,
         Ok(None) => return Ok(None),
         Err(err) => {
@@ -142,10 +144,10 @@ pub fn load_migrating(
             return Ok(None);
         }
     };
-    match current.save(instance, &token) {
+    match current.save(key, &token) {
         Ok(()) => {
             log::info!("moved the saved session to the new Keychain service");
-            if let Err(err) = legacy.clear(instance) {
+            if let Err(err) = legacy.clear(key) {
                 log::warn!("couldn't delete the legacy saved session: {err:#}");
             }
         }
@@ -161,20 +163,20 @@ pub struct MemoryStore {
 }
 
 impl TokenStore for MemoryStore {
-    fn load(&self, instance: &str) -> anyhow::Result<Option<String>> {
-        Ok(self.tokens.lock().unwrap().get(instance).cloned())
+    fn load(&self, key: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.tokens.lock().unwrap().get(key).cloned())
     }
 
-    fn save(&self, instance: &str, token: &str) -> anyhow::Result<()> {
+    fn save(&self, key: &str, token: &str) -> anyhow::Result<()> {
         self.tokens
             .lock()
             .unwrap()
-            .insert(instance.to_string(), token.to_string());
+            .insert(key.to_string(), token.to_string());
         Ok(())
     }
 
-    fn clear(&self, instance: &str) -> anyhow::Result<()> {
-        self.tokens.lock().unwrap().remove(instance);
+    fn clear(&self, key: &str) -> anyhow::Result<()> {
+        self.tokens.lock().unwrap().remove(key);
         Ok(())
     }
 }
@@ -191,15 +193,15 @@ pub enum Restored {
     Unverified { token: String, error: ApiError },
 }
 
-/// Look for a saved token for `client`'s instance and check it with `GET /users/@me`.
+/// Look for the token saved under `key` and check it with `GET /users/@me` on
+/// `client`'s instance.
 ///
 /// Must run on the Tokio IO runtime (use [`crate::runtime::spawn_io`]).
-pub async fn restore(store: Arc<dyn TokenStore>, client: StoatClient) -> Restored {
-    let instance = client.base_url().to_string();
+pub async fn restore(store: Arc<dyn TokenStore>, client: StoatClient, key: String) -> Restored {
     let token = match blocking({
         let store = store.clone();
-        let instance = instance.clone();
-        move || store.load(&instance)
+        let key = key.clone();
+        move || store.load(&key)
     })
     .await
     {
@@ -221,7 +223,7 @@ pub async fn restore(store: Arc<dyn TokenStore>, client: StoatClient) -> Restore
         }
         Err(ApiError::Unauthorized) => {
             log::info!("saved session was rejected; clearing it");
-            if let Err(err) = blocking(move || store.clear(&instance)).await {
+            if let Err(err) = blocking(move || store.clear(&key)).await {
                 log::warn!("couldn't clear rejected session: {err:#}");
             }
             Restored::NeedsLogin
@@ -233,13 +235,13 @@ pub async fn restore(store: Arc<dyn TokenStore>, client: StoatClient) -> Restore
     }
 }
 
-/// Save the token for `instance`. Must run on the Tokio IO runtime.
+/// Save the token under `key`. Must run on the Tokio IO runtime.
 pub async fn remember(
     store: Arc<dyn TokenStore>,
-    instance: String,
+    key: String,
     token: String,
 ) -> anyhow::Result<()> {
-    blocking(move || store.save(&instance, &token)).await
+    blocking(move || store.save(&key, &token)).await
 }
 
 /// Forget the token locally, then end the session on the server.
@@ -248,19 +250,26 @@ pub async fn remember(
 /// reached: after "Log out" the app must not keep signing in. Clearing first
 /// also means a slow server call can't delete a token from a quick re-login.
 /// Both results are returned so the caller can report them. `client` must
-/// carry the token. Must run on the Tokio IO runtime.
+/// carry the token, and `key` is where it's saved. Must run on the Tokio IO
+/// runtime.
 pub async fn log_out(
     store: Arc<dyn TokenStore>,
     client: StoatClient,
+    key: String,
 ) -> (Result<(), ApiError>, anyhow::Result<()>) {
-    let instance = client.base_url().to_string();
-    let local = blocking(move || store.clear(&instance)).await;
+    let local = blocking(move || store.clear(&key)).await;
     let server = client.logout().await;
     (server, local)
 }
 
+/// Forget the token saved under `key`, without contacting the server (for
+/// a session that's already over). Must run on the Tokio IO runtime.
+pub async fn forget(store: Arc<dyn TokenStore>, key: String) -> anyhow::Result<()> {
+    blocking(move || store.clear(&key)).await
+}
+
 /// Run a blocking store call off the async worker threads.
-async fn blocking<T: Send + 'static>(
+pub(crate) async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
 ) -> anyhow::Result<T> {
     tokio::task::spawn_blocking(f)
@@ -273,7 +282,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn memory_store_round_trips_per_instance() {
+    fn memory_store_round_trips_per_key() {
         let store = MemoryStore::default();
         store.save("https://a", "tok-a").unwrap();
         store.save("https://b", "tok-b").unwrap();

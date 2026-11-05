@@ -298,3 +298,32 @@ fn has_read_follows_the_read_position() {
     store.apply_message(message("dm-bob", "u-me", serde_json::json!({})));
     assert!(store.has_read("dm-bob", "01JC0000000000000000000007"));
 }
+
+#[test]
+fn account_summary_covers_home_and_servers() {
+    // Home: dm-ada (1 mention), dm-bob and the group are unread; servers are read.
+    let mut store = store();
+    assert_eq!(store.account_summary(), (true, 1));
+
+    store.apply_message(message(
+        "ch-random",
+        "u-ada",
+        serde_json::json!({ "mentions": ["u-me"] }),
+    ));
+    assert_eq!(store.account_summary(), (true, 2));
+}
+
+#[test]
+fn account_summary_is_clear_when_everything_is_read() {
+    let mut store = store();
+    store.apply_ack("dm-ada", DM_ADA_LAST);
+    store.apply_ack("dm-bob", "01JC0000000000000000000007");
+    store.apply_ack("grp-weekend", "01JC0000000000000000000006");
+    assert_eq!(store.home_summary(), (false, 0), "fixture check");
+    assert_eq!(store.account_summary(), (false, 0));
+}
+
+#[test]
+fn an_empty_store_has_nothing_to_show() {
+    assert_eq!(ChatStore::new("u-me").account_summary(), (false, 0));
+}

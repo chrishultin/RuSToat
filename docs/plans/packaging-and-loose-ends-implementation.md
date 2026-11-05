@@ -205,3 +205,23 @@ Deferred to the end at the user's request:
 - `:party:` (an existing custom emoji) becomes its chip.
 - `:smile:` still becomes 😄.
 - No redraw storm: no stream of `Complete` events in the debug log while idle.
+
+## Merge: multiple accounts (between chunks 5 and 6)
+
+The session on `i-d-like-to-look-into-adding-support-for-being-l-6b03` (multiple accounts, finished at `ad283cd`; plan `docs/plans/multiple-accounts.md`, with its own implementation record) asked, on the user's behalf, for its branch to be merged here. It's merged with `--no-ff` after chunk 5's commit.
+
+**History.** That branch was based on `main` at `4b71851`, without milestones 3–4, so this branch had 21 commits it lacked. `git merge-tree` showed 4 textual conflicts: `Cargo.lock`, `README.md`, `src/main.rs` and `src/ui/chat.rs`.
+
+**Resolutions:**
+- `src/ui/chat.rs`, render: their branch moved the Dock badge and banner dismissal into `AppRoot` (`ChatView::sync_outside`, per account), so only this branch's `self.sync_composer(window, cx)` stays in `render`.
+- `src/ui/chat.rs`, chunk 4's `leave_server`: banner tags now include the account, so it dismisses `notify::banner_tag(&self.account_id, channel)` instead of the bare channel. This one wasn't a textual conflict but would have left banners showing.
+- `src/main.rs`: `MigratingStore::keychain()` together with their `FileAccounts`/`MemoryAccounts` setup, the `AddAccount` action and menu item, and `AppRoot::new(store, accounts, …)`.
+- `src/accounts.rs`: `FileAccounts::in_config_dir()` (`dirs::config_dir()/chat.stoat.rustoat`) became `in_app_dir()` = `places::app_dir()?.join("accounts.json")`, so it sits beside `places.json` and moves with chunk 1's folder migration. `CONFIG_DIR_NAME` and the module doc path were updated, `main.rs` follows, and the warning now says "no home directory".
+- `Cargo.toml` and `Cargo.lock`: removed the `dirs = "6"` dependency (no longer used). `dirs` stays in the lock for other crates. Their `tempfile` dev-dependency comes along.
+- `src/session.rs` (auto-merged): their API is keyed by account (`"{api_url}#{user_id}"`; `restore`, `remember` and `log_out` take the key, plus a new `forget`). `MigratingStore` and `load_migrating` keep their logic, with the parameter renamed `instance` → `key`. The two migrations compose: this one moves items between Keychain services under the same key, and theirs adopts a bare-URL key as the first account.
+- `tests/session_restore.rs`: this branch's four migration tests now use their `KEY` constant, plus a new `OTHER_KEY`, and `restore(…, KEY.into())`.
+- `README.md`, "Your session and the Keychain": service `com.chrishultin.rustoat`, account `{API URL}#{user ID}`, `accounts.json` in `com.chrishultin.rustoat/`, session name "RuSToat", and one Keychain prompt per account and then none. Their "Multiple accounts" and rewritten "Self-hosted instances" sections are kept.
+
+**Verification:** `cargo test`: 377 passed, 0 failed (their branch alone had 245 passing). `cargo clippy --all-targets -- -D warnings`: clean. No stale `chat.stoat.*` references in code, apart from the deliberate legacy constants.
+
+**State on this Mac, to fix before the final manual tests:** after chunk 1's folder migration, the other branch wrote a newer `~/Library/Application Support/chat.stoat.rustoat/accounts.json` with two per-user entries. `com.chrishultin.rustoat/accounts.json` only has the older one-entry list, and the folder migration won't run again because the new folder exists. Plan: back up the new folder's file, then copy the old folder's `accounts.json` over it. `MigratingStore` moves each token from `chat.stoat.gpui-poc` on first load.

@@ -57,6 +57,8 @@ block2 = "0.6"
 
 [dev-dependencies]
 wiremock = "0.6"
+# A scratch directory for the account list file tests. Already in the tree.
+tempfile = "3"
 # The parser inside TextView (already in the tree), to check what `prepare` produces parses as intended.
 markdown = "1"
 # Rendering the app icon's SVG to PNGs (examples/render_icon.rs). The version
