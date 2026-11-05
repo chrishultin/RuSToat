@@ -259,3 +259,58 @@ _Same worktree and branch (`feature/mark-as-read`), stacked on `5f075fb`._
 ### Manual Validation
 - The user allowed notifications on the first bundled run (`banners: allowed`). On the relaunch, macOS remembered the choice and didn't prompt again.
 - After the new-DM fix, with RuSToat in the background, a DM from the user's test account showed a macOS banner. The log has `banner: @<test-account> | â¦`. Clicking it brought RuSToat forward on that DM (`banner: clicked <new-DM-id>`). About a second later the DM was acked and its banner removed (`banner: dismissing … (read)`). The user confirmed ("Works, commit").
+
+## Summary
+
+_Completed: 2026-11-04, on `feature/mark-as-read` (worktree `.claude/worktrees/mark-as-read`). Not yet merged into `main`, and not pushed._
+
+### Chunks Completed
+1. Unread indicators: bold and dot, plus mention counts per channel, server and Home, from `Ready.channel_unreads` and live messages (`efda345`).
+2. Mark as read: a debounced auto-ack while viewing at the bottom of a focused window, `ChannelAck` from other sessions, and server Mark as read (`8df2cfe`).
+3. Notification rules and in-app toasts, following the web client's settings, mutes, presence and skip rules (`5f075fb`).
+4. Dock badge for the attention count; closed DMs and stale mentions excluded (`cb7769e`).
+5. macOS banners from an ad-hoc-signed app bundle, with click-to-open and dismiss-on-read, plus `ChannelCreate`/`ChannelUpdate` handling (`4f85ecf`).
+- Plus `858ba36`, which merges `main` (the formatting session's `2482a73`) into the branch before chunk 5.
+
+### Divergences
+- **Chunk 1:**
+  - `MessageFlags` are bit positions, not masks. Assumption 2 in the plan was corrected.
+  - Muted-channel indicators moved to chunk 3.
+  - Sending a message acks its channel locally.
+  - Home's indicator comes from `home_channels()`.
+- **Chunk 2:**
+  - Built in a worktree, at the user's direction.
+  - Home has no Mark as read.
+  - The indicator clears when the debounce fires, not when the request succeeds.
+- **Chunk 3:**
+  - Presence comes only from `Ready`: `UserUpdate` isn't handled, so a status change mid-session applies after a reconnect.
+  - Only the `notifications` key of `UserSettingsUpdate` is used.
+- **Chunk 4:** the badge stuck at 1 because of a closed DM with an old mention. Fixed: closed DMs don't count, and mentions at or before the read position are dropped.
+- **Chunk 5:**
+  - Notification permission is requested at login.
+  - Banners are dismissed by read position.
+  - `main` was merged in first.
+  - Fixed: a brand-new DM never notified. `ChannelCreate`/`ChannelUpdate` were ignored, so the channel was unknown.
+
+### Definition of Done
+- [x] **Sidebar:** unread and mention indicators per channel, server and Home, from `Ready.channel_unreads`, updated live by `Message` and `ChannelAck`. Matches the web app: the user confirmed it in chunk 1 and in manual test 2.
+- [x] **Auto read:** one debounced (1 s) `PUT /channels/{id}/ack/{msg}` per newer message while viewing; server Mark as read sends `PUT /servers/{id}/ack`. Tested in `api_unreads` and manual tests 2 and 3.
+- [x] **Rules:** channel, then server, then type-default level resolution; mutes with expiry, including server mutes; and every skip rule, each with a test in `notify_rules`.
+- [x] **Live settings:** read from the `notifications` user setting and updated on `UserSettingsUpdate`. Muting live passed manual test 4.
+- [x] **Toasts:** web-client title formats, and a click opens the channel (chunk 3, manual test 4).
+- [x] **Dock badge:** the attention count, "99+" above 99, and nothing at 0 (`dock::badge_label` tests, chunk 4, manual test 6).
+- [x] **Bundle:** `scripts/bundle.sh` builds an ad-hoc-signed `RuSToat.app` with identifier `chat.stoat.rustoat` (checked with `codesign -dv`).
+- [x] **Banners:** when bundled and in the background, a banner per channel; a click opens the channel, and reading it dismisses the banner (manual test 7). Unbundled runs fall back to toasts: routing test, the `banners: not running from an app bundle; using in-app toasts` log line, and manual test 8.
+- [x] **Checks:** `cargo test`: 165 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings`: clean.
+
+### Manual Tests
+The user confirmed all eight plan-level manual tests:
+- Tests 1, 6 and 7 in their chunks.
+- Tests 2, 3, 4, 5 and 8 in a final unbundled run ("All pass"). That run's log shows the toast fallback (`notify: @<test-account> | …`), the badge going 1 → 0, and the ack.
+
+### Remaining Manual Steps
+- Merge `feature/mark-as-read` into `main`, when the user decides to.
+- Known limits, deliberately out of scope:
+  - Presence changes mid-session apply after a reconnect (`UserUpdate` isn't handled).
+  - `ChannelDelete` isn't handled; a deleted channel stays listed until a restart.
+  - Banners need the app bundle (`scripts/run-bundled.sh`); `cargo run` gets toasts.
