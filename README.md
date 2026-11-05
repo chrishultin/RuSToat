@@ -56,6 +56,16 @@ STOAT_API_URL=https://stoat.example.com/api cargo run
 
 Each saved session remembers its own instance, so a token is never sent to another server. While there's a saved account, the app restores that one.
 
+### Multiple accounts
+
+You can be signed in to several accounts at once, on one instance or several. They appear in a column on the far left, as Slack's workspaces do:
+
+- **+** (or **Add Account…** in the Stoat menu) logs in to another account. Each account remembers its own instance.
+- Click an account to switch to it. Every account stays connected, so unreads, notifications and the Dock badge cover all of them. Clicking a notification for another account switches to it.
+- An account you aren't looking at never marks anything as read.
+- **Log Out** (in the Stoat menu, or the button in the window) applies to the account on screen. Right-click an account to log out of it from the switcher.
+- If Stoat ends an account's session, the account stays in the switcher, dimmed. Select it to log in again.
+
 ## Your session and the Keychain
 
 After you log in, the session token is saved in your login Keychain under the service `chat.stoat.gpui-poc`, with `{API URL}#{user ID}` as the account. The next launch signs you in automatically. A session saved by an older version (whose Keychain account is just the API URL) is picked up as it is.
@@ -64,6 +74,7 @@ The list of accounts is kept, without tokens, in `~/Library/Application Support/
 
 - **Log Out** (in the Stoat menu, or the button in the window) removes the account, deletes its Keychain item and ends the session on Stoat. If Stoat can't be reached, you're still logged out locally; revoke the session from Stoat's Settings → Sessions, where it's listed as "Stoat GPUI POC".
 - **Expect a Keychain prompt during development.** macOS ties Keychain access to the app's code signature, and every `cargo build` produces a new unsigned binary. After a rebuild, macOS may ask whether `stoat-gpui` can use the saved item. Choose **Always Allow**. This is expected and won't happen with a signed release build.
+- **Each account has its own Keychain item**, so during development you may get one prompt per account after a rebuild.
 - If your saved session can't be checked at startup (offline, or a Stoat outage), the app keeps it and offers **Retry**. It only discards a saved session that Stoat itself rejects.
 
 The app also remembers where you were: the open server, and the last channel you viewed in each server and in Home. Switching back to a server returns you to its channel, and the next launch opens where you left off. This is saved in `~/Library/Application Support/chat.stoat.rustoat/places.json`, per instance and account. Deleting the file just starts you at Home.

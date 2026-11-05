@@ -185,6 +185,12 @@ pub async fn log_out(
     (server, local)
 }
 
+/// Forget the token saved under `key`, without contacting the server (for
+/// a session that's already over). Must run on the Tokio IO runtime.
+pub async fn forget(store: Arc<dyn TokenStore>, key: String) -> anyhow::Result<()> {
+    blocking(move || store.clear(&key)).await
+}
+
 /// Run a blocking store call off the async worker threads.
 pub(crate) async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> anyhow::Result<T> + Send + 'static,

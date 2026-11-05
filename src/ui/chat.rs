@@ -660,6 +660,16 @@ impl ChatView {
         self.store.attention_count()
     }
 
+    /// The signed-in user's display name and avatar, once `Ready` has them.
+    pub fn me_summary(&self) -> Option<(String, String)> {
+        let me = self.store.me();
+        let user = self.store.user(me)?;
+        Some((
+            display_name(user).to_string(),
+            self.store.user_avatar_url(me),
+        ))
+    }
+
     /// Log what makes up [`Self::sync_outside`]'s count.
     pub fn log_attention(&self) {
         for (channel, count) in self.store.attention_breakdown() {
@@ -1042,7 +1052,7 @@ impl ChatView {
                 let icon = server_icon(&server, &self.media, selected);
                 let view = cx.entity().downgrade();
                 let server_id = server.id.clone();
-                let mark_read: MarkRead = Rc::new(move |_, _, cx| {
+                let mark_read: MenuAction = Rc::new(move |_, _, cx| {
                     let server_id = server_id.clone();
                     view.update(cx, |this, cx| this.mark_server_read(server_id, cx))
                         .ok();
@@ -1054,7 +1064,7 @@ impl ChatView {
                     selected,
                     server.unread,
                     server.mentions,
-                    Some(mark_read),
+                    Some(("Mark as read", mark_read)),
                     cx.listener(move |this, _, _, cx| this.select_place(place.clone(), cx)),
                     cx,
                 )
@@ -1517,7 +1527,7 @@ const AVATAR_SIZE: f32 = 32.;
 /// fails, or if there's no image.
 /// `id` must be unique among the avatars on screen: the image keeps its
 /// loading state under it (without one, the initial never shows while loading).
-fn avatar(
+pub(crate) fn avatar(
     id: impl Into<SharedString>,
     url: Option<String>,
     name: &str,
@@ -2475,20 +2485,21 @@ fn server_icon(server: &ServerEntry, media: &MediaUrls, selected: bool) -> AnyEl
     }
 }
 
-/// A rail button, with a marker on the left edge when selected (an icon image
-/// covers the button's own highlight colour).
-/// What a rail button's "Mark as read" menu item does.
-type MarkRead = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+/// What a rail button's right-click menu item does.
+pub(crate) type MenuAction = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
+/// A rail button, with a marker on the left edge when selected (an icon image
+/// covers the button's own highlight colour). Also used by the account
+/// switcher. `menu` is a right-click menu item: its label and action.
 #[allow(clippy::too_many_arguments)]
-fn rail_button(
+pub(crate) fn rail_button(
     id: impl Into<ElementId>,
     content: AnyElement,
     tooltip: impl Into<SharedString>,
     selected: bool,
     unread: bool,
     mentions: usize,
-    mark_read: Option<MarkRead>,
+    menu: Option<(&'static str, MenuAction)>,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> Div {
@@ -2522,14 +2533,14 @@ fn rail_button(
         .on_click(on_click)
         .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         .child(content);
-    // Right-click: "Mark as read" (servers only).
-    let button = match mark_read {
-        Some(mark_read) => button
+    // Right-click: e.g. "Mark as read" on servers.
+    let button = match menu {
+        Some((label, action)) => button
             .context_menu(move |menu, _, _| {
-                let mark_read = mark_read.clone();
+                let action = action.clone();
                 menu.item(
-                    PopupMenuItem::new("Mark as read")
-                        .on_click(move |event, window, cx| mark_read(event, window, cx)),
+                    PopupMenuItem::new(label)
+                        .on_click(move |event, window, cx| action(event, window, cx)),
                 )
             })
             .into_any_element(),
@@ -2571,7 +2582,7 @@ fn rail_button(
 }
 
 /// A red pill with an unread-mention count ("99+" past 99).
-fn mention_badge(count: usize, cx: &App) -> Div {
+pub(crate) fn mention_badge(count: usize, cx: &App) -> Div {
     let theme = cx.theme();
     let label = if count > 99 {
         "99+".to_string()

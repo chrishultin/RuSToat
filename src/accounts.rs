@@ -106,6 +106,18 @@ impl AccountList {
         changed
     }
 
+    /// Update an account's display name, as last seen. Returns whether it
+    /// changed.
+    pub fn set_name(&mut self, id: &str, name: &str) -> bool {
+        match self.accounts.iter_mut().find(|a| a.id == id) {
+            Some(entry) if entry.name.as_deref() != Some(name) => {
+                entry.name = Some(name.to_string());
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Show `id` next time. Ignored if there's no such account.
     pub fn set_active(&mut self, id: &str) {
         if self.get(id).is_some() {
@@ -298,6 +310,15 @@ mod tests {
         // Found by user from now on, and its ID (Keychain name) is unchanged.
         assert_eq!(accounts.find("https://a", "u1").unwrap().id, "https://a");
         assert_eq!(accounts.add_or_update("https://a", "u1", None), "https://a");
+    }
+
+    #[test]
+    fn set_name_reports_changes() {
+        let mut accounts = list(&["a"]);
+        assert!(accounts.set_name("a", "Ann"));
+        assert!(!accounts.set_name("a", "Ann"));
+        assert!(!accounts.set_name("missing", "Ann"));
+        assert_eq!(accounts.get("a").unwrap().name.as_deref(), Some("Ann"));
     }
 
     #[test]

@@ -14,10 +14,12 @@ use crate::runtime::{IoTask, spawn_io};
 /// Emitted once the server returns a session token.
 pub enum LoginEvent {
     LoggedIn {
-        session: Session,
+        session: Box<Session>,
         /// The instance's API base URL.
         instance: String,
     },
+    /// The user gave up on adding an account (see [`LoginView::cancellable`]).
+    Cancelled,
 }
 
 /// Why a login attempt failed.
@@ -49,6 +51,8 @@ pub struct LoginView {
     instance: Entity<InputState>,
     /// The instance can't be changed (logging back in to a known account).
     instance_locked: bool,
+    /// Offer Cancel (adding another account).
+    cancellable: bool,
     email: Entity<InputState>,
     password: Entity<InputState>,
     code: Entity<InputState>,
@@ -123,6 +127,7 @@ impl LoginView {
             client,
             instance,
             instance_locked: locked,
+            cancellable: false,
             email,
             password,
             code,
@@ -131,6 +136,12 @@ impl LoginView {
             pending: None,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Offer a Cancel button, which emits [`LoginEvent::Cancelled`].
+    pub fn cancellable(mut self, cancellable: bool) -> Self {
+        self.cancellable = cancellable;
+        self
     }
 
     fn is_busy(&self) -> bool {
@@ -232,7 +243,7 @@ impl LoginView {
                     self.client.base_url()
                 );
                 cx.emit(LoginEvent::LoggedIn {
-                    session,
+                    session: Box::new(session),
                     instance: self.client.base_url().to_string(),
                 });
             }
@@ -328,6 +339,11 @@ impl Render for LoginView {
         let theme = cx.theme();
 
         let (title, subtitle, submit_label) = match &self.step {
+            Step::Credentials if self.cancellable => (
+                "Add an account",
+                "Log in to another Stoat account, here or on another server.",
+                "Log in",
+            ),
             Step::Credentials => ("Log in to Stoat", "Use your Stoat account.", "Log in"),
             Step::Mfa {
                 use_recovery: false,
@@ -453,6 +469,18 @@ impl Render for LoginView {
                         el.child(Button::new("back").ghost().w_full().label("Back").on_click(
                             cx.listener(|this, _, window, cx| this.back_to_credentials(window, cx)),
                         ))
+                    })
+                    .when(!is_mfa && self.cancellable, |el| {
+                        el.child(
+                            Button::new("cancel")
+                                .ghost()
+                                .w_full()
+                                .label("Cancel")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.pending = None;
+                                    cx.emit(LoginEvent::Cancelled);
+                                })),
+                        )
                     }),
             )
     }

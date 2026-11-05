@@ -148,3 +148,61 @@ Deferred at the user's request. Testing the login screen now would mean logging 
 **Not done.** The bundled app was killed partway through: the parallel worktree's session ran `pkill -f "RuSToat.app/Contents/MacOS/stoat-gpui"`, which matches this branch's bundle too. At the user's request, the banner, toast and badge checks move to the end of the plan, together with chunks 4 and 5.
 
 **Found during the run (environment, not this chunk):** the parallel branch's first launch renamed `~/Library/Application Support/chat.stoat.rustoat` to `com.chrishultin.rustoat`, taking chunk 1's `accounts.json` with it. It also moved the bare-URL Keychain item to its new service. So this branch's next launch saw a first launch with nothing to adopt, and showed the login screen. The user logged in through the new Server field. This covers chunk 2's deferred login check on the default instance: `instance: https://api.stoat.chat (API 0.16.2)`, then `logged in as user 01KH…`, and `accounts.json` gained the per-user Keychain name `https://api.stoat.chat#01KH4Q74NX640MPRYJF506Y71W`. When the two branches meet, `FileAccounts` must use `places::app_dir()`, so the account list moves with the folder.
+
+## Chunk 4: Several accounts at once, with a switcher
+
+### Changes Made
+- `src/ui/app_root.rs`, rewritten:
+  - **State.** `AccountState { Restoring, Offline { token, error }, SignedOut { login }, Chat { view, token, … } }` per account, in `states: HashMap<id, AccountState>`. `Shown { Loading, Account(id), Adding { login, back } }` says what's on screen.
+  - **Startup.** `start()` restores every saved account at once (one `spawn_io` each), then `show_next()`: the active account, or the add screen when there are none.
+  - **Switching.** `show_account(id)` calls `set_active(false)` on the previous view and `set_active(true)` on the new one, and saves `active`.
+  - **Adding.** `add_account()` opens a login view, cancellable when other accounts exist. `cancel_adding()` returns to `back`.
+  - **Restore results:**
+    - `SignedIn`: `set_user`, then `start_chat`. A new view starts hidden unless it's the account on screen.
+    - `NeedsLogin`: `forget_account` for an unidentified adopted entry, otherwise `sign_out`.
+    - `Unverified`: `Offline`.
+    - a task error: `sign_out`.
+  - **Signed out.** `sign_out(id, message)` gives `SignedOut`, with a login view locked to the account's instance.
+  - **Rejected session.** `session_ended(id)` forgets the token (new `session::forget`), and the account shows "Your session has ended. Please log in again."
+  - **Login.** `logged_in()` (assumption 3):
+    - same instance and user, already `Chat`: ends the new session (`end_session`), switches to the existing account, and shows a toast "You're already signed in to that account."
+    - `Offline`: ends the old unchecked session, and the new token replaces it
+    - otherwise: `add_or_update`, save, remember the token, `start_chat`, show
+  - **Log out.** `log_out(id)` ends the session on the server, clears the token, and calls `forget_account`. An account with no token (signed out) is only forgotten. `log_out_current()` is for the menu.
+  - **Forgetting.** `forget_account(id)` drops the state (closing its websocket), removes the entry and saves. If the account was on screen, the next one is shown.
+  - **Banners.** `open_notice(tag)` switches to the banner's account, then opens the channel.
+  - **Sync.** `sync_outside()` runs from every chat view's observer. It sums attention counts for the Dock badge, dismisses banners that have been read, saves display names seen in `Ready` (`AccountList::set_name`), and redraws.
+  - **Render.** The switcher column (only once there's at least one account), plus the main area: chat, login, or a status page (Signing in…, or Offline with Retry and Log out for that account).
+- New `src/ui/switcher.rs`:
+  - `render_switcher(items, adding, on_select, on_log_out, on_add)`.
+  - `SwitcherItem { id, name, host, avatar, status, selected, unread, mentions }`.
+  - `AccountStatus { Loading, SignedIn, Offline, SignedOut }`. Offline and signed-out accounts are drawn at 50% opacity, and the tooltip reads "Name — host (offline / signed out)".
+  - Right-click shows "Log Out". **+** sits at the bottom.
+  - `host_of(instance)`.
+- `src/ui/chat.rs`:
+  - `avatar`, `rail_button` and `mention_badge` are `pub(crate)`.
+  - `rail_button`'s menu parameter becomes `Option<(&'static str, MenuAction)>` (it was "Mark as read" only).
+  - New `me_summary() -> Option<(name, avatar_url)>`.
+- `src/ui/login.rs`:
+  - `cancellable(bool)` builder, `LoginEvent::Cancelled`, and a Cancel button on the credentials step.
+  - The title reads "Add an account" when cancellable.
+  - `LoginEvent::LoggedIn.session` is boxed (clippy `large_enum_variant`).
+- `src/session.rs`: `forget(store, key)` clears a token without contacting the server.
+- `src/accounts.rs`: `set_name(id, name) -> bool`, with a test.
+- `src/main.rs`: an **Add Account…** menu item (`AddAccount` action). Log Out calls `log_out_current`.
+- `src/ui/mod.rs`: `pub mod switcher`.
+- `README.md`: new "Multiple accounts" section, and a note that each account has its own Keychain item.
+
+### Divergences
+- **The switcher is drawn by `AppRoot`, not a separate entity.** `render_switcher` is a function, which is simpler, because `AppRoot` owns all the state.
+- **Name on fresh login.** A freshly logged-in account's `name` is filled in from `Ready` (`sync_outside` with `set_name`), not only on the next restore. The plan left it unknown until relaunch.
+- **List-logic tests.** These were planned for `tests/accounts.rs`. They're unit tests in `src/accounts.rs` (chunk 1, plus `set_name`), covering removal from the middle, last and only positions, dedupe, and keeping the active account.
+- **Rejected sessions.** These used to also try a server logout. Now they only forget the token, since the server has already ended the session.
+
+### Verification Performed
+- `cargo test`: 238 passed, 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean, after boxing the login event's `Session`.
+- `cargo fmt --check`: clean.
+
+### Manual Validation
+Deferred to the end at the user's request (see chunk 3).

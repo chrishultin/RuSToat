@@ -5,7 +5,7 @@ use stoat_gpui::accounts::{AccountsFile, FileAccounts, MemoryAccounts};
 use stoat_gpui::session::{KeychainStore, TokenStore};
 use stoat_gpui::{runtime, ui};
 
-actions!(stoat, [Quit, LogOut]);
+actions!(stoat, [Quit, LogOut, AddAccount]);
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("stoat_gpui=info"))
@@ -27,6 +27,7 @@ fn main() {
             cx.set_menus(vec![Menu {
                 name: "Stoat".into(),
                 items: vec![
+                    MenuItem::action("Add Account…", AddAccount),
                     MenuItem::action("Log Out", LogOut),
                     MenuItem::separator(),
                     MenuItem::action("Quit Stoat", Quit),
@@ -63,11 +64,22 @@ fn main() {
             })
             .expect("failed to open the main window");
 
-            // Handled at the app level so the menu item works wherever focus is.
-            cx.on_action(move |_: &LogOut, cx| {
+            // Handled at the app level so the menu items work wherever focus is.
+            // Log Out applies to the account on screen.
+            cx.on_action({
+                let root = root.clone();
+                move |_: &LogOut, cx| {
+                    window
+                        .update(cx, |_, window, cx| {
+                            root.update(cx, |root, cx| root.log_out_current(window, cx))
+                        })
+                        .ok();
+                }
+            });
+            cx.on_action(move |_: &AddAccount, cx| {
                 window
                     .update(cx, |_, window, cx| {
-                        root.update(cx, |root, cx| root.log_out(window, cx))
+                        root.update(cx, |root, cx| root.add_account(window, cx))
                     })
                     .ok();
             });
