@@ -43,6 +43,7 @@ futures = "0.3"
 anyhow = "1"
 log = "0.4"
 env_logger = "0.11"
+emojis = "0.9.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Dock badge (AppKit's NSDockTile), and checking whether banners can be

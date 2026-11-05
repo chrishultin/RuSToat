@@ -12,6 +12,7 @@ use crate::api::models::{
 };
 use crate::attachment::AttachmentView;
 use crate::complete::{Candidate, TokenRef};
+use crate::emoji::CustomEmoji;
 use crate::draft::DraftAttachment;
 use crate::embed::EmbedView;
 use crate::media::MediaUrls;
@@ -1314,6 +1315,20 @@ impl ChatStore {
     /// then custom emoji by name. Those are the channel's server's in a
     /// server, or all of the user's servers' in DMs and groups.
     pub fn reaction_choices(&self, channel: &str) -> Vec<PickerEmoji> {
+        COMMON_REACTIONS
+            .iter()
+            .map(|key| key.to_string())
+            .chain(self.server_emoji(channel).into_iter().map(|emoji| emoji.id.clone()))
+            .map(|key| PickerEmoji {
+                emoji: self.reaction_emoji(&key),
+                key,
+            })
+            .collect()
+    }
+
+    /// The custom emoji usable in `channel`, by name: its server's, or in
+    /// DMs and groups those of all the user's servers.
+    fn server_emoji(&self, channel: &str) -> Vec<&Emoji> {
         let server = self.server_of(channel);
         let mut custom: Vec<&Emoji> = self
             .emojis
@@ -1325,13 +1340,18 @@ impl ChatStore {
             })
             .collect();
         custom.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
-        COMMON_REACTIONS
-            .iter()
-            .map(|key| key.to_string())
-            .chain(custom.into_iter().map(|emoji| emoji.id.clone()))
-            .map(|key| PickerEmoji {
-                emoji: self.reaction_emoji(&key),
-                key,
+        custom
+    }
+
+    /// The custom emoji `:` and the emoji picker offer in `channel` (the
+    /// same ones as the reaction picker).
+    pub fn custom_emoji_for(&self, channel: &str) -> Vec<CustomEmoji> {
+        self.server_emoji(channel)
+            .into_iter()
+            .map(|emoji| CustomEmoji {
+                id: emoji.id.clone(),
+                name: emoji.name.clone(),
+                url: self.media.emoji(&emoji.id),
             })
             .collect()
     }

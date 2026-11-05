@@ -74,6 +74,26 @@ pub fn completion_query(text: &str, cursor: usize) -> Option<Query> {
     })
 }
 
+/// A `:shortcode:` just closed by the `:` before byte offset `cursor`:
+/// its byte range (both colons) and the shortcode. Same rules as
+/// [`completion_query`] for where it may start, and not in code.
+pub fn closed_shortcode(text: &str, cursor: usize) -> Option<(Range<usize>, String)> {
+    if cursor > text.len() || !text.is_char_boundary(cursor) {
+        return None;
+    }
+    let before = text[..cursor].strip_suffix(':')?;
+    let start = before.rfind(':')?;
+    let code = &before[start + 1..];
+    if code.is_empty() || !code.chars().all(is_shortcode_char) {
+        return None;
+    }
+    let opens = before[..start]
+        .chars()
+        .next_back()
+        .is_none_or(|c| c.is_whitespace() || OPENING.contains(&c));
+    (opens && !in_code(text, start)).then(|| (start..cursor, code.to_string()))
+}
+
 /// Punctuation a trigger may follow.
 const OPENING: [char; 7] = ['(', '[', '{', '"', '\'', '“', '‘'];
 

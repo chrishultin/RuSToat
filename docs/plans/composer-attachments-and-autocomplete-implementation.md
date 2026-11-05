@@ -168,3 +168,39 @@ Deferred by the user ("we'll test it all later"). The chunk's checks (`@` in a D
 
 ### Manual Validation
 Deferred by the user ("we'll test it all later"). The chunk's checks (a member who hasn't posted appearing after a moment, `#gen` → `#general` showing as a link in the web app) move to the plan's Manual Test 5.
+
+## Chunk 5: :emoji: autocomplete
+
+### Changes Made
+- `Cargo.toml` and `Cargo.lock`: `emojis = "0.9.1"`, licensed `(MIT OR Apache-2.0) AND Unicode-3.0`, with one dependency, `phf 0.13`. The API was checked: `iter()` (CLDR order, default skin tones only), `get_by_shortcode`, `Emoji::{as_str, name, group, shortcode, shortcodes}`, and `Group::iter()`.
+- `src/emoji.rs` (new, pure):
+  - `CustomEmoji { id, name, url }` and `EmojiChoice::{Unicode { emoji, shortcode }, Custom(CustomEmoji)}`.
+  - `EmojiChoice::suggestion()`: a Unicode emoji shows the glyph and `:code:` and inserts the character as text. A custom one shows its image and `:name:` and inserts a chip, `TokenRef::Emoji(id)` labelled `:name:`.
+  - `search(query, custom)` ranks in tiers: 0 an exact shortcode or name, 1 a prefix, 2 a later word (split on `_ - space`). Within a tier, custom emoji come first, then CLDR order. The result is cut at 8.
+  - `by_shortcode(code)`.
+- `src/complete.rs`: `closed_shortcode(text, cursor)` gives the `:code:` closed by the `:` just before the cursor, with the same start and code rules as `completion_query`.
+- `src/store.rs`:
+  - `server_emoji(channel)` is factored out of `reaction_choices` (its server's emoji, or all servers' in DMs and groups, sorted by name).
+  - `custom_emoji_for(channel) -> Vec<CustomEmoji>` (with image URLs).
+- `src/ui/chat.rs`: `suggest` answers `QueryKind::Emoji` with `emoji::search(query, store.custom_emoji_for(channel))`. `set_media` also gives the composer the `MediaUrls`.
+- `src/ui/composer.rs`:
+  - `replace_closed_shortcode` runs on every `Change`. When exactly one `:` was typed at the cursor (`typed_char(last_text, text, cursor, ':')`, so pasted or loaded text is left alone) and it closes a known shortcode, the range is selected and replaced with the emoji. Unknown codes are left as typed. `last_text` is kept on changes and `set_text`.
+  - `render_chip` draws custom emoji chips (`emoji:{id}`) as their image at 90 % of the line height, falling back to the label. Mentions keep the pill. `set_media` provides the URLs.
+- `src/lib.rs`: `pub mod emoji`.
+- Tests:
+  - `tests/emoji.rs` (new, 6 tests): `:smi` finds 😄 in the first 3; 👍 for `thu` and `+1`; 🎉 for `TADA`; exact matches first (😄 for `smile`, 🐱 for `cat`); later-word matches (🚒 for `engine`); custom emoji by name and tier order; suggestion insertions; `by_shortcode`.
+  - `tests/complete.rs`: `a_closing_colon_finds_the_shortcode_it_ends` covers `:smile:`, `:tada:` after a space, `(:+1:`, an unknown `:nope:` left alone, and the non-triggers `12:30:`, `a:smile:`, code, spaces and custom-emoji wire text.
+
+### Divergences
+- **`emojis` has one dependency**, `phf 0.13` (another `phf` version, 0.11, was already in the tree). The plan said it had none. Its licence includes `Unicode-3.0` for the emoji data, which is permissive.
+- **Ranking adds an exact-match tier** (so `:smile` puts 😄 before 😃 `smiley`, which comes earlier in CLDR order). Words are matched after the first one only, since the first is covered by the prefix tier.
+- **Closing colons only convert Unicode shortcodes.** A custom emoji's exact `:name:` isn't converted. Custom emoji are inserted from the list.
+- **The closing colon only acts on a typed `:`.** It compares the previous text with the new one, so drafts, edits and pastes that contain `:smile:` aren't changed.
+
+### Verification Performed
+- `cargo test --test emoji`: 6 passed. One expectation was corrected: `parrot` is 🦜's exact shortcode, so 🦜 rightly ranks above the custom `:smile_parrot:`.
+- `cargo test --test complete`: 20 passed.
+- Full suite: `cargo test` gives 315 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings` is clean.
+
+### Manual Validation
+Deferred by the user ("we'll test it all later"). The chunk's checks (`:thu` → 👍, a custom emoji from the list, `:tada:` converting on the final colon) move to the plan's Manual Test 7.

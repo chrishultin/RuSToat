@@ -18,7 +18,10 @@ use gpui_kit::*;
 
 use crate::api::models::ReplyIntent;
 use crate::attachment::FileKind;
-use crate::complete::{Insertion, Query, Suggestion, TokenRef, completion_query, mention_spans};
+use crate::complete::{
+    Insertion, Query, Suggestion, TokenRef, closed_shortcode, completion_query, mention_spans,
+};
+use crate::media::MediaUrls;
 use crate::draft::{
     AttachmentLimits, Draft, DraftAttachment, Drafts, EditStash, MAX_MESSAGE_CHARS, ReplyTarget,
     SendCheck, TooManyReplies, char_count, check_send, save_pasted_image,
@@ -78,6 +81,10 @@ pub struct Composer {
     /// Chip labels seen so far, by token ID, for text that comes back
     /// (a draft after an edit).
     labels: HashMap<String, String>,
+    /// The text as of the last change, to tell a typed `:` from a paste.
+    last_text: String,
+    /// Where custom emoji chips' images come from.
+    media: MediaUrls,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -103,6 +110,7 @@ impl Composer {
                 // The character count follows the text.
                 InputEvent::Change => {
                     this.hint = None;
+                    this.replace_closed_shortcode(window, cx);
                     if this.editing.editing().is_none() {
                         let empty = this.input.read(cx).value().trim().is_empty();
                         cx.emit(ComposerEvent::Input { empty });
@@ -127,6 +135,8 @@ impl Composer {
             hint: None,
             completion: None,
             labels: HashMap::new(),
+            last_text: String::new(),
+            media: MediaUrls::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -279,6 +289,7 @@ impl Composer {
     fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         let content = self.with_chips(text);
         self.completion = None;
+        self.last_text = text.to_string();
         self.input.update(cx, |input, cx| {
             input.set_value(content, window, cx);
             input.set_cursor_position(end_of(text), window, cx);
@@ -309,6 +320,35 @@ impl Composer {
         for (_, token) in mention_spans(text) {
             self.labels.insert(token.token_id(), labels(&token));
         }
+    }
+
+    /// Where custom emoji chips' images come from.
+    pub fn set_media(&mut self, media: MediaUrls) {
+        self.media = media;
+    }
+
+    /// Typing the closing `:` of a known shortcode (`:smile:`) turns it
+    /// into the emoji. Only for a typed `:`, not pasted or loaded text.
+    fn replace_closed_shortcode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (text, cursor) = {
+            let input = self.input.read(cx);
+            (input.value().to_string(), input.cursor())
+        };
+        let typed_colon = typed_char(&self.last_text, &text, cursor, ':');
+        self.last_text = text;
+        if !typed_colon {
+            return;
+        }
+        let Some((range, emoji)) = closed_shortcode(&self.last_text, cursor)
+            .and_then(|(range, code)| Some((range, crate::emoji::by_shortcode(&code)?)))
+        else {
+            return;
+        };
+        self.input.update(cx, |input, cx| {
+            input.set_selected_range(range, cx);
+            input.replace(emoji, window, cx);
+        });
+        self.last_text = self.input.read(cx).value().to_string();
     }
 
     /// Open, update or close the suggestion list for what's at the cursor.
@@ -787,9 +827,44 @@ fn unknown_label(token: &TokenRef) -> String {
     }
 }
 
-/// A mention or channel link in the box: a pill in the primary tint.
-fn render_chip(chip: &InlineTokenContext, _: &mut Window, cx: &mut App) -> Div {
+/// Whether `new` is `old` with `c` typed just before byte offset `cursor`.
+fn typed_char(old: &str, new: &str, cursor: usize, c: char) -> bool {
+    let Some(at) = cursor.checked_sub(c.len_utf8()) else {
+        return false;
+    };
+    new.len() == old.len() + c.len_utf8()
+        && new.get(at..cursor).is_some_and(|typed| typed.starts_with(c))
+        && new.get(..at) == old.get(..at)
+        && new.get(cursor..) == old.get(at..)
+}
+
+/// A chip in the box: a custom emoji's picture, or a pill in the primary
+/// tint for a mention or channel link.
+fn render_chip(chip: &InlineTokenContext, media: &MediaUrls, _: &mut Window, cx: &mut App) -> AnyElement {
     let theme = cx.theme();
+    if let Some(TokenRef::Emoji(id)) = TokenRef::from_token_id(chip.token().id())
+        && let Some(url) = media.emoji(&id)
+    {
+        let size = chip.line_height();
+        return div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .h(size)
+            .px_0p5()
+            .rounded(px(4.))
+            .when(chip.is_selected(), |el| el.bg(theme.selection))
+            .child(
+                img(SharedUri::from(url))
+                    .size(size * 0.9)
+                    .object_fit(ObjectFit::Contain)
+                    .with_fallback({
+                        let label = chip.token().label().clone();
+                        move || div().child(label.clone()).into_any_element()
+                    }),
+            )
+            .into_any_element();
+    }
     div()
         .flex()
         .items_center()
@@ -805,6 +880,7 @@ fn render_chip(chip: &InlineTokenContext, _: &mut Window, cx: &mut App) -> Div {
         .text_color(theme.primary)
         .font_weight(FontWeight::MEDIUM)
         .child(div().min_w_0().truncate().child(chip.token().label().clone()))
+        .into_any_element()
 }
 
 /// Height of a suggestion row.
@@ -960,7 +1036,10 @@ impl Render for Composer {
                                             .unwrap_or(false)
                                     }
                                 })
-                                .token(render_chip),
+                                .token({
+                                    let media = self.media.clone();
+                                    move |chip, window, cx| render_chip(chip, &media, window, cx)
+                                }),
                         ),
                     )
                     .children(suggestions),

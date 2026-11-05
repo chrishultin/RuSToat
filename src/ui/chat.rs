@@ -30,6 +30,7 @@ use crate::api::models::ReplyIntent;
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
 use crate::attachment::{AttachmentView, fit_into};
 use crate::complete::{Query, QueryKind, Suggestion, TokenRef, rank, rank_people};
+use crate::emoji::EmojiChoice;
 use crate::draft::{AttachmentLimits, DraftAttachment, ReplyTarget};
 use crate::embed::{Description, EmbedCard, EmbedImage, EmbedView};
 use crate::markdown::{JUMBO_TEXT_PX, is_external_link};
@@ -497,6 +498,8 @@ impl ChatView {
     /// Image URLs are known: give them to the store and redraw anything loaded.
     fn set_media(&mut self, media: MediaUrls, cx: &mut Context<Self>) {
         self.media = media.clone();
+        self.composer
+            .update(cx, |composer, _| composer.set_media(media.clone()));
         self.store.set_media(media);
         let loaded: Vec<String> = self.panes.keys().cloned().collect();
         for channel in loaded {
@@ -693,7 +696,12 @@ impl ChatView {
                     .map(|c| Suggestion::channel(&c.id, &c.name))
                     .collect()
             }
-            QueryKind::Emoji => Vec::new(),
+            QueryKind::Emoji => {
+                crate::emoji::search(&query.query, &self.store.custom_emoji_for(channel))
+                    .iter()
+                    .map(EmojiChoice::suggestion)
+                    .collect()
+            }
         };
         self.composer.update(cx, |composer, cx| {
             composer.set_suggestions(query, suggestions, loading, cx)
