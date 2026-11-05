@@ -6,8 +6,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::api::events::Ready;
 use crate::api::models::{
-    BulkMessageResponse, Channel, Emoji, FieldsMessage, File, Member, Message, MessageFlags,
-    PartialMessage, Presence, Server, SystemMessage, User,
+    BulkMessageResponse, Channel, Emoji, FieldsChannel, FieldsMessage, File, Member, Message,
+    MessageFlags, PartialChannel, PartialMessage, Presence, Server, SystemMessage, User,
 };
 use crate::media::MediaUrls;
 use crate::notify::{self, NotificationSettings};
@@ -421,6 +421,15 @@ impl ChatStore {
             .is_none_or(|read| read < last_message)
     }
 
+    /// Whether the user's read position in `channel_id` has reached
+    /// `message_id` (by reading it here or elsewhere, or by posting after it).
+    pub fn has_read(&self, channel_id: &str, message_id: &str) -> bool {
+        self.read_states
+            .get(channel_id)
+            .and_then(|s| s.last_id.as_deref())
+            .is_some_and(|read| read >= message_id)
+    }
+
     /// Unread messages in a channel that mention the user.
     pub fn mention_count(&self, channel_id: &str) -> usize {
         self.read_states
@@ -581,6 +590,110 @@ impl ChatStore {
             && last_message_id.as_deref().is_none_or(|last| last < id)
         {
             *last_message_id = Some(id.to_string());
+        }
+    }
+
+    /// A channel new to the user (`ChannelCreate`): a DM or group someone
+    /// opened with them, or a new server channel (added to its server's list).
+    pub fn add_channel(&mut self, channel: Channel) {
+        let id = channel_id(&channel).to_string();
+        if let Channel::TextChannel { server, .. } = &channel
+            && let Some(server) = self.servers.get_mut(server)
+            && !server.channels.contains(&id)
+        {
+            server.channels.push(id.clone());
+        }
+        self.channels.insert(id, channel);
+    }
+
+    /// A channel changed (`ChannelUpdate`): merge what's in `data`, then clear
+    /// the `clear` fields. Unknown channels are ignored. The last message
+    /// only moves forward, as with live messages.
+    pub fn apply_channel_update(
+        &mut self,
+        id: &str,
+        data: PartialChannel,
+        clear: &[FieldsChannel],
+    ) {
+        let Some(channel) = self.channels.get_mut(id) else {
+            return;
+        };
+        let PartialChannel {
+            name: new_name,
+            owner: new_owner,
+            description: new_description,
+            icon: new_icon,
+            nsfw: new_nsfw,
+            active: new_active,
+            permissions: new_permissions,
+            role_permissions: new_role_permissions,
+            default_permissions: new_default_permissions,
+            last_message_id: new_last_message,
+            voice: new_voice,
+            slowmode: new_slowmode,
+        } = data;
+        match channel {
+            Channel::SavedMessages { .. } => {}
+            Channel::DirectMessage { active, .. } => {
+                if let Some(new) = new_active {
+                    *active = new;
+                }
+            }
+            Channel::Group {
+                name,
+                owner,
+                description,
+                icon,
+                permissions,
+                nsfw,
+                ..
+            } => {
+                set(name, new_name);
+                set(owner, new_owner);
+                set(nsfw, new_nsfw);
+                set_some(description, new_description);
+                set_some(icon, new_icon);
+                set_some(permissions, new_permissions);
+                for field in clear {
+                    match field {
+                        FieldsChannel::Description => *description = None,
+                        FieldsChannel::Icon => *icon = None,
+                        _ => {}
+                    }
+                }
+            }
+            Channel::TextChannel {
+                name,
+                description,
+                icon,
+                default_permissions,
+                role_permissions,
+                nsfw,
+                voice,
+                slowmode,
+                ..
+            } => {
+                set(name, new_name);
+                set(nsfw, new_nsfw);
+                set(role_permissions, new_role_permissions);
+                set_some(description, new_description);
+                set_some(icon, new_icon);
+                set_some(default_permissions, new_default_permissions);
+                set_some(voice, new_voice);
+                set_some(slowmode, new_slowmode);
+                for field in clear {
+                    match field {
+                        FieldsChannel::Description => *description = None,
+                        FieldsChannel::Icon => *icon = None,
+                        FieldsChannel::DefaultPermissions => *default_permissions = None,
+                        FieldsChannel::Voice => *voice = None,
+                        FieldsChannel::Slowmode => *slowmode = None,
+                    }
+                }
+            }
+        }
+        if let Some(last) = new_last_message {
+            self.bump_last_message(id, &last);
         }
     }
 
@@ -1119,6 +1232,20 @@ pub fn channel_id(channel: &Channel) -> &str {
         | Channel::DirectMessage { id, .. }
         | Channel::Group { id, .. }
         | Channel::TextChannel { id, .. } => id,
+    }
+}
+
+/// Overwrite `field` if a partial update carries a new value.
+fn set<T>(field: &mut T, new: Option<T>) {
+    if let Some(new) = new {
+        *field = new;
+    }
+}
+
+/// [`set`] for optional fields.
+fn set_some<T>(field: &mut Option<T>, new: Option<T>) {
+    if new.is_some() {
+        *field = new;
     }
 }
 

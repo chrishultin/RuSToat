@@ -3,7 +3,9 @@
 
 use stoat_gpui::api::events::{Ready, ServerEvent, parse_frame};
 use stoat_gpui::api::models::Message;
-use stoat_gpui::notify::{Notice, NotificationSettings, Viewing, should_notify};
+use stoat_gpui::notify::{
+    Delivery, Notice, NotificationSettings, Viewing, delivery, should_notify,
+};
 use stoat_gpui::store::ChatStore;
 
 const NOW: i64 = 1_800_000_000_000;
@@ -352,4 +354,56 @@ fn attention_count_skips_muted_and_mention_only_conversations() {
     );
     // Only dm-ada is left: dm-bob is muted, the group only counts mentions.
     assert_eq!(store.attention_count(), 1);
+}
+
+#[test]
+fn a_dm_opened_just_now_notifies_its_first_message() {
+    // Seen live: another account DMed us for the first time. The channel
+    // didn't exist at Ready, so the message was skipped as "unknown channel".
+    let mut store = default_store();
+    let first = message(
+        "dm-new",
+        "u-new",
+        serde_json::json!({
+            "user": {
+                "_id": "u-new", "username": "newcomer", "discriminator": "0001",
+                "relationship": "None", "online": true
+            }
+        }),
+    );
+    assert_eq!(notify(&store, &first, AWAY), None, "unknown channel");
+
+    store.add_channel(
+        serde_json::from_value(serde_json::json!({
+            "channel_type": "DirectMessage", "_id": "dm-new",
+            "active": false, "recipients": ["u-me", "u-new"]
+        }))
+        .unwrap(),
+    );
+    store.apply_channel_update(
+        "dm-new",
+        serde_json::from_value(serde_json::json!({ "active": true })).unwrap(),
+        &[],
+    );
+    let notice = notify(&store, &first, AWAY).expect("a new DM notifies");
+    assert_eq!(notice.title, "@newcomer");
+
+    store.apply_message(first);
+    assert!(store.is_unread("dm-new"));
+    assert!(store.home_channels().iter().any(|e| e.id == "dm-new"));
+    assert_eq!(
+        store.attention_count(),
+        default_store().attention_count() + 1
+    );
+}
+
+#[test]
+fn banners_only_in_the_background_and_when_possible() {
+    // In the background, with banners possible (bundled, not denied).
+    assert_eq!(delivery(false, true), Delivery::Banner);
+    // In front: a toast, even though banners would work.
+    assert_eq!(delivery(true, true), Delivery::Toast);
+    // Not bundled, or banners denied: toasts either way, so nothing is lost.
+    assert_eq!(delivery(false, false), Delivery::Toast);
+    assert_eq!(delivery(true, false), Delivery::Toast);
 }

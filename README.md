@@ -26,6 +26,20 @@ For more logging:
 RUST_LOG=stoat_gpui=debug cargo run
 ```
 
+### Notifications: running as an app bundle
+
+New messages notify according to your Stoat notification settings. The Dock icon shows a badge for unread DMs and mentions. A plain `cargo run` shows notices as in-app toasts only, because macOS only lets an app post notification banners when it runs from an app bundle. To get banners, run it bundled:
+
+```bash
+scripts/run-bundled.sh
+```
+
+This builds `target/debug/RuSToat.app` (identifier `chat.stoat.rustoat`, ad-hoc signed) and runs it with its logs in your terminal. Pass `release` to bundle a release build. `scripts/bundle.sh` only builds the bundle and prints its path.
+
+- **The first bundled run asks for permission to send notifications.** Choose **Allow**. If you don't, RuSToat logs `banners: turned off…` and falls back to in-app toasts. You can change the setting later in System Settings → Notifications → RuSToat.
+- **Banners only appear while RuSToat is in the background.** While its window is in front, you get toasts instead. Clicking a banner brings RuSToat forward on that channel, and reading a channel, here or in another Stoat client, removes its banner from Notification Center.
+- **Expect a Keychain prompt on the first bundled run too.** The bundle has a different code identity from the `cargo run` binary, so it gets the same prompt.
+
 ### Self-hosted instances
 
 The app talks to the official instance, `https://api.stoat.chat`, by default. Point it somewhere else with:

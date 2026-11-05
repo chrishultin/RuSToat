@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
 use revolt_models::v0::{
-    Channel, ChannelUnread, Emoji, FieldsMessage, Member, Message, PartialMessage, Server, User,
+    Channel, ChannelUnread, Emoji, FieldsChannel, FieldsMessage, Member, Message, PartialChannel,
+    PartialMessage, Server, User,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -83,6 +84,17 @@ pub enum ServerEvent {
     },
     EmojiDelete {
         id: String,
+    },
+    /// A channel the user can now see: a DM or group someone just opened with
+    /// them, or a new server channel. It comes before the channel's first
+    /// message.
+    ChannelCreate(Box<Channel>),
+    /// A channel changed: merge `data`, then clear the `clear` fields. A DM
+    /// reopening (`active: true`) arrives this way.
+    ChannelUpdate {
+        id: String,
+        data: Box<PartialChannel>,
+        clear: Vec<FieldsChannel>,
     },
     /// An event type this client doesn't handle (yet). Holds the `type` tag.
     Unknown(String),
@@ -220,6 +232,25 @@ fn decode(mut value: Value, out: &mut Vec<ServerEvent>) {
             }
             out.push(decode_as(value, &kind, |d: Delete| {
                 ServerEvent::EmojiDelete { id: d.id }
+            }))
+        }
+        "ChannelCreate" => out.push(decode_as(value, &kind, |c: Channel| {
+            ServerEvent::ChannelCreate(Box::new(c))
+        })),
+        "ChannelUpdate" => {
+            #[derive(Deserialize)]
+            struct Update {
+                id: String,
+                data: PartialChannel,
+                #[serde(default)]
+                clear: Vec<FieldsChannel>,
+            }
+            out.push(decode_as(value, &kind, |u: Update| {
+                ServerEvent::ChannelUpdate {
+                    id: u.id,
+                    data: Box::new(u.data),
+                    clear: u.clear,
+                }
             }))
         }
         other => out.push(ServerEvent::Unknown(other.to_string())),
@@ -549,6 +580,8 @@ async fn session(
                         | ServerEvent::EmojiCreate(_)
                         | ServerEvent::UserSettingsUpdate { .. }
                         | ServerEvent::ChannelAck { .. }
+                        | ServerEvent::ChannelCreate(_)
+                        | ServerEvent::ChannelUpdate { .. }
                         | ServerEvent::EmojiDelete { .. }) => {
                             Some(ConnectionEvent::Event(message_event))
                         }
@@ -662,6 +695,36 @@ mod tests {
             events.as_slice(),
             [ServerEvent::ChannelAck { channel, user, message_id }]
                 if channel == "c" && user == "u" && message_id.starts_with("01M6")
+        ));
+    }
+
+    #[test]
+    fn channel_events_decode() {
+        // What another account opening a DM with us sends: the DM (closed),
+        // then the update that opens it, as the first message goes out.
+        let events = parse_frame(
+            r#"{"type":"Bulk","v":[
+                {"type":"ChannelCreate","channel_type":"DirectMessage","_id":"dm-new",
+                 "active":false,"recipients":["u-me","u-new"]},
+                {"type":"ChannelUpdate","id":"dm-new","data":{"active":true},"clear":[]},
+                {"type":"ChannelUpdate","id":"ch","data":{"name":"renamed"},"clear":["Description"]}
+            ]}"#,
+        );
+        assert!(matches!(
+            &events[0],
+            ServerEvent::ChannelCreate(c)
+                if matches!(c.as_ref(), Channel::DirectMessage { id, active: false, .. } if id == "dm-new")
+        ));
+        assert!(matches!(
+            &events[1],
+            ServerEvent::ChannelUpdate { id, data, clear }
+                if id == "dm-new" && data.active == Some(true) && clear.is_empty()
+        ));
+        assert!(matches!(
+            &events[2],
+            ServerEvent::ChannelUpdate { data, clear, .. }
+                if data.name.as_deref() == Some("renamed")
+                    && matches!(clear.as_slice(), [FieldsChannel::Description])
         ));
     }
 

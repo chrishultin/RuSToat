@@ -208,3 +208,54 @@ _Same worktree and branch (`feature/mark-as-read`), stacked on `5f075fb`._
 ### Manual Validation
 - The user saw the Dock badge appear. It first showed the wrong count, because of the stuck-at-1 bug above.
 - After the fix, with everything read, the user confirmed the badge is cleared ("lgtm").
+
+## Chunk 5: macOS banners (app bundle)
+
+### Changes Made
+- `scripts/bundle.sh` (new): `cargo build` (or `--release`), then assembles `target/<profile>/RuSToat.app`:
+  - `Contents/MacOS/stoat-gpui`, plus an `Info.plist` with `CFBundleIdentifier` `chat.stoat.rustoat`, `CFBundleName`/`CFBundleDisplayName` RuSToat, the crate version, `LSMinimumSystemVersion` 11.0 and `NSHighResolutionCapable`
+  - `codesign --force --sign - --identifier chat.stoat.rustoat`
+  - prints the bundle path as its last line
+  - overwrites files in place; never deletes the bundle
+- `scripts/run-bundled.sh` (new): runs `bundle.sh`, then `exec`s the bundle's executable directly, so logs stay in the terminal. `RUST_LOG` defaults to `info`.
+- `src/banners.rs` (new):
+  - `bundle_identifier()` reads `NSBundle::mainBundle().bundleIdentifier()` once (`OnceLock`).
+  - `available()` is true when bundled and permission hasn't been denied.
+  - `request_permission()` calls `UNUserNotificationCenter::requestAuthorizationWithOptions_completionHandler` (Alert | Sound) when bundled. It logs `banners: allowed` or `banners: turned off… using in-app toasts`, and records a denial in an `AtomicBool`. When not bundled it logs `banners: not running from an app bundle; using in-app toasts` and never touches the notification center, which would abort the process outside a bundle.
+- `src/notify.rs`: `Delivery { Banner, Toast }` and `delivery(window_active, banners_available)`. A banner is used only when the window is in the background and banners are available; otherwise a toast.
+- `src/store.rs`: `has_read(channel, message_id)`, true when the read position is at or past that message.
+- `src/ui/chat.rs`:
+  - `ChatView::new` calls `banners::request_permission()`. When banners are available, it registers `cx.on_system_notification_response`. A click calls `cx.activate(true)` and `window.activate_window()`, then `open_channel(tag)`.
+  - Live messages pick a delivery. Banners go through `show_banner`, which calls `cx.show_system_notification` with the channel ID as the tag (a newer message replaces the channel's banner) and no actions, then records `banners[channel] = message_id`.
+  - `dismiss_read_banners`, run on every render, calls `cx.dismiss_system_notification(channel)` once `has_read` passes the bannered message. That covers reading here, in another session (`ChannelAck`), posting, and Mark as read.
+- `Cargo.toml` (macOS only): `objc2-foundation` gains `NSBundle` and `NSError`; added `objc2-user-notifications` 0.3 (`std`, `block2`, `UNUserNotificationCenter`) and `block2` 0.6. GPUI already uses all of them.
+- `README.md`: new "Notifications: running as an app bundle" section covering the scripts, the permission prompt and the toast fallback, banners only in the background, click and dismiss behaviour, and the Keychain prompt for the bundle.
+- Tests:
+  - `tests/notify_rules.rs`: `banners_only_in_the_background_and_when_possible`, with all four routing combinations.
+  - `tests/store_unreads.rs`: `has_read_follows_the_read_position`.
+
+### Divergences
+- **Permission is requested at login, not on the first banner.** GPUI requests authorization lazily inside its first `show_system_notification`. A banner posted while the prompt is still up is likely refused, so the first notification would be lost. `banners::request_permission()` asks up front instead, using the crate GPUI uses. It also gives the "detect what's possible and log it" from the plan's Risks: a denial is logged and routes notices to toasts rather than silently dropping them.
+- **Dismissal is keyed on the read position, not "the channel was acked".** The view tracks channel → bannered message and dismisses once `has_read` passes it. That covers every way a channel gets read (here, other sessions, posting, server Mark as read) without hooking each path. It also avoids `is_unread`, which is always false for closed DMs and would dismiss their banners at once.
+- **Merged `main` before this chunk** (`858ba36`) at the user's request, to bring in the formatting session's `2482a73`: line breaks, quote endings and `$$` KaTeX. The only conflict was `Cargo.lock`'s dependency list. After the merge: 160 tests passed, and clippy was clean.
+- **Bug found in the manual check, fixed: a DM opened just now never notified.** The user's test DM came from another account opening a brand-new DM. The log showed three `live: new message … in <new-DM-id>` lines, but no `notify:` or `banner:` line. Going by its ULID, the channel was created about 4 s before its first message.
+  - **Cause:** RuSToat ignored `ChannelCreate` and `ChannelUpdate`. Unknown events are only logged at `trace`. So the store never learned about the channel, and `should_notify` returned early (`store.channel(&message.channel)?`). The new DM also never appeared in Home. Stoat creates a DM closed and opens it as the first message goes out, which RuSToat also missed.
+  - **Fix:**
+    - `src/api/events.rs` decodes `ChannelCreate(Box<Channel>)` and `ChannelUpdate { id, data: PartialChannel, clear: Vec<FieldsChannel> }` and forwards both.
+    - `src/store.rs` gains `add_channel`, which adds new server text channels to their server's list, and `apply_channel_update`. The update merges the partial per channel type (DM `active`; group and server-channel name, description, icon, nsfw and permissions; text-channel voice and slowmode), clears the listed fields, and only moves `last_message_id` forward. Two small helpers, `set` and `set_some`, do the merging.
+    - `src/ui/chat.rs` applies both events, with `live: new channel` and `live: channel … updated` debug lines.
+  - **Not handled:** `ChannelDelete`, which only leaves a stale entry behind, and not a notification problem.
+  - **Tests:**
+    - `a_dm_opened_just_now_notifies_its_first_message` (notify_rules): unknown channel, then ChannelCreate (closed), then ChannelUpdate (open). The message then notifies as `@newcomer`, the DM is unread and in Home, and the badge goes up by 1.
+    - `channel_create_and_update_reach_the_sidebar` (store_live).
+    - `channel_events_decode` (events unit test).
+
+### Verification Performed
+- `scripts/bundle.sh`: succeeded. `codesign -dv target/debug/RuSToat.app` shows `Identifier=chat.stoat.rustoat`, `Format=app bundle with Mach-O thin (arm64)`, `Signature=adhoc`.
+- `RUST_LOG=info,stoat_gpui=debug scripts/run-bundled.sh`: logged `banners: bundled as chat.stoat.rustoat; asking for permission` and then `events: Ready …`. There's no `system notifications disabled` line, and launching the executable directly didn't abort on a missing bundle proxy.
+- `cargo test`: 165 passed, 0 failed, 5 ignored. That's 160 after the merge, plus 2 for routing and `has_read`, plus 3 for the new-DM fix. `cargo clippy --all-targets -- -D warnings`: clean. `cargo fmt`: applied.
+- First live run: the user allowed notifications (`banners: allowed`), but a brand-new DM produced no notice, which is the bug above. The bundled build with the fix was then relaunched for the user to re-check.
+
+### Manual Validation
+- The user allowed notifications on the first bundled run (`banners: allowed`). On the relaunch, macOS remembered the choice and didn't prompt again.
+- After the new-DM fix, with RuSToat in the background, a DM from the user's test account showed a macOS banner. The log has `banner: @<test-account> | â¦`. Clicking it brought RuSToat forward on that DM (`banner: clicked <new-DM-id>`). About a second later the DM was acked and its banner removed (`banner: dismissing … (read)`). The user confirmed ("Works, commit").

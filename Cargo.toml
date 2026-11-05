@@ -38,10 +38,14 @@ log = "0.4"
 env_logger = "0.11"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# Dock badge (AppKit's NSDockTile). The same versions GPUI already uses.
+# Dock badge (AppKit's NSDockTile), and checking whether banners can be
+# posted (bundle identifier, notification permission). The same versions GPUI
+# already uses.
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSBundle", "NSError"] }
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile", "NSResponder"] }
+objc2-user-notifications = { version = "0.3", features = ["std", "block2", "UNUserNotificationCenter"] }
+block2 = "0.6"
 
 [dev-dependencies]
 wiremock = "0.6"

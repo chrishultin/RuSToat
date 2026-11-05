@@ -281,3 +281,20 @@ fn mentions_at_or_before_the_read_position_are_already_read() {
     assert_eq!(store.mention_count("dm-ada"), 0);
     assert!(!store.is_unread("dm-ada"));
 }
+
+#[test]
+fn has_read_follows_the_read_position() {
+    let mut store = store();
+    // dm-ada is read up to …01; its newest message is …05.
+    assert!(store.has_read("dm-ada", "01JC0000000000000000000001"));
+    assert!(!store.has_read("dm-ada", DM_ADA_LAST));
+    // No position for us at all.
+    assert!(!store.has_read("dm-bob", "01JC0000000000000000000007"));
+
+    store.apply_ack("dm-ada", DM_ADA_LAST);
+    assert!(store.has_read("dm-ada", DM_ADA_LAST));
+
+    // Posting reads everything before it.
+    store.apply_message(message("dm-bob", "u-me", serde_json::json!({})));
+    assert!(store.has_read("dm-bob", "01JC0000000000000000000007"));
+}

@@ -24,7 +24,7 @@ use crate::api::StoatClient;
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
 use crate::markdown::{JUMBO_TEXT_PX, is_external_link};
 use crate::media::MediaUrls;
-use crate::notify::{self, Notice, Viewing};
+use crate::notify::{self, Delivery, Notice, Viewing};
 use crate::runtime::spawn_io;
 use crate::store::{
     ChannelEntry, ChannelKind, ChatStore, MessageRow, RowOp, ServerEntry, TimelineRow, diff_rows,
@@ -92,6 +92,9 @@ pub struct ChatView {
     pending_ack: Option<(String, String, Task<()>)>,
     /// The count last shown on the Dock icon, to only touch AppKit on change.
     dock_badge: usize,
+    /// macOS banners still showing: channel (also the banner's tag) → the
+    /// message it's for. Dismissed once the channel is read past it.
+    banners: HashMap<String, String>,
     _connection: Connection,
     _events: Task<()>,
     _root: Task<()>,
@@ -116,6 +119,25 @@ impl ChatView {
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             this.maybe_ack_current(window, cx)
         });
+        // Banners: ask for permission up front, and make clicking one bring
+        // the window forward on its channel (the banner's tag).
+        crate::banners::request_permission();
+        if crate::banners::available() {
+            let view = cx.weak_entity();
+            let handle = window.window_handle();
+            cx.on_system_notification_response(move |response, cx| {
+                let channel = response.tag.to_string();
+                log::debug!("banner: clicked {channel}");
+                cx.activate(true);
+                handle
+                    .update(cx, |_, window, cx| {
+                        window.activate_window();
+                        view.update(cx, |this, cx| this.open_channel(&channel, cx))
+                            .ok();
+                    })
+                    .ok();
+            });
+        }
         let root = spawn_io({
             let client = client.clone();
             async move { client.root_config().await }
@@ -165,6 +187,7 @@ impl ChatView {
             older_errors: HashMap::new(),
             pending_ack: None,
             dock_badge: 0,
+            banners: HashMap::new(),
             _connection: connection,
             _events: events,
             _root: root,
@@ -210,11 +233,15 @@ impl ChatView {
                 };
                 let notice =
                     notify::should_notify(&self.store, &message, viewing, notify::now_ms());
+                let message_id = message.id.clone();
                 if self.store.apply_message(*message) {
                     self.sync_pane(&channel, cx);
                 }
                 if let Some(notice) = notice {
-                    self.show_toast(notice, window, cx);
+                    match notify::delivery(viewing.window_active, crate::banners::available()) {
+                        Delivery::Banner => self.show_banner(notice, message_id, cx),
+                        Delivery::Toast => self.show_toast(notice, window, cx),
+                    }
                 }
             }
             ConnectionEvent::Event(ServerEvent::UserSettingsUpdate { notifications }) => {
@@ -259,6 +286,14 @@ impl ChatView {
                 } else {
                     return;
                 }
+            }
+            ConnectionEvent::Event(ServerEvent::ChannelCreate(channel)) => {
+                log::debug!("live: new channel {}", crate::store::channel_id(&channel));
+                self.store.add_channel(*channel);
+            }
+            ConnectionEvent::Event(ServerEvent::ChannelUpdate { id, data, clear }) => {
+                log::debug!("live: channel {id} updated");
+                self.store.apply_channel_update(&id, *data, &clear);
             }
             ConnectionEvent::Event(ServerEvent::EmojiCreate(emoji)) => {
                 self.store.add_emoji(*emoji);
@@ -326,6 +361,35 @@ impl ChatView {
                     .ok();
             });
         window.push_notification(toast, cx);
+    }
+
+    /// A macOS banner for a notifying message while RuSToat is in the
+    /// background. The channel is the tag, so a newer message replaces the
+    /// channel's older banner, and a click opens it (see `new`). Reading the
+    /// channel takes the banner away (`dismiss_read_banners`).
+    fn show_banner(&mut self, notice: Notice, message_id: String, cx: &mut Context<Self>) {
+        log::debug!("banner: {} | {}", notice.title, notice.body);
+        cx.show_system_notification(SystemNotification {
+            tag: notice.channel.clone().into(),
+            title: notice.title.into(),
+            body: notice.body.into(),
+            actions: Vec::new(),
+        });
+        self.banners.insert(notice.channel, message_id);
+    }
+
+    /// Take away banners for channels read since (here, in another session,
+    /// by posting, or with Mark as read).
+    fn dismiss_read_banners(&mut self, cx: &mut Context<Self>) {
+        let store = &self.store;
+        self.banners.retain(|channel, message| {
+            let read = store.has_read(channel, message);
+            if read {
+                log::debug!("banner: dismissing {channel} (read)");
+                cx.dismiss_system_notification(channel);
+            }
+            !read
+        });
     }
 
     /// Show `channel`: switch to its server (or Home) and select it.
@@ -1455,6 +1519,7 @@ impl Render for ChatView {
             crate::dock::set_badge(attention);
             self.dock_badge = attention;
         }
+        self.dismiss_read_banners(cx);
         let theme = cx.theme();
         h_flex()
             .size_full()

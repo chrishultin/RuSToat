@@ -246,3 +246,63 @@ fn nothing_in_common_resets() {
     assert_eq!(check(&old, &new), vec![RowOp::Reset(2)]);
     assert_eq!(diff_rows(&[], &new), vec![RowOp::Reset(2)]);
 }
+
+#[test]
+fn channel_create_and_update_reach_the_sidebar() {
+    let mut store = store_with_page(50);
+    let names = |store: &ChatStore| -> Vec<String> {
+        store
+            .server_channels("srv-alpha")
+            .into_iter()
+            .flat_map(|s| s.channels)
+            .map(|c| c.name)
+            .collect()
+    };
+
+    store.add_channel(
+        serde_json::from_value(serde_json::json!({
+            "channel_type": "TextChannel", "_id": "ch-new", "server": "srv-alpha",
+            "name": "brand-new", "description": "fresh"
+        }))
+        .unwrap(),
+    );
+    assert!(names(&store).contains(&"brand-new".to_string()));
+
+    store.apply_channel_update(
+        "ch-new",
+        serde_json::from_value(serde_json::json!({
+            "name": "renamed", "last_message_id": "01JC0000000000000000000010"
+        }))
+        .unwrap(),
+        &[stoat_gpui::api::models::FieldsChannel::Description],
+    );
+    assert!(names(&store).contains(&"renamed".to_string()));
+    let Some(stoat_gpui::api::models::Channel::TextChannel {
+        description,
+        last_message_id,
+        ..
+    }) = store.channel("ch-new")
+    else {
+        panic!("still a text channel");
+    };
+    assert_eq!(description, &None, "cleared");
+    assert_eq!(
+        last_message_id.as_deref(),
+        Some("01JC0000000000000000000010")
+    );
+
+    // An older last message (a stale update) doesn't move it back.
+    store.apply_channel_update(
+        "ch-new",
+        serde_json::from_value(
+            serde_json::json!({ "last_message_id": "01JC0000000000000000000001" }),
+        )
+        .unwrap(),
+        &[],
+    );
+    assert!(matches!(
+        store.channel("ch-new"),
+        Some(stoat_gpui::api::models::Channel::TextChannel { last_message_id: Some(l), .. })
+            if l == "01JC0000000000000000000010"
+    ));
+}

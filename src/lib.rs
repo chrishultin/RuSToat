@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod assets;
+pub mod banners;
 pub mod dock;
 pub mod http;
 pub mod markdown;

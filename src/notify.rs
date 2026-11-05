@@ -151,6 +151,27 @@ pub struct Notice {
     pub body: String,
 }
 
+/// Where a notice is shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delivery {
+    /// A macOS banner (Notification Center).
+    Banner,
+    /// An in-app toast.
+    Toast,
+}
+
+/// A macOS banner when RuSToat is in the background and banners can be shown
+/// (bundled, not denied); an in-app toast otherwise. A toast is right while
+/// the window is in front, and it's the fallback that keeps notices from
+/// being lost when banners aren't possible.
+pub fn delivery(window_active: bool, banners_available: bool) -> Delivery {
+    if !window_active && banners_available {
+        Delivery::Banner
+    } else {
+        Delivery::Toast
+    }
+}
+
 /// Whether `message` should notify, and what the notice says. Applies the
 /// web client's checks in its order.
 pub fn should_notify(
