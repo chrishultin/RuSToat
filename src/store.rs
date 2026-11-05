@@ -7,9 +7,10 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use crate::api::events::Ready;
 use crate::api::models::{
     BulkMessageResponse, Channel, Emoji, FieldsMessage, File, Member, Message, MessageFlags,
-    PartialMessage, Server, SystemMessage, User,
+    PartialMessage, Presence, Server, SystemMessage, User,
 };
 use crate::media::MediaUrls;
+use crate::notify::{self, NotificationSettings};
 
 /// One entry in the channel list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,6 +137,8 @@ pub struct ChatStore {
     emojis: HashMap<String, Emoji>,
     /// Read positions by channel ID.
     read_states: HashMap<String, ReadState>,
+    /// The user's notification levels and mutes.
+    notifications: NotificationSettings,
 }
 
 impl ChatStore {
@@ -174,6 +177,7 @@ impl ChatStore {
             .into_iter()
             .map(|e| (e.id.clone(), e))
             .collect();
+        self.notifications = ready.notifications.unwrap_or_default();
         self.read_states = ready
             .unreads
             .into_iter()
@@ -317,6 +321,27 @@ impl ChatStore {
             state.last_id = Some(message_id.to_string());
         }
         state.mentions.retain(|m| m.as_str() > message_id);
+    }
+
+    pub fn notification_settings(&self) -> &NotificationSettings {
+        &self.notifications
+    }
+
+    /// New notification settings (`UserSettingsUpdate`).
+    pub fn set_notification_settings(&mut self, settings: NotificationSettings) {
+        self.notifications = settings;
+    }
+
+    /// The user's own presence (Online, Focus, Busy...), if known.
+    pub fn my_presence(&self) -> Option<Presence> {
+        self.users.get(&self.me)?.status.as_ref()?.presence.clone()
+    }
+
+    /// Muted in the user's notification settings (the channel or its server),
+    /// right now.
+    pub fn is_muted(&self, channel_id: &str) -> bool {
+        self.notifications
+            .is_muted(channel_id, self.server_of(channel_id), notify::now_ms())
     }
 
     /// The message to acknowledge to mark `channel` read: its newest message,
@@ -715,10 +740,8 @@ impl ChatStore {
                     matches!(self.channels.get(*id), Some(Channel::TextChannel { .. }))
                 });
                 let (unread, mentions) = visible.fold((false, 0), |(unread, mentions), id| {
-                    (
-                        unread || self.is_unread(id),
-                        mentions + self.mention_count(id),
-                    )
+                    let shows_dot = self.is_unread(id) && !self.is_muted(id);
+                    (unread || shows_dot, mentions + self.mention_count(id))
                 });
                 ServerEntry {
                     id: s.id.clone(),
@@ -836,7 +859,8 @@ impl ChatStore {
         };
         let id = channel_id(channel).to_string();
         Some(ChannelEntry {
-            unread: self.is_unread(&id),
+            // Muted: no unread dot, but mentions still show.
+            unread: self.is_unread(&id) && !self.is_muted(&id),
             mentions: self.mention_count(&id),
             id,
             name,

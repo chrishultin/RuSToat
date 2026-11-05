@@ -13,9 +13,10 @@ use gpui_kit::component::message::{
     Message as MessageLayout, MessageAlignment, MessageAvatar, MessageContent, MessageHeader,
 };
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Icon, Sizable, WindowExt, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
@@ -23,6 +24,7 @@ use crate::api::StoatClient;
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
 use crate::markdown::{JUMBO_TEXT_PX, is_external_link};
 use crate::media::MediaUrls;
+use crate::notify::{self, Notice, Viewing};
 use crate::runtime::spawn_io;
 use crate::store::{
     ChannelEntry, ChannelKind, ChatStore, MessageRow, RowOp, ServerEntry, TimelineRow, diff_rows,
@@ -129,10 +131,12 @@ impl ChatView {
             }
         });
         let (connection, mut events) = events::connect(client.clone());
-        let events = cx.spawn(async move |this, cx| {
+        let events = cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = events.next().await {
                 if this
-                    .update(cx, |this, cx| this.on_connection_event(event, cx))
+                    .update_in(cx, |this, window, cx| {
+                        this.on_connection_event(event, window, cx)
+                    })
                     .is_err()
                 {
                     break;
@@ -164,7 +168,12 @@ impl ChatView {
         }
     }
 
-    fn on_connection_event(&mut self, event: ConnectionEvent, cx: &mut Context<Self>) {
+    fn on_connection_event(
+        &mut self,
+        event: ConnectionEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match event {
             ConnectionEvent::Connecting { attempt } => self.status = Status::Connecting { attempt },
             ConnectionEvent::Connected => self.status = Status::Connected,
@@ -189,8 +198,28 @@ impl ChatView {
             ConnectionEvent::Event(ServerEvent::Message(message)) => {
                 let channel = message.channel.clone();
                 log::debug!("live: new message {} in {channel}", message.id);
+                // Decide before applying: what the user was looking at when it arrived.
+                let current = self.current_channel().map(|c| c.id);
+                let viewing = Viewing {
+                    channel: current.as_deref(),
+                    window_active: window.is_window_active(),
+                };
+                let notice =
+                    notify::should_notify(&self.store, &message, viewing, notify::now_ms());
                 if self.store.apply_message(*message) {
                     self.sync_pane(&channel, cx);
+                }
+                if let Some(notice) = notice {
+                    self.show_toast(notice, window, cx);
+                }
+            }
+            ConnectionEvent::Event(ServerEvent::UserSettingsUpdate { notifications }) => {
+                match notifications {
+                    Some(settings) => {
+                        log::debug!("notification settings updated");
+                        self.store.set_notification_settings(settings);
+                    }
+                    None => return,
                 }
             }
             ConnectionEvent::Event(ServerEvent::MessageUpdate {
@@ -274,6 +303,38 @@ impl ChatView {
 
     fn select_place(&mut self, place: Place, cx: &mut Context<Self>) {
         self.place = place;
+        self.ensure_current_loaded(cx);
+        cx.notify();
+    }
+
+    /// An in-app toast for a notifying message; one per channel (a newer
+    /// message replaces the older toast). Clicking it opens the channel.
+    fn show_toast(&mut self, notice: Notice, window: &mut Window, cx: &mut Context<Self>) {
+        log::debug!("notify: {} | {}", notice.title, notice.body);
+        let view = cx.entity().downgrade();
+        let channel = notice.channel.clone();
+        let toast = Notification::new()
+            .id1::<ChatView>(SharedString::from(notice.tag))
+            .title(notice.title)
+            .message(notice.body)
+            .on_click(move |_, _, cx| {
+                view.update(cx, |this, cx| this.open_channel(&channel, cx))
+                    .ok();
+            });
+        window.push_notification(toast, cx);
+    }
+
+    /// Show `channel`: switch to its server (or Home) and select it.
+    pub fn open_channel(&mut self, channel: &str, cx: &mut Context<Self>) {
+        let place = match self.store.channel(channel) {
+            Some(crate::api::models::Channel::TextChannel { server, .. }) => {
+                Place::Server(server.clone())
+            }
+            Some(_) => Place::Home,
+            None => return,
+        };
+        self.place = place.clone();
+        self.selected.insert(place, channel.to_string());
         self.ensure_current_loaded(cx);
         cx.notify();
     }

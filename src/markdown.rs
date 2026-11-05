@@ -315,6 +315,12 @@ fn is_autolink(inner: &str) -> bool {
     !inner.contains(char::is_whitespace) && is_external_link(inner)
 }
 
+/// Message text as plain text (notification bodies): mentions as `@Name`,
+/// custom emoji as `:name:`. Markdown punctuation is left as typed.
+pub fn plain_text(content: &str, names: &impl Names) -> String {
+    plain_mentions(content, names)
+}
+
 /// Mentions as plain `@Name` text, for places links can't go (spoilers).
 fn plain_mentions(text: &str, names: &impl Names) -> String {
     let text = plain_emoji(text, names);

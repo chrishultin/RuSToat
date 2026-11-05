@@ -98,3 +98,72 @@ _Built in a git worktree (`.claude/worktrees/mark-as-read`, branch `feature/mark
 
 ### Manual Validation
 The user tested the worktree build against the web app and confirmed "Works": reading here clears unread state in the web app.
+
+## Chunk 3: Notification rules and in-app toasts
+
+_Same worktree and branch as chunk 2 (`feature/mark-as-read`), stacked on `8df2cfe`._
+
+### Changes Made
+- `src/notify.rs` (new, pure):
+  - `Level` is `All`, `Mention` or `None`.
+  - `NotificationSettings::parse(json)` reads the `notifications` user setting the way the web client's `clean()` does:
+    - `server` and `channel` levels; unknown levels are ignored
+    - the legacy level `"muted"` becomes an open-ended mute
+    - `server_mutes` and `channel_mutes` as `{until?: ms}`; non-objects are ignored
+    - garbage parses as defaults
+  - `level(channel, server)`: the channel's level, else the server's level (default `Mention`), else `All` (DMs, groups, Saved Notes).
+  - `is_muted(channel, server, now)`: a server or channel mute with no `until`, or an `until` in the future.
+  - `should_notify(store, message, Viewing { channel, window_active }, now) -> Option<Notice { tag, channel, title, body }>`. It skips, in the web client's order:
+    1. the channel is being viewed in the active window
+    2. own messages
+    3. blocked authors
+    4. `SuppressNotifications` (mask 2)
+    5. muted
+    6. level `None`, or `Mention` when not mentioned
+    7. presence `Busy`, or `Focus` when not mentioned
+    8. Saved Notes
+  - Titles: `@author` for DMs; `@author - Group` for groups (just the group name for system messages); `@author (#channel, Server)` in servers. The body is `markdown::plain_text`, or the system-message text, cut to 200 characters with "…".
+  - 3 unit tests: truncation, settings parsing, garbage settings.
+- `src/api/events.rs`:
+  - `"user_settings[notifications]"` is added to `READY_FIELDS`. `Ready.notifications: Option<NotificationSettings>` is parsed from the same `[ts, json]` map as `ordering`.
+  - New `ServerEvent::UserSettingsUpdate { notifications: Option<…> }`, decoded from `{ id, update }` and forwarded. It's `None` when the update doesn't touch `notifications`.
+  - New unit test `settings_updates_carry_notification_settings`.
+- `src/markdown.rs`: `pub fn plain_text()` (mentions as `@Name`, custom emoji as `:name:`).
+- `src/store.rs`:
+  - holds `NotificationSettings`: from `Ready`, with `set_notification_settings` and `notification_settings()`
+  - `my_presence()` (from our user's `status.presence` in `Ready`)
+  - `is_muted(channel)`, at the current time
+  - **Moved from chunk 1:** `ChannelEntry.unread` and the server roll-up skip muted channels (no dot), while mention counts still show.
+- `src/ui/chat.rs`:
+  - The events loop runs via `cx.spawn_in(window, …)`, and `on_connection_event` gets the window.
+  - On each live `Message`, `should_notify` runs before `apply_message`, with `Viewing` set to the open channel and `window.is_window_active()`.
+  - `show_toast()` calls `window.push_notification(Notification::new().id1::<ChatView>(tag).title(…).message(…).on_click(open))`. Toasts are deduplicated per channel tag, and clicking one runs `open_channel()`, which switches to the server (or Home) and selects the channel.
+  - `UserSettingsUpdate` with `notifications` replaces the settings live.
+  - gpui-component's toast layer is mounted automatically in every `gpui_kit::open_window` root (`WindowStateLayers`), so no extra layer code was needed.
+- `tests/notify_rules.rs` (new), 12 tests, one per rule:
+  - a DM notifies by default, with the web title
+  - viewing skips only while the window is active
+  - own and blocked authors
+  - suppressed messages
+  - servers default to mentions only, with the server title
+  - level resolution: channel over server, DM turned down
+  - channel, server, expired and legacy mutes
+  - Busy and Focus
+  - Saved Notes
+  - group titles and system messages
+  - plain, truncated bodies
+  - muted channels hide their dot but keep mentions
+
+### Divergences
+- **Minor: presence comes only from `Ready`.** Changing status mid-session takes effect after a reconnect, because `UserUpdate` events aren't handled.
+- **Minor:** only the `notifications` key of `UserSettingsUpdate` is used. A server-order change in the web app still needs a reconnect.
+- **Implemented here, moved from chunk 1:** muted-indicator behaviour (Assumption 3).
+- My first version of `muted_channels_hide_their_dot_but_keep_mentions` forgot that the fixture has no read positions, so `#general` was unread and kept Alpha's dot lit. The test was fixed to read `#general` first; the code was right.
+
+### Verification Performed
+- `cargo test --test notify_rules`: 12 passed.
+- `cargo test`: 141 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings`: clean. `cargo fmt`: applied.
+- Live: the app connects with `…&ready=user_settings[ordering]&ready=user_settings[notifications]`, and `Ready` parses as before (73 unreads, 0 skipped), with no warnings.
+
+### Manual Validation
+The user tested toasts in the running worktree build and confirmed "Works".

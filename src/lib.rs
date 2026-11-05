@@ -9,6 +9,7 @@ pub mod assets;
 pub mod http;
 pub mod markdown;
 pub mod media;
+pub mod notify;
 pub mod runtime;
 pub mod session;
 pub mod store;

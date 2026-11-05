@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use super::{ApiError, StoatClient};
+use crate::notify::NotificationSettings;
 use crate::runtime::runtime;
 
 /// How often to ping. Stoat drops connections that are quiet for 10–30 s.
@@ -39,6 +40,7 @@ const READY_FIELDS: &[&str] = &[
     "emojis",
     "channel_unreads",
     "user_settings[ordering]",
+    "user_settings[notifications]",
 ];
 
 /// A decoded event from the server.
@@ -67,6 +69,11 @@ pub enum ServerEvent {
         ids: Vec<String>,
     },
     EmojiCreate(Box<Emoji>),
+    /// Some user settings changed. Only `notifications` is kept; `None` if
+    /// this update didn't touch it.
+    UserSettingsUpdate {
+        notifications: Option<NotificationSettings>,
+    },
     /// A channel was read up to `message_id` (by `user`: one of our own
     /// sessions, possibly another client).
     ChannelAck {
@@ -95,6 +102,8 @@ pub struct Ready {
     pub unreads: Vec<ChannelUnread>,
     /// Server IDs in the order the user arranged them, if they have.
     pub server_order: Vec<String>,
+    /// The `notifications` user setting, if the user has one.
+    pub notifications: Option<NotificationSettings>,
     /// List items that didn't parse (for example a new channel type) and were dropped.
     pub skipped: usize,
 }
@@ -195,6 +204,12 @@ fn decode(mut value: Value, out: &mut Vec<ServerEvent>) {
                 message_id: a.message_id,
             }))
         }
+        "UserSettingsUpdate" => {
+            let update = value.get_mut("update").map(Value::take);
+            out.push(ServerEvent::UserSettingsUpdate {
+                notifications: update.and_then(notifications_from_settings),
+            });
+        }
         "EmojiCreate" => out.push(decode_as(value, &kind, |e: Emoji| {
             ServerEvent::EmojiCreate(Box::new(e))
         })),
@@ -236,9 +251,12 @@ impl Ready {
         let members = lenient_list(take("members"), "member", &mut skipped);
         let emojis = lenient_list(take("emojis"), "emoji", &mut skipped);
         let unreads = lenient_list(take("channel_unreads"), "channel unread", &mut skipped);
-        let server_order = take("user_settings")
+        let settings = take("user_settings");
+        let server_order = settings
+            .clone()
             .map(server_order_from_settings)
             .unwrap_or_default();
+        let notifications = settings.and_then(notifications_from_settings);
         Ready {
             users,
             servers,
@@ -247,9 +265,17 @@ impl Ready {
             emojis,
             unreads,
             server_order,
+            notifications,
             skipped,
         }
     }
+}
+
+/// The `notifications` user setting (`[updated_at, "<json>"]`), parsed.
+fn notifications_from_settings(settings: Value) -> Option<NotificationSettings> {
+    let mut parsed: HashMap<String, (i64, String)> = serde_json::from_value(settings).ok()?;
+    let (_, json) = parsed.remove("notifications")?;
+    Some(NotificationSettings::parse(&json))
 }
 
 fn lenient_list<T: DeserializeOwned>(
@@ -521,6 +547,7 @@ async fn session(
                         | ServerEvent::MessageDelete { .. }
                         | ServerEvent::BulkMessageDelete { .. }
                         | ServerEvent::EmojiCreate(_)
+                        | ServerEvent::UserSettingsUpdate { .. }
                         | ServerEvent::ChannelAck { .. }
                         | ServerEvent::EmojiDelete { .. }) => {
                             Some(ConnectionEvent::Event(message_event))
@@ -559,7 +586,7 @@ mod tests {
             events_url("wss://events.stoat.chat"),
             "wss://events.stoat.chat/?version=1&format=json&ready=users&ready=servers\
              &ready=channels&ready=members&ready=emojis&ready=channel_unreads\
-             &ready=user_settings[ordering]"
+             &ready=user_settings[ordering]&ready=user_settings[notifications]"
         );
     }
 
@@ -635,6 +662,29 @@ mod tests {
             events.as_slice(),
             [ServerEvent::ChannelAck { channel, user, message_id }]
                 if channel == "c" && user == "u" && message_id.starts_with("01M6")
+        ));
+    }
+
+    #[test]
+    fn settings_updates_carry_notification_settings() {
+        let events = parse_frame(
+            r#"{"type":"Bulk","v":[
+                {"type":"UserSettingsUpdate","id":"u","update":{"notifications":[1,"{\"channel\":{\"c\":\"none\"}}"]}},
+                {"type":"UserSettingsUpdate","id":"u","update":{"ordering":[1,"{}"]}}
+            ]}"#,
+        );
+        let ServerEvent::UserSettingsUpdate {
+            notifications: Some(settings),
+        } = &events[0]
+        else {
+            panic!("expected notifications, got {:?}", events[0]);
+        };
+        assert_eq!(settings.level("c", Some("s")), crate::notify::Level::None);
+        assert!(matches!(
+            events[1],
+            ServerEvent::UserSettingsUpdate {
+                notifications: None
+            }
         ));
     }
 
