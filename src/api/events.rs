@@ -186,6 +186,19 @@ pub enum ServerEvent {
         server: String,
         ranks: Vec<String>,
     },
+    /// The user joined or created a server (possibly on another device):
+    /// the server with its channels and emoji. Stoat never sends this
+    /// session its own `ServerMemberJoin` for it, so the user's membership
+    /// has to be fetched.
+    ServerCreate {
+        server: Box<Server>,
+        channels: Vec<Channel>,
+        emojis: Vec<Emoji>,
+    },
+    /// The owner deleted a server. (Leaving one is `ServerMemberLeave`.)
+    ServerDelete {
+        id: String,
+    },
     /// An event type this client doesn't handle (yet). Holds the `type` tag.
     Unknown(String),
 }
@@ -565,6 +578,40 @@ fn decode(mut value: Value, out: &mut Vec<ServerEvent>) {
                     server: r.id,
                     ranks: r.ranks,
                 }
+            }))
+        }
+        // Channels and emoji one by one, so one this client can't parse (a
+        // new channel type) costs that one, not the server. Voice states
+        // aren't used.
+        "ServerCreate" => {
+            #[derive(Deserialize)]
+            struct Create {
+                server: Server,
+                #[serde(default)]
+                channels: Value,
+                #[serde(default)]
+                emojis: Value,
+            }
+            out.push(decode_as(value, &kind, |c: Create| {
+                let mut skipped = 0;
+                ServerEvent::ServerCreate {
+                    server: Box::new(c.server),
+                    channels: lenient_list(
+                        Some(c.channels),
+                        "channel in ServerCreate",
+                        &mut skipped,
+                    ),
+                    emojis: lenient_list(Some(c.emojis), "emoji in ServerCreate", &mut skipped),
+                }
+            }))
+        }
+        "ServerDelete" => {
+            #[derive(Deserialize)]
+            struct Delete {
+                id: String,
+            }
+            out.push(decode_as(value, &kind, |d: Delete| {
+                ServerEvent::ServerDelete { id: d.id }
             }))
         }
         other => out.push(ServerEvent::Unknown(other.to_string())),
@@ -966,7 +1013,9 @@ async fn session(
                         | ServerEvent::ServerUpdate { .. }
                         | ServerEvent::ServerRoleUpdate { .. }
                         | ServerEvent::ServerRoleDelete { .. }
-                        | ServerEvent::ServerRoleRanksUpdate { .. }) => {
+                        | ServerEvent::ServerRoleRanksUpdate { .. }
+                        | ServerEvent::ServerCreate { .. }
+                        | ServerEvent::ServerDelete { .. }) => {
                             Some(ConnectionEvent::Event(message_event))
                         }
                     };
@@ -1346,5 +1395,49 @@ mod tests {
             ServerEvent::ServerRoleRanksUpdate { server, ranks }
                 if server == "srv-1" && ranks == &["r-b", "r-a"]
         ));
+    }
+
+    #[test]
+    fn server_create_decodes_and_skips_what_it_cannot_parse() {
+        let events = parse_frame(
+            r#"{"type":"ServerCreate","id":"srv-new",
+                "server":{"_id":"srv-new","owner":"u-me","name":"New","channels":["ch-a","ch-b"],
+                          "default_permissions":0,"approximate_member_count":1,
+                          "roles":{"r":{"_id":"r","name":"Role","permissions":{"a":0,"d":0}}}},
+                "channels":[
+                    {"channel_type":"TextChannel","_id":"ch-a","server":"srv-new","name":"general"},
+                    {"channel_type":"FancyNewChannel","_id":"ch-b","server":"srv-new"}
+                ],
+                "emojis":[{"_id":"01ARYZ6S41TSV4RRFFQ69G5FAV","parent":{"type":"Server","id":"srv-new"},"creator_id":"u-me","name":"stoat"}],
+                "voice_states":[{"id":"ch-a","participants":[]}]}"#,
+        );
+        let [
+            ServerEvent::ServerCreate {
+                server,
+                channels,
+                emojis,
+            },
+        ] = events.as_slice()
+        else {
+            panic!("got {events:?}");
+        };
+        assert_eq!(server.id, "srv-new");
+        assert_eq!(server.roles["r"].name, "Role");
+        assert_eq!(channels.len(), 1);
+        assert_eq!(emojis[0].name, "stoat");
+        // Without the lists at all.
+        let events = parse_frame(
+            r#"{"type":"ServerCreate","id":"s","server":{"_id":"s","owner":"u","name":"S","channels":[],"default_permissions":0,"approximate_member_count":1}}"#,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [ServerEvent::ServerCreate { channels, emojis, .. }] if channels.is_empty() && emojis.is_empty()
+        ));
+    }
+
+    #[test]
+    fn server_delete_decodes() {
+        let events = parse_frame(r#"{"type":"ServerDelete","id":"srv-1"}"#);
+        assert!(matches!(events.as_slice(), [ServerEvent::ServerDelete { id }] if id == "srv-1"));
     }
 }

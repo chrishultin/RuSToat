@@ -2529,6 +2529,30 @@ impl ChatStore {
         self.users.contains_key(id)
     }
 
+    /// The user joined or created a server (`ServerCreate`): add it with its
+    /// channels and emoji, at the end of the rail if it's new. One that's
+    /// already known (the event twice) is replaced, keeping its loaded
+    /// history and cached members. Returns true if it's new.
+    pub fn add_server(
+        &mut self,
+        server: Server,
+        channels: Vec<Channel>,
+        emojis: Vec<Emoji>,
+    ) -> bool {
+        let id = server.id.clone();
+        let new = self.servers.insert(id.clone(), server).is_none();
+        if new {
+            self.server_order.push(id);
+        }
+        for channel in channels {
+            self.add_channel(channel);
+        }
+        for emoji in emojis {
+            self.add_emoji(emoji);
+        }
+        new
+    }
+
     /// Forget a server the user left or was removed from: the server, its
     /// channels (and their history) and its members. Returns the IDs of the
     /// channels removed.

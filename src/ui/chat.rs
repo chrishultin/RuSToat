@@ -745,6 +745,23 @@ impl ChatView {
                 }
                 self.server_permissions_changed(&server, cx);
             }
+            ConnectionEvent::Event(ServerEvent::ServerCreate {
+                server,
+                channels,
+                emojis,
+            }) => {
+                let id = server.id.clone();
+                log::info!("live: joined server {id} ({} channels)", channels.len());
+                self.store.add_server(*server, channels, emojis);
+                // Its channels aren't filtered until the membership arrives.
+                if self.store.member(&id, self.store.me()).is_none() {
+                    self.fetch_own_member(id, cx);
+                }
+            }
+            ConnectionEvent::Event(ServerEvent::ServerDelete { id }) => {
+                log::info!("live: server {id} deleted");
+                self.leave_server(&id, cx);
+            }
             ConnectionEvent::Event(_) => return,
             ConnectionEvent::Disconnected { reason, retry_in } => {
                 // Their stops may never arrive now.
@@ -820,6 +837,38 @@ impl ChatView {
         self.drop_stale_selection();
         self.remember_places();
         self.ensure_current_loaded(cx);
+    }
+
+    /// Fetch the user's own membership of a server they just joined: Stoat
+    /// doesn't send this session its `ServerMemberJoin`. Its roles decide
+    /// which channels show. If it fails, the next reconnect brings it.
+    fn fetch_own_member(&mut self, server: String, cx: &mut Context<Self>) {
+        let request = spawn_io({
+            let (client, server, me) = (
+                self.client.clone(),
+                server.clone(),
+                self.store.me().to_string(),
+            );
+            async move { client.fetch_member(&server, &me).await }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = request.await;
+            this.update(cx, |this, cx| match result {
+                Ok(Ok(member)) => {
+                    // Left again before it arrived.
+                    if this.store.server(&server).is_none() {
+                        return;
+                    }
+                    this.store.apply_member_join(member);
+                    this.server_permissions_changed(&server, cx);
+                    cx.notify();
+                }
+                Ok(Err(err)) => log::warn!("couldn't load own membership of {server}: {err}"),
+                Err(err) => log::warn!("membership task failed: {err:?}"),
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Fetch one user the client doesn't know yet (someone who just joined),

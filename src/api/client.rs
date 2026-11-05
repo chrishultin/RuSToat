@@ -3,7 +3,7 @@ use std::time::Duration;
 use reqwest::{Client, Method};
 use revolt_models::v0::{
     AllMemberResponse, BulkMessageResponse, DataEditMessage, DataLogin, DataMessageSearch,
-    DataMessageSend, MFAResponse, Message, MessageSort, OptionsQueryMessages, ReplyIntent,
+    DataMessageSend, MFAResponse, Member, Message, MessageSort, OptionsQueryMessages, ReplyIntent,
     ResponseLogin, User,
 };
 use serde::de::DeserializeOwned;
@@ -510,6 +510,18 @@ impl StoatClient {
         self.send(
             Method::GET,
             &members_path(server, exclude_offline),
+            None::<&()>,
+        )
+        .await
+    }
+
+    /// `GET /servers/{server}/members/{user}`: one membership. For the
+    /// user's own, after joining a server: Stoat doesn't send that session
+    /// its own `ServerMemberJoin`. Someone who isn't a member is `NotFound`.
+    pub async fn fetch_member(&self, server: &str, user: &str) -> Result<Member, ApiError> {
+        self.send(
+            Method::GET,
+            &format!("/servers/{server}/members/{user}"),
             None::<&()>,
         )
         .await

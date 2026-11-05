@@ -68,3 +68,39 @@ _Started: 2026-11-05_
 
 ### Manual Validation
 Deferred to the end of the milestone (manual checks are batched).
+
+## Chunk 2: Joining and deleted servers, live
+
+### Changes Made
+- `src/api/events.rs`:
+  - New `ServerCreate { server: Box<Server>, channels: Vec<Channel>, emojis: Vec<Emoji> }`. Channels and emojis are read with `lenient_list`, so an unparseable channel costs only itself. `voice_states` is ignored.
+  - New `ServerDelete { id }`.
+  - Both are forwarded to the UI.
+  - Parse tests: a `ServerCreate` with an unknown channel type skipped, one with no lists, and `ServerDelete`.
+- `src/api/client.rs`: `fetch_member(server, user) -> Member` (`GET /servers/{s}/members/{u}`).
+- `src/store.rs`: `add_server(server, channels, emojis) -> bool` (true if new).
+  - It inserts or replaces the server and adds each channel (through `add_channel`) and emoji.
+  - A new server is appended to `server_order` (Assumption 10).
+  - Histories and members aren't touched, so a repeated `ServerCreate` keeps loaded history.
+- `src/ui/chat.rs`:
+  - On `ServerCreate`: `add_server`, then, if the user's own membership isn't known yet, `fetch_own_member`. That fetches `GET /servers/{id}/members/{me}`, applies it with `apply_member_join`, and calls `server_permissions_changed`, so the chunk 1 channel filter now applies. If the server was left before the membership arrived, the result is dropped. A failure is logged and left for the next reconnect.
+  - On `ServerDelete`: the existing `leave_server`.
+- `tests/store_servers.rs` (new, 4 tests):
+  - A joined server goes at the end of the rail, with its channels and emojis.
+  - Channels aren't filtered until the membership is known, and a role-restricted channel disappears once it is.
+  - A repeated `ServerCreate` replaces the server (renamed, not duplicated) and keeps history.
+  - `ServerDelete` → `remove_server` removes the channels.
+- `tests/api_users.rs` (new, 2 tests): `fetch_member`'s path and token, parsing a bare `Member`, and a 404 → `ApiError::Api(NotFound)`.
+
+### Divergences
+None. The rail-order risk was accepted as planned: the server appears last, and the saved ordering isn't re-read live.
+
+### Verification Performed
+- `cargo test --test store_servers --test api_users`: 6 passed.
+- `cargo test --lib events`: 26 passed.
+- `cargo test` (full): 513 passed, 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- `rustfmt --check` hunks are unchanged from `HEAD` in `events.rs`, `store.rs`, `chat.rs` and `client.rs`. The new test files are rustfmt-clean.
+
+### Manual Validation
+Deferred to the end of the milestone (manual checks are batched).
