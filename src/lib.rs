@@ -8,6 +8,7 @@ pub mod api;
 pub mod assets;
 pub mod http;
 pub mod markdown;
+pub mod math;
 pub mod media;
 pub mod runtime;
 pub mod session;

@@ -16,8 +16,16 @@
 //! - Any other `<` is escaped. `TextView` renders raw HTML, which Stoat doesn't,
 //!   so `<b>` or `<not a mention>` must show as typed. Autolinks
 //!   (`<https://…>`, `<mailto:…>`) are kept.
+//! - Every line break is kept (Stoat uses `remark-breaks`; CommonMark, and so
+//!   `TextView`, joins lines into one paragraph): two trailing spaces make it
+//!   a hard break.
+//! - A block quote ends at its last `>` line. Stoat inserts a blank line there,
+//!   so the next line isn't pulled into the quote (CommonMark's "lazy
+//!   continuation").
 //!
-//! Nothing is rewritten inside code (fenced blocks or inline spans).
+//! Nothing is rewritten inside code (fenced blocks or inline spans). Inside
+//! `$$…$$` math only `<` is escaped (`\<`, which [`crate::math`] reads back
+//! as `<`); `ui::math` draws the formula.
 
 /// Name lookups for mentions.
 pub trait Names {
@@ -50,12 +58,28 @@ pub fn prepare(content: &str, names: &impl Names) -> String {
     } else {
         EMOJI_PX
     };
+    // One kind of line ending, so line breaks only need to look for `\n`.
+    let content = if content.contains('\r') {
+        std::borrow::Cow::Owned(content.replace("\r\n", "\n"))
+    } else {
+        std::borrow::Cow::Borrowed(content)
+    };
     let mut out = String::with_capacity(content.len() + 16);
-    for segment in segments(content) {
+    let mut offset = 0;
+    for segment in segments(&content) {
         match segment {
             Segment::Code(code) => out.push_str(code),
-            Segment::Text(text) => rewrite_text(text, names, emoji_px, &mut out),
+            Segment::Math(math) => out.push_str(&math.replace('<', "\\<")),
+            Segment::Text(text) => {
+                let text = Text {
+                    content: &content,
+                    offset,
+                    text,
+                };
+                rewrite_text(text, names, emoji_px, &mut out);
+            }
         }
+        offset += segment.as_str().len();
     }
     out
 }
@@ -139,9 +163,20 @@ pub fn is_external_link(url: &str) -> bool {
 enum Segment<'a> {
     Text(&'a str),
     Code(&'a str),
+    /// `$$…$$` on one line, delimiters included.
+    Math(&'a str),
 }
 
-/// Split into code (fenced blocks, inline spans) and everything else.
+impl<'a> Segment<'a> {
+    fn as_str(&self) -> &'a str {
+        match self {
+            Segment::Text(s) | Segment::Code(s) | Segment::Math(s) => s,
+        }
+    }
+}
+
+/// Split into code (fenced blocks, inline spans), math (`$$…$$` within a
+/// line) and everything else.
 fn segments(content: &str) -> Vec<Segment<'_>> {
     let mut out = Vec::new();
     let mut text_start = 0;
@@ -175,6 +210,20 @@ fn segments(content: &str) -> Vec<Segment<'_>> {
             }
             continue;
         }
+        if bytes[pos] == b'$' {
+            let run = count_run(bytes, pos, b'$');
+            if let Some(end) = math_span_end(content, pos, run) {
+                if text_start < pos {
+                    out.push(Segment::Text(&content[text_start..pos]));
+                }
+                out.push(Segment::Math(&content[pos..end]));
+                pos = end;
+                text_start = end;
+            } else {
+                pos += run;
+            }
+            continue;
+        }
         pos += content[pos..].chars().next().map_or(1, char::len_utf8);
     }
     if text_start < content.len() {
@@ -185,6 +234,38 @@ fn segments(content: &str) -> Vec<Segment<'_>> {
 
 fn count_run(bytes: &[u8], from: usize, byte: u8) -> usize {
     bytes[from..].iter().take_while(|&&b| b == byte).count()
+}
+
+/// The end of a `$$…$$` span opened by the `run` dollars at `start`: the
+/// next run of exactly as many on the same line, with something between.
+/// One `$` isn't math in Stoat, and an escaped `\$` doesn't open anything.
+fn math_span_end(content: &str, start: usize, run: usize) -> Option<usize> {
+    let bytes = content.as_bytes();
+    let backslashes = bytes[..start]
+        .iter()
+        .rev()
+        .take_while(|&&b| b == b'\\')
+        .count();
+    if run < 2 || backslashes % 2 == 1 {
+        return None;
+    }
+    let from = start + run;
+    let line_end = content[from..]
+        .find('\n')
+        .map_or(content.len(), |i| from + i);
+    let mut pos = from;
+    while pos < line_end {
+        if bytes[pos] == b'$' {
+            let len = count_run(bytes, pos, b'$');
+            if len == run {
+                return (pos > from).then_some(pos + run);
+            }
+            pos += len;
+        } else {
+            pos += 1;
+        }
+    }
+    None
 }
 
 /// A fenced code block starting at `start` (a line start): its end, including
@@ -244,9 +325,24 @@ fn find_closing_backticks(content: &str, from: usize, run: usize) -> Option<usiz
     None
 }
 
-fn rewrite_text(text: &str, names: &impl Names, emoji_px: u32, out: &mut String) {
+/// A text segment, and where it is in the whole message (line breaks look
+/// at the lines either side, which can be in other segments).
+struct Text<'a> {
+    content: &'a str,
+    offset: usize,
+    text: &'a str,
+}
+
+fn rewrite_text(segment: Text<'_>, names: &impl Names, emoji_px: u32, out: &mut String) {
+    let text = segment.text;
     let mut rest = text;
     while !rest.is_empty() {
+        if rest.starts_with('\n') {
+            let at = segment.offset + (text.len() - rest.len());
+            out.push_str(line_break(segment.content, at));
+            rest = &rest[1..];
+            continue;
+        }
         if let Some(id) = custom_emoji_id(rest)
             && let Some(img) = emoji_img(id, names, emoji_px)
         {
@@ -273,10 +369,31 @@ fn rewrite_text(text: &str, names: &impl Names, emoji_px: u32, out: &mut String)
         // multi-byte one (emoji, CJK), and slicing mid-character panics.
         let first = rest.chars().next().map_or(1, char::len_utf8);
         let next = rest[first..]
-            .find(['<', '|', ':'])
+            .find(['<', '|', ':', '\n'])
             .map_or(rest.len(), |i| i + first);
         out.push_str(&rest[..next]);
         rest = &rest[next..];
+    }
+}
+
+/// What the `\n` at `at` in `content` becomes. Stoat keeps every line break,
+/// so a line followed by another becomes a hard break (two trailing spaces),
+/// and a quote's last `>` line gets a blank line after it.
+fn line_break(content: &str, at: usize) -> &'static str {
+    let line = &content[content[..at].rfind('\n').map_or(0, |i| i + 1)..at];
+    let rest = &content[at + 1..];
+    let next = &rest[..rest.find('\n').unwrap_or(rest.len())];
+    let is_quote = |line: &str| line.trim_start().starts_with('>');
+    if line.trim().is_empty() || next.trim().is_empty() {
+        // Already a paragraph break.
+        "\n"
+    } else if is_quote(line) && !is_quote(next) {
+        "\n\n"
+    } else if line.ends_with("  ") || (line.len() - line.trim_end_matches('\\').len()) % 2 == 1 {
+        // Already a hard break (two spaces, or an unescaped `\`).
+        "\n"
+    } else {
+        "  \n"
     }
 }
 
@@ -426,6 +543,26 @@ mod tests {
         );
         // An unclosed fence runs to the end.
         assert_eq!(segments("```\nopen"), vec![Segment::Code("```\nopen")]);
+    }
+
+    #[test]
+    fn segments_split_double_dollar_math_within_a_line() {
+        assert_eq!(
+            segments("a $$x<y$$ b"),
+            vec![
+                Segment::Text("a "),
+                Segment::Math("$$x<y$$"),
+                Segment::Text(" b")
+            ]
+        );
+        assert_eq!(segments("$1 and $2"), vec![Segment::Text("$1 and $2")]);
+        assert_eq!(segments("$$a\nb$$"), vec![Segment::Text("$$a\nb$$")]);
+        assert_eq!(segments("\\$$a$$"), vec![Segment::Text("\\$$a$$")]);
+        // An escaped backslash doesn't escape the dollars.
+        assert_eq!(
+            segments("\\\\$$a$$"),
+            vec![Segment::Text("\\\\"), Segment::Math("$$a$$")]
+        );
     }
 
     #[test]

@@ -24,6 +24,8 @@ serde_urlencoded = "0.7"
 url = "2"
 # Emoji character classes, for "only emoji" (jumbo) messages. Already in the tree.
 unicode-properties = "0.1"
+# CSS colour names for `$$\color{…}$$` (see src/math.rs). Already in the tree (via resvg).
+svgtypes = "0.16"
 # Local-time formatting for message timestamps.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 thiserror = "2"
@@ -37,3 +39,5 @@ env_logger = "0.11"
 
 [dev-dependencies]
 wiremock = "0.6"
+# The parser inside TextView (already in the tree), to check what `prepare` produces parses as intended.
+markdown = "1"
