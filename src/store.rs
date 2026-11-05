@@ -66,8 +66,13 @@ pub struct MessageRow {
     pub avatar: Option<String>,
     /// "Today at 14:05" etc.
     pub time: String,
-    /// Plain text with mentions resolved. For system messages, the description.
+    /// Markdown (see [`crate::markdown::prepare`]). For system messages, a
+    /// plain-text description instead.
     pub body: Option<String>,
+    /// Changes whenever what's drawn for `body` changes (an edit, a renamed
+    /// mention), so the Markdown view's cached parse is replaced. The view
+    /// keeps its parse per element ID and only reads the source the first time.
+    pub render_key: String,
     pub attachments: Vec<String>,
     pub system: bool,
     pub edited: bool,
@@ -420,37 +425,6 @@ impl ChatStore {
         }
     }
 
-    /// Message text with `<@user>` and `<#channel>` mentions replaced by names.
-    pub fn render_content(&self, content: &str) -> String {
-        let mut out = String::with_capacity(content.len());
-        let mut rest = content;
-        while let Some(start) = rest.find('<') {
-            out.push_str(&rest[..start]);
-            let tail = &rest[start..];
-            let replacement = tail.find('>').and_then(|end| {
-                let inner = &tail[1..end];
-                let text = match (inner.strip_prefix('@'), inner.strip_prefix('#')) {
-                    (Some(user), _) => format!("@{}", self.user_name(user)?),
-                    (_, Some(channel)) => format!("#{}", self.channel_entry(channel)?.name),
-                    _ => return None,
-                };
-                Some((text, end + 1))
-            });
-            match replacement {
-                Some((text, consumed)) => {
-                    out.push_str(&text);
-                    rest = &tail[consumed..];
-                }
-                None => {
-                    out.push('<');
-                    rest = &tail[1..];
-                }
-            }
-        }
-        out.push_str(rest);
-        out
-    }
-
     /// Display rows for a loaded channel, oldest first. Empty if not loaded.
     pub fn timeline(&self, channel: &str) -> Vec<TimelineRow> {
         let Some(history) = self.histories.get(channel) else {
@@ -483,10 +457,12 @@ impl ChatStore {
                     .content
                     .as_deref()
                     .filter(|c| !c.is_empty())
-                    .map(|c| self.render_content(c)),
+                    .map(|c| crate::markdown::prepare(c, self)),
             };
+            let render_key = render_key(&message.id, body.as_deref());
             rows.push(TimelineRow::Message(MessageRow {
                 id: message.id.clone(),
+                render_key,
                 author: author.clone(),
                 avatar: self.avatar_url(message),
                 time: crate::time::message_time_label(&message.id),
@@ -740,6 +716,24 @@ pub fn diff_rows(old: &[TimelineRow], new: &[TimelineRow]) -> Vec<RowOp> {
         ops.push(RowOp::Append(new.len() - j));
     }
     ops
+}
+
+/// `"{id}:{hash of body}"`, see [`MessageRow::render_key`].
+pub fn render_key(id: &str, body: Option<&str>) -> String {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    body.hash(&mut hasher);
+    format!("{id}:{:016x}", hasher.finish())
+}
+
+impl crate::markdown::Names for ChatStore {
+    fn user_name(&self, id: &str) -> Option<String> {
+        self.users.get(id).map(|u| display_name(u).to_string())
+    }
+
+    fn channel_name(&self, id: &str) -> Option<String> {
+        self.channel_entry(id).map(|c| c.name)
+    }
 }
 
 /// Oldest first, no duplicates. ULIDs sort by time, so ID order is time order.

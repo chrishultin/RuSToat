@@ -74,9 +74,12 @@ fn author_names_follow_precedence() {
 fn mentions_and_system_messages_use_names() {
     let rows = store_with_page(50).timeline("ch-general");
     let rows = messages(&rows);
+    // Mentions become internal links; the stray `<` is escaped so it isn't HTML.
     assert_eq!(
         rows[0].body.as_deref(),
-        Some("Hello @bob, see #random <not a mention>")
+        Some(
+            r"Hello [@bob](stoat:user/u-bob), see [#random](stoat:channel/ch-random) \<not a mention>"
+        )
     );
     assert!(rows[3].system);
     assert_eq!(rows[3].body.as_deref(), Some("Carol joined"));
@@ -120,4 +123,17 @@ fn short_page_marks_the_start_of_the_channel() {
 #[test]
 fn unloaded_channels_have_no_timeline() {
     assert!(store_with_page(50).timeline("ch-random").is_empty());
+}
+
+#[test]
+fn render_key_changes_when_the_drawn_text_changes() {
+    use stoat_gpui::store::render_key;
+    let id = "01M6GDKW80AAAAAAAAAAAAAAAA";
+    assert_eq!(render_key(id, Some("hi")), render_key(id, Some("hi")));
+    assert_ne!(
+        render_key(id, Some("hi")),
+        render_key(id, Some("hi (edited)"))
+    );
+    assert_ne!(render_key(id, Some("hi")), render_key(id, None));
+    assert!(render_key(id, Some("hi")).starts_with(id));
 }

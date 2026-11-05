@@ -8,6 +8,7 @@ use futures::StreamExt;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
+use gpui_kit::component::text::TextView;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
@@ -15,6 +16,7 @@ use gpui_kit::*;
 
 use crate::api::StoatClient;
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
+use crate::markdown::is_external_link;
 use crate::media::MediaUrls;
 use crate::runtime::spawn_io;
 use crate::store::{
@@ -987,14 +989,22 @@ fn render_message_row(message: &MessageRow, colors: RowColors) -> AnyElement {
         })
         .when_some(message.body.clone(), |el, body| {
             el.child(
-                div()
+                // Keyed by `render_key`, so an edit (or a renamed mention)
+                // gets a fresh parse instead of the cached one.
+                TextView::markdown(SharedString::from(message.render_key.clone()), body)
                     .w_full()
                     .text_sm()
-                    .child(body)
-                    .when(message.edited, |el| {
-                        el.child(div().text_xs().text_color(colors.muted).child("(edited)"))
+                    .selectable(true)
+                    .on_link_click(|url, _, _, cx| {
+                        // Mentions are internal `stoat:` links: nothing to open yet.
+                        if is_external_link(url) {
+                            cx.open_url(url);
+                        }
                     }),
             )
+            .when(message.edited, |el| {
+                el.child(div().text_xs().text_color(colors.muted).child("(edited)"))
+            })
         })
         .children(message.attachments.iter().map(|name| {
             div()

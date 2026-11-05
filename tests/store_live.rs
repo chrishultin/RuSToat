@@ -130,6 +130,7 @@ fn older_page_merges_without_duplicates() {
 fn row(id: &str, body: &str) -> TimelineRow {
     TimelineRow::Message(MessageRow {
         id: id.into(),
+        render_key: stoat_gpui::store::render_key(id, Some(body)),
         author: "a".into(),
         avatar: None,
         time: String::new(),
