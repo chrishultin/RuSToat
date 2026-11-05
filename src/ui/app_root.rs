@@ -5,37 +5,26 @@ use gpui_kit::component::{ActiveTheme, Theme, h_flex, v_flex};
 use gpui_kit::*;
 
 use crate::api::StoatClient;
-use crate::api::models::User;
 use crate::runtime::spawn_io;
 use crate::session::{self, Restored, TokenStore};
+use crate::ui::chat::{ChatEvent, ChatView};
 use crate::ui::login::{LoginEvent, LoginView};
 
 /// What the main window is showing.
 enum Screen {
     /// Checking a saved session token at startup.
-    Restoring {
-        _task: Task<()>,
-    },
+    Restoring { _task: Task<()> },
     Login {
         view: Entity<LoginView>,
         _events: Subscription,
     },
     /// A saved token exists but couldn't be checked. Kept so a retry can work.
-    Offline(Box<Offline>),
-    SignedIn(Box<SignedIn>),
-}
-
-struct Offline {
-    token: String,
-    error: SharedString,
-}
-
-/// Placeholder until the chat UI lands. Shows who we're logged in as.
-struct SignedIn {
-    token: String,
-    user: Option<User>,
-    error: Option<SharedString>,
-    _fetch: Option<Task<()>>,
+    Offline { token: String, error: SharedString },
+    Chat {
+        view: Entity<ChatView>,
+        token: String,
+        _events: Subscription,
+    },
 }
 
 /// Top-level view for the main window: routes between login and chat.
@@ -90,17 +79,12 @@ impl AppRoot {
         cx: &mut Context<Self>,
     ) {
         self.screen = match restored {
-            Ok(Restored::SignedIn { token, user }) => Screen::SignedIn(Box::new(SignedIn {
-                token,
-                user: Some(*user),
-                error: None,
-                _fetch: None,
-            })),
+            Ok(Restored::SignedIn { token, user }) => self.chat_screen(token, user.id, window, cx),
             Ok(Restored::NeedsLogin) => Self::login_screen(&self.client, window, cx),
-            Ok(Restored::Unverified { token, error }) => Screen::Offline(Box::new(Offline {
+            Ok(Restored::Unverified { token, error }) => Screen::Offline {
                 token,
                 error: error.to_string().into(),
-            })),
+            },
             Err(err) => {
                 log::error!("session restore task failed: {err:?}");
                 Self::login_screen(&self.client, window, cx)
@@ -112,7 +96,9 @@ impl AppRoot {
     fn login_screen(client: &StoatClient, window: &mut Window, cx: &mut Context<Self>) -> Screen {
         let view = cx.new(|cx| LoginView::new(client.clone(), window, cx));
         let events = cx.subscribe_in(&view, window, |this, _, event, window, cx| match event {
-            LoginEvent::LoggedIn(session) => this.logged_in(session.token.clone(), window, cx),
+            LoginEvent::LoggedIn(session) => {
+                this.logged_in(session.token.clone(), session.user_id.clone(), window, cx)
+            }
         });
         Screen::Login {
             view,
@@ -120,8 +106,42 @@ impl AppRoot {
         }
     }
 
-    /// Fresh login: remember the token, then load the profile.
-    fn logged_in(&mut self, token: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn chat_screen(
+        &self,
+        token: String,
+        me: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Screen {
+        let client = self.client.with_token(token.clone());
+        let view = cx.new(|cx| ChatView::new(client, me, cx));
+        let events = cx.subscribe_in(&view, window, |this, _, event, window, cx| match event {
+            ChatEvent::LogOutRequested => this.log_out(window, cx),
+            ChatEvent::SessionRejected => {
+                log::warn!("server rejected the session; logging out");
+                this.log_out(window, cx);
+                if let Screen::Login { view, .. } = &this.screen {
+                    view.update(cx, |login, cx| {
+                        login.show_message("Your session has ended. Please log in again.", cx)
+                    });
+                }
+            }
+        });
+        Screen::Chat {
+            view,
+            token,
+            _events: events,
+        }
+    }
+
+    /// Fresh login: remember the token and open the chat.
+    fn logged_in(
+        &mut self,
+        token: String,
+        me: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let save = spawn_io(session::remember(
             self.store.clone(),
             self.client.base_url().to_string(),
@@ -136,32 +156,7 @@ impl AppRoot {
         })
         .detach();
 
-        let client = self.client.with_token(token.clone());
-        let request = spawn_io(async move { client.fetch_self().await });
-        let fetch = cx.spawn_in(window, async move |this, cx| {
-            let result = request.await;
-            this.update(cx, |this, cx| {
-                if let Screen::SignedIn(state) = &mut this.screen {
-                    match result {
-                        Ok(Ok(me)) => state.user = Some(me),
-                        Ok(Err(err)) => {
-                            log::warn!("fetching /users/@me failed: {err:?}");
-                            state.error = Some(err.to_string().into());
-                        }
-                        Err(err) => state.error = Some(err.to_string().into()),
-                    }
-                    cx.notify();
-                }
-            })
-            .ok();
-        });
-
-        self.screen = Screen::SignedIn(Box::new(SignedIn {
-            token,
-            user: None,
-            error: None,
-            _fetch: Some(fetch),
-        }));
+        self.screen = self.chat_screen(token, me, window, cx);
         cx.notify();
     }
 
@@ -173,8 +168,7 @@ impl AppRoot {
     /// Forget the saved session, end it on the server, and show the login screen.
     pub fn log_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let token = match &self.screen {
-            Screen::SignedIn(state) => state.token.clone(),
-            Screen::Offline(state) => state.token.clone(),
+            Screen::Chat { token, .. } | Screen::Offline { token, .. } => token.clone(),
             Screen::Restoring { .. } | Screen::Login { .. } => return,
         };
 
@@ -200,17 +194,9 @@ impl AppRoot {
         })
         .detach();
 
+        // Replacing the chat screen drops its events connection.
         self.screen = Self::login_screen(&self.client, window, cx);
         cx.notify();
-    }
-}
-
-/// "Display Name (username#1234)", or just "username#1234".
-fn user_label(user: &User) -> String {
-    let tag = format!("{}#{}", user.username, user.discriminator);
-    match &user.display_name {
-        Some(display) if !display.is_empty() => format!("{display} ({tag})"),
-        _ => tag,
     }
 }
 
@@ -219,27 +205,22 @@ impl Render for AppRoot {
         let (status, detail, actions): (SharedString, Option<SharedString>, Option<Div>) =
             match &self.screen {
                 Screen::Login { view, .. } => return view.clone().into_any_element(),
+                Screen::Chat { view, .. } => return view.clone().into_any_element(),
                 Screen::Restoring { .. } => ("Signing in…".into(), None, None),
-                Screen::Offline(state) => (
+                Screen::Offline { error, .. } => (
                     "Couldn't check your saved session".into(),
-                    Some(state.error.clone()),
+                    Some(error.clone()),
                     Some(
                         h_flex()
                             .gap_2()
                             .child(Button::new("retry").primary().label("Retry").on_click(
                                 cx.listener(|this, _, window, cx| this.retry_restore(window, cx)),
                             ))
-                            .child(log_out_button(cx)),
+                            .child(Button::new("log-out").ghost().label("Log out").on_click(
+                                cx.listener(|this, _, window, cx| this.log_out(window, cx)),
+                            )),
                     ),
                 ),
-                Screen::SignedIn(state) => {
-                    let status = match (&state.user, &state.error) {
-                        (Some(user), _) => format!("Logged in as {}", user_label(user)).into(),
-                        (None, Some(error)) => error.clone(),
-                        (None, None) => "Loading your profile…".into(),
-                    };
-                    (status, None, Some(h_flex().child(log_out_button(cx))))
-                }
             };
 
         let theme = cx.theme();
@@ -265,46 +246,5 @@ impl Render for AppRoot {
             }))
             .children(actions)
             .into_any_element()
-    }
-}
-
-fn log_out_button(cx: &mut Context<AppRoot>) -> Button {
-    Button::new("log-out")
-        .ghost()
-        .label("Log out")
-        .on_click(cx.listener(|this, _, window, cx| this.log_out(window, cx)))
-}
-
-#[cfg(test)]
-mod tests {
-    // Explicit imports: `use super::*` would bring in GPUI's own `test` macro
-    // through the `gpui_kit::*` glob and shadow Rust's `#[test]`.
-    use super::user_label;
-    use crate::api::models::User;
-
-    fn user(display_name: Option<&str>) -> User {
-        serde_json::from_value(serde_json::json!({
-            "_id": "01JC0USER000000000000000AA",
-            "username": "stoatfan",
-            "discriminator": "1234",
-            "display_name": display_name,
-            "relationship": "User",
-            "online": true,
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn label_prefers_display_name() {
-        assert_eq!(
-            user_label(&user(Some("Stoat Fan"))),
-            "Stoat Fan (stoatfan#1234)"
-        );
-    }
-
-    #[test]
-    fn label_falls_back_to_username_tag() {
-        assert_eq!(user_label(&user(None)), "stoatfan#1234");
-        assert_eq!(user_label(&user(Some(""))), "stoatfan#1234");
     }
 }

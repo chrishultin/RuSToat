@@ -232,9 +232,14 @@ impl LoginView {
         cx.notify();
     }
 
-    fn show_error(&mut self, message: &'static str, cx: &mut Context<Self>) {
+    /// Show a message under the form (errors, or a notice such as "session ended").
+    pub fn show_message(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.error = Some(message.into());
         cx.notify();
+    }
+
+    fn show_error(&mut self, message: &'static str, cx: &mut Context<Self>) {
+        self.show_message(message, cx);
     }
 }
 

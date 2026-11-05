@@ -24,6 +24,42 @@ pub struct RootConfig {
     pub version: String,
     /// Events websocket URL, e.g. `wss://events.stoat.chat`.
     pub ws: String,
+    #[serde(default)]
+    pub features: RootFeatures,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RootFeatures {
+    /// The file server ("Autumn"): icons, avatars, attachments.
+    #[serde(default)]
+    pub autumn: Option<ServiceFeature>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServiceFeature {
+    pub enabled: bool,
+    pub url: String,
+}
+
+impl RootConfig {
+    /// Base URL of the file server, e.g. `https://cdn.stoatusercontent.com`.
+    pub fn file_server(&self) -> Option<&str> {
+        self.features
+            .autumn
+            .as_ref()
+            .filter(|autumn| autumn.enabled)
+            .map(|autumn| autumn.url.as_str())
+    }
+}
+
+/// Where a file (server icon, avatar, attachment) is served: `{server}/{tag}/{id}`.
+pub fn file_url(file_server: &str, file: &revolt_models::v0::File) -> String {
+    format!(
+        "{}/{}/{}",
+        file_server.trim_end_matches('/'),
+        file.tag,
+        file.id
+    )
 }
 
 /// A small, cloneable Stoat REST client.

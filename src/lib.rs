@@ -5,6 +5,9 @@
 //! from here.
 
 pub mod api;
+pub mod assets;
+pub mod http;
 pub mod runtime;
 pub mod session;
+pub mod store;
 pub mod ui;

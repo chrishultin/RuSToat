@@ -16,6 +16,24 @@ fn root_config_reads_version_and_ws() {
     let root: RootConfig = serde_json::from_str(&fixture("root.json")).unwrap();
     assert_eq!(root.version, "0.16.2");
     assert_eq!(root.ws, "wss://events.stoat.chat");
+    assert_eq!(root.file_server(), Some("https://cdn.stoatusercontent.com"));
+}
+
+#[test]
+fn file_urls_use_tag_and_id() {
+    let file: stoat_gpui::api::models::File = serde_json::from_value(serde_json::json!({
+        "_id": "icon-file-id",
+        "tag": "icons",
+        "filename": "icon.png",
+        "metadata": { "type": "Image", "width": 256, "height": 256 },
+        "content_type": "image/png",
+        "size": 1234
+    }))
+    .unwrap();
+    assert_eq!(
+        stoat_gpui::api::file_url("https://cdn.stoatusercontent.com/", &file),
+        "https://cdn.stoatusercontent.com/icons/icon-file-id"
+    );
 }
 
 #[test]

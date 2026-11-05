@@ -1,0 +1,45 @@
+{
+  "type": "Ready",
+  "users": [
+    { "_id": "u-me", "username": "me", "discriminator": "0001", "relationship": "User", "online": true },
+    { "_id": "u-ada", "username": "ada", "discriminator": "1815", "display_name": "Ada L.", "relationship": "Friend", "online": true },
+    { "_id": "u-bob", "username": "bob", "discriminator": "4242", "relationship": "Friend", "online": false },
+    { "_id": "u-broken", "username": "broken" }
+  ],
+  "servers": [
+    {
+      "_id": "srv-alpha", "owner": "u-ada", "name": "Alpha Team",
+      "channels": ["ch-welcome", "ch-general", "ch-random", "ch-voice", "ch-no-access"],
+      "categories": [
+        { "id": "cat-chat", "title": "Chat", "channels": ["ch-general", "ch-random", "ch-secret"] },
+        { "id": "cat-voice", "title": "Voice", "channels": ["ch-voice"] },
+        { "id": "cat-archive", "title": "Archive", "channels": ["ch-gone"] }
+      ],
+      "icon": { "_id": "file-alpha-icon", "tag": "icons", "filename": "alpha.png", "metadata": { "type": "Image", "width": 128, "height": 128 }, "content_type": "image/png", "size": 2048 },
+      "roles": {}, "default_permissions": 0, "approximate_member_count": 12
+    },
+    {
+      "_id": "srv-beta", "owner": "u-me", "name": "beta lounge",
+      "channels": ["ch-beta"], "default_permissions": 0, "approximate_member_count": 2
+    }
+  ],
+  "channels": [
+    { "channel_type": "TextChannel", "_id": "ch-welcome", "server": "srv-alpha", "name": "welcome" },
+    { "channel_type": "TextChannel", "_id": "ch-general", "server": "srv-alpha", "name": "general", "last_message_id": "01JC0000000000000000000009" },
+    { "channel_type": "TextChannel", "_id": "ch-random", "server": "srv-alpha", "name": "random" },
+    { "channel_type": "TextChannel", "_id": "ch-voice", "server": "srv-alpha", "name": "hangout", "voice": { "max_users": 10 } },
+    { "channel_type": "TextChannel", "_id": "ch-beta", "server": "srv-beta", "name": "chat" },
+    { "channel_type": "SavedMessages", "_id": "ch-saved", "user": "u-me" },
+    { "channel_type": "DirectMessage", "_id": "dm-ada", "active": true, "recipients": ["u-me", "u-ada"], "last_message_id": "01JC0000000000000000000005" },
+    { "channel_type": "DirectMessage", "_id": "dm-bob", "active": true, "recipients": ["u-bob", "u-me"], "last_message_id": "01JC0000000000000000000007" },
+    { "channel_type": "DirectMessage", "_id": "dm-closed", "active": false, "recipients": ["u-me", "u-bob"] },
+    { "channel_type": "DirectMessage", "_id": "dm-stranger", "active": true, "recipients": ["u-me", "u-unknown"] },
+    { "channel_type": "Group", "_id": "grp-weekend", "name": "Weekend plans", "owner": "u-ada", "recipients": ["u-me", "u-ada", "u-bob"], "last_message_id": "01JC0000000000000000000006" },
+    { "channel_type": "FancyNewChannel", "_id": "ch-future" }
+  ],
+  "members": [
+    { "_id": { "server": "srv-alpha", "user": "u-me" }, "joined_at": "2026-01-01T00:00:00.000Z", "nickname": "Captain Me", "roles": [] },
+    { "_id": { "server": "srv-beta", "user": "u-me" }, "joined_at": "2026-01-01T00:00:00.000Z" }
+  ],
+  "user_settings": { "ordering": [1730000000000, "{\"servers\":[\"srv-beta\",\"srv-alpha\"]}"] }
+}

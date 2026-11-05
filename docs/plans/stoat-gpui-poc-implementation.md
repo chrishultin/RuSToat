@@ -189,3 +189,67 @@ All passed on 2026-11-04 with the user's real account:
 1. **Login:** the user logged in. The app logged `logged in as user …` and `session saved to Keychain`, and `security find-generic-password -s chat.stoat.gpui-poc` confirmed the item existed.
 2. **Relaunch:** the app was quit and relaunched (same binary, so no Keychain prompt). It logged `restored saved session for <username>` straight away, without showing the login screen.
 3. **Log out:** the user clicked Log out and confirmed they were back at the login screen and the session was gone from Stoat's Sessions. The app logged `logged out` (server logout succeeded), and the Keychain item was gone.
+
+## Chunk 4: Events websocket and sidebar (servers, channels, DMs)
+
+### Changes Made
+- `Cargo.toml`: added `tokio-tungstenite 0.30` (`rustls-tls-native-roots`).
+- `src/api/events.rs` (new):
+  - **Decoding:** `parse_frame` turns a websocket text frame into our own `ServerEvent` enum: `Authenticated`, `Ready`, `Pong`, `Error(revolt_result::Error)`, `Logout`, or `Unknown(type)`. `Bulk` frames are flattened.
+  - **Lenient `Ready`:** `users`, `servers`, `channels` and `members` are parsed item by item into `revolt-models` types. Failures are logged and counted in `Ready::skipped`. `server_order` comes from the `ordering` user setting, which holds `{"servers": [...]}` inside the `[timestamp, json]` tuple.
+  - **Outgoing frames:** `authenticate_frame` (the token goes in a message, not the URL) and `ping_frame`.
+  - **URL:** `events_url` is `…/?version=1&format=json`, with repeated `ready=` for `users`, `servers`, `channels`, `members` and `user_settings[ordering]`.
+  - **Connection:** `connect(client)` spawns the connection loop on the IO runtime and returns an abort-on-drop `Connection` plus an `mpsc` receiver of `ConnectionEvent`s (`Connecting`, `Connected`, `Event`, `Disconnected { reason, retry_in }`, `SessionRejected`). Each attempt re-fetches `GET /` for the ws URL, authenticates, pings every 20 s, and drops the connection if no pong arrives for 65 s. It reconnects with backoff from 1 s to 30 s, and the backoff resets after a successful authentication. `InvalidSession`/`NotAuthenticated` errors and `Logout` stop the loop with `SessionRejected`.
+- `src/store.rs` (new): `ChatStore` is plain data with no GPUI dependency.
+  - `apply_ready` replaces all state on each `Ready`.
+  - `servers()` lists servers in the saved order, then any others in `Ready` order. Each `ServerEntry` has the initials and icon `File`.
+  - `server_channels()` returns uncategorized channels first, then categories in order. Channels missing from `Ready` and empty categories are skipped.
+  - `home_channels()` returns Saved Notes, then open DMs and groups sorted by `last_message_id` descending (ULIDs sort by time). Closed DMs are hidden. DMs are named after the other participant's display name, or "Unknown user".
+  - Lookups: `member()`, `user()`, `channel()`.
+  - Helpers: `display_name`, `initials`, `channel_id`.
+- `src/ui/chat.rs` (new): `ChatView` owns the store, the connection and the selection, and emits `LogOutRequested` and `SessionRejected`.
+  - Fetches the file server address from `GET /` once.
+  - **Server rail:** Home button, then servers with their uploaded icon (`img()` with initials as fallback) and a name tooltip. The selected server has a marker on the left edge.
+  - **Channel list:** a header, category headings, and rows with Lucide icons (`#`, speaker, `@`, users, bookmark). The selected row is highlighted, and each place remembers its last selected channel.
+  - **User panel:** display name, an Online/Connecting/Offline line, and a Log out button.
+  - **Main area:** channel header and a placeholder body, plus a warning banner while reconnecting.
+- `src/ui/app_root.rs`: the `SignedIn` "Logged in as" placeholder is replaced by `Screen::Chat { view, token }`. A fresh login uses `session.user_id`; a restore uses `user.id`. `SessionRejected` logs out and shows "Your session has ended" on the login screen.
+- `src/ui/login.rs`: added `pub fn show_message`.
+- `src/assets.rs` (new): `AppAssets` combines gpui-component's default icons with `icon_assets!(ExtraIcons, [AtSign, Bookmark, Hash, House, Users, Volume2, WifiOff])`.
+- `src/http.rs` (new): `ReqwestHttpClient` implements GPUI's `HttpClient` on top of reqwest on the IO runtime. Values cross the boundary as strings and bytes, so GPUI's and reqwest's `http` versions don't need to match.
+- `src/main.rs`: `.with_assets(AppAssets)` and `.with_http_client(ReqwestHttpClient::new())`.
+- `src/api/client.rs`: `RootConfig.features.autumn`, `RootConfig::file_server()`, and `file_url(server, file)` = `{server}/{tag}/{id}`.
+- Tests:
+  - `tests/fixtures/ready.json` is an anonymized sample covering the awkward cases: an unparseable user and channel type, channels that are listed but missing, an empty category, a closed DM, an unknown DM partner, a voice channel, an icon, and saved ordering.
+  - `tests/store_ready.rs`: 8 tests.
+  - Unit tests: 7 for events, 1 for initials, 1 for assets, 1 `wiremock` HTTP adapter round trip.
+  - Contract tests: added `file_server` and `file_url` cases.
+  - `tests/live_events.rs`: an opt-in live handshake test.
+
+### Divergences
+- **Bug found in live testing, fixed: websocket 400.** `events_url` produced `wss://events.stoat.chat?…` with no path. tungstenite sends that as `GET ?version=1… HTTP/1.1`, and Stoat rejects it with 400. I confirmed this by probing with curl over HTTP/1.1 (every query-parameter variant got 101) and by reproducing it in an opt-in live handshake test. The fix always adds `/`. The unit test checks both input forms, and `cargo test --test live_events -- --ignored` now passes.
+- **Minor: voice channels are listed, not hidden.** Stoat 0.16 has no voice channel type; voice-capable channels are `TextChannel`s with `voice`. Plan Assumption 6 is amended.
+- **Minor: assets weren't registered before.** gpui-component icons only render when the app registers an `AssetSource`, and the app didn't, so chunk 2's password-eye toggle and button spinner were blank. Fixed with `AppAssets`.
+- **Scope addition at the user's request: server icons in the rail.** The user reported "No icons are showing up" and, asked to clarify, said they meant server pictures. This needed `ReqwestHttpClient`, the file server address from `GET /`, and `ServerEntry.icon`. Plan Assumption 2 is amended, and user avatars remain out of scope.
+- **Minor: requests `user_settings[ordering]`** so the rail matches the web app's server order.
+- **Minor: the "Logged in as" screen and `user_label` are removed.** The chat view replaces them, and the user's name shows in the sidebar footer.
+- **Tried and backed out: offscreen-snapshot debug feature.** I tried a `snapshot` feature using `gpui-kit/test-support` to render the window to PNG. Enabling it pulls in `gpui-fast`, whose exact version pins (`taffy =0.15.0`, `unicode-properties`, …) conflict with the lockfile. Cargo resolves the lockfile with all declared features, so declaring the feature would also break normal builds. I removed it and restored the lockfile (`taffy` back at 0.15.1).
+- No effect on later chunks beyond the amended assumptions. Chunk 5's channel header and placeholder body slot into `ChatView::render_main`.
+
+### Verification Performed
+- `cargo test`: 54 passed, 0 failed, 3 ignored:
+  - 20 unit tests
+  - 9 `api_login`
+  - 7 contract
+  - 10 `session_restore`
+  - 8 `store_ready`
+- `cargo test --test live_events -- --ignored`: passed after the fix (failed with 400 before).
+- `cargo clippy --all-targets -- -D warnings`: clean. `cargo fmt --check`: clean.
+- Live run against the user's account:
+  - Logs: `events: authenticated`, then `events: Ready (5 servers, 75 channels, 29 users, 0 skipped)`, then `events: pong` every 20 s.
+  - The app fetched 5 server icons from `https://cdn.stoatusercontent.com/icons/<id>`. Each returns `200 image/webp`, 1–5 KB, when fetched directly with curl.
+  - No GPUI image or SVG errors at warn level.
+
+### Manual Validation
+- The user confirmed the sidebar populates. They reported missing server pictures, which are now implemented.
+- After the fixes, the user confirmed "Looks right": server pictures show, and the sidebar matches the web app (server order, channels and categories, DMs).
