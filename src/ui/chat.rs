@@ -20,7 +20,7 @@ use gpui_kit::*;
 
 use crate::api::StoatClient;
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
-use crate::markdown::is_external_link;
+use crate::markdown::{JUMBO_TEXT_PX, is_external_link};
 use crate::media::MediaUrls;
 use crate::runtime::spawn_io;
 use crate::store::{
@@ -1011,7 +1011,7 @@ fn render_message_row(message: &MessageRow, colors: RowColors) -> AnyElement {
                     // in the Markdown itself).
                     .map(|text| {
                         if message.jumbo {
-                            text.text_3xl()
+                            text.text_size(px(JUMBO_TEXT_PX))
                         } else {
                             text.text_sm()
                         }
@@ -1035,11 +1035,13 @@ fn render_message_row(message: &MessageRow, colors: RowColors) -> AnyElement {
             el.child(div().text_xs().text_color(colors.muted).child("(edited)"))
         });
 
+    // Big emoji stand on their own: same bubble (so it keeps its width and
+    // side), with the surface made invisible. Not `BubbleVariant::Ghost`:
+    // gpui-component stretches ghost bubbles to the full row width, which
+    // left-aligned emoji-only messages even when they were ours.
+    let surface = surface.when(message.jumbo, |el| el.bg(transparent_black()).p_0());
     let bubble = Bubble::new()
-        .with_variant(if message.jumbo {
-            // Big emoji stand on their own, without a surface behind them.
-            BubbleVariant::Ghost
-        } else if message.mine {
+        .with_variant(if message.mine {
             BubbleVariant::Tinted
         } else {
             BubbleVariant::Secondary

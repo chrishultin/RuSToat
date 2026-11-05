@@ -184,6 +184,6 @@ fn emoji_only_messages_are_jumbo() {
 fn jumbo_messages_get_big_custom_emoji() {
     assert_eq!(
         md(&format!(":{STOAT}: :{OTHER}:")),
-        format!("{} {}", img(STOAT, "stoat", 48), img(OTHER, "emoji", 48))
+        format!("{} {}", img(STOAT, "stoat", 96), img(OTHER, "emoji", 96))
     );
 }

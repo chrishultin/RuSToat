@@ -36,7 +36,10 @@ pub trait Names {
 /// Custom emoji size inline with `text_sm` text (about 1.4× the font size).
 pub const EMOJI_PX: u32 = 20;
 /// Custom emoji size in an emoji-only ("jumbo") message.
-pub const JUMBO_EMOJI_PX: u32 = 48;
+pub const JUMBO_EMOJI_PX: u32 = 96;
+/// Font size for Unicode emoji in a jumbo message, to roughly match
+/// [`JUMBO_EMOJI_PX`] custom emoji.
+pub const JUMBO_TEXT_PX: f32 = 60.;
 /// Messages with more emoji than this aren't drawn jumbo.
 pub const JUMBO_MAX: usize = 10;
 

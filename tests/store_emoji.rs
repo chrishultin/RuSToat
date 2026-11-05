@@ -79,10 +79,10 @@ fn emoji_only_messages_are_flagged_jumbo() {
         .timeline("c")
         .into_iter()
         .filter_map(|row| match row {
-            TimelineRow::Message(m) => Some((m.jumbo, m.body.unwrap().contains("width=\"48\""))),
+            TimelineRow::Message(m) => Some((m.jumbo, m.body.unwrap().contains("width=\"96\""))),
             _ => None,
         })
         .collect();
-    // (jumbo, big image): only the emoji-only message is both.
+    // (jumbo, 96px image): only the emoji-only message is both.
     assert_eq!(flags, vec![(true, true), (false, false)]);
 }

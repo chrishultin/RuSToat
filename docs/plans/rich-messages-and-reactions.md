@@ -175,7 +175,7 @@ This milestone widens `MessageRow` from text into a small display model: avatar 
   - `File { name, size_label, url, kind }`, where `kind` is image, video, audio or file
 - `src/ui/chat.rs`:
   - `img(url)`, sized exactly to the precomputed dimensions, with a shimmer or blank placeholder while loading
-  - *(After chunk 2b)* images go inside the message's bubble surface. A message that's only an image uses `BubbleVariant::Ghost` (no surface), so the picture isn't framed by a coloured box.
+  - *(After chunk 2b)* images go inside the message's bubble surface. A message that's only an image keeps its normal bubble variant but makes the surface invisible (`bg(transparent_black()).p_0()` on `BubbleContent`), so the picture isn't framed by a coloured box. **Don't use `BubbleVariant::Ghost`:** gpui-component stretches Ghost bubbles to the full row width, which left-aligned the user's own emoji-only messages after chunk 3.
   - a file card with icon, name and size, opening in the browser on click
   - "Show image" for images over 8 MB, with per-message "revealed" state in `ChatView`
 - `src/assets.rs`: extra Lucide icons for file kinds (`File`, `FileImage`, `FileVideo`, `FileAudio`, `Download`)

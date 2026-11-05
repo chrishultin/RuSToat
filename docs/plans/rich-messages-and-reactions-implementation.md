@@ -209,3 +209,14 @@ _Added at the user's request before chunk 3: "a 'bubble' or some other identifie
 
 ### Manual Validation
 The user checked the running app and confirmed "Looks right": custom emoji render at the right size.
+
+### Follow-up fix (after the chunk 3 commit): own emoji-only messages left-aligned
+- **Reported by the user:** an emoji-only message they sent showed on the left instead of the right.
+- **Cause:** jumbo messages used `BubbleVariant::Ghost`. gpui-component's `Bubble::render` applies `.when(variant == Ghost, |this| this.w_full().max_w_full())`, which stretches ghost bubbles to the full row width (the variant is meant for full-width assistant-style content). The emoji then sat at the left of a full-width bubble.
+- **Fix** (`src/ui/chat.rs`): jumbo messages keep their normal variant, so they keep normal shrink-to-fit width (max 80%) and normal alignment. The surface is made invisible with `bg(transparent_black()).p_0()` on `BubbleContent`, which gpui-component applies after the variant's own styles.
+- **Plan look-ahead:** chunk 4 said image-only messages would use Ghost. It's amended to use the same transparent-surface approach, with a note not to use Ghost.
+- **Verification:**
+  - `cargo test`: 111 passed. `cargo clippy --all-targets -- -D warnings`: clean.
+  - Relaunched; `Ready` parsed 41 emoji, with no errors.
+  - The user confirmed the emoji-only message is now on the right ("it's correctly aligned").
+- **Size tweak (user request, "the emoji by itself should be 2x larger"):** `JUMBO_EMOJI_PX` went from 48 to 96 px for custom emoji. For consistency, Unicode emoji in jumbo messages went from `text_3xl` (30 px) to `JUMBO_TEXT_PX` = 60 px. Tests are updated, and 111 pass. The user confirmed the emoji is bigger in the running app.
