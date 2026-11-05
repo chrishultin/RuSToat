@@ -326,3 +326,99 @@ Deferred to the end:
 - Paste a screenshot and send it: its file disappears from `$TMPDIR/rustoat-pasted-*` once confirmed.
 - Paste one and remove it with ×: its file is gone.
 - A roughly 15 MB upload keeps memory flat in Activity Monitor.
+
+## Final manual testing
+
+Done with the user after chunk 7, on the bundled debug build (log: `/tmp/rustoat-m5-4ae9.log`):
+- **Migration with two accounts.**
+  - The first launch after the merge read `accounts.json` (two accounts). The two legacy Keychain reads were refused ("User canceled the operation"), and as designed that counted as "nothing saved", so nothing was lost.
+  - On relaunch the user allowed the prompts. The log shows "moved the saved session to the new Keychain service" twice and "restored saved session" for spedione and spedi-test, and both accounts reached Ready.
+- **1. Signing:** after `touch src/main.rs`, the app rebuilt, re-signed (Apple Development) and relaunched. Both sessions were restored within about 1 s with no Keychain prompt, and the user confirmed it.
+- **2. Icon:** the user confirmed the Dock icon. A banner showing the icon wasn't separately checked.
+- **3. Release:** done in chunk 3 (installed from the DMG, ran, deleted).
+- **4. Live updates:** skipped at the user's call ("I'm not worried about those"). Covered by the decoding and store tests only.
+- **5. Cursor** and **6. custom `:name:`:** the user confirmed ("lgtm"). No warnings or errors in the log.
+- **7. Skin tone:**
+  - The user chose tones in the picker, and `prefs.json` was written on change, ending at `{"skin_tone": "MediumLight"}`.
+  - After a relaunch, the user confirmed the tone was kept, along with the other picker checks (toned insertion, `:wave`, sharing across accounts, light and dark mode).
+- **8. Pasted files:**
+  - The log shows `POST …/attachments (pasted-image-1.png, image/png, 124666 bytes)` → HTTP 200 → `uploaded pasted-image-1.png`, then `removed …/rustoat-pasted-73201/pasted-image-1.png`, and the paste folder is empty.
+  - Removing with × and the ~15 MB memory check weren't separately confirmed.
+
+## Summary
+
+_Completed: 2026-11-05_
+
+### Chunks Completed
+1. Own bundle ID (`com.chrishultin.rustoat`) and a stable Apple Development signature for the bundle and `cargo run`, with Keychain and app-folder migration (`9a63302`).
+2. App icon: a cyborg Stoat SVG rendered to `RuSToat.icns` (`2fbc066`), flipped to face left at the user's request (`71f5b69`).
+3. `scripts/release.sh`: a signed, hardened DMG, with notarization behind Developer ID and `RUSTOAT_NOTARY_PROFILE`, plus `--dry-run` (`4d8aa27`).
+4. Live member and user updates: joins, leaves, nicknames, avatars, and leaving a server (`0c5a672`).
+5. The suggestion list follows the cursor, and a custom emoji's `:name:` converts (`a740045`).
+6. Merge: the multiple-accounts branch, at another session's request on the user's behalf (`aacf78b`).
+7. Default skin tone (chunk 6 of the plan; `e06a470`).
+8. Uploads streamed from disk, and pasted-file cleanup (chunk 7 of the plan; `8840978`).
+
+### Divergences
+- **Chunk 1:**
+  - Migration is a `MigratingStore` wrapper rather than inside `KeychainStore::load`.
+  - The app folder migrates lazily in `places::app_dir()`.
+- **Chunk 2:**
+  - resvg 0.46, through its `tiny_skia` re-export, with no separate tiny-skia dependency.
+  - The small-size variant is chosen by `class="detail"`.
+  - The icon was flipped horizontally at the user's request.
+- **Chunk 3:**
+  - `--dry-run` builds nothing.
+  - There's no ad-hoc fallback for releases.
+  - The DMG's own codesign identifier is the default.
+- **Chunk 4:**
+  - `author_name` and `avatar_url` prefer the live member cache over a message's snapshot.
+  - New `StoatClient::fetch_user` for joiners, used only where `@` already loaded the member list.
+- **Merge (not in the plan):**
+  - The multiple-accounts branch was merged between chunks 5 and 6.
+  - `accounts.json` moved to `places::app_dir()` and `dirs` was dropped.
+  - `leave_server` dismisses account-tagged banners.
+  - The plan's chunks 6 and 7 were amended: `AppRoot` owns prefs, and the sweep runs from `main.rs`.
+  - Local data: `com.chrishultin.rustoat/accounts.json` was replaced with the two-account list. The old one was kept as `accounts.json.bak-pre-merge`.
+- **Chunk 6:** prefs are owned by `AppRoot` and shared by every account's `ChatView`.
+- **Chunk 7:**
+  - `take_released_files` (covering confirm, discard and server removal) instead of `take_confirmed_files`.
+  - New `ApiError::File` variant.
+  - A stray milestone 4 doc line removed.
+- **Process incident:** an early `pkill -f` matched and killed the other worktree's RuSToat, and both sessions shared `/tmp/rustoat-bundled.log`. Since then this task only stops processes whose working directory is this worktree, and logs to `/tmp/rustoat-m5-4ae9.log`.
+
+### Definition of Done
+- [x] **ID and migration:**
+  - The bundle and `cargo run` binary are signed by "Apple Development: Christopher Hultin (87ATGCDMGT)" as `com.chrishultin.rustoat`, and the designated requirement has no cdhash.
+  - Rebuilds don't prompt (checked live).
+  - The session and places migrate (tested, and seen live for one and then two accounts). The session name is "RuSToat" (tested via `SESSION_FRIENDLY_NAME`).
+- [x] **Icon:** `RuSToat.icns` has all 10 sizes, generated from `assets/icon/rustoat.svg` by `scripts/make-icon.sh`, and the bundle uses it (Dock confirmed).
+- [x] **Release:**
+  - `dist/RuSToat-0.1.0.dmg`, hardened runtime, passes `hdiutil verify` and `codesign --verify --deep --strict`.
+  - It installed and ran from /Applications.
+  - The notarization dry run was checked, and the README documents enabling it.
+- [~] **Live updates:**
+  - The four events are decoded and applied (tested).
+  - Nicknames, avatars and joins wired to panes and `@`, and leaving removes the server (tested at the store level).
+  - Not checked live: the user skipped it.
+- [x] **Cursor:** re-evaluated on keyboard and mouse moves (the user confirmed).
+- [x] **Custom `:name:`:** exact names convert on the closing colon (tested; the user confirmed).
+- [x] **Skin tone:** applies to the picker, completion and conversion, is shared across accounts, and persists in `prefs.json` (tested; seen live).
+- [x] **Uploads and temp files:**
+  - Uploads stream from disk with progress, and missing or truncated files fail as file errors (tested).
+  - Temp files are deleted on confirm (seen live), discard and removal (tested). The stale-folder sweep is tested.
+- [x] **Checks:** `cargo test`: 394 passed. `cargo clippy --all-targets -- -D warnings`: clean. `cargo test -- --ignored`: all 5 opt-in checks passed (live API, events, media, real Keychain). `bash -n` and `shellcheck scripts/*.sh`: clean.
+
+### Remaining Manual Steps
+- **Not checked live:**
+  - Live nickname, avatar, join and leave changes from the web app (test 4).
+  - A banner showing the new icon.
+  - Removing a pasted image with ×.
+  - The ~15 MB upload memory check.
+- **When distributing:**
+  - Get a Developer ID Application certificate (Account Holder) and store a notary profile (`xcrun notarytool store-credentials rustoat-notary …`), then run `RUSTOAT_NOTARY_PROFILE=rustoat-notary scripts/release.sh`.
+  - Check Stoat's brand terms for the icon before any public distribution.
+  - A universal (Intel) build is still deferred.
+- **Housekeeping on this Mac (optional):**
+  - Delete `~/Library/Application Support/com.chrishultin.rustoat/accounts.json.bak-pre-merge` and the old `~/Library/Application Support/chat.stoat.rustoat/` folder once happy.
+  - The bare-URL Keychain item `com.chrishultin.rustoat` / `https://api.stoat.chat`, moved by chunk 1 before multiple accounts existed, is now unused and can be deleted in Keychain Access.
