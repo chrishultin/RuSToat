@@ -1113,6 +1113,7 @@ impl ChatView {
                 let (reason, answered) = match result {
                     Ok(Ok(message)) => {
                         log::debug!("sent {} in {channel}", message.id);
+                        this.ack_sent(&channel, &message.id, cx);
                         if this.store.apply_message(message) {
                             this.sync_pane(&channel, cx);
                         }
@@ -1818,6 +1819,28 @@ impl ChatView {
             }
         });
         self.pending_ack = Some((channel, latest, task));
+    }
+
+    /// Tell Stoat the user has read `channel` up to `message`, which they just
+    /// sent. Stoat doesn't do this itself, and the store already counts the
+    /// user's own messages as read, so [`Self::maybe_ack_current`] never would.
+    fn ack_sent(&mut self, channel: &str, message: &str, cx: &mut Context<Self>) {
+        // A pending ack for something older would move the read position back.
+        if matches!(&self.pending_ack, Some((c, m, _)) if c == channel && m.as_str() < message) {
+            self.pending_ack = None;
+        }
+        let client = self.client.clone();
+        let request = spawn_io({
+            let (channel, message) = (channel.to_string(), message.to_string());
+            async move { client.ack_message(&channel, &message).await }
+        });
+        let (channel, message) = (channel.to_string(), message.to_string());
+        cx.spawn(async move |_, _| match request.await {
+            Ok(Ok(())) => log::debug!("acked {channel} up to {message} (sent)"),
+            Ok(Err(err)) => log::warn!("couldn't mark {channel} read: {err:?}"),
+            Err(err) => log::warn!("ack task failed: {err:?}"),
+        })
+        .detach();
     }
 
     /// "Mark as read" on a server: clear it here and tell Stoat.
