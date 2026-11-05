@@ -449,9 +449,19 @@ impl StoatClient {
 
     /// `GET /servers/{server}/members`: every member of `server`, with
     /// their users. Stoat 0.16.2 has no member search, so it's the whole list.
-    pub async fn fetch_members(&self, server: &str) -> Result<AllMemberResponse, ApiError> {
-        self.send(Method::GET, &format!("/servers/{server}/members"), None::<&()>)
-            .await
+    /// `exclude_offline` asks for the online members only (the web client
+    /// does that for servers of more than 1000).
+    pub async fn fetch_members(
+        &self,
+        server: &str,
+        exclude_offline: bool,
+    ) -> Result<AllMemberResponse, ApiError> {
+        self.send(
+            Method::GET,
+            &members_path(server, exclude_offline),
+            None::<&()>,
+        )
+        .await
     }
 
     /// `GET /users/{id}`: one user (someone who just joined a server, so
@@ -623,6 +633,15 @@ fn encode_path_segment(segment: &str) -> String {
     out
 }
 
+/// Path of a server's member list, online members only if asked.
+fn members_path(server: &str, exclude_offline: bool) -> String {
+    if exclude_offline {
+        format!("/servers/{server}/members?exclude_offline=true")
+    } else {
+        format!("/servers/{server}/members")
+    }
+}
+
 /// Query string for message history, built from the backend's own
 /// `OptionsQueryMessages`. `sort` must be explicit: the server defaults to
 /// `Relevance`, which is for search.
@@ -647,7 +666,16 @@ fn messages_query(
 mod tests {
     use revolt_models::v0::MessageSort;
 
-    use super::messages_query;
+    use super::{members_path, messages_query};
+
+    #[test]
+    fn members_path_asks_for_online_members_only_when_told_to() {
+        assert_eq!(members_path("srv", false), "/servers/srv/members");
+        assert_eq!(
+            members_path("srv", true),
+            "/servers/srv/members?exclude_offline=true"
+        );
+    }
 
     #[test]
     fn messages_query_is_latest_first_with_users() {

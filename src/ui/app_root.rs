@@ -218,6 +218,34 @@ impl AppRoot {
         }
     }
 
+    /// The member list was opened or closed in one account's view: save it,
+    /// and give it to every account.
+    fn set_member_list_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.prefs.member_list_open != open {
+            self.prefs.member_list_open = open;
+            if let Some(file) = &self.prefs_file
+                && let Err(err) = file.save(&self.prefs)
+            {
+                log::warn!("couldn't save preferences: {err:#}");
+            }
+        }
+        let views: Vec<Entity<ChatView>> = self
+            .states
+            .values()
+            .filter_map(|state| match state {
+                AccountState::Chat { view, .. } => Some(view.clone()),
+                _ => None,
+            })
+            .collect();
+        for view in views {
+            view.update(cx, |view, cx| {
+                if view.member_list_open() != open {
+                    view.set_member_list_open(open, cx);
+                }
+            });
+        }
+    }
+
     /// A client for an account's instance, without a token.
     fn client_for(&self, id: &str) -> StoatClient {
         match self.accounts.get(id) {
@@ -387,10 +415,12 @@ impl AppRoot {
         let account = id.to_string();
         let active = self.shown_account() == Some(id);
         let tone = self.prefs.skin_tone;
+        let member_list_open = self.prefs.member_list_open;
         let view = cx.new(|cx| {
             let mut view = ChatView::new(client, me, account, window, cx);
             view.set_active(active, cx);
             view.set_skin_tone(tone, cx);
+            view.set_member_list_open(member_list_open, cx);
             view
         });
         let changes = cx.observe(&view, |this, _, cx| this.sync_outside(cx));
@@ -401,6 +431,7 @@ impl AppRoot {
                 ChatEvent::LogOutRequested => this.log_out(&id, window, cx),
                 ChatEvent::SessionRejected => this.session_ended(&id, window, cx),
                 ChatEvent::SkinTone(tone) => this.set_skin_tone(*tone, cx),
+                ChatEvent::MemberListOpen(open) => this.set_member_list_open(*open, cx),
             }
         });
         self.states.insert(

@@ -1,5 +1,5 @@
-//! App-wide preferences, kept between launches: for now, the default skin
-//! tone for emoji. Like [`crate::places`], plain data with no GPUI, saved
+//! App-wide preferences, kept between launches: the default skin tone for
+//! emoji, and whether the member list is open. Like [`crate::places`], plain data with no GPUI, saved
 //! as a small JSON file in the app's folder and read and written
 //! synchronously.
 
@@ -61,10 +61,22 @@ impl Tone {
 
 /// Everything saved in `prefs.json`. Missing fields take their defaults,
 /// so older and newer files both load.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Prefs {
     pub skin_tone: Tone,
+    /// The right-hand panel shows the member list (as the web client's
+    /// toggle does). On until the user turns it off.
+    pub member_list_open: bool,
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Self {
+            skin_tone: Tone::default(),
+            member_list_open: true,
+        }
+    }
 }
 
 /// Where preferences are saved.
@@ -139,6 +151,7 @@ mod tests {
         let file = PrefsFile::at(dir.join("nested/prefs.json"));
         let prefs = Prefs {
             skin_tone: Tone::MediumDark,
+            member_list_open: false,
         };
         file.save(&prefs).unwrap();
         assert_eq!(file.load(), prefs);
@@ -158,6 +171,7 @@ mod tests {
         assert_eq!(file.load(), Prefs::default());
         let prefs = Prefs {
             skin_tone: Tone::Light,
+            ..Prefs::default()
         };
         file.save(&prefs).unwrap();
         assert_eq!(file.load(), prefs);
@@ -173,6 +187,22 @@ mod tests {
         assert_eq!(PrefsFile::at(&path).load(), Prefs::default());
         std::fs::write(&path, br#"{"skin_tone":"Dark","future_setting":1}"#).unwrap();
         assert_eq!(PrefsFile::at(&path).load().skin_tone, Tone::Dark);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_member_list_is_open_unless_a_file_says_otherwise() {
+        let dir = temp_dir("member-list");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("prefs.json");
+        assert!(Prefs::default().member_list_open);
+        // A file from before the setting existed.
+        std::fs::write(&path, br#"{"skin_tone":"Light"}"#).unwrap();
+        let old = PrefsFile::at(&path).load();
+        assert!(old.member_list_open);
+        assert_eq!(old.skin_tone, Tone::Light);
+        std::fs::write(&path, br#"{"member_list_open":false}"#).unwrap();
+        assert!(!PrefsFile::at(&path).load().member_list_open);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

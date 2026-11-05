@@ -20,7 +20,7 @@ use gpui_kit::component::popover::Popover;
 use gpui_kit::component::skeleton::Skeleton;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme, Icon, Sizable, WindowExt, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Icon, Selectable, Sizable, WindowExt, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
@@ -39,10 +39,9 @@ use crate::places::{Place, Places, PlacesFile};
 use crate::runtime::spawn_io;
 use crate::typing::{OutgoingTyping, TypingSignal, TypingState, typing_label};
 use crate::store::{
-    ChannelEntry, ChannelKind, ChatStore, MessageRow, PendingAttachment, PendingMessage,
-    PendingState, PickerEmoji,
-    ReactionEmoji, ReplyPreview, ReplyState, RowOp, ServerEntry, TimelineRow, diff_rows,
-    display_name,
+    ChannelEntry, ChannelKind, ChatStore, MemberList, MemberListRow, MessageRow, PendingAttachment,
+    PendingMessage, PendingState, PickerEmoji, PresenceKind, ReactionEmoji, ReplyPreview,
+    ReplyState, RowOp, ServerEntry, TimelineRow, diff_rows, display_name,
 };
 use crate::ui::composer::{Composer, ComposerEvent, file_icon};
 use crate::ui::emoji_picker::emoji_grid;
@@ -71,6 +70,9 @@ pub enum ChatEvent {
     /// The user chose a new default skin tone (it's app-wide: the owner
     /// saves it and gives it to every account's view).
     SkinTone(crate::prefs::Tone),
+    /// The user opened or closed the member list (also app-wide, saved the
+    /// same way).
+    MemberListOpen(bool),
 }
 
 enum Status {
@@ -157,6 +159,17 @@ pub struct ChatView {
     /// `@`), and those still loading.
     member_fetches: HashSet<String>,
     members_loading: HashSet<String>,
+    /// The same for the online members of large servers, which is all the
+    /// member list asks for there (`@` keeps its own full fetch).
+    online_fetches: HashSet<String>,
+    online_loading: HashSet<String>,
+    /// Servers whose last member fetch failed.
+    members_failed: HashSet<String>,
+    /// The right-hand panel shows the member list (app-wide, remembered).
+    member_list_open: bool,
+    /// Member lists built for the panel, by channel. Dropped whenever
+    /// members, users or permissions change (see [`Self::forget_member_lists`]).
+    member_lists: HashMap<String, Rc<MemberList>>,
     /// The message box, under the open channel.
     composer: Entity<Composer>,
     /// The default skin tone for emoji (`:` suggestions use it too).
@@ -349,6 +362,11 @@ impl ChatView {
             reply_fetches: HashSet::new(),
             member_fetches: HashSet::new(),
             members_loading: HashSet::new(),
+            online_fetches: HashSet::new(),
+            online_loading: HashSet::new(),
+            members_failed: HashSet::new(),
+            member_list_open: true,
+            member_lists: HashMap::new(),
             composer,
             skin_tone: crate::prefs::Tone::default(),
             _composer: composer_events,
@@ -377,7 +395,11 @@ impl ChatView {
                 self.has_ready = true;
                 self.status = Status::Connected;
                 self.drop_stale_selection();
+                self.member_lists.clear();
                 if reconnect {
+                    // `Ready` brings only the user's own memberships back.
+                    self.member_fetches.clear();
+                    self.online_fetches.clear();
                     // Events missed while offline would leave gaps, so drop
                     // loaded history and reload what's on screen.
                     log::info!("reconnected: reloading message history");
@@ -502,6 +524,8 @@ impl ChatView {
             ConnectionEvent::Event(ServerEvent::ChannelUpdate { id, data, clear }) => {
                 log::debug!("live: channel {id} updated");
                 self.store.apply_channel_update(&id, *data, &clear);
+                // Permission overrides decide who sees the channel.
+                self.forget_member_lists();
             }
             ConnectionEvent::Event(ServerEvent::ChannelStartTyping { channel, user }) => {
                 self.typing.start(&channel, &user, std::time::Instant::now());
@@ -530,7 +554,7 @@ impl ChatView {
                     self.fetch_user(user, cx);
                 }
                 self.refresh_suggestions(cx);
-                return;
+                self.forget_member_lists();
             }
             ConnectionEvent::Event(ServerEvent::ServerMemberLeave { server, user }) => {
                 log::debug!("live: {user} left {server}");
@@ -538,9 +562,17 @@ impl ChatView {
                     self.leave_server(&server, cx);
                 }
                 self.refresh_suggestions(cx);
+                self.forget_member_lists();
             }
             ConnectionEvent::Event(ServerEvent::ServerMemberUpdate { id, data, clear }) => {
-                if !self.store.apply_member_update(&id, *data, &clear) {
+                let shown = self.store.apply_member_update(&id, *data, &clear);
+                // Roles and timeouts change the list without changing a row's name.
+                let listed = self.member_panel_lists(&id.user);
+                self.forget_member_lists();
+                if !shown {
+                    if listed {
+                        cx.notify();
+                    }
                     return;
                 }
                 log::debug!("live: member {} of {} updated", id.user, id.server);
@@ -553,13 +585,18 @@ impl ChatView {
             }
             ConnectionEvent::Event(ServerEvent::UserUpdate { id, data, clear }) => {
                 let shown = self.store.apply_user_update(&id, *data, &clear);
+                // The member list shows presence and status too.
+                let listed = self.member_panel_lists(&id);
+                if shown || listed {
+                    self.forget_member_lists();
+                }
                 if shown {
                     log::debug!("live: user {id} updated");
                     for channel in self.store.channels_showing(&id) {
                         self.sync_pane(&channel, cx);
                     }
                     self.refresh_suggestions(cx);
-                } else if id != self.store.me() {
+                } else if id != self.store.me() && !listed {
                     // Someone else's presence or status: nothing on screen.
                     return;
                 }
@@ -608,6 +645,10 @@ impl ChatView {
         }
         self.member_fetches.remove(server);
         self.members_loading.remove(server);
+        self.online_fetches.remove(server);
+        self.online_loading.remove(server);
+        self.members_failed.remove(server);
+        self.forget_member_lists();
         self.selected.remove(&Place::Server(server.to_string()));
         self.drop_stale_selection();
         self.remember_places();
@@ -626,6 +667,7 @@ impl ChatView {
             this.update(cx, |this, cx| match result {
                 Ok(Ok(fetched)) => {
                     this.store.add_user(fetched);
+                    this.forget_member_lists();
                     this.refresh_suggestions(cx);
                     cx.notify();
                 }
@@ -1000,40 +1042,126 @@ impl ChatView {
     /// this session. When it arrives, open `@` suggestions there refresh.
     /// Returns whether it's still loading.
     fn fetch_members(&mut self, server: String, cx: &mut Context<Self>) -> bool {
-        if !self.member_fetches.insert(server.clone()) {
-            return self.members_loading.contains(&server);
+        self.request_members(server, false, cx)
+    }
+
+    /// [`Self::fetch_members`], or with `online_only` just the members who
+    /// are online (the member list's request for large servers), tracked
+    /// separately.
+    fn request_members(
+        &mut self,
+        server: String,
+        online_only: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let (fetches, loading) = if online_only {
+            (&mut self.online_fetches, &mut self.online_loading)
+        } else {
+            (&mut self.member_fetches, &mut self.members_loading)
+        };
+        if !fetches.insert(server.clone()) {
+            return loading.contains(&server);
         }
-        self.members_loading.insert(server.clone());
+        loading.insert(server.clone());
+        self.members_failed.remove(&server);
         let request = spawn_io({
             let (client, server) = (self.client.clone(), server.clone());
-            async move { client.fetch_members(&server).await }
+            async move { client.fetch_members(&server, online_only).await }
         });
         cx.spawn(async move |this, cx| {
             let result = request.await;
             this.update(cx, |this, cx| {
-                this.members_loading.remove(&server);
+                let (fetches, loading) = if online_only {
+                    (&mut this.online_fetches, &mut this.online_loading)
+                } else {
+                    (&mut this.member_fetches, &mut this.members_loading)
+                };
+                loading.remove(&server);
                 match result {
                     Ok(Ok(members)) => {
-                        log::info!("{} members in {server}", members.members.len());
+                        log::info!(
+                            "{} {}members in {server}",
+                            members.members.len(),
+                            if online_only { "online " } else { "" }
+                        );
                         this.store.add_members(members);
                     }
-                    // Asked again on the next `@` there.
+                    // Asked again on the next `@` (or channel open) there.
                     Ok(Err(err)) => {
                         log::warn!("couldn't load members of {server}: {err}");
-                        this.member_fetches.remove(&server);
+                        fetches.remove(&server);
+                        this.members_failed.insert(server.clone());
                     }
                     Err(err) => {
                         log::warn!("member task failed: {err:?}");
-                        this.member_fetches.remove(&server);
+                        fetches.remove(&server);
+                        this.members_failed.insert(server.clone());
                     }
                 }
+                this.forget_member_lists();
                 // Not fetching again: after a failure, that would loop.
                 this.refresh_suggestions(cx);
+                cx.notify();
             })
             .ok();
         })
         .detach();
         true
+    }
+
+    /// Load the people the member list shows for the open channel, if the
+    /// list is open and they aren't loaded yet. A small server's members all
+    /// come with the one fetch `@` uses; a large server's online members are
+    /// fetched on their own, unless `@` has already fetched everyone.
+    fn ensure_members(&mut self, cx: &mut Context<Self>) {
+        if !self.has_ready || !self.member_list_open {
+            return;
+        }
+        let Some(channel) = self.current_channel() else {
+            return;
+        };
+        let Some(server) = self.store.channel_server(&channel.id).map(str::to_string) else {
+            return;
+        };
+        let large = self
+            .store
+            .server(&server)
+            .is_some_and(|s| s.approximate_member_count > crate::store::LARGE_SERVER_MEMBERS);
+        if !large {
+            self.fetch_members(server, cx);
+        } else if !self.member_fetches.contains(&server) {
+            self.request_members(server, true, cx);
+        }
+    }
+
+    /// Forget the member lists built so far: something they show changed.
+    fn forget_member_lists(&mut self) {
+        self.member_lists.clear();
+    }
+
+    /// Whether the member list is on screen and lists `user`.
+    fn member_panel_lists(&self, user: &str) -> bool {
+        self.member_list_open
+            && self
+                .current_channel()
+                .is_some_and(|c| self.store.lists_member(&c.id, user))
+    }
+
+    /// Open or close the member list, and tell the owner to remember it.
+    fn toggle_member_list(&mut self, cx: &mut Context<Self>) {
+        self.set_member_list_open(!self.member_list_open, cx);
+        cx.emit(ChatEvent::MemberListOpen(self.member_list_open));
+    }
+
+    pub fn member_list_open(&self) -> bool {
+        self.member_list_open
+    }
+
+    /// Show or hide the member list (the app-wide preference).
+    pub fn set_member_list_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.member_list_open = open;
+        self.ensure_members(cx);
+        cx.notify();
     }
 
     /// Suggest again for what the message box is completing (something it
@@ -1694,6 +1822,7 @@ impl ChatView {
         if !self.has_ready {
             return;
         }
+        self.ensure_members(cx);
         if let Some(channel) = self.current_channel()
             && self.store.history(&channel.id).is_none()
             && !self.loading.contains_key(&channel.id)
@@ -2494,7 +2623,13 @@ impl ChatView {
             .map(|el| match &channel {
                 Some(channel) => el
                     .child(Icon::new(channel_icon(channel.kind)).text_color(theme.muted_foreground))
-                    .child(div().truncate().child(channel.name.clone())),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(channel.name.clone()),
+                    ),
                 None => el.child(div().text_color(theme.muted_foreground).child(
                     if self.has_ready {
                         "No channel selected"
@@ -2502,8 +2637,34 @@ impl ChatView {
                         "Connecting to Stoat…"
                     },
                 )),
-            });
+            })
+            // Right side. DMs and Saved Notes have no member list to toggle.
+            .when(
+                channel
+                    .as_ref()
+                    .is_some_and(|c| self.store.has_member_list(&c.id)),
+                |el| {
+                    let open = self.member_list_open;
+                    el.child(
+                        Button::new("toggle-members")
+                            .ghost()
+                            .icon(IconName::Users)
+                            .selected(open)
+                            .tooltip(if open {
+                                "Hide member list"
+                            } else {
+                                "Show member list"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_member_list(cx))),
+                    )
+                },
+            );
 
+        let member_panel = channel
+            .as_ref()
+            .filter(|c| self.member_list_open && self.store.has_member_list(&c.id))
+            .map(|c| self.render_member_panel(c, cx));
+        let theme = cx.theme();
         let colors = RowColors {
             muted: theme.muted_foreground,
             system: theme.muted_foreground,
@@ -2701,6 +2862,14 @@ impl ChatView {
             }
         };
 
+        let (warning, warning_foreground) = (theme.warning, theme.warning_foreground);
+        let mut conversation = v_flex().flex_1().min_w_0().h_full().child(body);
+        if let Some(channel) = &channel {
+            conversation = conversation
+                .child(self.render_typing_line(&channel.id, cx))
+                .child(self.composer.clone());
+        }
+
         v_flex()
             .flex_1()
             .min_w_0()
@@ -2726,18 +2895,254 @@ impl ChatView {
                         .py_1()
                         .flex_none()
                         .text_sm()
-                        .bg(theme.warning)
-                        .text_color(theme.warning_foreground)
+                        .bg(warning)
+                        .text_color(warning_foreground)
                         .child(banner),
                 )
             })
             .child(header)
-            .child(body)
-            .when_some(channel.as_ref(), |el, channel| {
-                el.child(self.render_typing_line(&channel.id, cx))
-                    .child(self.composer.clone())
-                    .child(render_drop_overlay(cx))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(conversation)
+                    .when_some(member_panel, |el, panel| el.child(panel)),
+            )
+            .when(channel.is_some(), |el| el.child(render_drop_overlay(cx)))
+    }
+
+    /// Build the member list the panel shows for the open channel, unless
+    /// it's already built.
+    fn refresh_member_list(&mut self) {
+        if !self.has_ready || !self.member_list_open {
+            return;
+        }
+        let Some(channel) = self.current_channel() else {
+            return;
+        };
+        if self.store.has_member_list(&channel.id) && !self.member_lists.contains_key(&channel.id) {
+            let list = Rc::new(self.store.member_list(&channel.id));
+            self.member_lists.insert(channel.id, list);
+        }
+    }
+
+    /// The right-hand panel: `channel`'s people (see [`Self::refresh_member_list`]).
+    fn render_member_panel(&self, channel: &ChannelEntry, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let list: Rc<MemberList> = self
+            .member_lists
+            .get(&channel.id)
+            .cloned()
+            .unwrap_or_default();
+        let server = self.store.channel_server(&channel.id);
+        let loading = server
+            .is_some_and(|s| self.members_loading.contains(s) || self.online_loading.contains(s));
+        let failed = server.is_some_and(|s| self.members_failed.contains(s));
+        let colors = MemberColors {
+            foreground: theme.sidebar_foreground,
+            muted: theme.muted_foreground,
+            avatar_bg: theme.secondary,
+            avatar_fg: theme.secondary_foreground,
+            ring: theme.sidebar,
+            online: theme.success,
+            idle: theme.warning,
+            focus: theme.info,
+            busy: theme.danger,
+        };
+        let note = |text: &'static str, colour: Hsla| {
+            div()
+                .px_3()
+                .pb_1()
+                .text_xs()
+                .text_color(colour)
+                .child(text)
+                .into_any_element()
+        };
+        let title: SharedString = if list.title.is_empty() {
+            "Members".into()
+        } else {
+            list.title.clone().into()
+        };
+        let rows = list.clone();
+        v_flex()
+            .id("member-panel")
+            .w(px(MEMBER_PANEL_WIDTH))
+            .h_full()
+            .flex_none()
+            .bg(theme.sidebar)
+            .text_color(theme.sidebar_foreground)
+            .border_l_1()
+            .border_color(theme.sidebar_border)
+            .child(
+                div()
+                    .px_3()
+                    .pt_3()
+                    .pb_1()
+                    .flex_none()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(colors.muted)
+                    .child(title),
+            )
+            .when(loading, |el| {
+                el.child(note("Loading members…", colors.muted))
             })
+            .when(failed, |el| {
+                el.child(note(
+                    "Couldn't load all members. Reopen the channel to try again.",
+                    theme.danger,
+                ))
+            })
+            .when(list.offline_hidden, |el| {
+                el.child(note(
+                    "Offline members aren't listed in large servers.",
+                    colors.muted,
+                ))
+            })
+            .when(list.rows.is_empty() && !loading, |el| {
+                el.child(note("No members to show.", colors.muted))
+            })
+            .child(
+                div().flex_1().min_h_0().child(
+                    uniform_list(
+                        SharedString::from(format!("members-{}", channel.id)),
+                        list.rows.len(),
+                        move |range, _, _| {
+                            range
+                                .map(|ix| render_member_row(&rows.rows[ix], colors))
+                                .collect::<Vec<_>>()
+                        },
+                    )
+                    .size_full(),
+                ),
+            )
+            .into_any_element()
+    }
+}
+
+/// Width of the right-hand panel.
+const MEMBER_PANEL_WIDTH: f32 = 240.;
+
+/// Height of every row of the member list (section titles too, which is what
+/// lets it be a `uniform_list`).
+const MEMBER_ROW_HEIGHT: f32 = 42.;
+
+/// The colours a member row is drawn with.
+#[derive(Clone, Copy)]
+struct MemberColors {
+    foreground: Hsla,
+    muted: Hsla,
+    avatar_bg: Hsla,
+    avatar_fg: Hsla,
+    /// Behind the presence dot, so it reads against the avatar.
+    ring: Hsla,
+    online: Hsla,
+    idle: Hsla,
+    focus: Hsla,
+    busy: Hsla,
+}
+
+impl MemberColors {
+    fn presence(&self, presence: PresenceKind) -> Hsla {
+        match presence {
+            PresenceKind::Online => self.online,
+            PresenceKind::Idle => self.idle,
+            PresenceKind::Focus => self.focus,
+            PresenceKind::Busy => self.busy,
+            PresenceKind::Offline => self.muted,
+        }
+    }
+}
+
+/// `#rrggbb` as a colour.
+fn hex_colour(css: &str) -> Option<Hsla> {
+    let digits = css.strip_prefix('#')?;
+    (digits.len() == 6)
+        .then(|| u32::from_str_radix(digits, 16).ok())
+        .flatten()
+        .map(|value| Hsla::from(rgb(value)))
+}
+
+fn render_member_row(row: &MemberListRow, colors: MemberColors) -> AnyElement {
+    match row {
+        MemberListRow::Header { name, count } => h_flex()
+            .h(px(MEMBER_ROW_HEIGHT))
+            .px_3()
+            .pb_1()
+            .items_end()
+            .text_xs()
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(colors.muted)
+            .child(format!("{} — {count}", name.to_uppercase()))
+            .into_any_element(),
+        MemberListRow::Member {
+            user_id,
+            name,
+            avatar_url,
+            colour,
+            presence,
+            status,
+            online,
+        } => {
+            let name_colour = colour
+                .as_deref()
+                .and_then(hex_colour)
+                .unwrap_or(colors.foreground);
+            h_flex()
+                .h(px(MEMBER_ROW_HEIGHT))
+                .px_3()
+                .gap_2()
+                .items_center()
+                .when(!online, |el| el.opacity(0.5))
+                .child(
+                    div()
+                        .relative()
+                        .size(px(AVATAR_SIZE))
+                        .flex_none()
+                        .child(avatar(
+                            format!("member-avatar-{user_id}"),
+                            Some(avatar_url.clone()),
+                            name,
+                            AVATAR_SIZE,
+                            colors.avatar_bg,
+                            colors.avatar_fg,
+                        ))
+                        .child(
+                            div()
+                                .absolute()
+                                .right(px(-2.))
+                                .bottom(px(-2.))
+                                .size(px(12.))
+                                .rounded_full()
+                                .border_2()
+                                .border_color(colors.ring)
+                                .bg(colors.presence(*presence)),
+                        ),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .justify_center()
+                        .child(
+                            div()
+                                .text_sm()
+                                .truncate()
+                                .text_color(name_colour)
+                                .child(name.clone()),
+                        )
+                        .when(!status.is_empty(), |el| {
+                            el.child(
+                                div()
+                                    .text_xs()
+                                    .truncate()
+                                    .text_color(colors.muted)
+                                    .child(status.clone()),
+                            )
+                        }),
+                )
+                .into_any_element()
+        }
     }
 }
 
@@ -4338,6 +4743,7 @@ impl Render for ChatView {
             });
         }
         self.sync_composer(window, cx);
+        self.refresh_member_list();
         let viewer = self
             .viewer
             .as_ref()

@@ -277,10 +277,34 @@ async fn fetching_members_gets_the_whole_list_with_users() {
         .mount(&server)
         .await;
 
-    let members = client(&server).fetch_members("srv-alpha").await.unwrap();
+    let members = client(&server)
+        .fetch_members("srv-alpha", false)
+        .await
+        .unwrap();
     assert_eq!(members.members.len(), 1);
     assert_eq!(members.members[0].nickname.as_deref(), Some("Cyclone"));
     assert_eq!(members.users[0].username, "cy");
+}
+
+#[tokio::test]
+async fn fetching_members_can_ask_for_online_ones_only() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/servers/srv-alpha/members"))
+        .and(query_param("exclude_offline", "true"))
+        .and(header("x-session-token", "tok"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "members": [], "users": [] })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let members = client(&server)
+        .fetch_members("srv-alpha", true)
+        .await
+        .unwrap();
+    assert!(members.members.is_empty());
 }
 
 #[tokio::test]

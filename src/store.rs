@@ -373,6 +373,65 @@ pub struct ServerEntry {
     pub mentions: usize,
 }
 
+/// Servers with more members than this list only the members who are
+/// online: that's all the web client fetches for them, too.
+pub const LARGE_SERVER_MEMBERS: usize = 1000;
+
+/// How a person shows in the member list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresenceKind {
+    Online,
+    Idle,
+    Focus,
+    Busy,
+    /// Offline, or online but invisible.
+    Offline,
+}
+
+impl PresenceKind {
+    /// The status line of someone with no custom status text. Empty for
+    /// offline people: their section already says so.
+    pub fn label(self) -> &'static str {
+        match self {
+            PresenceKind::Online => "Online",
+            PresenceKind::Idle => "Idle",
+            PresenceKind::Focus => "Focus",
+            PresenceKind::Busy => "Busy",
+            PresenceKind::Offline => "",
+        }
+    }
+}
+
+/// One row of the right-hand member list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemberListRow {
+    /// A section title: a hoisted role, "Online" or "Offline".
+    Header { name: String, count: usize },
+    Member {
+        user_id: String,
+        /// Nickname in the server, else display name, else username.
+        name: String,
+        avatar_url: String,
+        /// The colour of the member's highest-ranked role that has one, as
+        /// `#rrggbb`. `None` if they have none, or it's not a solid colour.
+        colour: Option<String>,
+        presence: PresenceKind,
+        /// The custom status, else the presence's name.
+        status: String,
+        online: bool,
+    },
+}
+
+/// What the right-hand panel lists for a channel.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemberList {
+    /// "Members" in a server, "N members" in a group.
+    pub title: String,
+    pub rows: Vec<MemberListRow>,
+    /// A large server: only online members are listed (see [`LARGE_SERVER_MEMBERS`]).
+    pub offline_hidden: bool,
+}
+
 /// The user's read position in a channel, from Stoat's `ChannelUnread`.
 #[derive(Debug, Default, Clone)]
 struct ReadState {
@@ -2007,6 +2066,186 @@ impl ChatStore {
         people
     }
 
+    /// Whether `a` and `b` share a server (as far as the cached members
+    /// show) or a group. The client only knows its own servers' members
+    /// in full once they've been fetched, so this can miss a shared server.
+    pub fn have_mutual_connection(&self, a: &str, b: &str) -> bool {
+        let shared_server = self.members.keys().any(|(server, user)| {
+            user == a && self.members.contains_key(&(server.clone(), b.to_string()))
+        });
+        shared_server
+            || self.channels.values().any(|channel| match channel {
+                Channel::Group { recipients, .. } => {
+                    recipients.iter().any(|id| id == a) && recipients.iter().any(|id| id == b)
+                }
+                _ => false,
+            })
+    }
+
+    /// Whether `user` is one of the people [`Self::member_list`] lists for
+    /// `channel` (before leaving out those who can't see it).
+    pub fn lists_member(&self, channel: &str, user: &str) -> bool {
+        match self.channels.get(channel) {
+            Some(Channel::TextChannel { server, .. }) => self.member(server, user).is_some(),
+            Some(Channel::Group { recipients, .. }) => recipients.iter().any(|id| id == user),
+            _ => false,
+        }
+    }
+
+    /// Whether the right-hand panel can list `channel`'s people: server
+    /// channels and groups, not DMs or Saved Notes.
+    pub fn has_member_list(&self, channel: &str) -> bool {
+        matches!(
+            self.channels.get(channel),
+            Some(Channel::TextChannel { .. } | Channel::Group { .. })
+        )
+    }
+
+    /// The right-hand panel's list for `channel`.
+    ///
+    /// In a server: each hoisted role in rank order, then Online, then
+    /// Offline. An online member goes under the first hoisted role they
+    /// hold, and every offline member under Offline. Members who can't see
+    /// the channel are left out, and in a large server so are the offline
+    /// ones. Each section is sorted by name.
+    ///
+    /// In a group: its recipients in one name-sorted list. Anything else
+    /// (a DM, Saved Notes) has none.
+    pub fn member_list(&self, channel: &str) -> MemberList {
+        match self.channels.get(channel) {
+            Some(Channel::TextChannel { server, .. }) => self.server_member_list(channel, server),
+            Some(Channel::Group { recipients, .. }) => {
+                let mut rows: Vec<(String, MemberListRow)> = recipients
+                    .iter()
+                    .filter_map(|id| self.users.get(id))
+                    .map(|user| self.member_list_row(channel, None, user))
+                    .collect();
+                sort_member_rows(&mut rows);
+                MemberList {
+                    title: format!("{} members", recipients.len()),
+                    rows: rows.into_iter().map(|(_, row)| row).collect(),
+                    offline_hidden: false,
+                }
+            }
+            _ => MemberList::default(),
+        }
+    }
+
+    fn server_member_list(&self, channel: &str, server_id: &str) -> MemberList {
+        let Some(server) = self.servers.get(server_id) else {
+            return MemberList::default();
+        };
+        let offline_hidden = server.approximate_member_count > LARGE_SERVER_MEMBERS;
+        // (ID, role): members refer to roles by the key they have in the map.
+        let mut hoisted: Vec<_> = server.roles.iter().filter(|(_, role)| role.hoist).collect();
+        hoisted.sort_by(|(a_id, a), (b_id, b)| a.rank.cmp(&b.rank).then_with(|| a_id.cmp(b_id)));
+
+        let mut by_role: Vec<Vec<(String, MemberListRow)>> = vec![Vec::new(); hoisted.len()];
+        let (mut online, mut offline) = (Vec::new(), Vec::new());
+        for ((member_server, user_id), member) in &self.members {
+            if member_server != server_id {
+                continue;
+            }
+            let Some(user) = self.users.get(user_id) else {
+                continue;
+            };
+            if !crate::permissions::can_view(self, user_id, channel) {
+                continue;
+            }
+            let row = self.member_list_row(channel, Some((server_id, member)), user);
+            if presence_kind(user) == PresenceKind::Offline {
+                if !offline_hidden {
+                    offline.push(row);
+                }
+            } else {
+                match hoisted.iter().position(|(id, _)| member.roles.contains(id)) {
+                    Some(ix) => by_role[ix].push(row),
+                    None => online.push(row),
+                }
+            }
+        }
+
+        let mut sections: Vec<(String, Vec<(String, MemberListRow)>)> = hoisted
+            .iter()
+            .zip(by_role)
+            .map(|((_, role), rows)| (role.name.clone(), rows))
+            .collect();
+        sections.push(("Online".into(), online));
+        sections.push(("Offline".into(), offline));
+
+        let mut rows = Vec::new();
+        for (name, mut section) in sections {
+            if section.is_empty() {
+                continue;
+            }
+            sort_member_rows(&mut section);
+            rows.push(MemberListRow::Header {
+                name,
+                count: section.len(),
+            });
+            rows.extend(section.into_iter().map(|(_, row)| row));
+        }
+        MemberList {
+            title: "Members".into(),
+            rows,
+            offline_hidden,
+        }
+    }
+
+    /// `user`'s row, with the lowercased name to sort it by. `membership`:
+    /// the server and the user's membership of it, in a server.
+    fn member_list_row(
+        &self,
+        channel: &str,
+        membership: Option<(&str, &Member)>,
+        user: &User,
+    ) -> (String, MemberListRow) {
+        let presence = presence_kind(user);
+        let custom = user
+            .status
+            .as_ref()
+            .and_then(|status| status.text.as_deref())
+            .map(str::trim)
+            .filter(|text| !text.is_empty());
+        let avatar_url = membership
+            .and_then(|(_, member)| member.avatar.as_ref())
+            .and_then(|file| self.media.file(file))
+            .unwrap_or_else(|| self.user_avatar_url(&user.id));
+        let name = self.name_in(channel, &user.id);
+        let row = MemberListRow::Member {
+            user_id: user.id.clone(),
+            avatar_url,
+            colour: membership.and_then(|(server, _)| self.role_colour(server, &user.id)),
+            presence,
+            status: custom.unwrap_or(presence.label()).to_string(),
+            online: presence != PresenceKind::Offline,
+            name: name.clone(),
+        };
+        (name.to_lowercase(), row)
+    }
+
+    /// The colour of `user`'s highest-ranked role in `server` that has one,
+    /// as `#rrggbb`. Roles can be given any CSS colour, including gradients,
+    /// which can't be drawn as text: those, and anything unparseable, give
+    /// `None` (the default text colour).
+    pub fn role_colour(&self, server: &str, user: &str) -> Option<String> {
+        use std::str::FromStr as _;
+        let server = self.servers.get(server)?;
+        let member = self.member(&server.id, user)?;
+        let (_, role) = member
+            .roles
+            .iter()
+            .filter_map(|id| Some((id, server.roles.get(id)?)))
+            .filter(|(_, role)| role.colour.as_deref().is_some_and(|c| !c.trim().is_empty()))
+            // A higher rank is a smaller number.
+            .min_by(|(a_id, a), (b_id, b)| a.rank.cmp(&b.rank).then_with(|| a_id.cmp(b_id)))?;
+        let colour = svgtypes::Color::from_str(role.colour.as_deref()?.trim()).ok()?;
+        Some(format!(
+            "#{:02x}{:02x}{:02x}",
+            colour.red, colour.green, colour.blue
+        ))
+    }
+
     /// Cache a server's full member list and its users (for `@`).
     pub fn add_members(&mut self, response: AllMemberResponse) {
         for user in response.users {
@@ -2544,6 +2783,35 @@ fn pending_as_message(pending: &PendingMessage, me: &str) -> Message {
 fn sort_messages(messages: &mut Vec<Message>) {
     messages.sort_by(|a, b| a.id.cmp(&b.id));
     messages.dedup_by(|a, b| a.id == b.id);
+}
+
+/// How `user` shows in the member list: by their presence, if they're
+/// online and not invisible.
+fn presence_kind(user: &User) -> PresenceKind {
+    if !user.online {
+        return PresenceKind::Offline;
+    }
+    match user
+        .status
+        .as_ref()
+        .and_then(|status| status.presence.as_ref())
+    {
+        Some(Presence::Invisible) => PresenceKind::Offline,
+        Some(Presence::Idle) => PresenceKind::Idle,
+        Some(Presence::Focus) => PresenceKind::Focus,
+        Some(Presence::Busy) => PresenceKind::Busy,
+        Some(Presence::Online) | None => PresenceKind::Online,
+    }
+}
+
+/// Sort member rows by their (lowercased) names; the same name by user ID, so
+/// the order is stable.
+fn sort_member_rows(rows: &mut [(String, MemberListRow)]) {
+    let id = |row: &MemberListRow| match row {
+        MemberListRow::Member { user_id, .. } => user_id.clone(),
+        MemberListRow::Header { .. } => String::new(),
+    };
+    rows.sort_by_cached_key(|(key, row)| (key.clone(), id(row)));
 }
 
 /// A user's display name, falling back to their username.

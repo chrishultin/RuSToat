@@ -7466,6 +7466,7 @@ name = "stoat-gpui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "block2 0.6.2",
  "chrono",
  "emojis",
@@ -7484,6 +7485,7 @@ dependencies = [
  "reqwest 0.13.5",
  "resvg 0.46.0",
  "revolt-models",
+ "revolt-permissions",
  "revolt-result",
  "serde",
  "serde_json",

@@ -14,6 +14,11 @@ gpui-kit = "=0.9.0"
 # Rocket server integration, which a client doesn't need.
 revolt-models = { version = "=0.16.2", default-features = false, features = ["serde", "partials"] }
 revolt-result = { version = "=0.16.2", default-features = false, features = ["serde"] }
+# Stoat's own permission maths (owners, role and channel overrides, timeouts),
+# for what a user may see or do in a channel. Its `PermissionQuery` trait is
+# declared with `#[async_trait]`, so implementing it needs that crate too.
+revolt-permissions = { version = "=0.16.2", default-features = false }
+async-trait = "0.1"
 
 # `multipart` and `stream` for attachment uploads with progress.
 reqwest = { version = "0.13", features = ["json", "multipart", "stream"] }

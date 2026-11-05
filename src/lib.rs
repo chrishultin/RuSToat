@@ -19,6 +19,7 @@ pub mod markdown;
 pub mod math;
 pub mod media;
 pub mod notify;
+pub mod permissions;
 pub mod places;
 pub mod prefs;
 pub mod runtime;
