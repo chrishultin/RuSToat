@@ -128,6 +128,12 @@ pub fn by_shortcode(code: &str) -> Option<&'static str> {
     emojis::get_by_shortcode(code).map(|emoji| emoji.as_str())
 }
 
+/// The custom emoji named exactly `name` (Stoat's names are
+/// case-sensitive), for converting a typed `:name:`.
+pub fn custom_by_name<'a>(custom: &'a [CustomEmoji], name: &str) -> Option<&'a CustomEmoji> {
+    custom.iter().find(|emoji| emoji.name == name)
+}
+
 /// Every Unicode emoji, by category in Unicode (CLDR) order, with each
 /// category's name. Default skin tones only.
 pub fn groups() -> Vec<(&'static str, Vec<EmojiChoice>)> {

@@ -178,3 +178,30 @@ The user was given the steps: a bundled run with the one-time prompts, a rebuild
 
 ### Manual Validation
 Deferred to the end at the user's request ("we'll test at the very end"): a nickname change in the web app, someone joining (shows in `@`), and leaving a test server.
+
+## Chunk 5: The suggestion list follows the cursor, and custom `:name:` converts
+
+### Changes Made
+- `src/ui/composer.rs`:
+  - New field `last_cursor`.
+  - In `Composer::new`, `cx.observe_in(&input, …)`: if `cursor()` differs from `last_cursor`, it stores it. If the text also equals `last_text` (a move, not an edit), it calls `update_completion` and notifies. A notify with the same cursor (blink, redraws) returns immediately.
+  - `replace_closed_shortcode`: when `closed_shortcode` finds `:code:` but `by_shortcode(code)` is `None`, it emits the new `ComposerEvent::ClosedShortcode { range, code }`.
+  - New `pub fn replace_with_custom_emoji(range, &CustomEmoji, …)`: only if the text at `range` is still exactly `:{name}:`, it records the chip label, calls `replace_range_with_token` with the emoji chip, and updates `last_text`.
+- `src/ui/chat.rs`: handles `ClosedShortcode` by looking up `emoji::custom_by_name(&store.custom_emoji_for(channel), code)` and calling `replace_with_custom_emoji`.
+- `src/emoji.rs`: `custom_by_name(custom, name) -> Option<&CustomEmoji>`, exact and case-sensitive.
+- `tests/emoji.rs`: `custom_emoji_are_found_by_exact_name` (exact match, no case folding, no prefix, missing, empty list).
+
+### Divergences
+None. Unicode shortcodes still win, because the event is only emitted when `by_shortcode` finds nothing.
+
+### Verification Performed
+- `cargo test --test emoji`: 20 passed. `cargo test --test complete`: 12 passed (the query rules are unchanged).
+- `cargo test`: 342 passed, 0 failed. `cargo clippy --all-targets -- -D warnings`: clean.
+
+### Manual Validation
+Deferred to the end at the user's request:
+- Moving in and out of `@ad` with the arrows reopens and closes the list.
+- Clicking into an earlier `@bo` opens the list for it.
+- `:party:` (an existing custom emoji) becomes its chip.
+- `:smile:` still becomes 😄.
+- No redraw storm: no stream of `Complete` events in the debug log while idle.

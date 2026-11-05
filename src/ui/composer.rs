@@ -52,6 +52,13 @@ pub enum ComposerEvent {
     /// The emoji button was clicked: answer with
     /// [`Composer::open_emoji_picker`] and the channel's custom emoji.
     OpenEmojiPicker,
+    /// A typed closing `:` finished `:code:` (at `range`), and `code` isn't a
+    /// Unicode shortcode. If the channel has a custom emoji named exactly
+    /// `code`, answer with [`Composer::replace_with_custom_emoji`].
+    ClosedShortcode {
+        range: std::ops::Range<usize>,
+        code: String,
+    },
 }
 
 /// What gives a chip its label (`@Ada`) when text is loaded into the box.
@@ -90,6 +97,8 @@ pub struct Composer {
     labels: HashMap<String, String>,
     /// The text as of the last change, to tell a typed `:` from a paste.
     last_text: String,
+    /// The cursor as last seen, to notice it moving without the text changing.
+    last_cursor: usize,
     /// Where custom emoji chips' images come from.
     media: MediaUrls,
     /// The emoji picker, while it's open.
@@ -112,7 +121,24 @@ impl Composer {
                 // Shift+Enter still inserts one.
                 .submit_on_enter(true)
         });
-        let subscriptions = vec![cx.subscribe_in(
+        // The textarea has no cursor event, but it notifies when the cursor
+        // moves (keys, clicks). Moving into or out of an `@word` updates the
+        // suggestion list; text changes are handled by `Change` below.
+        let cursor_moves = cx.observe_in(&input, window, |this, input, window, cx| {
+            let (cursor, same_text) = {
+                let input = input.read(cx);
+                (input.cursor(), input.value() == this.last_text.as_str())
+            };
+            if cursor == this.last_cursor {
+                return;
+            }
+            this.last_cursor = cursor;
+            if same_text {
+                this.update_completion(window, cx);
+                cx.notify();
+            }
+        });
+        let subscriptions = vec![cursor_moves, cx.subscribe_in(
             &input,
             window,
             |this, _, event: &InputEvent, window, cx| match event {
@@ -146,6 +172,7 @@ impl Composer {
             completion: None,
             labels: HashMap::new(),
             last_text: String::new(),
+            last_cursor: 0,
             media: MediaUrls::default(),
             emoji_picker: None,
             recent_emoji: RecentEmoji::default(),
@@ -411,9 +438,12 @@ impl Composer {
         if !typed_colon {
             return;
         }
-        let Some((range, emoji)) = closed_shortcode(&self.last_text, cursor)
-            .and_then(|(range, code)| Some((range, crate::emoji::by_shortcode(&code)?)))
-        else {
+        let Some((range, code)) = closed_shortcode(&self.last_text, cursor) else {
+            return;
+        };
+        let Some(emoji) = crate::emoji::by_shortcode(&code) else {
+            // Maybe one of the channel's custom emoji (only the view knows them).
+            cx.emit(ComposerEvent::ClosedShortcode { range, code });
             return;
         };
         self.input.update(cx, |input, cx| {
@@ -421,6 +451,32 @@ impl Composer {
             input.replace(emoji, window, cx);
         });
         self.last_text = self.input.read(cx).value().to_string();
+    }
+
+    /// Turn `:name:` at `range` into `custom`'s chip (the answer to
+    /// [`ComposerEvent::ClosedShortcode`]). Does nothing if the text there
+    /// has changed since, as typing may have moved on.
+    pub fn replace_with_custom_emoji(
+        &mut self,
+        range: std::ops::Range<usize>,
+        custom: &CustomEmoji,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let label = format!(":{}:", custom.name);
+        if self.input.read(cx).value().get(range.clone()) != Some(label.as_str()) {
+            return;
+        }
+        let token = TokenRef::Emoji(custom.id.clone());
+        self.labels.insert(token.token_id(), label.clone());
+        let chip = InlineToken::new(token.token_id(), token.wire_text()).with_label(label);
+        self.input.update(cx, |input, cx| {
+            if let Err(err) = input.replace_range_with_token(range, chip, window, cx) {
+                log::warn!("couldn't insert {token:?}: {err}");
+            }
+        });
+        self.last_text = self.input.read(cx).value().to_string();
+        cx.notify();
     }
 
     /// Open, update or close the suggestion list for what's at the cursor.

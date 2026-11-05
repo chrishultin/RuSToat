@@ -2,7 +2,7 @@
 //! shortcodes for `:smile:` as you type.
 
 use stoat_gpui::complete::{Insertion, MAX_SUGGESTIONS, TokenRef};
-use stoat_gpui::emoji::{CustomEmoji, EmojiChoice, by_shortcode, search};
+use stoat_gpui::emoji::{CustomEmoji, EmojiChoice, by_shortcode, custom_by_name, search};
 
 fn glyphs(choices: &[EmojiChoice]) -> Vec<String> {
     choices
@@ -203,4 +203,24 @@ fn picker_rows_put_a_header_over_rows_of_eight() {
     // Every category, virtualized: a few hundred rows, not 1,900 cells.
     let all = picker_rows(picker_sections("", &RecentEmoji::default(), &[]), 8);
     assert!(all.len() < 300, "{}", all.len());
+}
+
+#[test]
+fn custom_emoji_are_found_by_exact_name() {
+    let party = CustomEmoji {
+        id: "01M6GEW5A0DDDDDDDDDDDDDDDD".into(),
+        name: "party".into(),
+        url: None,
+    };
+    let custom = [parrot(), party.clone()];
+    assert_eq!(custom_by_name(&custom, "party"), Some(&party));
+    assert_eq!(
+        custom_by_name(&custom, "smile_parrot").map(|e| e.id.as_str()),
+        Some(parrot().id.as_str())
+    );
+    // Exact: no case folding, no prefixes.
+    assert_eq!(custom_by_name(&custom, "Party"), None);
+    assert_eq!(custom_by_name(&custom, "part"), None);
+    assert_eq!(custom_by_name(&custom, "missing"), None);
+    assert_eq!(custom_by_name(&[], "party"), None);
 }

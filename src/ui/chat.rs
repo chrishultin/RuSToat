@@ -275,6 +275,17 @@ impl ChatView {
                         composer.open_emoji_picker(custom, window, cx)
                     });
                 }
+                ComposerEvent::ClosedShortcode { range, code } => {
+                    let Some(channel) = composer.read(cx).channel().map(str::to_string) else {
+                        return;
+                    };
+                    let custom = this.store.custom_emoji_for(&channel);
+                    if let Some(emoji) = crate::emoji::custom_by_name(&custom, code) {
+                        composer.update(cx, |composer, cx| {
+                            composer.replace_with_custom_emoji(range.clone(), emoji, window, cx)
+                        });
+                    }
+                }
                 ComposerEvent::EditLast => {
                     let Some(channel) = composer.read(cx).channel().map(str::to_string) else {
                         return;
