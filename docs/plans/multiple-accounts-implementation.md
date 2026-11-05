@@ -237,3 +237,63 @@ Deferred to the end at the user's request (see chunk 3).
 
 ### Manual Validation
 Deferred to the end at the user's request (see chunk 3).
+
+## End-to-end manual testing (after chunk 5)
+
+Ran this branch's bundled app with debug logs (`scripts/run-bundled.sh`). Seen in the log, and confirmed by the user ("looking good"):
+- **Restore from the per-user Keychain item.** `restoring https://api.stoat.chat#01KH…`, then `restored saved session for spedione`. No login screen.
+- **A second account on the same instance, added with +.** `logged in as user 01M6N083S64NP9F02DM1R5WWK0 on https://api.stoat.chat`, then `Ready (0 servers, 2 channels, …)`. Both accounts connected at once.
+- **Switching accounts.** The account on screen loaded its channels and sent acks.
+- **Discovery for a self-hosted instance.** `chat.spedi.one`: `/` returned HTML, so the API was found at `/api`, which runs **API 0.11.5** (version warning logged). The user left the add-account screen while the login was pending, which cancelled it. Whether a 0.11 server works with this client is still untested.
+
+## Summary
+
+_Completed: 2026-11-05_
+
+### Chunks Completed
+1. Account list and per-account tokens: `accounts.json`, `{api_url}#{user_id}` Keychain names, and adopting the legacy session.
+2. Choose the instance at login: the Server field, with `/` and then `/api` discovery.
+3. App-level notification routing and Dock badge: one banner handler routed by account, and hidden views never ack.
+4. Several accounts at once, with a switcher: per-account state, add, switch, log out, and signed-out accounts.
+5. Switcher unread badges and labelled notices.
+
+`main` was also merged after chunk 1 (550a67b).
+
+### Divergences
+- **Corrupt account file.** It doesn't count as a first launch, so it isn't overwritten by a migration (chunk 1).
+- **Until chunk 2, `STOAT_API_URL`** only picked the instance for a fresh login (chunk 1).
+- **Resolved address.** The Server field is replaced with the resolved URL, rather than showing the host under it (chunk 2).
+- **Known limitation:** `stoat.chat` resolves to `https://stoat.chat/api`, which is a different instance string from `https://api.stoat.chat` (chunk 2).
+- **Banner dismissal** moved out of `render` along with the Dock badge, so hidden views' banners are taken away too (chunk 3).
+- **The switcher is a render function owned by `AppRoot`,** not an entity. Account names are saved from `Ready` straight after login. The list-logic tests are unit tests in `src/accounts.rs`. Rejected sessions only forget the token (chunk 4).
+- **Labels for accounts sharing a host** use `host · display name` rather than `@username` (chunk 5).
+- **Environment issue:** the parallel `let-s-continue-…-4ae9` branch renames the Application Support folder and Keychain service. Its app moved this branch's `accounts.json` and the legacy Keychain item away mid-testing, and its session's `pkill -f "RuSToat.app/…/stoat-gpui"` killed this branch's app once.
+
+### Definition of Done
+- [x] A pre-existing saved session signs in after the upgrade with no login prompt, and its Keychain item isn't renamed. *(Chunk 1 manual check.)*
+- [x] The login screen has an instance field. `stoat.example.com` resolves to `/` or `/api`, and an unreachable instance shows an error. *(Tests; live discovery of `chat.spedi.one/api`.)*
+- [~] Two accounts on different instances, and two on the same instance, can be signed in at once, each with its own Keychain item. *(Same instance verified live. A different instance wasn't completed: the self-hosted login was cancelled, and that server is on API 0.11.5.)*
+- [x] The switcher shows one icon per account and a **+**. Clicking an icon shows that account's last server and channel. *(User confirmed.)*
+- [ ] Hidden accounts stay connected, notify, and never mark anything read while hidden. *(Implemented and gated in code; not checked by hand.)*
+- [ ] Clicking a banner or toast for a hidden account switches to it and opens the channel. *(Not checked by hand.)*
+- [ ] The Dock badge is the sum across accounts. *(Not checked by hand.)*
+- [ ] Relaunching restores every saved account and shows the last active one. *(A single account restored; two not yet relaunched.)*
+- [ ] Logging out removes only that account. A rejected session marks only that account signed out. *(Not checked by hand.)*
+- [ ] Switcher dots and mention counts, and account labels on notices. *(`account_summary` and `notice_labels` covered by tests; not checked by hand.)*
+- [x] The README documents multiple accounts, the instance field, the accounts file and the Keychain naming.
+- [x] `cargo test && cargo clippy --all-targets -- -D warnings` passes: 245 tests, clippy clean.
+
+### Remaining Manual Steps
+1. **Notifications for one account** (bundled):
+   - a banner while RuSToat is in the background, and the Dock badge going up
+   - clicking the banner opens the channel and clears the banner and badge
+   - a toast while RuSToat is in front, and clicking it opens the channel
+2. **A hidden account:**
+   - a message to it gives its switcher icon a dot or mention count
+   - the toast or banner title ends with its host (or `host · name`)
+   - clicking switches to it
+   - another client still shows the message unread
+3. **Relaunch with two accounts:** both restore, showing the last one on screen.
+4. **Right-click → Log Out** on an account: only it goes away.
+5. **A different instance:** log in to a self-hosted server and stay on the screen until it finishes. `chat.spedi.one` runs API 0.11.5, so check whether login and `Ready` work, or fail with a clear error.
+6. **When the packaging branch lands:** point `FileAccounts::in_config_dir` at `places::app_dir()` (and drop the `dirs` dependency), so `accounts.json` lives in `com.chrishultin.rustoat` with `places.json`.
