@@ -193,6 +193,10 @@ Key API facts, checked on 2026-11-04 against `https://api.stoat.chat/openapi.jso
 
 **Full-suite command:** `cargo test && cargo clippy --all-targets -- -D warnings`. These are built-in cargo subcommands, so no script is needed. Run them after every chunk.
 
+Optional drift check against the live API: `cargo test --test api_login -- --ignored`.
+
+**Gotcha:** in modules that `use gpui_kit::*`, test submodules must import items explicitly instead of using `use super::*`. Otherwise GPUI's `test` macro shadows `#[test]`.
+
 ### Unit Tests
 - Contract tests: JSON fixtures in `tests/fixtures/`, shaped like the live API, parse into the pinned `revolt-models` / `revolt-result` types. This guards against drift between the crate and the server. Cover:
   - `ResponseLogin` (Success / MFA / Disabled)

@@ -1,0 +1,1 @@
+{"result":"MFA","ticket":"test-mfa-ticket","allowed_methods":["Totp","Recovery"]}
