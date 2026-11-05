@@ -109,3 +109,42 @@ After chunk 1, `main` (10 commits: attachments, embeds, reactions, and `places.r
 
 ### Manual Validation
 Deferred at the user's request. Testing the login screen now would mean logging out of their only real session. Chunk 4's manual check (adding an account with **+**) covers logging in through the Server field.
+
+## Chunk 3: App-level notification routing and Dock badge
+
+### Changes Made
+- `src/notify.rs`:
+  - `banner_tag(account, channel)` gives `"{channel} {account}"`.
+  - `parse_banner_tag(tag) -> (Option<account>, channel)`. A tag with no space is treated as legacy: just the channel, with no account.
+- `src/ui/chat.rs`:
+  - `ChatView::new(client, me, account_id, …)`. It no longer calls `banners::request_permission()` or registers `on_system_notification_response`.
+  - New fields: `account_id`, and `active` (default `true`). The `dock_badge` field is removed.
+  - `ChatEvent::Activate` is emitted when a toast is clicked, after `open_channel`.
+  - Toast IDs and banner tags use `banner_tag(account_id, channel)`.
+  - `pub fn sync_outside(&mut self, cx) -> usize` replaces `dismiss_read_banners` plus the Dock code in `render`. It dismisses banners for channels read since, and returns `attention_count()`. `pub fn log_attention()` logs the breakdown.
+  - `pub fn set_active(bool, cx)`: going inactive drops `pending_ack`, and coming back calls `notify` (render then acks what's on screen).
+  - `maybe_ack_current` returns early when inactive.
+  - The live-message `Viewing.channel` is `None` when inactive.
+- `src/ui/app_root.rs`:
+  - Calls `banners::request_permission()` once, and registers the app's single `on_system_notification_response`. That handler activates the window and calls `open_notice(tag)`, which routes by `parse_banner_tag`. A legacy tag goes to the account on screen, and a tag for an account that isn't on screen is ignored for now (chunk 4 switches to it).
+  - `Screen::Chat` keeps a `cx.observe(&view)` subscription that calls `AppRoot::sync_outside`. That sums `view.sync_outside()` over the chat views and sets the Dock badge when the total changes, with a debug log and the per-view breakdown.
+  - Log out calls `sync_outside` after replacing the screen, which clears the badge.
+  - `ChatEvent::Activate` is a no-op until chunk 4.
+- `tests/notify_rules.rs`: `banner_tags_round_trip_with_the_account` and `banner_tags_from_before_accounts_are_just_the_channel`.
+
+### Divergences
+- Banner dismissal also moved out of `render`, not just the Dock badge. Hidden views don't render, so their banners would never be taken away. Both now run from the `AppRoot` observer, which fires whenever any view notifies.
+
+### Verification Performed
+- `cargo test`: 237 passed, 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- Bundled run (`scripts/run-bundled.sh`, debug logs):
+  - `banners: allowed`
+  - login, `events: Ready (5 servers, 76 channels, …, 81 unreads)`
+  - live messages handled
+  - No `dock badge:` line: the count stayed 0, because the only unread mention is in a closed DM and the servers are mentions-only.
+
+### Manual Validation
+**Not done.** The bundled app was killed partway through: the parallel worktree's session ran `pkill -f "RuSToat.app/Contents/MacOS/stoat-gpui"`, which matches this branch's bundle too. At the user's request, the banner, toast and badge checks move to the end of the plan, together with chunks 4 and 5.
+
+**Found during the run (environment, not this chunk):** the parallel branch's first launch renamed `~/Library/Application Support/chat.stoat.rustoat` to `com.chrishultin.rustoat`, taking chunk 1's `accounts.json` with it. It also moved the bare-URL Keychain item to its new service. So this branch's next launch saw a first launch with nothing to adopt, and showed the login screen. The user logged in through the new Server field. This covers chunk 2's deferred login check on the default instance: `instance: https://api.stoat.chat (API 0.16.2)`, then `logged in as user 01KH…`, and `accounts.json` gained the per-user Keychain name `https://api.stoat.chat#01KH4Q74NX640MPRYJF506Y71W`. When the two branches meet, `FileAccounts` must use `places::app_dir()`, so the account list moves with the folder.

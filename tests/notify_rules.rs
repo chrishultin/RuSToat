@@ -3,6 +3,7 @@
 
 use stoat_gpui::api::events::{Ready, ServerEvent, parse_frame};
 use stoat_gpui::api::models::Message;
+use stoat_gpui::notify;
 use stoat_gpui::notify::{
     Delivery, Notice, NotificationSettings, Viewing, delivery, should_notify,
 };
@@ -406,4 +407,22 @@ fn banners_only_in_the_background_and_when_possible() {
     // Not bundled, or banners denied: toasts either way, so nothing is lost.
     assert_eq!(delivery(false, false), Delivery::Toast);
     assert_eq!(delivery(true, false), Delivery::Toast);
+}
+
+#[test]
+fn banner_tags_round_trip_with_the_account() {
+    let account = "https://api.stoat.chat#01USER";
+    let tag = notify::banner_tag(account, "01CHANNEL");
+    assert_eq!(notify::parse_banner_tag(&tag), (Some(account), "01CHANNEL"));
+    // An account from before multiple accounts: its ID is the bare URL.
+    let tag = notify::banner_tag("https://stoat.example.com/api", "01CHANNEL");
+    assert_eq!(
+        notify::parse_banner_tag(&tag),
+        (Some("https://stoat.example.com/api"), "01CHANNEL")
+    );
+}
+
+#[test]
+fn banner_tags_from_before_accounts_are_just_the_channel() {
+    assert_eq!(notify::parse_banner_tag("01CHANNEL"), (None, "01CHANNEL"));
 }

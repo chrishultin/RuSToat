@@ -172,6 +172,23 @@ pub fn delivery(window_active: bool, banners_available: bool) -> Delivery {
     }
 }
 
+/// The tag for a channel's banner and toast in one account: the channel,
+/// then the account's ID. Channel IDs are ULIDs and account IDs are URLs, so
+/// neither has spaces. A newer notice with the same tag replaces the older.
+pub fn banner_tag(account: &str, channel: &str) -> String {
+    format!("{channel} {account}")
+}
+
+/// Split a tag from [`banner_tag`] into (account, channel). A tag without an
+/// account is a banner from before multiple accounts, which was just the
+/// channel.
+pub fn parse_banner_tag(tag: &str) -> (Option<&str>, &str) {
+    match tag.split_once(' ') {
+        Some((channel, account)) => (Some(account), channel),
+        None => (None, tag),
+    }
+}
+
 /// Whether `message` should notify, and what the notice says. Applies the
 /// web client's checks in its order.
 pub fn should_notify(

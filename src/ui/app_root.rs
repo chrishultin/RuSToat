@@ -6,6 +6,7 @@ use gpui_kit::*;
 
 use crate::accounts::{self, AccountList, AccountsFile};
 use crate::api::StoatClient;
+use crate::notify;
 use crate::runtime::spawn_io;
 use crate::session::{self, Restored, TokenStore};
 use crate::store::display_name;
@@ -26,6 +27,8 @@ enum Screen {
         view: Entity<ChatView>,
         token: String,
         _events: Subscription,
+        /// Keeps the Dock badge and banners in step with the view.
+        _changes: Subscription,
     },
 }
 
@@ -40,6 +43,8 @@ pub struct AppRoot {
     /// The account on screen (its ID), once there is one.
     current: Option<String>,
     screen: Screen,
+    /// The count last shown on the Dock icon, to only touch AppKit on change.
+    dock_badge: usize,
     _appearance: Subscription,
 }
 
@@ -55,6 +60,24 @@ impl AppRoot {
         let appearance = cx.observe_window_appearance(window, |_, window, cx| {
             Theme::sync_system_appearance(Some(window), cx);
         });
+        // Banners: ask for permission up front. GPUI keeps one click handler
+        // for the whole app, so it's registered here and routed by account.
+        crate::banners::request_permission();
+        if crate::banners::available() {
+            let root = cx.weak_entity();
+            let handle = window.window_handle();
+            cx.on_system_notification_response(move |response, cx| {
+                let tag = response.tag.to_string();
+                log::debug!("banner: clicked {tag}");
+                cx.activate(true);
+                handle
+                    .update(cx, |_, window, cx| {
+                        window.activate_window();
+                        root.update(cx, |this, cx| this.open_notice(&tag, cx)).ok();
+                    })
+                    .ok();
+            });
+        }
 
         let default_instance = StoatClient::from_env().base_url().to_string();
         log::info!("default Stoat API: {default_instance}");
@@ -97,7 +120,43 @@ impl AppRoot {
             accounts: saved,
             current: None,
             screen: Screen::Restoring { _task: task },
+            dock_badge: 0,
             _appearance: appearance,
+        }
+    }
+
+    /// A banner was clicked: show its channel, in its account. A banner
+    /// from before multiple accounts names no account and opens in the one
+    /// on screen; one for an account that's gone is ignored.
+    fn open_notice(&mut self, tag: &str, cx: &mut Context<Self>) {
+        let (account, channel) = notify::parse_banner_tag(tag);
+        if account.is_some_and(|account| self.current.as_deref() != Some(account)) {
+            log::debug!("banner: {tag} is for an account that isn't signed in here");
+            return;
+        }
+        if let Screen::Chat { view, .. } = &self.screen {
+            view.update(cx, |view, cx| view.open_channel(channel, cx));
+        }
+    }
+
+    /// Show the sum of every signed-in account's attention count on the
+    /// Dock icon, and take away banners for what's been read.
+    fn sync_outside(&mut self, cx: &mut Context<Self>) {
+        let mut views = Vec::new();
+        if let Screen::Chat { view, .. } = &self.screen {
+            views.push(view.clone());
+        }
+        let attention: usize = views
+            .iter()
+            .map(|view| view.update(cx, |view, cx| view.sync_outside(cx)))
+            .sum();
+        if attention != self.dock_badge {
+            log::debug!("dock badge: {attention}");
+            for view in &views {
+                view.read(cx).log_attention();
+            }
+            crate::dock::set_badge(attention);
+            self.dock_badge = attention;
         }
     }
 
@@ -205,8 +264,12 @@ impl AppRoot {
         cx: &mut Context<Self>,
     ) -> Screen {
         let client = self.client_for(id).with_token(token.clone());
-        let view = cx.new(|cx| ChatView::new(client, me, window, cx));
+        let account = id.to_string();
+        let view = cx.new(|cx| ChatView::new(client, me, account, window, cx));
+        let changes = cx.observe(&view, |this, _, cx| this.sync_outside(cx));
         let events = cx.subscribe_in(&view, window, |this, _, event, window, cx| match event {
+            // It's the only account on screen for now.
+            ChatEvent::Activate => {}
             ChatEvent::LogOutRequested => this.log_out(window, cx),
             ChatEvent::SessionRejected => {
                 log::warn!("server rejected the session; logging out");
@@ -222,6 +285,7 @@ impl AppRoot {
             view,
             token,
             _events: events,
+            _changes: changes,
         }
     }
 
@@ -301,10 +365,10 @@ impl AppRoot {
         })
         .detach();
 
-        // Nothing to attend to once logged out.
-        crate::dock::set_badge(0);
         // Replacing the chat screen drops its events connection.
         self.screen = self.login_screen(window, cx);
+        // Nothing to attend to once logged out.
+        self.sync_outside(cx);
         cx.notify();
     }
 }
