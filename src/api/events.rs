@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
 use revolt_models::v0::{
-    Channel, Emoji, FieldsMessage, Member, Message, PartialMessage, Server, User,
+    Channel, ChannelUnread, Emoji, FieldsMessage, Member, Message, PartialMessage, Server, User,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -37,6 +37,7 @@ const READY_FIELDS: &[&str] = &[
     "channels",
     "members",
     "emojis",
+    "channel_unreads",
     "user_settings[ordering]",
 ];
 
@@ -66,6 +67,13 @@ pub enum ServerEvent {
         ids: Vec<String>,
     },
     EmojiCreate(Box<Emoji>),
+    /// A channel was read up to `message_id` (by `user`: one of our own
+    /// sessions, possibly another client).
+    ChannelAck {
+        channel: String,
+        user: String,
+        message_id: String,
+    },
     EmojiDelete {
         id: String,
     },
@@ -83,6 +91,8 @@ pub struct Ready {
     pub members: Vec<Member>,
     /// Custom emoji of the servers the user is in.
     pub emojis: Vec<Emoji>,
+    /// The user's read position (and unread mentions) per channel.
+    pub unreads: Vec<ChannelUnread>,
     /// Server IDs in the order the user arranged them, if they have.
     pub server_order: Vec<String>,
     /// List items that didn't parse (for example a new channel type) and were dropped.
@@ -172,6 +182,19 @@ fn decode(mut value: Value, out: &mut Vec<ServerEvent>) {
                 }
             }))
         }
+        "ChannelAck" => {
+            #[derive(Deserialize)]
+            struct Ack {
+                id: String,
+                user: String,
+                message_id: String,
+            }
+            out.push(decode_as(value, &kind, |a: Ack| ServerEvent::ChannelAck {
+                channel: a.id,
+                user: a.user,
+                message_id: a.message_id,
+            }))
+        }
         "EmojiCreate" => out.push(decode_as(value, &kind, |e: Emoji| {
             ServerEvent::EmojiCreate(Box::new(e))
         })),
@@ -212,6 +235,7 @@ impl Ready {
         let channels = lenient_list(take("channels"), "channel", &mut skipped);
         let members = lenient_list(take("members"), "member", &mut skipped);
         let emojis = lenient_list(take("emojis"), "emoji", &mut skipped);
+        let unreads = lenient_list(take("channel_unreads"), "channel unread", &mut skipped);
         let server_order = take("user_settings")
             .map(server_order_from_settings)
             .unwrap_or_default();
@@ -221,6 +245,7 @@ impl Ready {
             channels,
             members,
             emojis,
+            unreads,
             server_order,
             skipped,
         }
@@ -477,11 +502,12 @@ async fn session(
                         }
                         ServerEvent::Ready(ready) => {
                             log::info!(
-                                "events: Ready ({} servers, {} channels, {} users, {} emoji, {} skipped)",
+                                "events: Ready ({} servers, {} channels, {} users, {} emoji, {} unreads, {} skipped)",
                                 ready.servers.len(),
                                 ready.channels.len(),
                                 ready.users.len(),
                                 ready.emojis.len(),
+                                ready.unreads.len(),
                                 ready.skipped,
                             );
                             Some(ConnectionEvent::Event(ServerEvent::Ready(ready)))
@@ -495,6 +521,7 @@ async fn session(
                         | ServerEvent::MessageDelete { .. }
                         | ServerEvent::BulkMessageDelete { .. }
                         | ServerEvent::EmojiCreate(_)
+                        | ServerEvent::ChannelAck { .. }
                         | ServerEvent::EmojiDelete { .. }) => {
                             Some(ConnectionEvent::Event(message_event))
                         }
@@ -531,7 +558,8 @@ mod tests {
         assert_eq!(
             events_url("wss://events.stoat.chat"),
             "wss://events.stoat.chat/?version=1&format=json&ready=users&ready=servers\
-             &ready=channels&ready=members&ready=emojis&ready=user_settings[ordering]"
+             &ready=channels&ready=members&ready=emojis&ready=channel_unreads\
+             &ready=user_settings[ordering]"
         );
     }
 
@@ -596,6 +624,18 @@ mod tests {
         );
         assert!(matches!(&events[0], ServerEvent::EmojiCreate(e) if e.name == "stoat"));
         assert!(matches!(&events[1], ServerEvent::EmojiDelete { id } if id.starts_with("01ARYZ")));
+    }
+
+    #[test]
+    fn channel_ack_decodes() {
+        let events = parse_frame(
+            r#"{"type":"ChannelAck","id":"c","user":"u","message_id":"01M6GDKW80AAAAAAAAAAAAAAAA"}"#,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [ServerEvent::ChannelAck { channel, user, message_id }]
+                if channel == "c" && user == "u" && message_id.starts_with("01M6")
+        ));
     }
 
     #[test]

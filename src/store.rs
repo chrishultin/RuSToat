@@ -2,12 +2,12 @@
 //! connection. Plain data with no GPUI, so ordering and naming rules are
 //! unit-testable.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::api::events::Ready;
 use crate::api::models::{
-    BulkMessageResponse, Channel, Emoji, FieldsMessage, File, Member, Message, PartialMessage,
-    Server, SystemMessage, User,
+    BulkMessageResponse, Channel, Emoji, FieldsMessage, File, Member, Message, MessageFlags,
+    PartialMessage, Server, SystemMessage, User,
 };
 use crate::media::MediaUrls;
 
@@ -19,6 +19,10 @@ pub struct ChannelEntry {
     pub kind: ChannelKind,
     /// The other person's avatar for DMs, the group icon for groups.
     pub avatar: Option<String>,
+    /// Has messages newer than the user's read position.
+    pub unread: bool,
+    /// Unread messages that mention the user.
+    pub mentions: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +103,19 @@ pub struct ServerEntry {
     pub initials: String,
     /// The server's uploaded icon, if it has one.
     pub icon: Option<File>,
+    /// Any of its channels is unread.
+    pub unread: bool,
+    /// Unread mentions across its channels.
+    pub mentions: usize,
+}
+
+/// The user's read position in a channel, from Stoat's `ChannelUnread`.
+#[derive(Debug, Default, Clone)]
+struct ReadState {
+    /// The newest message the user has read.
+    last_id: Option<String>,
+    /// Unread messages that mention the user.
+    mentions: BTreeSet<String>,
 }
 
 #[derive(Default)]
@@ -117,6 +134,8 @@ pub struct ChatStore {
     media: MediaUrls,
     /// Custom emoji of the user's servers, by ID.
     emojis: HashMap<String, Emoji>,
+    /// Read positions by channel ID.
+    read_states: HashMap<String, ReadState>,
 }
 
 impl ChatStore {
@@ -154,6 +173,20 @@ impl ChatStore {
             .emojis
             .into_iter()
             .map(|e| (e.id.clone(), e))
+            .collect();
+        self.read_states = ready
+            .unreads
+            .into_iter()
+            .filter(|u| u.id.user == self.me)
+            .map(|u| {
+                (
+                    u.id.channel,
+                    ReadState {
+                        last_id: u.last_id,
+                        mentions: u.mentions.into_iter().collect(),
+                    },
+                )
+            })
             .collect();
 
         let mut seen = HashSet::new();
@@ -239,6 +272,16 @@ impl ChatStore {
     /// way. Returns true if a loaded history changed.
     pub fn apply_message(&mut self, message: Message) -> bool {
         self.bump_last_message(&message.channel, &message.id);
+        if message.author == self.me {
+            // Sending something means everything before it has been seen.
+            self.apply_ack(&message.channel, &message.id);
+        } else if self.is_mentioned(&message) {
+            self.read_states
+                .entry(message.channel.clone())
+                .or_default()
+                .mentions
+                .insert(message.id.clone());
+        }
         if let Some(user) = &message.user {
             self.users
                 .entry(user.id.clone())
@@ -260,6 +303,93 @@ impl ChatStore {
             Err(ix) => history.messages.insert(ix, message),
         }
         true
+    }
+
+    /// The channel has been read up to `message_id` (here, or by another of
+    /// the user's sessions via `ChannelAck`). Never moves the position back.
+    pub fn apply_ack(&mut self, channel: &str, message_id: &str) {
+        let state = self.read_states.entry(channel.to_string()).or_default();
+        if state
+            .last_id
+            .as_deref()
+            .is_none_or(|last| last < message_id)
+        {
+            state.last_id = Some(message_id.to_string());
+        }
+        state.mentions.retain(|m| m.as_str() > message_id);
+    }
+
+    /// Whether a channel has messages newer than the user's read position.
+    /// A channel with no read position at all counts as unread if it has any
+    /// messages, as in Stoat's web client.
+    pub fn is_unread(&self, channel_id: &str) -> bool {
+        let Some(channel) = self.channels.get(channel_id) else {
+            return false;
+        };
+        let last_message = match channel {
+            Channel::SavedMessages { .. } | Channel::DirectMessage { active: false, .. } => {
+                return false;
+            }
+            Channel::DirectMessage {
+                last_message_id, ..
+            }
+            | Channel::Group {
+                last_message_id, ..
+            }
+            | Channel::TextChannel {
+                last_message_id, ..
+            } => last_message_id.as_deref(),
+        };
+        let Some(last_message) = last_message else {
+            return false;
+        };
+        self.read_states
+            .get(channel_id)
+            .and_then(|s| s.last_id.as_deref())
+            .is_none_or(|read| read < last_message)
+    }
+
+    /// Unread messages in a channel that mention the user.
+    pub fn mention_count(&self, channel_id: &str) -> usize {
+        self.read_states
+            .get(channel_id)
+            .map_or(0, |s| s.mentions.len())
+    }
+
+    /// Whether a message mentions the user: directly, through one of their
+    /// roles in the server, with @everyone, or with @online while online.
+    pub fn is_mentioned(&self, message: &Message) -> bool {
+        if message.author == self.me {
+            return false;
+        }
+        if message
+            .mentions
+            .as_ref()
+            .is_some_and(|m| m.contains(&self.me))
+        {
+            return true;
+        }
+        if let Some(roles) = &message.role_mentions
+            && let Some(server) = self.server_of(&message.channel)
+            && let Some(member) = self.member(server, &self.me)
+            && roles.iter().any(|r| member.roles.contains(r))
+        {
+            return true;
+        }
+        if has_flag(message.flags, MessageFlags::MentionsEveryone) {
+            return true;
+        }
+        let online = self.users.get(&self.me).is_some_and(|u| u.online);
+        online && has_flag(message.flags, MessageFlags::MentionsOnline)
+    }
+
+    /// Unread state for the Home button: open DMs and groups.
+    pub fn home_summary(&self) -> (bool, usize) {
+        self.home_channels()
+            .iter()
+            .fold((false, 0), |(unread, mentions), c| {
+                (unread || c.unread, mentions + c.mentions)
+            })
     }
 
     /// An edit, merged with the backend's own `Message::apply_options`.
@@ -552,11 +682,24 @@ impl ChatStore {
         self.server_order
             .iter()
             .filter_map(|id| self.servers.get(id))
-            .map(|s| ServerEntry {
-                id: s.id.clone(),
-                name: s.name.clone(),
-                initials: initials(&s.name),
-                icon: s.icon.clone(),
+            .map(|s| {
+                let visible = s.channels.iter().filter(|id| {
+                    matches!(self.channels.get(*id), Some(Channel::TextChannel { .. }))
+                });
+                let (unread, mentions) = visible.fold((false, 0), |(unread, mentions), id| {
+                    (
+                        unread || self.is_unread(id),
+                        mentions + self.mention_count(id),
+                    )
+                });
+                ServerEntry {
+                    id: s.id.clone(),
+                    name: s.name.clone(),
+                    initials: initials(&s.name),
+                    icon: s.icon.clone(),
+                    unread,
+                    mentions,
+                }
             })
             .collect()
     }
@@ -663,8 +806,11 @@ impl ChatStore {
                 (name, ChannelKind::DirectMessage, avatar)
             }
         };
+        let id = channel_id(channel).to_string();
         Some(ChannelEntry {
-            id: channel_id(channel).to_string(),
+            unread: self.is_unread(&id),
+            mentions: self.mention_count(&id),
+            id,
             name,
             kind,
             avatar,
@@ -753,6 +899,12 @@ pub fn diff_rows(old: &[TimelineRow], new: &[TimelineRow]) -> Vec<RowOp> {
         ops.push(RowOp::Append(new.len() - j));
     }
     ops
+}
+
+/// Whether a message's `flags` has `flag` set. `MessageFlags` values are bit
+/// positions (the backend tests `flags & (1 << flag)`), not masks.
+fn has_flag(flags: u32, flag: MessageFlags) -> bool {
+    flags & (1 << flag as u32) != 0
 }
 
 /// A message row ends its group unless the next row continues it.

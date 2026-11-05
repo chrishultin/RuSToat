@@ -195,6 +195,18 @@ impl ChatView {
                     self.sync_pane(&channel, cx);
                 }
             }
+            ConnectionEvent::Event(ServerEvent::ChannelAck {
+                channel,
+                user,
+                message_id,
+            }) => {
+                // Read elsewhere (another of our sessions): clear it here too.
+                if user == self.store.me() {
+                    self.store.apply_ack(&channel, &message_id);
+                } else {
+                    return;
+                }
+            }
             ConnectionEvent::Event(ServerEvent::EmojiCreate(emoji)) => {
                 self.store.add_emoji(*emoji);
                 return;
@@ -470,11 +482,14 @@ impl ChatView {
 
     fn render_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let (home_unread, home_mentions) = self.store.home_summary();
         let home = rail_button(
             "rail-home",
             Icon::new(IconName::House).into_any_element(),
             "Direct Messages",
             self.place == Place::Home,
+            home_unread,
+            home_mentions,
             cx.listener(|this, _, _, cx| this.select_place(Place::Home, cx)),
             cx,
         );
@@ -491,6 +506,8 @@ impl ChatView {
                     icon,
                     server.name,
                     selected,
+                    server.unread,
+                    server.mentions,
                     cx.listener(move |this, _, _, cx| this.select_place(place.clone(), cx)),
                     cx,
                 )
@@ -611,7 +628,9 @@ impl ChatView {
         let theme = cx.theme();
         let hover_bg = theme.sidebar_accent;
         let hover_fg = theme.sidebar_accent_foreground;
+        let unread_fg = theme.sidebar_foreground;
         let id = channel.id.clone();
+        let (unread, mentions) = (channel.unread, channel.mentions);
         h_flex()
             .id(SharedString::from(format!("channel-{}", channel.id)))
             .gap_2()
@@ -626,8 +645,13 @@ impl ChatView {
                     .font_weight(FontWeight::MEDIUM)
             })
             .when(!selected, |el| {
-                el.text_color(theme.muted_foreground)
-                    .hover(move |style| style.bg(hover_bg).text_color(hover_fg))
+                el.text_color(if unread {
+                    unread_fg
+                } else {
+                    theme.muted_foreground
+                })
+                .when(unread, |el| el.font_weight(FontWeight::SEMIBOLD))
+                .hover(move |style| style.bg(hover_bg).text_color(hover_fg))
             })
             .on_click(cx.listener(move |this, _, _, cx| this.select_channel(id.clone(), cx)))
             .child(match channel.avatar.clone() {
@@ -642,7 +666,8 @@ impl ChatView {
                     .small()
                     .into_any_element(),
             })
-            .child(div().truncate().child(channel.name))
+            .child(div().flex_1().min_w_0().truncate().child(channel.name))
+            .when(mentions > 0, |el| el.child(mention_badge(mentions, cx)))
     }
 
     fn render_user_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1119,11 +1144,14 @@ fn server_icon(server: &ServerEntry, media: &MediaUrls, selected: bool) -> AnyEl
 
 /// A rail button, with a marker on the left edge when selected (an icon image
 /// covers the button's own highlight colour).
+#[allow(clippy::too_many_arguments)]
 fn rail_button(
     id: impl Into<ElementId>,
     content: AnyElement,
     tooltip: impl Into<SharedString>,
     selected: bool,
+    unread: bool,
+    mentions: usize,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> Div {
@@ -1132,6 +1160,7 @@ fn rail_button(
     let hover_bg = theme.primary_hover;
     let hover_fg = theme.primary_foreground;
     let marker = theme.foreground;
+    let badge_ring = theme.sidebar;
     let button = div()
         .id(id)
         .size(px(48.))
@@ -1163,18 +1192,55 @@ fn rail_button(
         .flex()
         .justify_center()
         .child(button)
-        .when(selected, |el| {
+        // Left-edge marker: tall when selected, a short pill when unread.
+        .when(selected || unread, |el| {
+            let (top, height) = if selected { (8., 32.) } else { (20., 8.) };
             el.child(
                 div()
                     .absolute()
                     .left_0()
-                    .top(px(8.))
+                    .top(px(top))
                     .w(px(4.))
-                    .h(px(32.))
+                    .h(px(height))
                     .rounded_r_md()
                     .bg(marker),
             )
         })
+        .when(mentions > 0, |el| {
+            el.child(
+                div()
+                    .absolute()
+                    .right(px(8.))
+                    .bottom(px(-2.))
+                    .border_2()
+                    .border_color(badge_ring)
+                    .rounded_full()
+                    .child(mention_badge(mentions, cx)),
+            )
+        })
+}
+
+/// A red pill with an unread-mention count ("99+" past 99).
+fn mention_badge(count: usize, cx: &App) -> Div {
+    let theme = cx.theme();
+    let label = if count > 99 {
+        "99+".to_string()
+    } else {
+        count.to_string()
+    };
+    div()
+        .min_w(px(18.))
+        .h(px(18.))
+        .px_1()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(theme.danger)
+        .text_color(theme.danger_foreground)
+        .text_xs()
+        .font_weight(FontWeight::BOLD)
+        .child(label)
 }
 
 impl Render for ChatView {

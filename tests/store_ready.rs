@@ -57,12 +57,18 @@ fn servers_follow_the_saved_ordering() {
                 name: "beta lounge".into(),
                 initials: "BL".into(),
                 icon: None,
+                // Its only channel has no messages.
+                unread: false,
+                mentions: 0,
             },
             ServerEntry {
                 id: "srv-alpha".into(),
                 name: "Alpha Team".into(),
                 initials: "AT".into(),
                 icon: Some(alpha_icon()),
+                // #general has messages and the fixture has no read positions.
+                unread: true,
+                mentions: 0,
             },
         ]
     );

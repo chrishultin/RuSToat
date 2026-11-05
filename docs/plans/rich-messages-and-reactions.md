@@ -69,6 +69,7 @@ This milestone widens `MessageRow` from text into a small display model: avatar 
 11. **Unicode emoji** in text render through the system font (Apple Color Emoji). Shortcodes like `:smile:` aren't converted, because Stoat clients already send Unicode.
 
 ## Open Questions
+- *(Status)* **Paused after chunk 3** (2026-11-04) at the user's request so that `docs/plans/unreads-and-notifications.md` can run first. Resume at chunk 4 (images and file cards) afterwards.
 - *(Deferred, not blocking)* Milestone 3 ("interaction": send, reply, edit/delete own messages, typing indicators, unreads and mark-as-read) needs its own plan once this one is done.
 
 ## Plan
