@@ -5,13 +5,14 @@
 use serde_json::json;
 use stoat_gpui::api::models::{BulkMessageResponse, Message};
 use stoat_gpui::api::models::ReplyIntent;
+use stoat_gpui::attachment::{AttachmentView, FileKind};
 use stoat_gpui::draft::{
-    Draft, Drafts, MAX_MESSAGE_CHARS, ReplyTarget, SendCheck, TooManyReplies, char_count,
-    check_send, new_nonce,
+    AttachError, AttachmentLimits, AttachmentSource, Draft, DraftAttachment, Drafts,
+    MAX_MESSAGE_CHARS, ReplyTarget, SendCheck, TooManyReplies, char_count, check_send, new_nonce,
 };
 use stoat_gpui::store::{
-    ChatStore, MessageRow, PendingMessage, PendingState, ReplyState, RowOp, TimelineRow,
-    diff_rows,
+    ChatStore, MessageRow, PendingAttachment, PendingMessage, PendingState, ReplyState, RowOp,
+    TimelineRow, UploadState, diff_rows,
 };
 
 const CH: &str = "ch-send";
@@ -59,6 +60,7 @@ fn pending(key: &str, content: &str, sent_ms: u64) -> PendingMessage {
         channel: CH.into(),
         content: content.into(),
         replies: Vec::new(),
+        attachments: Vec::new(),
         state: PendingState::Sending,
         sent_ms,
         nonce_used: false,
@@ -274,13 +276,13 @@ fn pending_markdown_is_prepared_like_real_messages() {
 
 #[test]
 fn only_messages_with_something_in_them_can_be_sent() {
-    assert_eq!(check_send(""), SendCheck::Empty);
-    assert_eq!(check_send("  \n\t \n"), SendCheck::Empty);
-    assert_eq!(check_send("hello"), SendCheck::Ready("hello".into()));
+    assert_eq!(check_send("", false), SendCheck::Empty);
+    assert_eq!(check_send("  \n\t \n", false), SendCheck::Empty);
+    assert_eq!(check_send("hello", false), SendCheck::Ready("hello".into()));
     // Blank lines before and whitespace after go; indentation and inner
     // blank lines stay.
     assert_eq!(
-        check_send("\n\n    code\n\nmore  \n"),
+        check_send("\n\n    code\n\nmore  \n", false),
         SendCheck::Ready("    code\n\nmore".into())
     );
 }
@@ -288,9 +290,9 @@ fn only_messages_with_something_in_them_can_be_sent() {
 #[test]
 fn the_limit_counts_characters_not_bytes() {
     let at_limit = "é".repeat(MAX_MESSAGE_CHARS);
-    assert!(matches!(check_send(&at_limit), SendCheck::Ready(_)));
+    assert!(matches!(check_send(&at_limit, false), SendCheck::Ready(_)));
     let over = "é".repeat(MAX_MESSAGE_CHARS + 5);
-    assert_eq!(check_send(&over), SendCheck::TooLong(MAX_MESSAGE_CHARS + 5));
+    assert_eq!(check_send(&over, false), SendCheck::TooLong(MAX_MESSAGE_CHARS + 5));
 
     assert_eq!(char_count("short"), None);
     assert_eq!(char_count(&"a".repeat(1800)), Some((1800, false)));
@@ -300,7 +302,7 @@ fn the_limit_counts_characters_not_bytes() {
 fn draft(text: &str) -> Draft {
     Draft {
         text: text.into(),
-        replies: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -406,4 +408,237 @@ fn nonces_are_unique_and_fit_stoats_limit() {
     assert_ne!(a, b);
     assert!(a.len() <= 64, "{a}");
     assert!(new_nonce(u64::MAX).len() <= 64);
+}
+
+// Attachments.
+
+fn file(name: &str, size: u64) -> DraftAttachment {
+    DraftAttachment::from_path(format!("/tmp/{name}").into(), size)
+}
+
+#[test]
+fn attached_files_get_their_type_from_the_name() {
+    let png = file("cat.PNG", 10);
+    assert_eq!(png.name, "cat.PNG");
+    assert_eq!(png.content_type, "image/png");
+    assert_eq!(png.kind, FileKind::Image);
+    let pdf = file("notes.pdf", 10);
+    assert_eq!(pdf.content_type, "application/pdf");
+    assert_eq!(pdf.kind, FileKind::File);
+    assert_eq!(file("clip.mp4", 1).kind, FileKind::Video);
+    assert_eq!(file("noext", 1).content_type, "application/octet-stream");
+    assert_ne!(png.local_id, pdf.local_id);
+}
+
+#[test]
+fn files_over_the_size_limit_or_past_the_count_are_refused() {
+    let limits = AttachmentLimits::default();
+    assert_eq!(limits.max_bytes, 20_000_000);
+    assert_eq!(limits.max_count, 5);
+    let mut draft = Draft::default();
+    assert!(draft.add_attachment(file("ok.bin", 20_000_000), &limits).is_ok());
+    let err = draft
+        .add_attachment(file("big.bin", 20_000_001), &limits)
+        .unwrap_err();
+    assert_eq!(
+        err,
+        AttachError::TooBig {
+            name: "big.bin".into(),
+            limit: 20_000_000
+        }
+    );
+    assert_eq!(
+        err.to_string(),
+        "big.bin is too big to send. Files can be up to 20 MB."
+    );
+    for n in 2..=5 {
+        draft
+            .add_attachment(file(&format!("f{n}.txt"), 1), &limits)
+            .unwrap();
+    }
+    let err = draft.add_attachment(file("sixth.txt", 1), &limits).unwrap_err();
+    assert_eq!(err, AttachError::TooMany { max: 5 });
+    assert_eq!(err.to_string(), "A message can have at most 5 files.");
+    assert_eq!(draft.attachments.len(), 5);
+
+    let first = draft.attachments[0].local_id;
+    draft.remove_attachment(first);
+    assert_eq!(draft.attachments.len(), 4);
+    assert!(draft.add_attachment(file("sixth.txt", 1), &limits).is_ok());
+}
+
+#[test]
+fn text_may_be_empty_when_files_are_attached() {
+    assert_eq!(check_send("  \n", true), SendCheck::Ready(String::new()));
+    assert_eq!(check_send(" hi ", true), SendCheck::Ready(" hi".into()));
+    let over = "a".repeat(MAX_MESSAGE_CHARS + 1);
+    assert_eq!(check_send(&over, true), SendCheck::TooLong(MAX_MESSAGE_CHARS + 1));
+
+    let mut only_files = Draft::default();
+    assert!(only_files.is_empty());
+    only_files
+        .add_attachment(file("a.txt", 1), &AttachmentLimits::default())
+        .unwrap();
+    assert!(!only_files.is_empty());
+    // A draft of only files is kept when switching channels.
+    let mut drafts = Drafts::default();
+    drafts.save("a", only_files.clone());
+    assert_eq!(drafts.take("a"), only_files);
+}
+
+#[test]
+fn editing_sets_the_files_aside_with_the_rest_of_the_draft() {
+    use stoat_gpui::draft::EditStash;
+    let mut current = draft("caption");
+    current
+        .add_attachment(file("a.png", 1), &AttachmentLimits::default())
+        .unwrap();
+    let mut stash = EditStash::default();
+    stash.begin("m1".into(), current.clone());
+    assert_eq!(stash.end(), Some(current));
+}
+
+fn with_files(key: &str, content: &str, files: &[DraftAttachment]) -> PendingMessage {
+    PendingMessage {
+        attachments: files.iter().cloned().map(PendingAttachment::new).collect(),
+        ..pending(key, content, T0 + 1_000)
+    }
+}
+
+/// The pending row's attachments as (name, progress in thousandths).
+fn local_views(store: &ChatStore) -> Vec<(String, u16)> {
+    rows(store)
+        .pop()
+        .unwrap()
+        .attachments
+        .into_iter()
+        .map(|a| match a {
+            AttachmentView::Local { name, progress, .. } => (name, progress),
+            other => panic!("not a local attachment: {other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn a_pending_message_shows_its_files_with_upload_progress() {
+    let mut store = store();
+    let (png, pdf) = (file("cat.png", 4000), file("notes.pdf", 1000));
+    store.add_pending(with_files("n1", "", &[png.clone(), pdf.clone()]));
+    assert_eq!(
+        local_views(&store),
+        vec![("cat.png".into(), 0), ("notes.pdf".into(), 0)]
+    );
+    // No text: the row has no body, only the files.
+    assert_eq!(rows(&store).pop().unwrap().body, None);
+
+    assert!(store.set_upload_progress(CH, "n1", png.local_id, 1000, 4000));
+    assert_eq!(local_views(&store)[0], ("cat.png".into(), 250));
+    assert!(store.set_uploaded(CH, "n1", png.local_id, "f-cat".into()));
+    assert!(store.set_upload_progress(CH, "n1", pdf.local_id, 1000, 1000));
+    assert_eq!(
+        local_views(&store),
+        vec![("cat.png".into(), 1000), ("notes.pdf".into(), 1000)]
+    );
+    // An uploaded file doesn't go back to uploading.
+    assert!(!store.set_upload_progress(CH, "n1", png.local_id, 1, 4000));
+    assert!(!store.set_uploaded(CH, "n1", 999_999, "f-x".into()));
+    assert!(!store.set_uploaded(CH, "nope", png.local_id, "f-x".into()));
+
+    // Images are drawn at the size the sent message will have, or a fixed box.
+    let row = rows(&store).pop().unwrap();
+    match &row.attachments[0] {
+        AttachmentView::Local {
+            image: Some((AttachmentSource::Path(path), w, h)),
+            ..
+        } => {
+            assert_eq!(path.to_str(), Some("/tmp/cat.png"));
+            assert_eq!((*w, *h), stoat_gpui::attachment::FALLBACK_IMAGE_SIZE);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(&row.attachments[1], AttachmentView::Local { image: None, .. }));
+}
+
+#[test]
+fn a_known_image_size_is_fitted_like_the_sent_image() {
+    let mut store = store();
+    let photo = file("photo.jpg", 1).with_dimensions(Some((1600, 1200)));
+    store.add_pending(with_files("n1", "", &[photo]));
+    match &rows(&store).pop().unwrap().attachments[0] {
+        AttachmentView::Local {
+            image: Some((_, w, h)),
+            ..
+        } => assert_eq!((*w, *h), stoat_gpui::attachment::fit_within(1600, 1200)),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn uploaded_then_confirmed_by_nonce_gives_one_real_row_with_the_real_files() {
+    let mut store = store();
+    let png = file("cat.png", 4000);
+    store.add_pending(with_files("n1", "look", std::slice::from_ref(&png)));
+    store.set_uploaded(CH, "n1", png.local_id, "f-cat".into());
+    let id = ulid_at(T0 + 1_200, "CCCCCCCCCCCCCCCC");
+    let sent: Message = serde_json::from_value(json!({
+        "_id": id, "channel": CH, "author": "u-me", "content": "look", "nonce": "n1",
+        "attachments": [{
+            "_id": "f-cat", "tag": "attachments", "filename": "cat.png",
+            "metadata": { "type": "Image", "width": 40, "height": 30 },
+            "content_type": "image/png", "size": 4000
+        }]
+    }))
+    .unwrap();
+    assert!(store.apply_message(sent.clone()));
+    assert!(store.apply_message(sent));
+    let rows = rows(&store);
+    assert_eq!(rows.len(), 3);
+    let row = rows.last().unwrap();
+    assert_eq!(row.pending, None);
+    assert_eq!(row.key, "n1");
+    assert_eq!(row.attachments.len(), 1);
+    assert!(!matches!(row.attachments[0], AttachmentView::Local { .. }));
+    assert!(store.pending(CH).is_empty());
+}
+
+fn uploads(store: &ChatStore) -> Vec<UploadState> {
+    store.pending(CH)[0]
+        .attachments
+        .iter()
+        .map(|a| a.upload.clone())
+        .collect()
+}
+
+#[test]
+fn a_retry_after_a_network_failure_keeps_the_uploaded_files_and_the_key() {
+    let mut store = store();
+    let (a, b) = (file("a.png", 10), file("b.png", 10));
+    store.add_pending(with_files("n1", "", &[a.clone(), b.clone()]));
+    store.set_uploaded(CH, "n1", a.local_id, "f-a".into());
+    store.set_upload_progress(CH, "n1", b.local_id, 5, 10);
+    // b's upload was cut off: it starts again, a doesn't.
+    assert!(store.fail_pending(CH, "n1", "Couldn't upload b.png".into(), false));
+    assert_eq!(
+        uploads(&store),
+        vec![UploadState::Uploaded("f-a".into()), UploadState::Waiting]
+    );
+    let retried = store.retry_pending(CH, "n1", || "fresh".into()).unwrap();
+    assert_eq!(retried.nonce, "n1");
+    assert_eq!(retried.attachments[0].uploaded_id(), Some("f-a"));
+    assert_eq!(retried.attachments[1].uploaded_id(), None);
+}
+
+#[test]
+fn a_retry_after_stoat_refused_uploads_everything_again_with_a_fresh_key() {
+    let mut store = store();
+    let (a, b) = (file("a.png", 10), file("b.png", 10));
+    store.add_pending(with_files("n1", "", &[a.clone(), b.clone()]));
+    store.set_uploaded(CH, "n1", a.local_id, "f-a".into());
+    store.set_uploaded(CH, "n1", b.local_id, "f-b".into());
+    // Stoat answered the post with an error: it may have claimed the files.
+    store.fail_pending(CH, "n1", "You can't send messages here.".into(), true);
+    let retried = store.retry_pending(CH, "n1", || "fresh".into()).unwrap();
+    assert_eq!(retried.nonce, "fresh");
+    assert_eq!(retried.key, "n1");
+    assert_eq!(uploads(&store), vec![UploadState::Waiting, UploadState::Waiting]);
 }

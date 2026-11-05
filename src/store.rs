@@ -11,6 +11,7 @@ use crate::api::models::{
     SystemMessage, User,
 };
 use crate::attachment::AttachmentView;
+use crate::draft::DraftAttachment;
 use crate::embed::EmbedView;
 use crate::media::MediaUrls;
 use crate::notify::{self, NotificationSettings};
@@ -182,12 +183,77 @@ pub struct PendingMessage {
     /// What the user typed (Markdown source).
     pub content: String,
     pub replies: Vec<ReplyIntent>,
+    /// Its files, uploaded one at a time before it's posted.
+    pub attachments: Vec<PendingAttachment>,
     pub state: PendingState,
     /// When it was sent, in milliseconds since the Unix epoch.
     pub sent_ms: u64,
     /// The last attempt got an answer from Stoat (an error), so Stoat has
     /// seen `nonce` and would refuse it as a duplicate. A retry needs a new one.
     pub nonce_used: bool,
+}
+
+/// A file of a pending message, and how far its upload has got.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingAttachment {
+    pub file: DraftAttachment,
+    pub upload: UploadState,
+}
+
+impl PendingAttachment {
+    pub fn new(file: DraftAttachment) -> Self {
+        Self {
+            file,
+            upload: UploadState::Waiting,
+        }
+    }
+
+    /// The uploaded file's ID, once it has one.
+    pub fn uploaded_id(&self) -> Option<&str> {
+        match &self.upload {
+            UploadState::Uploaded(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// How much has uploaded, in thousandths.
+    fn progress(&self) -> u16 {
+        match self.upload {
+            UploadState::Waiting => 0,
+            UploadState::Uploading { total: 0, .. } => 0,
+            UploadState::Uploading { sent, total } => (sent.min(total) * 1000 / total) as u16,
+            UploadState::Uploaded(_) => 1000,
+        }
+    }
+
+    /// How it's drawn in its pending row.
+    fn view(&self) -> AttachmentView {
+        let file = &self.file;
+        let image = (file.kind == crate::attachment::FileKind::Image).then(|| {
+            let (width, height) = file
+                .dimensions
+                .map_or(crate::attachment::FALLBACK_IMAGE_SIZE, |(w, h)| {
+                    crate::attachment::fit_within(w as usize, h as usize)
+                });
+            (file.source.clone(), width, height)
+        });
+        AttachmentView::Local {
+            name: file.name.clone(),
+            size_label: crate::attachment::size_label(file.size),
+            kind: file.kind,
+            image,
+            progress: self.progress(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UploadState {
+    Waiting,
+    /// `sent` of `total` bytes handed over so far.
+    Uploading { sent: u64, total: u64 },
+    /// Uploaded: the file's ID, to send with the message.
+    Uploaded(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -823,6 +889,12 @@ impl ChatStore {
         };
         pending.state = PendingState::Failed(reason);
         pending.nonce_used = answered;
+        // An upload that was cut off starts over.
+        for file in &mut pending.attachments {
+            if matches!(file.upload, UploadState::Uploading { .. }) {
+                file.upload = UploadState::Waiting;
+            }
+        }
         true
     }
 
@@ -844,12 +916,60 @@ impl ChatStore {
         if pending.nonce_used {
             pending.nonce = fresh_nonce();
             pending.nonce_used = false;
+            // Stoat may have claimed the files for the refused message (it
+            // does that after spending the key): a file can only be used
+            // once, so they're uploaded again.
+            for file in &mut pending.attachments {
+                file.upload = UploadState::Waiting;
+            }
         }
         pending.state = PendingState::Sending;
         Some(pending.clone())
     }
 
     /// Forget an unconfirmed message. Returns false if there's no such one.
+    /// `sent` of `total` bytes of the pending message `key`'s file
+    /// `local_id` have gone. Returns false if there's no such file, or it's
+    /// already uploaded.
+    pub fn set_upload_progress(
+        &mut self,
+        channel: &str,
+        key: &str,
+        local_id: u64,
+        sent: u64,
+        total: u64,
+    ) -> bool {
+        let Some(file) = self.pending_file_mut(channel, key, local_id) else {
+            return false;
+        };
+        if matches!(file.upload, UploadState::Uploaded(_)) {
+            return false;
+        }
+        file.upload = UploadState::Uploading { sent, total };
+        true
+    }
+
+    /// The pending message `key`'s file `local_id` is uploaded, as `id`.
+    pub fn set_uploaded(&mut self, channel: &str, key: &str, local_id: u64, id: String) -> bool {
+        let Some(file) = self.pending_file_mut(channel, key, local_id) else {
+            return false;
+        };
+        file.upload = UploadState::Uploaded(id);
+        true
+    }
+
+    fn pending_file_mut(
+        &mut self,
+        channel: &str,
+        key: &str,
+        local_id: u64,
+    ) -> Option<&mut PendingAttachment> {
+        self.pending_mut(channel, key)?
+            .attachments
+            .iter_mut()
+            .find(|a| a.file.local_id == local_id)
+    }
+
     pub fn discard_pending(&mut self, channel: &str, key: &str) -> bool {
         let Some(pending) = self.pending.get_mut(channel) else {
             return false;
@@ -1586,6 +1706,7 @@ impl ChatStore {
                 row.key = pending.key.clone();
                 row.time = crate::time::millis_time_label(pending.sent_ms);
                 row.pending = Some(pending.state.clone());
+                row.attachments = pending.attachments.iter().map(PendingAttachment::view).collect();
             }
             rows.push(TimelineRow::Message(row));
             previous = Some((&message.author, author, millis, system));

@@ -28,8 +28,8 @@ use crate::api::ApiError;
 use crate::api::StoatClient;
 use crate::api::models::ReplyIntent;
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
-use crate::attachment::{AttachmentView, FileKind, fit_into};
-use crate::draft::ReplyTarget;
+use crate::attachment::{AttachmentView, fit_into};
+use crate::draft::{AttachmentLimits, AttachmentSource, DraftAttachment, ReplyTarget};
 use crate::embed::{Description, EmbedCard, EmbedImage, EmbedView};
 use crate::markdown::{JUMBO_TEXT_PX, is_external_link};
 use crate::media::MediaUrls;
@@ -38,11 +38,12 @@ use crate::places::{Place, Places, PlacesFile};
 use crate::runtime::spawn_io;
 use crate::typing::{OutgoingTyping, TypingSignal, TypingState, typing_label};
 use crate::store::{
-    ChannelEntry, ChannelKind, ChatStore, MessageRow, PendingMessage, PendingState, PickerEmoji,
+    ChannelEntry, ChannelKind, ChatStore, MessageRow, PendingAttachment, PendingMessage,
+    PendingState, PickerEmoji,
     ReactionEmoji, ReplyPreview, ReplyState, RowOp, ServerEntry, TimelineRow, diff_rows,
     display_name,
 };
-use crate::ui::composer::{Composer, ComposerEvent};
+use crate::ui::composer::{Composer, ComposerEvent, file_icon};
 use crate::ui::emoji_picker::emoji_grid;
 use crate::ui::math::MathPlugin;
 
@@ -184,8 +185,14 @@ impl ChatView {
             async move |this, cx| match root.await {
                 Ok(Ok(root)) => {
                     let media = MediaUrls::from_root(&api, &root);
-                    log::debug!("media: {media:?}");
-                    this.update(cx, |this, cx| this.set_media(media, cx)).ok();
+                    let limits = AttachmentLimits::from_root(&root);
+                    log::debug!("media: {media:?}, attachments: {limits:?}");
+                    this.update(cx, |this, cx| {
+                        this.set_media(media, cx);
+                        this.composer
+                            .update(cx, |composer, _| composer.set_limits(limits));
+                    })
+                    .ok();
                 }
                 Ok(Err(err)) => log::warn!("couldn't load API config (no images): {err}"),
                 Err(err) => log::warn!("API config task failed: {err:?}"),
@@ -221,11 +228,16 @@ impl ChatView {
             &composer,
             window,
             |this, composer, event: &ComposerEvent, window, cx| match event {
-                ComposerEvent::Send { text, replies } => {
+                ComposerEvent::Send {
+                    text,
+                    replies,
+                    attachments,
+                } => {
                     let Some(channel) = composer.read(cx).channel().map(str::to_string) else {
                         return;
                     };
-                    this.send_message(channel, text.clone(), replies.clone(), window, cx);
+                    let attachments = attachments.iter().cloned().map(PendingAttachment::new).collect();
+                    this.send_message(channel, text.clone(), replies.clone(), attachments, window, cx);
                 }
                 ComposerEvent::Edit { id, content } => {
                     let Some(channel) = composer.read(cx).channel().map(str::to_string) else {
@@ -543,14 +555,16 @@ impl ChatView {
         cx.notify();
     }
 
-    /// Send `content` in `channel`: shown at once as pending (and scrolled
-    /// to), then posted. Stoat's answer, or the live event if that's first,
-    /// turns it into the real message.
+    /// Send `content` and `attachments` in `channel`: shown at once as
+    /// pending (and scrolled to), then the files are uploaded and it's
+    /// posted. Stoat's answer, or the live event if that's first, turns it
+    /// into the real message.
     fn send_message(
         &mut self,
         channel: String,
         content: String,
         replies: Vec<ReplyIntent>,
+        attachments: Vec<PendingAttachment>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -565,6 +579,7 @@ impl ChatView {
             channel: channel.clone(),
             content,
             replies,
+            attachments,
             state: PendingState::Sending,
             sent_ms,
             nonce_used: false,
@@ -808,26 +823,58 @@ impl ChatView {
         }
     }
 
-    /// `POST` a pending message. Success confirms it (unless its echo
+    /// Upload a pending message's files that aren't yet, one at a time,
+    /// then `POST` it with their IDs. Success confirms it (unless its echo
     /// already has); failure marks it failed, with the reason.
     fn post_pending(&mut self, pending: PendingMessage, window: &mut Window, cx: &mut Context<Self>) {
         let client = self.client.clone();
-        let request = spawn_io({
-            let pending = pending.clone();
-            async move {
-                client
-                    .send_message(
-                        &pending.channel,
-                        &pending.content,
-                        &pending.replies,
-                        &pending.nonce,
-                    )
-                    .await
-            }
-        });
-        let PendingMessage { key, channel, .. } = pending;
+        let file_server = self.media.file_server().map(str::to_string);
         cx.spawn_in(window, async move |this, cx| {
-            let result = request.await;
+            let PendingMessage { key, channel, .. } = pending.clone();
+            let mut ids = Vec::with_capacity(pending.attachments.len());
+            for file in &pending.attachments {
+                if let Some(id) = file.uploaded_id() {
+                    ids.push(id.to_string());
+                    continue;
+                }
+                let uploaded = match &file_server {
+                    Some(server) => {
+                        upload_file(&this, &client, server, &channel, &key, &file.file, cx).await
+                    }
+                    None => Err("no file server".to_string()),
+                };
+                let Ok(id) = uploaded.map_err(|reason| {
+                    let reason = format!("Couldn't upload {}: {reason}", file.file.name);
+                    // Nothing was posted, so the key is still unused.
+                    this.update(cx, |this, cx| {
+                        if this.store.fail_pending(&channel, &key, reason, false) {
+                            this.sync_pane(&channel, cx);
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                }) else {
+                    return;
+                };
+                ids.push(id);
+            }
+
+            let result = spawn_io({
+                let pending = pending.clone();
+                let client = client.clone();
+                async move {
+                    client
+                        .send_message(
+                            &pending.channel,
+                            &pending.content,
+                            &ids,
+                            &pending.replies,
+                            &pending.nonce,
+                        )
+                        .await
+                }
+            })
+            .await;
             this.update_in(cx, |this, _, cx| {
                 let (reason, answered) = match result {
                     Ok(Ok(message)) => {
@@ -2623,6 +2670,92 @@ fn message_toolbar(
 const FULL_REACTIONS_TEXT: &str =
     "This message has as many different reactions as it can (20). You can still join one.";
 
+/// How often a pending message's upload progress is redrawn.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Upload one of the pending message `key`'s files to `file_server`,
+/// showing its progress in the row. Returns its ID, or why it failed (for
+/// the user).
+async fn upload_file(
+    this: &WeakEntity<ChatView>,
+    client: &StoatClient,
+    file_server: &str,
+    channel: &str,
+    key: &str,
+    file: &DraftAttachment,
+    cx: &mut AsyncWindowContext,
+) -> Result<String, String> {
+    use futures::FutureExt;
+
+    let (tx, mut progress) = futures::channel::mpsc::unbounded::<(u64, u64)>();
+    let mut upload = spawn_io({
+        let (client, file_server, file) = (client.clone(), file_server.to_string(), file.clone());
+        async move {
+            let bytes = match &file.source {
+                AttachmentSource::Path(path) => {
+                    let path = path.clone();
+                    tokio::task::spawn_blocking(move || std::fs::read(path))
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .map_err(|e| format!("couldn't read it ({e})"))?
+                }
+                AttachmentSource::Bytes(bytes) => bytes.to_vec(),
+            };
+            client
+                .upload_attachment(&file_server, &file.name, &file.content_type, bytes, move |sent, total| {
+                    tx.unbounded_send((sent, total)).ok();
+                })
+                .await
+                .map_err(|err| upload_error_text(&err))
+        }
+    })
+    .fuse();
+
+    let mut shown: Option<std::time::Instant> = None;
+    loop {
+        futures::select! {
+            update = progress.next() => {
+                let Some((sent, total)) = update else { continue };
+                let due = shown.is_none_or(|at| at.elapsed() >= PROGRESS_INTERVAL);
+                if !due && sent < total {
+                    continue;
+                }
+                shown = Some(std::time::Instant::now());
+                this.update(cx, |this, cx| {
+                    if this.store.set_upload_progress(channel, key, file.local_id, sent, total) {
+                        this.sync_pane(channel, cx);
+                    }
+                })
+                .ok();
+            }
+            result = upload => {
+                let id = result.map_err(|e| e.to_string())??;
+                log::info!("uploaded {} as {id}", file.name);
+                this.update(cx, |this, cx| {
+                    if this.store.set_uploaded(channel, key, file.local_id, id.clone()) {
+                        this.sync_pane(channel, cx);
+                    }
+                })
+                .ok();
+                return Ok(id);
+            }
+        }
+    }
+}
+
+/// Why an upload failed, after "Couldn't upload {name}: ".
+fn upload_error_text(err: &ApiError) -> String {
+    match err {
+        ApiError::Network(_) => "couldn't reach the file server.".into(),
+        ApiError::Unexpected { status: 413, .. } => "it's too big.".into(),
+        ApiError::RateLimited { .. } => "uploading too fast. Wait a moment, then retry.".into(),
+        _ => match err.error_type() {
+            Some(revolt_result::ErrorType::FileTooLarge { .. }) => "it's too big.".into(),
+            _ => err.to_string(),
+        },
+    }
+}
+
 /// What a refused reaction's toast says.
 fn reaction_error_text(err: &ApiError) -> SharedString {
     use revolt_result::ErrorType;
@@ -2840,14 +2973,7 @@ fn render_attachment(
             url,
             kind,
         } => {
-            let icon = match kind {
-                FileKind::Image => IconName::FileImage,
-                FileKind::Video => IconName::FileVideoCamera,
-                FileKind::Audio => IconName::FileMusic,
-                FileKind::Text => IconName::FileText,
-                FileKind::File => IconName::File,
-            };
-            file_card(id, icon, name, size_label, colors)
+            file_card(id, file_icon(*kind), name, size_label, colors)
                 .when_some(url.clone(), |card, url| {
                     card.cursor_pointer()
                         .on_click(move |_, _, cx| cx.open_url(&url))
@@ -2855,7 +2981,60 @@ fn render_attachment(
                 })
                 .into_any_element()
         }
+        // Still uploading: the local copy, with a progress bar along its
+        // bottom edge (over it, so the row's height doesn't change).
+        AttachmentView::Local {
+            name,
+            size_label,
+            kind,
+            image,
+            progress,
+        } => match image {
+            Some((AttachmentSource::Path(path), width, height)) => div()
+                .id(id.clone())
+                .relative()
+                .w(px(*width as f32))
+                .h(px(*height as f32))
+                .flex_none()
+                .child(
+                    img(path.clone())
+                        .id(SharedString::from(format!("{id}-img")))
+                        .size_full()
+                        .rounded(px(ATTACHMENT_RADIUS))
+                        .object_fit(ObjectFit::Contain)
+                        .with_fallback(move || {
+                            div()
+                                .size_full()
+                                .rounded(px(ATTACHMENT_RADIUS))
+                                .bg(colors.image_bg)
+                                .into_any_element()
+                        }),
+                )
+                .child(upload_bar(*progress, colors).bottom(px(6.)).left(px(6.)).right(px(6.)))
+                .into_any_element(),
+            _ => file_card(id, file_icon(*kind), name, size_label, colors)
+                .relative()
+                .child(upload_bar(*progress, colors).bottom(px(3.)).left(px(8.)).right(px(8.)))
+                .into_any_element(),
+        },
     }
+}
+
+/// How much of a file has uploaded (`progress` in thousandths): a thin
+/// bar, positioned by the caller.
+fn upload_bar(progress: u16, colors: RowColors) -> Div {
+    div()
+        .absolute()
+        .h(px(3.))
+        .rounded_full()
+        .bg(colors.border)
+        .child(
+            div()
+                .h_full()
+                .rounded_full()
+                .bg(colors.mine)
+                .w(relative(f32::from(progress.min(1000)) / 1000.)),
+        )
 }
 
 /// A picture at exactly its display size (so its row never changes height

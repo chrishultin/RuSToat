@@ -9,7 +9,10 @@ pub mod client;
 pub mod error;
 pub mod events;
 
-pub use client::{DEFAULT_API_URL, RootConfig, SESSION_FRIENDLY_NAME, StoatClient, file_url};
+pub use client::{
+    DEFAULT_API_URL, DEFAULT_ATTACHMENT_SIZE_LIMIT, DEFAULT_MAX_ATTACHMENTS, RootConfig, SESSION_FRIENDLY_NAME,
+    StoatClient, file_url,
+};
 pub use error::ApiError;
 
 /// Stoat's API types (`revolt_models::v0`): `User`, `Session`, `DataLogin`, …

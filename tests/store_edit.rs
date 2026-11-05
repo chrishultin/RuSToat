@@ -95,6 +95,7 @@ fn up_edits_our_newest_real_message() {
         channel: CH.into(),
         content: "pending".into(),
         replies: Vec::new(),
+        attachments: Vec::new(),
         state: PendingState::Sending,
         sent_ms: 0,
         nonce_used: false,
@@ -112,6 +113,7 @@ fn draft(text: &str) -> Draft {
             author: "Ada".into(),
             mention: true,
         }],
+        ..Default::default()
     }
 }
 

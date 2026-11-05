@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use crate::api::models::{File, Metadata};
+use crate::draft::AttachmentSource;
 use crate::media::MediaUrls;
 
 /// Inline images fit within this box (logical px), keeping their aspect ratio.
@@ -61,6 +62,18 @@ pub enum AttachmentView {
         /// `None` until the file server is known.
         url: Option<String>,
         kind: FileKind,
+    },
+    /// A file of a message that's still being sent, drawn from the local
+    /// copy with how much of it has uploaded.
+    Local {
+        name: String,
+        size_label: String,
+        kind: FileKind,
+        /// For images: where to draw it from, at this display size (the
+        /// size the sent message will have, when known).
+        image: Option<(AttachmentSource, u32, u32)>,
+        /// Uploaded so far, in thousandths.
+        progress: u16,
     },
 }
 
@@ -130,6 +143,17 @@ pub fn fit_into(
         .min(1.0);
     let side = |v: f64| ((v * scale).round() as u32).max(1);
     Some((side(w), side(h)))
+}
+
+/// An image file's width and height, read from its header (without
+/// decoding it). `None` if it isn't an image this build can read.
+pub fn local_image_size(path: &std::path::Path) -> Option<(u32, u32)> {
+    image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
 }
 
 /// The card icon for a file, from its metadata, falling back to its MIME type.

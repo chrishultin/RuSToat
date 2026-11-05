@@ -1,9 +1,13 @@
 //! The message box's rules, with no GPUI: what can be sent, the length
-//! limit, replies, and drafts kept per channel.
+//! limit, replies, attached files, and drafts kept per channel.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::api::models::ReplyIntent;
+use crate::api::{DEFAULT_ATTACHMENT_SIZE_LIMIT, DEFAULT_MAX_ATTACHMENTS, RootConfig};
+use crate::attachment::{FileKind, size_label};
 use crate::store::MAX_REPLIES;
 
 /// Longest message Stoat accepts, in characters (`limits.global.message_length`).
@@ -22,10 +26,15 @@ pub enum SendCheck {
     TooLong(usize),
 }
 
-pub fn check_send(text: &str) -> SendCheck {
+/// `has_attachments`: files go with it, so the text may be empty.
+pub fn check_send(text: &str, has_attachments: bool) -> SendCheck {
     let text = trim_message(text);
     if text.is_empty() {
-        return SendCheck::Empty;
+        return if has_attachments {
+            SendCheck::Ready(String::new())
+        } else {
+            SendCheck::Empty
+        };
     }
     let chars = text.chars().count();
     if chars > MAX_MESSAGE_CHARS {
@@ -69,17 +78,168 @@ pub struct ReplyTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TooManyReplies;
 
-/// What's in the message box: text, and the messages it replies to.
+/// Where an attached file's bytes are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttachmentSource {
+    /// On disk (picked or dropped): read when the message is sent.
+    Path(PathBuf),
+    /// In memory (pasted).
+    Bytes(Arc<[u8]>),
+}
+
+/// A file attached to the message being typed, waiting in the tray under
+/// the box. It's uploaded when the message is sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftAttachment {
+    /// Tells it apart from the other files in the tray (and, once sent, in
+    /// its pending message).
+    pub local_id: u64,
+    pub name: String,
+    /// In bytes.
+    pub size: u64,
+    /// MIME type, from the name's extension.
+    pub content_type: String,
+    pub kind: FileKind,
+    /// An image's width and height, if they could be read locally (so its
+    /// pending row has the size the sent one will).
+    pub dimensions: Option<(u32, u32)>,
+    pub source: AttachmentSource,
+}
+
+impl DraftAttachment {
+    /// A file of `size` bytes, named and typed after `name`.
+    pub fn new(name: String, size: u64, source: AttachmentSource) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        let content_type = mime_guess::from_path(&name)
+            .first_or_octet_stream()
+            .essence_str()
+            .to_string();
+        Self {
+            local_id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            kind: crate::attachment::file_kind(&crate::api::models::Metadata::File, &content_type),
+            name,
+            size,
+            content_type,
+            dimensions: None,
+            source,
+        }
+    }
+
+    /// The file at `path`, `size` bytes long.
+    pub fn from_path(path: PathBuf, size: u64) -> Self {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file".into());
+        Self::new(name, size, AttachmentSource::Path(path))
+    }
+
+    pub fn with_dimensions(mut self, dimensions: Option<(u32, u32)>) -> Self {
+        self.dimensions = dimensions;
+        self
+    }
+}
+
+/// How many files a message may carry, and how big each may be (from
+/// `GET /`, see [`RootConfig::attachment_size_limit`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttachmentLimits {
+    pub max_bytes: u64,
+    pub max_count: usize,
+}
+
+impl Default for AttachmentLimits {
+    fn default() -> Self {
+        Self {
+            max_bytes: DEFAULT_ATTACHMENT_SIZE_LIMIT,
+            max_count: DEFAULT_MAX_ATTACHMENTS,
+        }
+    }
+}
+
+impl AttachmentLimits {
+    pub fn from_root(root: &RootConfig) -> Self {
+        Self {
+            max_bytes: root.attachment_size_limit(),
+            max_count: root.max_attachments(),
+        }
+    }
+}
+
+/// Why a file wasn't attached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttachError {
+    /// Over the size limit (`limit` bytes).
+    TooBig { name: String, limit: u64 },
+    /// The message already has the most files it can (`max`).
+    TooMany { max: usize },
+}
+
+impl std::fmt::Display for AttachError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AttachError::TooBig { name, limit } => write!(
+                f,
+                "{name} is too big to send. Files can be up to {}.",
+                decimal_size_label(*limit)
+            ),
+            AttachError::TooMany { max } => {
+                write!(f, "A message can have at most {max} files.")
+            }
+        }
+    }
+}
+
+/// A limit as Stoat states it: decimal units, so 20 000 000 bytes is
+/// "20 MB" (not 19.1). Falls back to [`size_label`] for odd sizes.
+fn decimal_size_label(bytes: u64) -> String {
+    if bytes >= 1_000_000 && bytes.is_multiple_of(1_000_000) {
+        format!("{} MB", bytes / 1_000_000)
+    } else {
+        size_label(bytes)
+    }
+}
+
+/// What's in the message box: text, the messages it replies to, and the
+/// files attached to it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Draft {
     pub text: String,
     pub replies: Vec<ReplyTarget>,
+    pub attachments: Vec<DraftAttachment>,
 }
 
 impl Draft {
-    /// Nothing typed and nothing being replied to.
+    /// Nothing typed, replied to or attached.
     pub fn is_empty(&self) -> bool {
-        self.text.trim().is_empty() && self.replies.is_empty()
+        self.text.trim().is_empty() && self.replies.is_empty() && self.attachments.is_empty()
+    }
+
+    /// Attach `file` too, unless it's over `limits.max_bytes` or the
+    /// message already has `limits.max_count` files.
+    pub fn add_attachment(
+        &mut self,
+        file: DraftAttachment,
+        limits: &AttachmentLimits,
+    ) -> Result<(), AttachError> {
+        if file.size > limits.max_bytes {
+            return Err(AttachError::TooBig {
+                name: file.name,
+                limit: limits.max_bytes,
+            });
+        }
+        if self.attachments.len() >= limits.max_count {
+            return Err(AttachError::TooMany {
+                max: limits.max_count,
+            });
+        }
+        self.attachments.push(file);
+        Ok(())
+    }
+
+    pub fn remove_attachment(&mut self, local_id: u64) {
+        self.attachments.retain(|a| a.local_id != local_id);
     }
 
     /// Reply to `target` as well. Replying to the same message twice

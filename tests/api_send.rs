@@ -37,7 +37,7 @@ async fn sending_posts_the_content_with_the_idempotency_key() {
         .await;
 
     let message = client(&server)
-        .send_message("ch-general", "hello\nworld", &[], KEY)
+        .send_message("ch-general", "hello\nworld", &[], &[], KEY)
         .await
         .unwrap();
     assert_eq!(message.id, MSG);
@@ -73,7 +73,7 @@ async fn replies_are_sent_with_their_mention_choice() {
         reply("01JC0000000000000000000002", false),
     ];
     client(&server)
-        .send_message("ch-general", "yes", &replies, KEY)
+        .send_message("ch-general", "yes", &[], &replies, KEY)
         .await
         .unwrap();
 }
@@ -91,7 +91,7 @@ async fn a_refused_send_is_a_missing_permission_error() {
         .await;
 
     let err = client(&server)
-        .send_message("ch-locked", "hi", &[], KEY)
+        .send_message("ch-locked", "hi", &[], &[], KEY)
         .await
         .unwrap_err();
     assert!(
@@ -110,7 +110,7 @@ async fn a_reused_key_is_a_duplicate_nonce_error() {
         .await;
 
     let err = client(&server)
-        .send_message("ch-general", "hi", &[], KEY)
+        .send_message("ch-general", "hi", &[], &[], KEY)
         .await
         .unwrap_err();
     assert!(
@@ -129,7 +129,7 @@ async fn sending_too_fast_is_rate_limited() {
         .await;
 
     let err = client(&server)
-        .send_message("ch-general", "hi", &[], KEY)
+        .send_message("ch-general", "hi", &[], &[], KEY)
         .await
         .unwrap_err();
     assert!(

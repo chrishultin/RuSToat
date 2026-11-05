@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use futures::StreamExt;
 use reqwest::{Client, Method};
 use revolt_models::v0::{
     BulkMessageResponse, DataEditMessage, DataLogin, DataMessageSend, MFAResponse, Message,
@@ -10,6 +11,12 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use super::ApiError;
+
+/// Uploads are handed to the connection in pieces this big, for progress.
+const UPLOAD_CHUNK: usize = 64 * 1024;
+/// A whole upload may take this long (the client's usual 30 s is too short
+/// for 20 MB on a slow link).
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// The official Stoat instance. Override with the `STOAT_API_URL` env var.
 pub const DEFAULT_API_URL: &str = "https://api.stoat.chat";
@@ -40,7 +47,39 @@ pub struct RootFeatures {
     /// The media proxy ("January"): external images, fetched on the user's behalf.
     #[serde(default)]
     pub january: Option<ServiceFeature>,
+    /// What accounts may do: established ones, and new ones (their first days).
+    #[serde(default)]
+    pub limits: RootLimits,
 }
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RootLimits {
+    #[serde(default)]
+    pub default: AccountLimits,
+    #[serde(default)]
+    pub new_user: AccountLimits,
+}
+
+/// The limits this client uses, out of many.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AccountLimits {
+    /// Most files one message can carry.
+    #[serde(default)]
+    pub message_attachments: Option<usize>,
+    #[serde(default)]
+    pub file_upload_size_limits: FileSizeLimits,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct FileSizeLimits {
+    /// Largest attachment, in bytes.
+    #[serde(default)]
+    pub attachments: Option<u64>,
+}
+
+/// Used when `GET /` doesn't say: Stoat's own defaults (20 MB, 5 files).
+pub const DEFAULT_ATTACHMENT_SIZE_LIMIT: u64 = 20_000_000;
+pub const DEFAULT_MAX_ATTACHMENTS: usize = 5;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServiceFeature {
@@ -57,6 +96,29 @@ impl RootConfig {
     /// Base URL of the media proxy, e.g. `https://proxy.stoatusercontent.com`.
     pub fn proxy_server(&self) -> Option<&str> {
         enabled_url(&self.features.january)
+    }
+
+    /// Largest attachment, in bytes. The stricter of the two account limits
+    /// (this client doesn't know which applies), else
+    /// [`DEFAULT_ATTACHMENT_SIZE_LIMIT`].
+    pub fn attachment_size_limit(&self) -> u64 {
+        let limits = &self.features.limits;
+        [&limits.default, &limits.new_user]
+            .iter()
+            .filter_map(|l| l.file_upload_size_limits.attachments)
+            .min()
+            .unwrap_or(DEFAULT_ATTACHMENT_SIZE_LIMIT)
+    }
+
+    /// Most files one message can carry, chosen the same way, else
+    /// [`DEFAULT_MAX_ATTACHMENTS`].
+    pub fn max_attachments(&self) -> usize {
+        let limits = &self.features.limits;
+        [&limits.default, &limits.new_user]
+            .iter()
+            .filter_map(|l| l.message_attachments)
+            .min()
+            .unwrap_or(DEFAULT_MAX_ATTACHMENTS)
     }
 }
 
@@ -180,21 +242,25 @@ impl StoatClient {
         self.send(Method::GET, &path, None::<&()>).await
     }
 
-    /// `POST /channels/{channel}/messages`: send `content`, replying to
-    /// `replies` (if any). `idempotency_key` (at most 64 bytes) makes a retry
-    /// of the same send harmless: Stoat refuses a key it has already seen
-    /// with `DuplicateNonce`, and copies it into the new message's `nonce`.
+    /// `POST /channels/{channel}/messages`: send `content` with the uploaded
+    /// files `attachments` (their IDs, see [`Self::upload_attachment`]),
+    /// replying to `replies` (if any). `content` may be empty if there are
+    /// attachments; it's left out then. `idempotency_key` (at most 64 bytes)
+    /// makes a retry of the same send harmless: Stoat refuses a key it has
+    /// already seen with `DuplicateNonce`, and copies it into the new
+    /// message's `nonce`.
     pub async fn send_message(
         &self,
         channel: &str,
         content: &str,
+        attachments: &[String],
         replies: &[ReplyIntent],
         idempotency_key: &str,
     ) -> Result<Message, ApiError> {
         let body = DataMessageSend {
             nonce: None,
-            content: Some(content.to_string()),
-            attachments: None,
+            content: (!content.is_empty()).then(|| content.to_string()),
+            attachments: (!attachments.is_empty()).then(|| attachments.to_vec()),
             replies: (!replies.is_empty()).then(|| replies.to_vec()),
             embeds: None,
             masquerade: None,
@@ -212,6 +278,60 @@ impl StoatClient {
             )
             .await?;
         parse(status, &bytes)
+    }
+
+    /// `POST {file_server}/attachments`: upload a file for a message, as the
+    /// multipart field `file`. Returns its ID, to send in
+    /// [`Self::send_message`]'s `attachments` (each ID can be used once).
+    ///
+    /// `on_progress(sent, total)` is called as the body is handed to the
+    /// connection, ending with `(total, total)`.
+    pub async fn upload_attachment(
+        &self,
+        file_server: &str,
+        name: &str,
+        content_type: &str,
+        bytes: Vec<u8>,
+        on_progress: impl Fn(u64, u64) + Send + Sync + 'static,
+    ) -> Result<String, ApiError> {
+        use reqwest::multipart::{Form, Part};
+
+        #[derive(Deserialize)]
+        struct Uploaded {
+            id: String,
+        }
+
+        let total = bytes.len() as u64;
+        let mut sent = 0;
+        let chunks: Vec<Vec<u8>> = bytes.chunks(UPLOAD_CHUNK).map(<[u8]>::to_vec).collect();
+        let counted = futures::stream::iter(chunks).map(move |chunk| {
+            sent += chunk.len() as u64;
+            on_progress(sent, total);
+            Ok::<_, std::io::Error>(chunk)
+        });
+        let part = Part::stream_with_length(reqwest::Body::wrap_stream(counted), total)
+            .file_name(name.to_string())
+            .mime_str(content_type)
+            .map_err(|e| ApiError::Unexpected {
+                status: 0,
+                detail: format!("bad content type {content_type:?}: {e}"),
+            })?;
+        let form = Form::new().part("file", part);
+
+        let url = format!("{}/attachments", file_server.trim_end_matches('/'));
+        log::debug!("POST {url} ({name}, {content_type}, {total} bytes)");
+        let mut request = self.http.post(&url).multipart(form).timeout(UPLOAD_TIMEOUT);
+        if let Some(token) = &self.token {
+            request = request.header("x-session-token", token);
+        }
+        let response = request.send().await.map_err(ApiError::Network)?;
+        let status = response.status();
+        let body = response.bytes().await.map_err(ApiError::Network)?;
+        log::debug!("upload {name}: HTTP {status}: {}", String::from_utf8_lossy(&body));
+        if !status.is_success() {
+            return Err(ApiError::from_response(status, &body));
+        }
+        parse::<Uploaded>(status, &body).map(|u| u.id)
     }
 
     /// `PATCH /channels/{channel}/messages/{message}`: replace the text of
