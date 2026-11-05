@@ -85,4 +85,11 @@ The user was given the steps: a bundled run with the one-time prompts, a rebuild
   - "moved …/chat.stoat.rustoat to …/com.chrishultin.rustoat".
   - Events reached Ready.
 - The log also showed `banners: permission request failed (Notifications are not allowed for this application)`. The new bundle ID needs notification permission granted again. The user was pointed to System Settings → Notifications → RuSToat.
-- The user confirmed "Looks good" for the Dock icon and the design. Whether a banner shows the icon wasn't separately confirmed; it depends on notification permission being re-granted.
+- The user confirmed: the Dock shows the icon, the notification prompt appeared, there was just one Keychain prompt (the legacy item), and the design is fine for now.
+- **The user asked for the icon to be flipped horizontally** "for added distinction" (follow-up commit after `2fbc066`):
+  - The stoat group's transform became `matrix(-0.761575,0,0,0.761575,794.06,298.32)`, mirrored about x = 512, so the stoat faces left.
+  - Gradients and highlights inside the mirrored group were mirrored back (the metal gradient's direction, the rivet and lens `cx`, the eye highlight at `cx=432`), so the light still falls from the top left.
+  - `RuSToat.icns` was regenerated, still with 10 sizes.
+- After the flip, the bundle was relaunched and the Dock restarted:
+  - It signed in from the new Keychain item with no migration and no prompt.
+  - It logged `banners: allowed`, so notification permission had been re-granted for the new bundle ID.

@@ -6,7 +6,9 @@
 
   1024×1024 canvas with Apple's 824 px rounded square at (100, 100). The stoat
   and its cyborg parts share one transform, so they're drawn in the original
-  path's coordinates (the eye is at about (415, 322)).
+  path's coordinates (the eye is at about (415, 322)). The transform mirrors
+  Stoat's stoat to face left, so gradients and highlights inside it are
+  mirrored too, keeping the light coming from the top left.
 
   Groups with class "detail" are dropped from the 16 and 32 px renders
   (see examples/render_icon.rs).
@@ -19,7 +21,7 @@
       <stop offset="0" stop-color="#3b3156"/>
       <stop offset="1" stop-color="#1d1730"/>
     </linearGradient>
-    <linearGradient id="metal" x1="0" y1="0" x2="1" y2="1">
+    <linearGradient id="metal" x1="1" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#eef1f5"/>
       <stop offset="0.35" stop-color="#b7bec8"/>
       <stop offset="0.55" stop-color="#d9dee5"/>
@@ -31,12 +33,12 @@
       <rect y="0" width="40" height="2" fill="#ffffff" opacity="0.28"/>
       <rect y="5" width="40" height="1.5" fill="#4a5260" opacity="0.14"/>
     </pattern>
-    <radialGradient id="rivet" cx="0.35" cy="0.35" r="0.7">
+    <radialGradient id="rivet" cx="0.65" cy="0.35" r="0.7">
       <stop offset="0" stop-color="#ffffff"/>
       <stop offset="0.5" stop-color="#a9b1bc"/>
       <stop offset="1" stop-color="#4b5462"/>
     </radialGradient>
-    <radialGradient id="lens" cx="0.42" cy="0.4" r="0.65">
+    <radialGradient id="lens" cx="0.58" cy="0.4" r="0.65">
       <stop offset="0" stop-color="#f2ffff"/>
       <stop offset="0.3" stop-color="#7ff6ff"/>
       <stop offset="0.75" stop-color="#14c8e6"/>
@@ -67,7 +69,7 @@
   </g>
 
   <g clip-path="url(#tile)">
-    <g transform="matrix(0.761575,0,0,0.761575,229.94,298.32)">
+    <g transform="matrix(-0.761575,0,0,0.761575,794.06,298.32)">
       <use href="#stoat" fill="#ffffff"/>
 
       <g clip-path="url(#body)">
@@ -112,7 +114,7 @@
       <circle cx="416" cy="322" r="78" fill="#29f0ff" filter="url(#glow)"/>
       <circle cx="416" cy="322" r="44" fill="url(#lens)"/>
       <circle cx="416" cy="322" r="16" fill="#ffffff" opacity="0.9"/>
-      <circle cx="400" cy="304" r="7" fill="#ffffff"/>
+      <circle cx="432" cy="304" r="7" fill="#ffffff"/>
     </g>
   </g>
 </svg>
