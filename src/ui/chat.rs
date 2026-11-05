@@ -17,7 +17,8 @@ use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
 use crate::api::{StoatClient, file_url};
 use crate::runtime::spawn_io;
 use crate::store::{
-    ChannelEntry, ChannelKind, ChatStore, MessageRow, ServerEntry, TimelineRow, display_name,
+    ChannelEntry, ChannelKind, ChatStore, MessageRow, RowOp, ServerEntry, TimelineRow, diff_rows,
+    display_name,
 };
 
 /// How many messages to load when a channel is opened.
@@ -52,6 +53,8 @@ enum Status {
 struct Pane {
     rows: Rc<Vec<TimelineRow>>,
     scroller: Entity<MessageScrollerState>,
+    /// Watches scrolling, to load older messages at the top.
+    _scroll: Subscription,
 }
 
 pub struct ChatView {
@@ -69,6 +72,9 @@ pub struct ChatView {
     /// own channel, so a slow one can't overwrite the channel being viewed.
     loading: HashMap<String, Task<()>>,
     load_errors: HashMap<String, SharedString>,
+    /// Older-page requests in flight, and the last failure, by channel.
+    loading_older: HashMap<String, Task<()>>,
+    older_errors: HashMap<String, SharedString>,
     _connection: Connection,
     _events: Task<()>,
     _root: Task<()>,
@@ -119,6 +125,8 @@ impl ChatView {
             panes: HashMap::new(),
             loading: HashMap::new(),
             load_errors: HashMap::new(),
+            loading_older: HashMap::new(),
+            older_errors: HashMap::new(),
             _connection: connection,
             _events: events,
             _root: root,
@@ -130,18 +138,52 @@ impl ChatView {
             ConnectionEvent::Connecting { attempt } => self.status = Status::Connecting { attempt },
             ConnectionEvent::Connected => self.status = Status::Connected,
             ConnectionEvent::Event(ServerEvent::Ready(ready)) => {
+                let reconnect = self.has_ready;
                 self.store.apply_ready(*ready);
                 self.has_ready = true;
                 self.status = Status::Connected;
                 self.drop_stale_selection();
-                // Names may have changed; redraw anything already loaded.
-                let loaded: Vec<String> = self.panes.keys().cloned().collect();
-                for channel in loaded {
-                    self.rebuild_pane(&channel, cx);
+                if reconnect {
+                    // Events missed while offline would leave gaps, so drop
+                    // loaded history and reload what's on screen.
+                    log::info!("reconnected: reloading message history");
+                    self.store.clear_histories();
+                    self.panes.clear();
+                    self.loading.clear();
+                    self.loading_older.clear();
+                    self.older_errors.clear();
                 }
                 self.ensure_current_loaded(cx);
             }
-            // Message events arrive in chunk 6.
+            ConnectionEvent::Event(ServerEvent::Message(message)) => {
+                let channel = message.channel.clone();
+                log::debug!("live: new message {} in {channel}", message.id);
+                if self.store.apply_message(*message) {
+                    self.sync_pane(&channel, cx);
+                }
+            }
+            ConnectionEvent::Event(ServerEvent::MessageUpdate {
+                id,
+                channel,
+                data,
+                clear,
+            }) => {
+                log::debug!("live: edit {id} in {channel}");
+                if self.store.apply_update(&channel, &id, *data, &clear) {
+                    self.sync_pane(&channel, cx);
+                }
+            }
+            ConnectionEvent::Event(ServerEvent::MessageDelete { id, channel }) => {
+                log::debug!("live: delete {id} in {channel}");
+                if self.store.apply_delete(&channel, &[id]) {
+                    self.sync_pane(&channel, cx);
+                }
+            }
+            ConnectionEvent::Event(ServerEvent::BulkMessageDelete { channel, ids }) => {
+                if self.store.apply_delete(&channel, &ids) {
+                    self.sync_pane(&channel, cx);
+                }
+            }
             ConnectionEvent::Event(_) => return,
             ConnectionEvent::Disconnected { reason, retry_in } => {
                 self.status = Status::Reconnecting {
@@ -217,7 +259,7 @@ impl ChatView {
                                 "loaded {} messages for {channel}",
                                 this.store.history(&channel).map_or(0, |h| h.messages.len())
                             );
-                            this.rebuild_pane(&channel, cx);
+                            this.sync_pane(&channel, cx);
                         }
                         Ok(Err(err)) => {
                             log::warn!("loading messages for {channel} failed: {err:?}");
@@ -237,30 +279,127 @@ impl ChatView {
         self.loading.insert(channel, task);
     }
 
-    /// Recompute a loaded channel's rows. A changed row count resets its
-    /// scroller to the newest message; the same count just remeasures.
-    fn rebuild_pane(&mut self, channel: &str, cx: &mut Context<Self>) {
+    /// Bring a loaded channel's rows up to date. Existing panes get the
+    /// minimal scroller operations (`diff_rows`), so live messages keep the
+    /// view at the bottom and older pages slide in above without a jump.
+    fn sync_pane(&mut self, channel: &str, cx: &mut Context<Self>) {
         let rows = Rc::new(self.store.timeline(channel));
-        let count = rows.len();
-        match self.panes.get_mut(channel) {
-            Some(pane) => {
-                let same_count = pane.rows.len() == count;
-                pane.rows = rows;
-                pane.scroller.update(cx, |scroller, cx| {
-                    if same_count {
-                        scroller.remeasure(cx);
-                    } else {
-                        scroller.reset(count, cx);
-                        scroller.scroll_to_end(cx);
+        if let Some(pane) = self.panes.get_mut(channel) {
+            let ops = diff_rows(&pane.rows, &rows);
+            pane.rows = rows;
+            pane.scroller.update(cx, |scroller, cx| {
+                for op in ops {
+                    let applied = match op {
+                        RowOp::Reset(count) => {
+                            scroller.reset(count, cx);
+                            scroller.scroll_to_end(cx);
+                            true
+                        }
+                        RowOp::Prepend(count) => scroller.prepend(count, cx),
+                        RowOp::Append(count) => scroller.append(count, cx),
+                        RowOp::Remove { at, count } => scroller.splice(at..at + count, 0, cx),
+                        RowOp::Insert { at, count } => scroller.splice(at..at, count, cx),
+                        RowOp::Remeasure { at } => scroller.remeasure_items(at..at + 1, cx),
+                    };
+                    if !applied {
+                        log::warn!("scroller rejected {op:?}; resetting");
                     }
-                });
-            }
-            None => {
-                let scroller = cx.new(|cx| MessageScrollerState::new(count, cx));
-                self.panes
-                    .insert(channel.to_string(), Pane { rows, scroller });
-            }
+                }
+            });
+            return;
         }
+
+        let scroller = cx.new(|cx| MessageScrollerState::new(rows.len(), cx));
+        let watched = channel.to_string();
+        let scroll = cx.observe(&scroller, move |this, _, cx| {
+            this.maybe_load_older(&watched, cx)
+        });
+        self.panes.insert(
+            channel.to_string(),
+            Pane {
+                rows,
+                scroller,
+                _scroll: scroll,
+            },
+        );
+    }
+
+    /// Load the page before the oldest loaded message, if the reader is at
+    /// the top of `channel` and there's more to load.
+    fn maybe_load_older(&mut self, channel: &str, cx: &mut Context<Self>) {
+        if self.loading_older.contains_key(channel) || self.older_errors.contains_key(channel) {
+            return;
+        }
+        let Some(history) = self.store.history(channel) else {
+            return;
+        };
+        if history.exhausted || history.messages.is_empty() {
+            return;
+        }
+        let Some(pane) = self.panes.get(channel) else {
+            return;
+        };
+        let at_top = {
+            let scroller = pane.scroller.read(cx);
+            scroller.item_count() > 0 && scroller.logical_scroll_top().item_ix == 0
+        };
+        if at_top {
+            self.load_older(channel.to_string(), cx);
+        }
+    }
+
+    fn load_older(&mut self, channel: String, cx: &mut Context<Self>) {
+        let Some(before) = self.store.oldest_message_id(&channel).map(str::to_string) else {
+            return;
+        };
+        self.older_errors.remove(&channel);
+        let client = self.client.clone();
+        let request = spawn_io({
+            let channel = channel.clone();
+            async move {
+                client
+                    .fetch_messages(&channel, Some(&before), HISTORY_PAGE as i64)
+                    .await
+            }
+        });
+        let task = cx.spawn({
+            let channel = channel.clone();
+            async move |this, cx| {
+                let result = request.await;
+                this.update(cx, |this, cx| {
+                    this.loading_older.remove(&channel);
+                    match result {
+                        Ok(Ok(page)) => {
+                            if this.store.prepend_page(&channel, page, HISTORY_PAGE) {
+                                log::debug!(
+                                    "loaded older messages for {channel} ({} total)",
+                                    this.store.history(&channel).map_or(0, |h| h.messages.len())
+                                );
+                                this.sync_pane(&channel, cx);
+                            }
+                        }
+                        Ok(Err(err)) => {
+                            log::warn!("loading older messages for {channel} failed: {err:?}");
+                            this.older_errors.insert(channel, err.to_string().into());
+                        }
+                        Err(err) => {
+                            log::warn!("older-messages task failed: {err:?}");
+                            this.older_errors
+                                .insert(channel, "Couldn't load older messages.".into());
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }
+        });
+        self.loading_older.insert(channel, task);
+        cx.notify();
+    }
+
+    fn retry_older(&mut self, channel: String, cx: &mut Context<Self>) {
+        self.older_errors.remove(&channel);
+        self.load_older(channel, cx);
     }
 
     fn sections(&self) -> Vec<(Option<String>, Vec<ChannelEntry>)> {
@@ -571,13 +710,68 @@ impl ChatView {
                         placeholder("No messages yet.".into())
                     } else {
                         let rows = pane.rows.clone();
-                        MessageScroller::new(
-                            SharedString::from(format!("messages-{}", channel.id)),
-                            pane.scroller.clone(),
-                            move |ix, _window, _cx| render_row(&rows[ix], colors),
-                        )
-                        .flex_1()
-                        .into_any_element()
+                        let older = if self.loading_older.contains_key(&channel.id) {
+                            Some(
+                                div()
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_full()
+                                    .text_xs()
+                                    .bg(theme.secondary)
+                                    .text_color(theme.secondary_foreground)
+                                    .child("Loading older messages…")
+                                    .into_any_element(),
+                            )
+                        } else {
+                            self.older_errors.get(&channel.id).map(|error| {
+                                let id = channel.id.clone();
+                                h_flex()
+                                    .gap_2()
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_full()
+                                    .text_xs()
+                                    .bg(theme.secondary)
+                                    .text_color(colors.danger)
+                                    .child(error.clone())
+                                    .child(
+                                        Button::new("retry-older")
+                                            .xsmall()
+                                            .label("Retry")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.retry_older(id.clone(), cx)
+                                            })),
+                                    )
+                                    .into_any_element()
+                            })
+                        };
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                MessageScroller::new(
+                                    SharedString::from(format!("messages-{}", channel.id)),
+                                    pane.scroller.clone(),
+                                    move |ix, _window, _cx| render_row(&rows[ix], colors),
+                                )
+                                .flex_1(),
+                            )
+                            .when_some(older, |el, pill| {
+                                el.child(
+                                    div()
+                                        .absolute()
+                                        .top_2()
+                                        .left_0()
+                                        .right_0()
+                                        .flex()
+                                        .justify_center()
+                                        .child(pill),
+                                )
+                            })
+                            .into_any_element()
                     }
                 } else if let Some(error) = self.load_errors.get(&channel.id) {
                     let id = channel.id.clone();
@@ -806,7 +1000,14 @@ fn rail_button(
 }
 
 impl Render for ChatView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // After layout, check whether the open channel is scrolled to its top
+        // (or too short to scroll) and has more history to load.
+        if let Some(channel) = self.current_channel().map(|c| c.id) {
+            cx.defer_in(window, move |this, _, cx| {
+                this.maybe_load_older(&channel, cx)
+            });
+        }
         let theme = cx.theme();
         h_flex()
             .size_full()

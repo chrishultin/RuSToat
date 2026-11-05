@@ -305,3 +305,112 @@ All passed on 2026-11-04 with the user's real account:
 
 ### Manual Validation
 The user opened channels and a DM in the running app and confirmed "Looks right": the content and order match the web app.
+
+## Chunk 6: Live messages and older-history paging
+
+### Changes Made
+- `src/api/events.rs`: `ServerEvent` gains these variants, all with `revolt-models` payloads, decoded through a shared `decode_as` helper that turns unparseable events into `Unknown` and logs them:
+  - `Message(Box<Message>)`
+  - `MessageUpdate { id, channel, data: Box<PartialMessage>, clear: Vec<FieldsMessage> }`
+  - `MessageDelete { id, channel }`
+  - `BulkMessageDelete { channel, ids }`
+
+  The session loop forwards them to the UI. 2 new unit tests (a Bulk frame with all four events, and a malformed message).
+- `src/store.rs`:
+  - `apply_message`: binary-search insert or replace by ULID in a loaded channel. It also caches the embedded user and member, and updates the channel's `last_message_id`, so Home reorders even for unloaded DMs.
+  - `apply_update`: merges with the backend's generated `Message::apply_options(PartialMessage)`, then clears `FieldsMessage::Pinned` if listed.
+  - `apply_delete(ids)`.
+  - `prepend_page`: merges, sorts and dedups, and sets `exhausted` on a short page.
+  - Also: `oldest_message_id`, `clear_histories`, and a shared `absorb_page`.
+  - `diff_rows(old, new) -> Vec<RowOp>`: a minimal diff over rows keyed by message ID. It produces `Prepend` (keeps the anchor), `Append`, `Remove`, `Insert`, `Remeasure` (same row with new content, or a grouping change) and `Reset`. A surviving old row anchors the diff, so deleting the oldest row doesn't force a reset.
+- `src/ui/chat.rs`:
+  - Live events are applied to the store, then `sync_pane` turns `diff_rows` into `MessageScrollerState` calls (`prepend`, `append`, `splice`, `remeasure_items`, `reset`). This replaces chunk 5's `rebuild_pane`. A new message keeps the view at the bottom (tail-following), an edit remeasures one row, and an older page prepends with the anchor kept.
+  - Paging:
+    - Each pane observes its scroller.
+    - Each render defers a `maybe_load_older` check, which also covers content too short to scroll.
+    - If the view is at the top (`logical_scroll_top().item_ix == 0`) and history isn't exhausted, it fetches `before = oldest`.
+    - A "Loading older messages…" pill shows at the top while loading, or the error with **Retry**. A failure stops automatic retries until Retry is clicked.
+  - On a **reconnect** `Ready`, all loaded history, panes and in-flight loads are dropped and the current channel reloads. This avoids gaps from events missed while offline.
+  - Debug logs record each live event applied.
+- `tests/store_live.rs` (new): 12 tests.
+  - Store behaviour: live append and dedup, unloaded-channel Home reorder, partial update merge with Pinned clear, single and bulk delete, older-page merge with overlap.
+  - `diff_rows` (append, prepend with start marker, edit, middle delete, oldest-row delete, mixed changes, no overlap): every case is replayed on a simulated list, which must reproduce the new rows exactly, with untouched rows unchanged.
+- `README.md`: feature list updated, plus the third opt-in check (`live_events`).
+
+### Divergences
+- **Minor: reconnect reloads history instead of showing a note** (plan Assumption 10). Reloading the open channel after a reconnect means no gaps, which is better than a visible "reconnected" note over possibly missing messages.
+- **Minor: `BulkMessageDelete` handled too.**
+- **Minor: the start-of-channel marker** already came from chunk 5. Paging only reaches it when a page comes back short.
+
+### Verification Performed
+- `cargo test`: 81 passed, 0 failed, 3 ignored:
+  - 27 unit tests
+  - 9 `api_login`
+  - 7 contract
+  - 10 `session_restore`
+  - 8 `store_ready`
+  - 8 `store_history`
+  - 12 `store_live`
+- `cargo test -- --ignored`: all 3 opt-in checks passed (live API drift, live websocket handshake, real Keychain round trip with no leftover item).
+- `cargo clippy --all-targets -- -D warnings`: clean. `cargo fmt --check`: clean.
+- Live session against the user's account, about 14 minutes (debug log):
+  - Many `live: new message` events, including in unloaded channels, which only reorder Home.
+  - In an open conversation, the user sent a message, edited it, then deleted it, and all three were applied to the loaded history: `live: new message …ZVH0…`, `live: edit …ZVH0…` and `live: delete …ZVH0…` (02:18:16, 02:18:25, 02:18:49).
+  - A **real server-side disconnect** (`Connection reset by peer`) at 02:13:56. The app retried after 1 s, authenticated, received `Ready`, logged `reconnected: reloading message history`, and reloaded the open channel (20 messages).
+  - Keepalive: 35 pongs at 20 s intervals, with no warnings or errors for the whole session.
+  - Paging in a busy channel: the first page loaded 50, then each scroll to the top fetched `before=<oldest>`, with totals going 100, 150, 200, 250, 300. Each step added exactly 50 (no duplicates), and each cursor was strictly older. Fetching stopped when the user stopped scrolling (nothing more in the following 12 s), so it isn't a runaway chain. The first older page came about 1 s after opening. That's consistent with the user scrolling straight away, but with second-level log timestamps one early prefetch at open can't be ruled out. Either way it would be a single page.
+
+### Manual Validation
+- The user confirmed live new, edit and delete work, and that paging works.
+- The user didn't page all the way to the start of the busy channel. The end-of-history marker is covered by `older_page_merges_without_duplicates` and shown live for short channels (chunk 5).
+
+## Summary
+
+_Completed: 2026-11-04_
+
+### Chunks Completed
+1. Project scaffold and window shell: `5e60bc3`
+2. Stoat REST client and login screen with 2FA, on `revolt-models`/`revolt-result`: `d1f0032`
+3. Keychain session persistence and logout: `a0a4bad`
+4. Events websocket and sidebar (servers with icons, channels, DMs): `98415ec`
+5. Channel message history view: `f1bfa2d`
+6. Live messages and older-history paging: this commit
+
+### Divergences
+- **User-directed:** reuse the Stoat backend's crates. `revolt-models` and `revolt-result` (MIT) supply all wire types and errors, including `Message::apply_options` for edits and `OptionsQueryMessages` for queries. The AGPL `revolt-database` is avoided, and the client has its own small `ServerEvent` enum.
+- **Toolchain:** Rust 1.99.1 pinned in `rust-toolchain.toml`, because `gpui-pre` needs `std::hint::cold_path`. The crate is split into a library and a thin binary.
+- **Libraries:**
+  - `keyring` 4.2 instead of 3.x.
+  - The Keychain account is the API URL, so tokens are kept per instance.
+  - Log Out has no shortcut (⇧⌘Q belongs to macOS).
+  - The local token is cleared before calling the server on logout.
+- **Bug fixed in live testing:** the websocket handshake got a 400 because the events URL had no `/` path.
+- **Fixes found along the way:**
+  - The asset source wasn't registered, so icons were blank.
+  - Server icons were added at the user's request, using a `reqwest`-backed GPUI `HttpClient`.
+  - Voice-capable channels are listed, since Stoat 0.16 has no voice channel type.
+- **Message list:** gpui-component's `MessageScroller`, plus the `diff_rows` scroller diff.
+- **Display:** the plain username is the final author fallback, with masquerade and webhook names ahead of it. Mentions are resolved and same-author messages are grouped.
+- **Reconnect** reloads history instead of showing a note.
+- **Tried and backed out:** an offscreen-snapshot debug feature, because `gpui-kit/test-support` pulls in `gpui-fast` with exact version pins that conflict with the lockfile.
+
+### Definition of Done
+- [x] **Build:** `cargo build` succeeds with `gpui-kit = "=0.9.0"`, and `cargo run` opens the app.
+- [x] **Tests:** `cargo test && cargo clippy --all-targets -- -D warnings` passes (81 tests, 0 warnings).
+- [x] **Login with 2FA:** email/password login works against `api.stoat.chat` (user-confirmed). An MFA response leads to the code prompt, and TOTP and recovery codes both complete login. Both are covered by `wiremock` tests. The user confirmed login works but didn't say separately that they used the 2FA step.
+- [x] **Login errors:** invalid credentials show "Incorrect email or password." inline. This is covered by a `wiremock` test, but it wasn't observed live.
+- [x] **Session persistence:**
+  - The token is saved to the Keychain on login and reused on relaunch (verified live).
+  - A 401 at startup clears it; a network failure at startup keeps it. Both are `session_restore` tests.
+- [x] **Logout:** Log out calls `POST /auth/session/logout`, deletes the Keychain entry and returns to the login screen. Verified live: the log said `logged out`, the item was gone, and the user confirmed the session was gone in Stoat.
+- [x] **Sidebar:** lists every joined server with its text channels grouped by category, plus DMs, groups and Saved Notes, all from `Ready`. User-confirmed against the web app, including server order and icons.
+- [x] **Keepalive:** the websocket pings every 20 s. It stayed connected through a 14-minute session, and when the server reset the connection it reconnected with backoff after 1 s.
+- [x] **History view:** opening a channel shows its latest 50 messages oldest to newest, with author name, local timestamp and plain text (user-confirmed). System messages and attachments have readable placeholders (covered by tests).
+- [x] **Live updates:** `Message`, `MessageUpdate` and `MessageDelete` update loaded channels. The user confirmed this, and the log shows the events applied within a second of arriving.
+- [x] **Paging:** scrolling to the top loads older pages of 50 without duplicates (verified live up to 300 messages). The start-of-channel marker at the end of history is covered by tests and shown live for short channels.
+- [x] **README:** documents running the app, `STOAT_API_URL`, the expected Keychain prompt during development, and the test commands.
+
+### Remaining Manual Steps
+None required. Optional:
+- run the plan's Wi-Fi off/on manual test (a real server-side disconnect was already handled)
+- page a busy channel all the way to its start, to see the marker after paging

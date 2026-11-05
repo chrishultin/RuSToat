@@ -2,7 +2,13 @@
 
 A proof-of-concept native desktop client for [Stoat](https://stoat.chat) (formerly Revolt), written in Rust with [GPUI](https://gpui.rs) via [`gpui-kit`](https://gpui-kit.com).
 
-The goal is to find out whether GPUI is a good foundation for a Stoat client. The POC covers logging in (including 2FA), browsing servers, channels and DMs, and reading text chats with live updates. The plan and progress are in [`docs/plans/`](docs/plans/).
+The goal is to find out whether GPUI is a good foundation for a Stoat client. The POC covers:
+
+- logging in, including 2FA
+- browsing servers (with their icons), channels and DMs
+- reading text chats: live new, edited and deleted messages, and older history that loads as you scroll up
+
+The plan and progress are in [`docs/plans/`](docs/plans/).
 
 ## Running
 
@@ -53,9 +59,10 @@ They're pinned to the live API's version (`=0.16.2`), so bump all `revolt-*` cra
 cargo test && cargo clippy --all-targets -- -D warnings
 ```
 
-The tests use a mock Stoat API (`wiremock`) and an in-memory token store, so they need no network and never touch your Keychain. There are two opt-in checks:
+The tests use a mock Stoat API (`wiremock`) and an in-memory token store, so they need no network and never touch your Keychain. There are three opt-in checks:
 
 ```bash
-cargo test --test api_login -- --ignored   # live API: is the server still on the pinned 0.16.x?
-cargo test --lib -- --ignored              # real Keychain: writes and deletes a throwaway test item
+cargo test --test api_login -- --ignored    # live API: is the server still on the pinned 0.16.x?
+cargo test --test live_events -- --ignored  # live events service: does the websocket handshake succeed?
+cargo test --lib -- --ignored               # real Keychain: writes and deletes a throwaway test item
 ```

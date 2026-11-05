@@ -6,7 +6,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::api::events::Ready;
 use crate::api::models::{
-    BulkMessageResponse, Channel, File, Member, Message, Server, SystemMessage, User,
+    BulkMessageResponse, Channel, FieldsMessage, File, Member, Message, PartialMessage, Server,
+    SystemMessage, User,
 };
 
 /// One entry in the channel list.
@@ -141,7 +142,36 @@ impl ChatStore {
     /// replacing what was there. The authors that come with it are cached too.
     /// `limit` is what was requested, so a short page means "no more history".
     pub fn set_history(&mut self, channel: &str, page: BulkMessageResponse, limit: usize) {
-        let (mut messages, users, members) = match page {
+        let mut messages = self.absorb_page(page);
+        let exhausted = messages.len() < limit;
+        sort_messages(&mut messages);
+        self.histories.insert(
+            channel.to_string(),
+            History {
+                messages,
+                exhausted,
+            },
+        );
+    }
+
+    /// Merge a page of older messages (fetched with `before`) into a loaded
+    /// channel. Returns false if the channel isn't loaded.
+    pub fn prepend_page(&mut self, channel: &str, page: BulkMessageResponse, limit: usize) -> bool {
+        let older = self.absorb_page(page);
+        let Some(history) = self.histories.get_mut(channel) else {
+            return false;
+        };
+        if older.len() < limit {
+            history.exhausted = true;
+        }
+        history.messages.extend(older);
+        sort_messages(&mut history.messages);
+        true
+    }
+
+    /// Cache a page's authors and return its messages.
+    fn absorb_page(&mut self, page: BulkMessageResponse) -> Vec<Message> {
+        let (messages, users, members) = match page {
             BulkMessageResponse::JustMessages(messages) => (messages, Vec::new(), Vec::new()),
             BulkMessageResponse::MessagesAndUsers {
                 messages,
@@ -156,22 +186,106 @@ impl ChatStore {
             self.members
                 .insert((member.id.server.clone(), member.id.user.clone()), member);
         }
-        let exhausted = messages.len() < limit;
-        // The API returns newest first. ULIDs sort by time, so sorting by ID
-        // gives oldest-first display order.
-        messages.sort_by(|a, b| a.id.cmp(&b.id));
-        messages.dedup_by(|a, b| a.id == b.id);
-        self.histories.insert(
-            channel.to_string(),
-            History {
-                messages,
-                exhausted,
-            },
-        );
+        messages
     }
 
     pub fn history(&self, channel: &str) -> Option<&History> {
         self.histories.get(channel)
+    }
+
+    /// The oldest loaded message, for fetching the page before it.
+    pub fn oldest_message_id(&self, channel: &str) -> Option<&str> {
+        self.histories
+            .get(channel)?
+            .messages
+            .first()
+            .map(|m| m.id.as_str())
+    }
+
+    /// Forget all loaded history (after a reconnect, to avoid gaps).
+    pub fn clear_histories(&mut self) {
+        self.histories.clear();
+    }
+
+    /// A live message. It's added to its channel's history if that's loaded,
+    /// and keeps the channel's "last message" fresh for Home ordering either
+    /// way. Returns true if a loaded history changed.
+    pub fn apply_message(&mut self, message: Message) -> bool {
+        self.bump_last_message(&message.channel, &message.id);
+        if let Some(user) = &message.user {
+            self.users
+                .entry(user.id.clone())
+                .or_insert_with(|| user.clone());
+        }
+        if let Some(member) = &message.member {
+            self.members
+                .entry((member.id.server.clone(), member.id.user.clone()))
+                .or_insert_with(|| member.clone());
+        }
+        let Some(history) = self.histories.get_mut(&message.channel) else {
+            return false;
+        };
+        match history
+            .messages
+            .binary_search_by(|m| m.id.as_str().cmp(&message.id))
+        {
+            Ok(ix) => history.messages[ix] = message,
+            Err(ix) => history.messages.insert(ix, message),
+        }
+        true
+    }
+
+    /// An edit, merged with the backend's own `Message::apply_options`.
+    /// Returns true if a loaded message changed.
+    pub fn apply_update(
+        &mut self,
+        channel: &str,
+        id: &str,
+        data: PartialMessage,
+        clear: &[FieldsMessage],
+    ) -> bool {
+        let Some(message) = self
+            .histories
+            .get_mut(channel)
+            .and_then(|h| h.messages.iter_mut().find(|m| m.id == id))
+        else {
+            return false;
+        };
+        message.apply_options(data);
+        for field in clear {
+            match field {
+                FieldsMessage::Pinned => message.pinned = None,
+            }
+        }
+        true
+    }
+
+    /// Remove messages from a loaded channel. Returns true if any were removed.
+    pub fn apply_delete(&mut self, channel: &str, ids: &[String]) -> bool {
+        let Some(history) = self.histories.get_mut(channel) else {
+            return false;
+        };
+        let before = history.messages.len();
+        history.messages.retain(|m| !ids.contains(&m.id));
+        history.messages.len() != before
+    }
+
+    fn bump_last_message(&mut self, channel: &str, id: &str) {
+        if let Some(
+            Channel::DirectMessage {
+                last_message_id, ..
+            }
+            | Channel::Group {
+                last_message_id, ..
+            }
+            | Channel::TextChannel {
+                last_message_id, ..
+            },
+        ) = self.channels.get_mut(channel)
+            && last_message_id.as_deref().is_none_or(|last| last < id)
+        {
+            *last_message_id = Some(id.to_string());
+        }
     }
 
     /// Who to show as a message's author. In order: a masquerade name
@@ -463,6 +577,95 @@ impl ChatStore {
             kind,
         })
     }
+}
+
+/// How to turn a message list's old rows into its new ones without losing
+/// the reader's place. Indexes are in the list's coordinates at the moment
+/// each operation is applied, in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowOp {
+    /// Start over with this many rows (and jump to the newest).
+    Reset(usize),
+    /// Rows added above the old first row; the scroll anchor is kept.
+    Prepend(usize),
+    /// Rows added after the old last row.
+    Append(usize),
+    Remove {
+        at: usize,
+        count: usize,
+    },
+    Insert {
+        at: usize,
+        count: usize,
+    },
+    /// Same row, new content (an edit, or a grouping change): re-measure it.
+    Remeasure {
+        at: usize,
+    },
+}
+
+fn row_key(row: &TimelineRow) -> &str {
+    match row {
+        TimelineRow::StartOfChannel { .. } => "",
+        TimelineRow::Message(message) => &message.id,
+    }
+}
+
+/// Diff two timelines (both sorted oldest first) into scroller operations.
+pub fn diff_rows(old: &[TimelineRow], new: &[TimelineRow]) -> Vec<RowOp> {
+    let new_keys: HashSet<&str> = new.iter().map(row_key).collect();
+    // The first old row that survives anchors the diff.
+    let Some(first_kept) = old.iter().position(|r| new_keys.contains(row_key(r))) else {
+        return vec![RowOp::Reset(new.len())];
+    };
+    let anchor = new
+        .iter()
+        .position(|r| row_key(r) == row_key(&old[first_kept]))
+        .expect("key is in new");
+
+    let mut ops = Vec::new();
+    if first_kept > 0 {
+        ops.push(RowOp::Remove {
+            at: 0,
+            count: first_kept,
+        });
+    }
+    if anchor > 0 {
+        ops.push(RowOp::Prepend(anchor));
+    }
+    let (mut i, mut j) = (first_kept, anchor);
+    while i < old.len() && j < new.len() {
+        let (old_key, new_key) = (row_key(&old[i]), row_key(&new[j]));
+        if old_key == new_key {
+            if old[i] != new[j] {
+                ops.push(RowOp::Remeasure { at: j });
+            }
+            i += 1;
+            j += 1;
+        } else if !new_keys.contains(old_key) {
+            ops.push(RowOp::Remove { at: j, count: 1 });
+            i += 1;
+        } else {
+            ops.push(RowOp::Insert { at: j, count: 1 });
+            j += 1;
+        }
+    }
+    if i < old.len() {
+        ops.push(RowOp::Remove {
+            at: j,
+            count: old.len() - i,
+        });
+    }
+    if j < new.len() {
+        ops.push(RowOp::Append(new.len() - j));
+    }
+    ops
+}
+
+/// Oldest first, no duplicates. ULIDs sort by time, so ID order is time order.
+fn sort_messages(messages: &mut Vec<Message>) {
+    messages.sort_by(|a, b| a.id.cmp(&b.id));
+    messages.dedup_by(|a, b| a.id == b.id);
 }
 
 /// A user's display name, falling back to their username.

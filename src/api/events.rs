@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
-use revolt_models::v0::{Channel, Member, Server, User};
+use revolt_models::v0::{Channel, FieldsMessage, Member, Message, PartialMessage, Server, User};
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -44,6 +45,23 @@ pub enum ServerEvent {
     Pong,
     Error(revolt_result::Error),
     Logout,
+    /// A new message in any channel the user can see.
+    Message(Box<Message>),
+    /// An edit: merge `data` into the message, then clear the `clear` fields.
+    MessageUpdate {
+        id: String,
+        channel: String,
+        data: Box<PartialMessage>,
+        clear: Vec<FieldsMessage>,
+    },
+    MessageDelete {
+        id: String,
+        channel: String,
+    },
+    BulkMessageDelete {
+        channel: String,
+        ids: Vec<String>,
+    },
     /// An event type this client doesn't handle (yet). Holds the `type` tag.
     Unknown(String),
 }
@@ -98,7 +116,69 @@ fn decode(mut value: Value, out: &mut Vec<ServerEvent>) {
             _ => out.push(ServerEvent::Unknown("Error (unrecognised body)".into())),
         },
         "Ready" => out.push(ServerEvent::Ready(Box::new(Ready::from_value(value)))),
+        "Message" => out.push(decode_as(value, &kind, |m: Message| {
+            ServerEvent::Message(Box::new(m))
+        })),
+        "MessageUpdate" => {
+            #[derive(Deserialize)]
+            struct Update {
+                id: String,
+                channel: String,
+                data: PartialMessage,
+                #[serde(default)]
+                clear: Vec<FieldsMessage>,
+            }
+            out.push(decode_as(value, &kind, |u: Update| {
+                ServerEvent::MessageUpdate {
+                    id: u.id,
+                    channel: u.channel,
+                    data: Box::new(u.data),
+                    clear: u.clear,
+                }
+            }))
+        }
+        "MessageDelete" => {
+            #[derive(Deserialize)]
+            struct Delete {
+                id: String,
+                channel: String,
+            }
+            out.push(decode_as(value, &kind, |d: Delete| {
+                ServerEvent::MessageDelete {
+                    id: d.id,
+                    channel: d.channel,
+                }
+            }))
+        }
+        "BulkMessageDelete" => {
+            #[derive(Deserialize)]
+            struct BulkDelete {
+                channel: String,
+                ids: Vec<String>,
+            }
+            out.push(decode_as(value, &kind, |d: BulkDelete| {
+                ServerEvent::BulkMessageDelete {
+                    channel: d.channel,
+                    ids: d.ids,
+                }
+            }))
+        }
         other => out.push(ServerEvent::Unknown(other.to_string())),
+    }
+}
+
+/// Decode `value` as `T` and wrap it, or report it as an unparseable `kind`.
+fn decode_as<T: DeserializeOwned>(
+    value: Value,
+    kind: &str,
+    wrap: impl FnOnce(T) -> ServerEvent,
+) -> ServerEvent {
+    match serde_json::from_value(value) {
+        Ok(parsed) => wrap(parsed),
+        Err(err) => {
+            log::warn!("ignoring {kind} event that didn't parse: {err}");
+            ServerEvent::Unknown(format!("{kind} (unparseable)"))
+        }
     }
 }
 
@@ -386,6 +466,12 @@ async fn session(
                             log::trace!("events: ignoring {kind}");
                             None
                         }
+                        message_event @ (ServerEvent::Message(_)
+                        | ServerEvent::MessageUpdate { .. }
+                        | ServerEvent::MessageDelete { .. }
+                        | ServerEvent::BulkMessageDelete { .. }) => {
+                            Some(ConnectionEvent::Event(message_event))
+                        }
                     };
                     if let Some(event) = forward
                         && tx.unbounded_send(event).is_err()
@@ -449,6 +535,37 @@ mod tests {
             events.as_slice(),
             [ServerEvent::Error(err)] if matches!(err.error_type, revolt_result::ErrorType::InvalidSession)
         ));
+    }
+
+    #[test]
+    fn message_events_decode() {
+        let events = parse_frame(
+            r#"{"type":"Bulk","v":[
+                {"type":"Message","_id":"01JC0000000000000000000010","channel":"c","author":"u","content":"hi"},
+                {"type":"MessageUpdate","id":"01JC0000000000000000000010","channel":"c",
+                 "data":{"content":"hi (edited)","edited":"2026-11-04T12:00:00.000Z"},"clear":["Pinned"]},
+                {"type":"MessageDelete","id":"01JC0000000000000000000010","channel":"c"},
+                {"type":"BulkMessageDelete","channel":"c","ids":["a","b"]}
+            ]}"#,
+        );
+        assert!(
+            matches!(&events[0], ServerEvent::Message(m) if m.content.as_deref() == Some("hi"))
+        );
+        assert!(matches!(
+            &events[1],
+            ServerEvent::MessageUpdate { data, clear, .. }
+                if data.content.as_deref() == Some("hi (edited)") && clear.len() == 1
+        ));
+        assert!(matches!(&events[2], ServerEvent::MessageDelete { channel, .. } if channel == "c"));
+        assert!(matches!(&events[3], ServerEvent::BulkMessageDelete { ids, .. } if ids.len() == 2));
+    }
+
+    #[test]
+    fn malformed_message_events_become_unknown() {
+        let events = parse_frame(r#"{"type":"Message","content":"no id or channel"}"#);
+        assert!(
+            matches!(events.as_slice(), [ServerEvent::Unknown(kind)] if kind == "Message (unparseable)")
+        );
     }
 
     #[test]
