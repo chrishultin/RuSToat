@@ -27,6 +27,9 @@ pub enum ComposerEvent {
     Edit { id: String, content: String },
     /// Up in an empty box: edit the user's last message.
     EditLast,
+    /// The user typed (or cleared the box): `empty` if nothing's left. Not
+    /// sent while editing, which isn't typing a message.
+    Input { empty: bool },
 }
 
 /// Shown when an edit would leave the message empty (Stoat needs at least
@@ -69,6 +72,10 @@ impl Composer {
                 // The character count follows the text.
                 InputEvent::Change => {
                     this.hint = None;
+                    if this.editing.editing().is_none() {
+                        let empty = this.input.read(cx).value().trim().is_empty();
+                        cx.emit(ComposerEvent::Input { empty });
+                    }
                     cx.notify()
                 }
                 _ => {}

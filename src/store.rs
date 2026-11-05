@@ -1664,6 +1664,17 @@ impl ChatStore {
         self.users.get(id).map(|u| display_name(u).to_string())
     }
 
+    /// What `user` is called in `channel`: their nickname in its server, else
+    /// their display name (for "Ada is typing…").
+    pub fn name_in(&self, channel: &str, user: &str) -> String {
+        self.server_of(channel)
+            .and_then(|server| self.member(server, user))
+            .and_then(|m| m.nickname.clone())
+            .filter(|n| !n.trim().is_empty())
+            .or_else(|| self.user_name(user))
+            .unwrap_or_else(|| "Someone".into())
+    }
+
     /// The server a channel belongs to, if it's a server channel.
     fn server_of(&self, channel: &str) -> Option<&str> {
         match self.channels.get(channel)? {

@@ -21,4 +21,5 @@ pub mod runtime;
 pub mod session;
 pub mod store;
 pub mod time;
+pub mod typing;
 pub mod ui;

@@ -241,3 +241,48 @@ The user ran the chunk 4 build. The first launch waited on a macOS Keychain prom
 
 ### Manual Validation
 The user deleted two messages: one through the dialog and one with Shift (log: `deleted 01M6PCP7…`, `deleted 01M6PCBG…`). They confirmed it works ("beautiful").
+
+## Chunk 6: Typing indicators
+
+### Changes Made
+- `src/api/events.rs`:
+  - `Connection` holds an `outbound` sender (`mpsc::UnboundedSender<String>`), with `begin_typing(channel)` and `end_typing(channel)`. `connect` passes the receiver to `run`, which lends it to each `session`.
+  - The session's `select!` gained an `outbound.next()` arm. It sends the frame only once authenticated, and treats a closed queue as `ClientGone`. At the start of each session, the queue is drained with `try_recv`, so frames queued while disconnected are dropped.
+  - Added `begin_typing_frame` and `end_typing_frame`.
+  - New `ServerEvent::ChannelStartTyping { channel, user }` and `ChannelStopTyping`, decoded from `id`/`user` and forwarded to the UI.
+  - The old "unknown event" unit test used `ChannelStartTyping` as its example, so it now uses `ServerMemberJoin`.
+- `src/typing.rs` (new, pure):
+  - Constants: `EXPIRE_AFTER` 5 s, `RESEND_EVERY` 3 s, `IDLE_AFTER` 5 s.
+  - `TypingState`: `new(me)`, `start` (ignores `me`, refreshes the expiry and keeps start order), `stop`, `typists(channel, now)`, `next_expiry`, `prune`, `clear`.
+  - `OutgoingTyping`: `on_input(channel, empty, now)` returns `Begin` throttled to 3 s, `End` when cleared, and `End` then `Begin` when the channel changes. Also `stop()` for send, switch or edit, `on_tick(now)` for idle, and `deadline()`.
+  - `typing_label(names)`.
+- `src/ui/composer.rs`: emits `ComposerEvent::Input { empty }` on text changes, except while editing.
+- `src/store.rs`: `name_in(channel, user)` gives the server nickname, else the display name, else "Someone".
+- `src/ui/chat.rs`:
+  - New fields `typing`, `outgoing_typing` and `typing_tick`. `_connection` was renamed to `connection`.
+  - `send_typing(signals)` sends the frames and reschedules. `schedule_typing_tick` sleeps until the nearest typist expiry or the user's idle deadline, then prunes, sends any idle `End`, and redraws.
+  - Typing ends on send (`send_message`), channel switch (`sync_composer`) and starting an edit (`start_edit`).
+  - Incoming `ChannelStartTyping` and `ChannelStopTyping` update `typing`. A `Message` from a typist stops them, and `Disconnected` clears everyone.
+  - `render_typing_line` draws a 16 px line between the list and the message box, always present and empty when nobody's typing.
+- `src/lib.rs`: registers `typing`.
+- Tests: `tests/typing.rs` (new), plus 2 unit tests in `events.rs`.
+
+### Divergences
+- **Ending typing when an edit starts** was added (not in the plan's list of End triggers). Editing isn't typing a message, and the composer reports no input while editing.
+- **The typing timing values (the plan's Open Question)** were confirmed live: 3 s resend, 5 s expiry, 5 s idle. In the log, `Begin` went out on typing and `End` after sending or going idle.
+
+### Verification Performed
+- `cargo test --test typing`: 7 passed.
+  - Start and stop, kept per channel.
+  - Expiry after 5 s, and a refresh extends it while keeping order.
+  - `next_expiry`, `prune` and `clear`.
+  - Our own user ignored.
+  - Labels for 0, 1, 2 and 3 people.
+  - `Begin` throttled to once per 3 s.
+  - `End` on send (only once), on clear, on channel switch (`End` then `Begin`), and on 5 s idle, with `deadline`.
+- `cargo test --lib events`: 15 passed. New: `typing_frames_match_the_protocol` (byte for byte `{"type":"BeginTyping","channel":"ch"}`, plus `EndTyping`) and `typing_events_decode_with_the_channel_as_id`.
+- `cargo test --test live_events -- --ignored`: `live_events_handshake_succeeds` passed with the outbound queue.
+- Full suite: `cargo test`, 268 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings`: clean.
+
+### Manual Validation
+The user typed in both clients and confirmed the indicators appear and clear both ways ("lgtm"). The log shows `typing: Begin(…)` at 17:58:46 and `typing: End(…)` at 17:58:52.

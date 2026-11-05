@@ -113,6 +113,16 @@ pub enum ServerEvent {
     EmojiDelete {
         id: String,
     },
+    /// `user` started typing in `channel` (again: it's resent while they type).
+    ChannelStartTyping {
+        channel: String,
+        user: String,
+    },
+    /// `user` stopped typing in `channel`.
+    ChannelStopTyping {
+        channel: String,
+        user: String,
+    },
     /// A channel the user can now see: a DM or group someone just opened with
     /// them, or a new server channel. It comes before the channel's first
     /// message.
@@ -329,6 +339,28 @@ fn decode(mut value: Value, out: &mut Vec<ServerEvent>) {
                 ServerEvent::EmojiDelete { id: d.id }
             }))
         }
+        // `id` is the channel.
+        "ChannelStartTyping" | "ChannelStopTyping" => {
+            #[derive(Deserialize)]
+            struct Typing {
+                id: String,
+                user: String,
+            }
+            let start = kind == "ChannelStartTyping";
+            out.push(decode_as(value, &kind, |t: Typing| {
+                if start {
+                    ServerEvent::ChannelStartTyping {
+                        channel: t.id,
+                        user: t.user,
+                    }
+                } else {
+                    ServerEvent::ChannelStopTyping {
+                        channel: t.id,
+                        user: t.user,
+                    }
+                }
+            }))
+        }
         "ChannelCreate" => out.push(decode_as(value, &kind, |c: Channel| {
             ServerEvent::ChannelCreate(Box::new(c))
         })),
@@ -452,6 +484,16 @@ pub fn authenticate_frame(token: &str) -> String {
     json!({ "type": "Authenticate", "token": token }).to_string()
 }
 
+/// `{"type":"BeginTyping","channel":…}`: the user is typing in `channel`.
+pub fn begin_typing_frame(channel: &str) -> String {
+    json!({ "type": "BeginTyping", "channel": channel }).to_string()
+}
+
+/// `{"type":"EndTyping","channel":…}`: the user stopped typing in `channel`.
+pub fn end_typing_frame(channel: &str) -> String {
+    json!({ "type": "EndTyping", "channel": channel }).to_string()
+}
+
 /// `{"type":"Ping","data":n}`.
 pub fn ping_frame(n: u64) -> String {
     json!({ "type": "Ping", "data": n }).to_string()
@@ -488,6 +530,26 @@ pub enum ConnectionEvent {
 /// A running events connection. Dropping it closes the connection.
 pub struct Connection {
     abort: tokio::task::AbortHandle,
+    /// Frames for the server. Only sent while connected: anything queued
+    /// while disconnected is dropped (typing isn't worth replaying).
+    outbound: mpsc::UnboundedSender<String>,
+}
+
+impl Connection {
+    /// Tell the server the user is typing in `channel`.
+    pub fn begin_typing(&self, channel: &str) {
+        self.send(begin_typing_frame(channel));
+    }
+
+    /// Tell the server the user stopped typing in `channel`.
+    pub fn end_typing(&self, channel: &str) {
+        self.send(end_typing_frame(channel));
+    }
+
+    fn send(&self, frame: String) {
+        // The task only stops when this `Connection` is dropped.
+        let _ = self.outbound.unbounded_send(frame);
+    }
 }
 
 impl Drop for Connection {
@@ -502,10 +564,12 @@ impl Drop for Connection {
 /// executor can poll.
 pub fn connect(client: StoatClient) -> (Connection, mpsc::UnboundedReceiver<ConnectionEvent>) {
     let (tx, rx) = mpsc::unbounded();
-    let handle = runtime().spawn(run(client, tx));
+    let (outbound, outbound_rx) = mpsc::unbounded();
+    let handle = runtime().spawn(run(client, tx, outbound_rx));
     (
         Connection {
             abort: handle.abort_handle(),
+            outbound,
         },
         rx,
     )
@@ -520,7 +584,11 @@ enum SessionEnd {
     Dropped { reason: String, authenticated: bool },
 }
 
-async fn run(client: StoatClient, tx: mpsc::UnboundedSender<ConnectionEvent>) {
+async fn run(
+    client: StoatClient,
+    tx: mpsc::UnboundedSender<ConnectionEvent>,
+    mut outbound: mpsc::UnboundedReceiver<String>,
+) {
     let Some(token) = client.token().map(str::to_string) else {
         let _ = tx.unbounded_send(ConnectionEvent::SessionRejected);
         return;
@@ -538,7 +606,7 @@ async fn run(client: StoatClient, tx: mpsc::UnboundedSender<ConnectionEvent>) {
         }
 
         let end = match client.root_config().await {
-            Ok(root) => session(&events_url(&root.ws), &token, &tx).await,
+            Ok(root) => session(&events_url(&root.ws), &token, &tx, &mut outbound).await,
             Err(ApiError::Unauthorized) => SessionEnd::Rejected,
             Err(err) => SessionEnd::Dropped {
                 reason: err.to_string(),
@@ -583,6 +651,7 @@ async fn session(
     url: &str,
     token: &str,
     tx: &mpsc::UnboundedSender<ConnectionEvent>,
+    outbound: &mut mpsc::UnboundedReceiver<String>,
 ) -> SessionEnd {
     let dropped = |reason: String, authenticated| SessionEnd::Dropped {
         reason,
@@ -608,9 +677,24 @@ async fn session(
     pings.tick().await; // The first tick fires immediately; skip it.
     let mut ping_count: u64 = 0;
     let mut last_pong = Instant::now();
+    // Whatever was queued while disconnected is stale by now.
+    while outbound.try_recv().is_ok() {}
 
     loop {
         tokio::select! {
+            frame = outbound.next() => {
+                let Some(frame) = frame else {
+                    return SessionEnd::ClientGone;
+                };
+                // Not authenticated yet: the server would reject it, and it's
+                // stale by the time we are.
+                if !authenticated {
+                    continue;
+                }
+                if let Err(err) = sink.send(WsMessage::Text(frame.into())).await {
+                    return dropped(format!("couldn't send: {err}"), authenticated);
+                }
+            }
             _ = pings.tick() => {
                 if last_pong.elapsed() > PONG_TIMEOUT {
                     return dropped("server stopped answering pings".into(), authenticated);
@@ -685,6 +769,8 @@ async fn session(
                         | ServerEvent::ChannelAck { .. }
                         | ServerEvent::ChannelCreate(_)
                         | ServerEvent::ChannelUpdate { .. }
+                        | ServerEvent::ChannelStartTyping { .. }
+                        | ServerEvent::ChannelStopTyping { .. }
                         | ServerEvent::EmojiDelete { .. }) => {
                             Some(ConnectionEvent::Event(message_event))
                         }
@@ -739,10 +825,38 @@ mod tests {
 
     #[test]
     fn unknown_event_types_are_kept_as_unknown() {
-        let events = parse_frame(r#"{"type":"ChannelStartTyping","id":"c","user":"u"}"#);
+        let events = parse_frame(r#"{"type":"ServerMemberJoin","id":"s","user":"u"}"#);
         assert!(
-            matches!(events.as_slice(), [ServerEvent::Unknown(kind)] if kind == "ChannelStartTyping")
+            matches!(events.as_slice(), [ServerEvent::Unknown(kind)] if kind == "ServerMemberJoin")
         );
+    }
+
+    #[test]
+    fn typing_frames_match_the_protocol() {
+        let begin: Value = serde_json::from_str(&begin_typing_frame("ch")).unwrap();
+        assert_eq!(begin, json!({ "type": "BeginTyping", "channel": "ch" }));
+        let end: Value = serde_json::from_str(&end_typing_frame("ch")).unwrap();
+        assert_eq!(end, json!({ "type": "EndTyping", "channel": "ch" }));
+        // Byte for byte, as the plan specifies.
+        assert_eq!(begin_typing_frame("ch"), r#"{"type":"BeginTyping","channel":"ch"}"#);
+    }
+
+    #[test]
+    fn typing_events_decode_with_the_channel_as_id() {
+        let events = parse_frame(
+            r#"{"type":"Bulk","v":[
+                {"type":"ChannelStartTyping","id":"ch","user":"u-ada"},
+                {"type":"ChannelStopTyping","id":"ch","user":"u-ada"}
+            ]}"#,
+        );
+        assert!(matches!(
+            &events[0],
+            ServerEvent::ChannelStartTyping { channel, user } if channel == "ch" && user == "u-ada"
+        ));
+        assert!(matches!(
+            &events[1],
+            ServerEvent::ChannelStopTyping { channel, user } if channel == "ch" && user == "u-ada"
+        ));
     }
 
     #[test]

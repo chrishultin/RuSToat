@@ -36,6 +36,7 @@ use crate::media::MediaUrls;
 use crate::notify::{self, Delivery, Notice, Viewing};
 use crate::places::{Place, Places, PlacesFile};
 use crate::runtime::spawn_io;
+use crate::typing::{OutgoingTyping, TypingSignal, TypingState, typing_label};
 use crate::store::{
     ChannelEntry, ChannelKind, ChatStore, MessageRow, PendingMessage, PendingState, PickerEmoji,
     ReactionEmoji, ReplyPreview, ReplyState, RowOp, ServerEntry, TimelineRow, diff_rows,
@@ -122,11 +123,19 @@ pub struct ChatView {
     /// The message box, under the open channel.
     composer: Entity<Composer>,
     _composer: Subscription,
-    _connection: Connection,
+    /// Others typing, and when to tell Stoat the user is.
+    typing: TypingState,
+    outgoing_typing: OutgoingTyping,
+    /// Wakes up when a typist lapses or the user goes idle.
+    typing_tick: Option<Task<()>>,
+    connection: Connection,
     _events: Task<()>,
     _root: Task<()>,
     _activation: Subscription,
 }
+
+/// Height of the "is typing…" line above the message box.
+const TYPING_LINE_HEIGHT: f32 = 16.;
 
 /// How long the newest message must stay on screen before it's marked read,
 /// so a burst of live messages sends one acknowledgement, not one each.
@@ -204,6 +213,7 @@ impl ChatView {
             .as_ref()
             .map(PlacesFile::load)
             .unwrap_or_default();
+        let typing = TypingState::new(me.clone());
         let mut store = ChatStore::new(me);
         store.set_media(media.clone());
         let composer = cx.new(|cx| Composer::new(window, cx));
@@ -222,6 +232,15 @@ impl ChatView {
                         return;
                     };
                     this.edit_message(channel, id.clone(), content.clone(), window, cx);
+                }
+                ComposerEvent::Input { empty } => {
+                    let Some(channel) = composer.read(cx).channel().map(str::to_string) else {
+                        return;
+                    };
+                    let signals =
+                        this.outgoing_typing
+                            .on_input(&channel, *empty, std::time::Instant::now());
+                    this.send_typing(signals, cx);
                 }
                 ComposerEvent::EditLast => {
                     let Some(channel) = composer.read(cx).channel().map(str::to_string) else {
@@ -258,7 +277,10 @@ impl ChatView {
             reply_fetches: HashSet::new(),
             composer,
             _composer: composer_events,
-            _connection: connection,
+            typing,
+            outgoing_typing: OutgoingTyping::default(),
+            typing_tick: None,
+            connection,
             _events: events,
             _root: root,
             _activation: activation,
@@ -294,6 +316,8 @@ impl ChatView {
             }
             ConnectionEvent::Event(ServerEvent::Message(message)) => {
                 let channel = message.channel.clone();
+                // Sending ends their typing.
+                self.typing.stop(&channel, &message.author);
                 log::debug!("live: new message {} in {channel}", message.id);
                 // Decide before applying: what the user was looking at when it arrived.
                 let current = self.current_channel().map(|c| c.id);
@@ -400,6 +424,15 @@ impl ChatView {
                 log::debug!("live: channel {id} updated");
                 self.store.apply_channel_update(&id, *data, &clear);
             }
+            ConnectionEvent::Event(ServerEvent::ChannelStartTyping { channel, user }) => {
+                self.typing.start(&channel, &user, std::time::Instant::now());
+                self.schedule_typing_tick(cx);
+            }
+            ConnectionEvent::Event(ServerEvent::ChannelStopTyping { channel, user }) => {
+                if !self.typing.stop(&channel, &user) {
+                    return;
+                }
+            }
             ConnectionEvent::Event(ServerEvent::EmojiCreate(emoji)) => {
                 self.store.add_emoji(*emoji);
                 return;
@@ -410,6 +443,8 @@ impl ChatView {
             }
             ConnectionEvent::Event(_) => return,
             ConnectionEvent::Disconnected { reason, retry_in } => {
+                // Their stops may never arrive now.
+                self.typing.clear();
                 self.status = Status::Reconnecting {
                     reason: reason.into(),
                     retry_in,
@@ -519,6 +554,9 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Sending ends typing (the box is cleared without a change event).
+        let stopped = self.outgoing_typing.stop();
+        self.send_typing(stopped, cx);
         let sent_ms = notify::now_ms().max(0) as u64;
         let nonce = crate::draft::new_nonce(sent_ms);
         let pending = PendingMessage {
@@ -540,8 +578,70 @@ impl ChatView {
         cx.notify();
     }
 
+    /// Tell Stoat about the user's typing, and wake up for the idle timeout.
+    fn send_typing(
+        &mut self,
+        signals: impl IntoIterator<Item = TypingSignal>,
+        cx: &mut Context<Self>,
+    ) {
+        for signal in signals {
+            log::debug!("typing: {signal:?}");
+            match signal {
+                TypingSignal::Begin(channel) => self.connection.begin_typing(&channel),
+                TypingSignal::End(channel) => self.connection.end_typing(&channel),
+            }
+        }
+        self.schedule_typing_tick(cx);
+    }
+
+    /// Wake up when the next typist lapses or the user goes idle, to redraw
+    /// the typing line and send `EndTyping`. Replaces the previous wake-up.
+    fn schedule_typing_tick(&mut self, cx: &mut Context<Self>) {
+        let now = std::time::Instant::now();
+        let next = [self.typing.next_expiry(now), self.outgoing_typing.deadline()]
+            .into_iter()
+            .flatten()
+            .min();
+        self.typing_tick = next.map(|at| {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(at.saturating_duration_since(std::time::Instant::now()))
+                    .await;
+                this.update(cx, |this, cx| {
+                    let now = std::time::Instant::now();
+                    this.typing.prune(now);
+                    let idle = this.outgoing_typing.on_tick(now);
+                    this.send_typing(idle, cx);
+                    cx.notify();
+                })
+                .ok();
+            })
+        });
+    }
+
+    /// The "Ada is typing…" line above the message box. Always there, empty
+    /// when nobody's typing, so the list above doesn't move.
+    fn render_typing_line(&self, channel: &str, cx: &mut Context<Self>) -> Div {
+        let names: Vec<String> = self
+            .typing
+            .typists(channel, std::time::Instant::now())
+            .into_iter()
+            .map(|user| self.store.name_in(channel, user))
+            .collect();
+        div()
+            .h(px(TYPING_LINE_HEIGHT))
+            .flex_none()
+            .px_5()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .truncate()
+            .children(typing_label(&names))
+    }
+
     /// Edit the user's message `id` in the message box.
     fn start_edit(&mut self, channel: &str, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let stopped = self.outgoing_typing.stop();
+        self.send_typing(stopped, cx);
         let content = self.store.raw_content(channel, &id).unwrap_or_default().to_string();
         self.composer
             .update(cx, |composer, cx| composer.start_edit(id, &content, window, cx));
@@ -778,6 +878,9 @@ impl ChatView {
         if self.composer.read(cx).channel() == id {
             return;
         }
+        // Not typing in the old channel any more.
+        let stopped = self.outgoing_typing.stop();
+        self.send_typing(stopped, cx);
         let placeholder = channel
             .as_ref()
             .map(composer_placeholder)
@@ -1857,7 +1960,10 @@ impl ChatView {
             })
             .child(header)
             .child(body)
-            .when(channel.is_some(), |el| el.child(self.composer.clone()))
+            .when_some(channel.as_ref(), |el, channel| {
+                el.child(self.render_typing_line(&channel.id, cx))
+                    .child(self.composer.clone())
+            })
     }
 }
 
