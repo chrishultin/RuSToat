@@ -16,7 +16,9 @@ use crate::session::{self, Restored, TokenStore};
 use crate::store::display_name;
 use crate::ui::chat::{ChatEvent, ChatView};
 use crate::ui::login::{LoginEvent, LoginView};
-use crate::ui::switcher::{AccountAction, AccountStatus, SwitcherItem, host_of, render_switcher};
+use crate::ui::switcher::{
+    AccountAction, AccountStatus, SwitcherItem, host_of, notice_labels, render_switcher,
+};
 
 /// Shown when Stoat has ended an account's session.
 const SESSION_ENDED: &str = "Your session has ended. Please log in again.";
@@ -605,6 +607,19 @@ impl AppRoot {
         if renamed {
             self.save_accounts();
         }
+        // With several accounts signed in, notices say which one they're for.
+        let named: Vec<(String, String)> = views
+            .iter()
+            .map(|(id, _)| {
+                let entry = self.accounts.get(id);
+                let host = entry.map(|e| host_of(&e.instance)).unwrap_or_default();
+                let name = entry.and_then(|e| e.name.clone()).unwrap_or_default();
+                (host, name)
+            })
+            .collect();
+        for ((_, view), label) in views.iter().zip(notice_labels(&named)) {
+            view.update(cx, |view, _| view.set_account_label(label));
+        }
         if attention != self.dock_badge {
             log::debug!("dock badge: {attention}");
             for (_, view) in &views {
@@ -624,9 +639,9 @@ impl AppRoot {
             .iter()
             .map(|entry| {
                 let host = host_of(&entry.instance);
-                let summary = self
-                    .chat_view(&entry.id)
-                    .and_then(|view| view.read(cx).me_summary());
+                let view = self.chat_view(&entry.id).map(|view| view.read(cx));
+                let summary = view.and_then(ChatView::me_summary);
+                let (unread, mentions) = view.map(ChatView::account_summary).unwrap_or_default();
                 let (name, avatar) = match summary {
                     Some((name, avatar)) => (name, Some(avatar)),
                     None => (entry.name.clone().unwrap_or_else(|| host.clone()), None),
@@ -644,8 +659,8 @@ impl AppRoot {
                     avatar,
                     status,
                     selected: shown == Some(entry.id.as_str()),
-                    unread: false,
-                    mentions: 0,
+                    unread,
+                    mentions,
                 }
             })
             .collect();

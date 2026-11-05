@@ -319,6 +319,9 @@ fn muted_channels_hide_their_dot_but_keep_mentions() {
         .unwrap();
     assert!(!alpha.unread);
     assert_eq!(alpha.mentions, 1);
+    // The account's switcher button counts the muted mention too.
+    let (_, home_mentions) = store.home_summary();
+    assert_eq!(store.account_summary().1, home_mentions + 1);
 }
 
 #[test]

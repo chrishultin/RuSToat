@@ -103,6 +103,9 @@ pub struct ChatView {
     /// Whether this account is the one on screen. A hidden account keeps
     /// receiving events and notifying, but never marks anything read.
     active: bool,
+    /// Added to notice titles to say which account they're for, when
+    /// several are signed in.
+    account_label: Option<String>,
     /// macOS banners still showing: channel → the message it's for.
     /// Dismissed once the channel is read past it.
     banners: HashMap<String, String>,
@@ -203,6 +206,7 @@ impl ChatView {
             pending_ack: None,
             account_id,
             active: true,
+            account_label: None,
             banners: HashMap::new(),
             viewer: None,
             viewer_focus: cx.focus_handle(),
@@ -605,6 +609,7 @@ impl ChatView {
     /// An in-app toast for a notifying message; one per channel (a newer
     /// message replaces the older toast). Clicking it opens the channel.
     fn show_toast(&mut self, notice: Notice, window: &mut Window, cx: &mut Context<Self>) {
+        let notice = self.labelled(notice);
         log::debug!("notify: {} | {}", notice.title, notice.body);
         let view = cx.entity().downgrade();
         let channel = notice.channel.clone();
@@ -631,6 +636,7 @@ impl ChatView {
     /// ([`notify::parse_banner_tag`]). Reading the channel takes the banner
     /// away ([`Self::sync_outside`]).
     fn show_banner(&mut self, notice: Notice, message_id: String, cx: &mut Context<Self>) {
+        let notice = self.labelled(notice);
         log::debug!("banner: {} | {}", notice.title, notice.body);
         cx.show_system_notification(SystemNotification {
             tag: notify::banner_tag(&self.account_id, &notice.channel).into(),
@@ -658,6 +664,25 @@ impl ChatView {
             !read
         });
         self.store.attention_count()
+    }
+
+    /// `notice`, with the account's label (if any) added to its title.
+    fn labelled(&self, mut notice: Notice) -> Notice {
+        if let Some(label) = &self.account_label {
+            notice.title = format!("{} · {label}", notice.title);
+        }
+        notice
+    }
+
+    /// Say which account notices are for (see [`Self::labelled`]), or not.
+    pub fn set_account_label(&mut self, label: Option<String>) {
+        self.account_label = label;
+    }
+
+    /// For the account's switcher button: anything unread, and how many
+    /// unread mentions (see [`ChatStore::account_summary`]).
+    pub fn account_summary(&self) -> (bool, usize) {
+        self.store.account_summary()
     }
 
     /// The signed-in user's display name and avatar, once `Ready` has them.

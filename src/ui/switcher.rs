@@ -132,3 +132,80 @@ pub fn host_of(instance: &str) -> String {
         .and_then(|url| url.host_str().map(str::to_string))
         .unwrap_or_else(|| instance.to_string())
 }
+
+/// What to add to notice titles so they say which account they're for, given
+/// each signed-in account's (host, name). With one account, nothing. Otherwise
+/// the host, or `host · name` when several accounts share that host.
+pub fn notice_labels(accounts: &[(String, String)]) -> Vec<Option<String>> {
+    if accounts.len() < 2 {
+        return vec![None; accounts.len()];
+    }
+    accounts
+        .iter()
+        .map(|(host, name)| {
+            let shared = accounts.iter().filter(|(h, _)| h == host).count() > 1;
+            Some(if shared {
+                format!("{host} · {name}")
+            } else {
+                host.clone()
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: that brings in GPUI's own `test` attribute.
+    use super::{host_of, notice_labels};
+
+    fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter()
+            .map(|(h, n)| (h.to_string(), n.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn one_account_needs_no_label() {
+        assert_eq!(notice_labels(&pairs(&[("api.stoat.chat", "Ann")])), [None]);
+        assert!(notice_labels(&[]).is_empty());
+    }
+
+    #[test]
+    fn different_hosts_are_labelled_by_host() {
+        assert_eq!(
+            notice_labels(&pairs(&[
+                ("api.stoat.chat", "Ann"),
+                ("stoat.example.com", "Ann")
+            ])),
+            [
+                Some("api.stoat.chat".to_string()),
+                Some("stoat.example.com".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn a_shared_host_adds_the_name() {
+        assert_eq!(
+            notice_labels(&pairs(&[
+                ("api.stoat.chat", "Ann"),
+                ("api.stoat.chat", "Bo"),
+                ("stoat.example.com", "Ann")
+            ])),
+            [
+                Some("api.stoat.chat · Ann".to_string()),
+                Some("api.stoat.chat · Bo".to_string()),
+                Some("stoat.example.com".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn host_of_strips_scheme_and_path() {
+        assert_eq!(
+            host_of("https://stoat.example.com/api"),
+            "stoat.example.com"
+        );
+        assert_eq!(host_of("not a url"), "not a url");
+    }
+}

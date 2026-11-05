@@ -206,3 +206,34 @@ Deferred at the user's request. Testing the login screen now would mean logging 
 
 ### Manual Validation
 Deferred to the end at the user's request (see chunk 3).
+
+## Chunk 5: Switcher unread badges and labelled notices
+
+### Changes Made
+- `src/store.rs`: `account_summary() -> (bool, usize)` folds `servers()` into `home_summary()`. It shows a dot if Home or any server shows one, and sums all mentions. Muted channels add mentions but no dot, matching the rail.
+- `src/ui/chat.rs`:
+  - `account_summary()` passthrough.
+  - `account_label: Option<String>`, with `set_account_label()`.
+  - `labelled()` appends ` · {label}` to toast and banner titles.
+- `src/ui/switcher.rs`:
+  - `notice_labels(&[(host, name)])`: no labels with fewer than 2 signed-in accounts, otherwise the host, or `host · name` when several accounts share the host.
+  - Unit tests for `notice_labels` and `host_of`. The test module imports items by name, because `super::*` brings in GPUI's `test` attribute through `gpui_kit::*`, which fails with "recursion limit reached while expanding `#[test]`".
+- `src/ui/app_root.rs`:
+  - The switcher items' `unread` and `mentions` come from each chat view's `account_summary()`. The account on screen shows neither, because `render_switcher` hides them when selected.
+  - `sync_outside` computes `notice_labels` over the signed-in accounts and sets each view's label.
+- `tests/store_unreads.rs`:
+  - `account_summary_covers_home_and_servers`
+  - `account_summary_is_clear_when_everything_is_read`
+  - `an_empty_store_has_nothing_to_show`
+- `tests/notify_rules.rs`: the muted-channel test also checks that the account summary counts the muted mention.
+
+### Divergences
+- **Labels for accounts sharing a host.** The plan said `@username`. The implementation uses `host · display name`, because the account entry stores the display name, which is also what the switcher shows.
+
+### Verification Performed
+- `cargo test`: 245 passed, 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- `cargo fmt --check`: clean.
+
+### Manual Validation
+Deferred to the end at the user's request (see chunk 3).
