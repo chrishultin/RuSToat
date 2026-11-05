@@ -1,4 +1,5 @@
-//! Email/password login, with a second step for two-factor codes.
+//! Email/password login on any Stoat instance, with a second step for
+//! two-factor codes.
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -7,13 +8,29 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::api::models::{MFAMethod, MFAResponse, ResponseLogin, Session};
-use crate::api::{ApiError, StoatClient};
+use crate::api::{ApiError, InstanceError, StoatClient, resolve_instance};
 use crate::runtime::{IoTask, spawn_io};
 
 /// Emitted once the server returns a session token.
 pub enum LoginEvent {
-    LoggedIn(Session),
+    LoggedIn {
+        session: Session,
+        /// The instance's API base URL.
+        instance: String,
+    },
 }
+
+/// Why a login attempt failed.
+#[derive(Debug, thiserror::Error)]
+enum LoginError {
+    #[error(transparent)]
+    Instance(#[from] InstanceError),
+    #[error(transparent)]
+    Api(#[from] ApiError),
+}
+
+/// A login request's result, with the client for the instance it went to.
+type Attempt = Result<(StoatClient, ResponseLogin), LoginError>;
 
 enum Step {
     Credentials,
@@ -27,7 +44,11 @@ enum Step {
 }
 
 pub struct LoginView {
+    /// The instance the last attempt went to; 2FA continues there.
     client: StoatClient,
+    instance: Entity<InputState>,
+    /// The instance can't be changed (logging back in to a known account).
+    instance_locked: bool,
     email: Entity<InputState>,
     password: Entity<InputState>,
     code: Entity<InputState>,
@@ -40,7 +61,21 @@ pub struct LoginView {
 impl EventEmitter<LoginEvent> for LoginView {}
 
 impl LoginView {
-    pub fn new(client: StoatClient, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// `instance` is prefilled (an API base URL or anything
+    /// [`resolve_instance`] accepts). With `locked`, it's shown but can't be
+    /// changed, and is used as the API base URL as it is.
+    pub fn new(
+        instance: String,
+        locked: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let client = StoatClient::new(instance.clone());
+        let instance = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("stoat.example.com")
+                .default_value(instance)
+        });
         let email = cx.new(|cx| InputState::new(window, cx).placeholder("you@example.com"));
         let password = cx.new(|cx| {
             InputState::new(window, cx)
@@ -50,6 +85,15 @@ impl LoginView {
         let code = cx.new(|cx| InputState::new(window, cx).placeholder("123456"));
 
         let subscriptions = vec![
+            cx.subscribe_in(
+                &instance,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        this.email.update(cx, |input, cx| input.focus(window, cx));
+                    }
+                },
+            ),
             // Enter in the email field moves on to the password field.
             cx.subscribe_in(&email, window, |this, _, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
@@ -77,6 +121,8 @@ impl LoginView {
 
         Self {
             client,
+            instance,
+            instance_locked: locked,
             email,
             password,
             code,
@@ -104,8 +150,16 @@ impl LoginView {
                     self.show_error("Enter your email and password.", cx);
                     return;
                 }
-                let client = self.client.clone();
-                spawn_io(async move { client.login(&email, &password).await })
+                let locked = self.instance_locked.then(|| self.client.clone());
+                let instance = self.instance.read(cx).value().to_string();
+                spawn_io(async move {
+                    let client = match locked {
+                        Some(client) => client,
+                        None => resolve_instance(&instance).await?.0,
+                    };
+                    let response = client.login(&email, &password).await?;
+                    Ok((client, response))
+                })
             }
             Step::Mfa {
                 ticket,
@@ -129,19 +183,17 @@ impl LoginView {
                 };
                 let client = self.client.clone();
                 let ticket = ticket.clone();
-                spawn_io(async move { client.login_mfa(&ticket, response).await })
+                spawn_io(async move {
+                    let response = client.login_mfa(&ticket, response).await?;
+                    Ok((client, response))
+                })
             }
         };
 
         self.run(request, window, cx);
     }
 
-    fn run(
-        &mut self,
-        request: IoTask<Result<ResponseLogin, ApiError>>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn run(&mut self, request: IoTask<Attempt>, window: &mut Window, cx: &mut Context<Self>) {
         self.error = None;
         self.pending = Some(cx.spawn_in(window, async move |this, cx| {
             let result = request.await;
@@ -156,14 +208,33 @@ impl LoginView {
 
     fn handle_result(
         &mut self,
-        result: anyhow::Result<Result<ResponseLogin, ApiError>>,
+        result: anyhow::Result<Attempt>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let result = result.map(|attempt| {
+            attempt.map(|(client, response)| {
+                // Show the address that worked, and continue 2FA there.
+                if !self.instance_locked && client.base_url() != self.client.base_url() {
+                    let url = client.base_url().to_string();
+                    self.instance
+                        .update(cx, |input, cx| input.set_value(url, window, cx));
+                }
+                self.client = client;
+                response
+            })
+        });
         match result {
             Ok(Ok(ResponseLogin::Success(session))) => {
-                log::info!("logged in as user {}", session.user_id);
-                cx.emit(LoginEvent::LoggedIn(session));
+                log::info!(
+                    "logged in as user {} on {}",
+                    session.user_id,
+                    self.client.base_url()
+                );
+                cx.emit(LoginEvent::LoggedIn {
+                    session,
+                    instance: self.client.base_url().to_string(),
+                });
             }
             Ok(Ok(ResponseLogin::MFA {
                 ticket,
@@ -278,6 +349,18 @@ impl Render for LoginView {
         let fields = match &self.step {
             Step::Credentials => v_flex()
                 .gap_3()
+                .child(v_flex().gap_1().child(field_label("Server", cx)).map(|el| {
+                    if self.instance_locked {
+                        el.child(
+                            div()
+                                .text_sm()
+                                .truncate()
+                                .child(SharedString::from(self.client.base_url().to_string())),
+                        )
+                    } else {
+                        el.child(Input::new(&self.instance).disabled(busy))
+                    }
+                }))
                 .child(
                     v_flex()
                         .gap_1()

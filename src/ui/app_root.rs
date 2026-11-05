@@ -31,8 +31,9 @@ enum Screen {
 
 /// Top-level view for the main window: routes between login and chat.
 pub struct AppRoot {
-    /// The default instance, for logging in (`STOAT_API_URL`, or the official one).
-    client: StoatClient,
+    /// The instance the login screen suggests (`STOAT_API_URL`, or the
+    /// official one).
+    default_instance: String,
     store: Arc<dyn TokenStore>,
     accounts_file: Arc<dyn AccountsFile>,
     accounts: AccountList,
@@ -55,8 +56,8 @@ impl AppRoot {
             Theme::sync_system_appearance(Some(window), cx);
         });
 
-        let client = StoatClient::from_env();
-        log::info!("default Stoat API: {}", client.base_url());
+        let default_instance = StoatClient::from_env().base_url().to_string();
+        log::info!("default Stoat API: {default_instance}");
         // Read here (it's a small file). Only a first launch needs the
         // Keychain, to adopt a session saved by an older version. An
         // unreadable list is left as it is until something is saved.
@@ -71,7 +72,7 @@ impl AppRoot {
         let migrate = first_launch.then(|| {
             spawn_io(accounts::migrate_legacy(
                 store.clone(),
-                client.base_url().into(),
+                default_instance.clone(),
             ))
         });
         let task = cx.spawn_in(window, async move |this, cx| {
@@ -90,7 +91,7 @@ impl AppRoot {
         });
 
         Self {
-            client,
+            default_instance,
             store,
             accounts_file,
             accounts: saved,
@@ -113,7 +114,7 @@ impl AppRoot {
     fn client_for(&self, id: &str) -> StoatClient {
         match self.accounts.get(id) {
             Some(entry) => StoatClient::new(entry.instance.clone()),
-            None => self.client.clone(),
+            None => StoatClient::new(self.default_instance.clone()),
         }
     }
 
@@ -123,7 +124,7 @@ impl AppRoot {
         self.current = self.accounts.active_entry().map(|entry| entry.id.clone());
         self.screen = match self.current.clone() {
             Some(id) => self.restoring_screen(id, window, cx),
-            None => Self::login_screen(&self.client, window, cx),
+            None => self.login_screen(window, cx),
         };
         cx.notify();
     }
@@ -163,7 +164,7 @@ impl AppRoot {
                     self.accounts.remove(&id);
                     self.save_accounts();
                 }
-                Self::login_screen(&self.client, window, cx)
+                self.login_screen(window, cx)
             }
             Ok(Restored::Unverified { token, error }) => Screen::Offline {
                 token,
@@ -171,18 +172,23 @@ impl AppRoot {
             },
             Err(err) => {
                 log::error!("session restore task failed: {err:?}");
-                Self::login_screen(&self.client, window, cx)
+                self.login_screen(window, cx)
             }
         };
         cx.notify();
     }
 
-    fn login_screen(client: &StoatClient, window: &mut Window, cx: &mut Context<Self>) -> Screen {
-        let view = cx.new(|cx| LoginView::new(client.clone(), window, cx));
+    fn login_screen(&self, window: &mut Window, cx: &mut Context<Self>) -> Screen {
+        let instance = self.default_instance.clone();
+        let view = cx.new(|cx| LoginView::new(instance, false, window, cx));
         let events = cx.subscribe_in(&view, window, |this, _, event, window, cx| match event {
-            LoginEvent::LoggedIn(session) => {
-                this.logged_in(session.token.clone(), session.user_id.clone(), window, cx)
-            }
+            LoginEvent::LoggedIn { session, instance } => this.logged_in(
+                instance.clone(),
+                session.token.clone(),
+                session.user_id.clone(),
+                window,
+                cx,
+            ),
         });
         Screen::Login {
             view,
@@ -222,14 +228,13 @@ impl AppRoot {
     /// Fresh login: add the account, remember the token and open the chat.
     fn logged_in(
         &mut self,
+        instance: String,
         token: String,
         me: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let id = self
-            .accounts
-            .add_or_update(self.client.base_url(), &me, None);
+        let id = self.accounts.add_or_update(&instance, &me, None);
         self.accounts.set_active(&id);
         self.save_accounts();
         self.current = Some(id.clone());
@@ -299,7 +304,7 @@ impl AppRoot {
         // Nothing to attend to once logged out.
         crate::dock::set_badge(0);
         // Replacing the chat screen drops its events connection.
-        self.screen = Self::login_screen(&self.client, window, cx);
+        self.screen = self.login_screen(window, cx);
         cx.notify();
     }
 }

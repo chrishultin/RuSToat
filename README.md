@@ -42,13 +42,19 @@ This builds `target/debug/RuSToat.app` (identifier `chat.stoat.rustoat`, ad-hoc 
 
 ### Self-hosted instances
 
-The app talks to the official instance, `https://api.stoat.chat`, by default. Point it somewhere else with:
+The login screen has a **Server** field, set to the official instance (`https://api.stoat.chat`) by default. To use a self-hosted instance, enter its address, e.g. `stoat.example.com`:
+
+- `https://` is added if you leave it out. Type `http://` yourself for a local server.
+- The app looks for Stoat's API at that address, then under `/api`, where self-hosted instances usually serve it. Once you log in, the field shows the address it found.
+- If the API is somewhere else, such as its own subdomain, enter that address instead.
+
+To change the field's default:
 
 ```bash
 STOAT_API_URL=https://stoat.example.com/api cargo run
 ```
 
-Each saved session remembers its own instance, so a token is never sent to another server. While there's a saved account, the app restores that one; `STOAT_API_URL` only picks the instance you log in to.
+Each saved session remembers its own instance, so a token is never sent to another server. While there's a saved account, the app restores that one.
 
 ## Your session and the Keychain
 

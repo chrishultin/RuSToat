@@ -64,3 +64,48 @@ Run by Claude, with the user's approval, against the user's real saved session. 
 The chat opened with no login prompt. `~/Library/Application Support/chat.stoat.rustoat/accounts.json` then contained one entry with `id` and `instance` set to `https://api.stoat.chat`, `user_id` `01KH4Q74NX640MPRYJF506Y71W`, `name` `spedione`, and `active` set to that entry.
 
 The optional log-out-and-relaunch step was not run, to keep the user's session.
+
+## Merge: main into this branch (550a67b)
+
+After chunk 1, `main` (10 commits: attachments, embeds, reactions, and `places.rs` remembering the open server and channels per account) was merged at the user's request, before the chunks that rework `src/ui/chat.rs`. It merged without conflicts; 224 tests passed, and clippy and fmt were clean. Look-ahead found the code that chunks 2–5 touch (banners, Dock badge, acks, login) unchanged in shape, so the plan needed no amendments.
+
+## Chunk 2: Choose the instance at login
+
+### Changes Made
+- New `src/api/instance.rs`:
+  - `normalize_instance(input)`:
+    - trims the input
+    - adds `https://` when there's no `://`
+    - accepts only `http` and `https`, with a host
+    - lowercases (via `url::Url`)
+    - drops the query, fragment and trailing slash
+  - `resolve_instance(input) -> (StoatClient, RootConfig)`:
+    - tries `GET {url}/`
+    - a network error stops there (`Unreachable`)
+    - otherwise tries `GET {url}/api/` unless the URL already ends in `/api`
+    - finds neither: `NotStoat { url }`
+  - `InstanceError` has user-facing messages.
+  - `SUPPORTED_VERSION_PREFIX = "0.16."`: other versions resolve but log a warning.
+  - Unit tests for normalization.
+- `src/api/mod.rs`: `pub mod instance`, and re-exports `InstanceError`, `normalize_instance` and `resolve_instance`.
+- `src/ui/login.rs`:
+  - `LoginView::new(instance, locked, …)`, with a **Server** input above Email. Enter moves on to Email.
+  - Locked mode shows the URL as text and uses it as it is, with no resolution. Locked mode is for chunk 4's re-login.
+  - The credentials step resolves the instance and then logs in, in one IO task. Results are `Result<(StoatClient, ResponseLogin), LoginError>`, where `LoginError` wraps `InstanceError` or `ApiError`.
+  - On a response, the view keeps that client, so 2FA continues on the same instance. The Server field shows the resolved URL.
+  - `LoginEvent::LoggedIn { session, instance }`.
+- `src/ui/app_root.rs`: `client` becomes `default_instance: String`. `login_screen` is a method that passes the default instance. `logged_in` takes the instance from the event.
+- New `tests/api_instance.rs` (7 tests): the API at `/`, the API at `/api` with HTML at `/`, a typed `/api` isn't doubled, `NotStoat` with the URL in the message, `Unreachable` without trying `/api`, a 0.17 version still resolves, and junk input is rejected.
+- `README.md`: the "Self-hosted instances" section describes the Server field. `STOAT_API_URL` now only sets its default.
+
+### Divergences
+- The plan mentioned showing the resolved host under the field. Instead, the field is replaced with the resolved API URL after a successful attempt. Same purpose, less UI.
+- **Known limitation:** on the official instance, `https://stoat.chat/api/` also serves the API (checked live: 200, JSON). So typing `stoat.chat` gives the instance `https://stoat.chat/api`, which differs from `https://api.stoat.chat`. The same user added both ways would be two accounts. Not special-cased.
+
+### Verification Performed
+- `cargo test`: 235 passed, 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- Live read-only check: `GET https://stoat.chat/` returns HTML, and `GET https://stoat.chat/api/` returns the root config. Bare-host resolution works for the official instance.
+
+### Manual Validation
+Deferred at the user's request. Testing the login screen now would mean logging out of their only real session. Chunk 4's manual check (adding an account with **+**) covers logging in through the Server field.
