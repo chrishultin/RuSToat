@@ -26,6 +26,7 @@ use crate::attachment::{AttachmentView, FileKind, fit_into};
 use crate::markdown::{JUMBO_TEXT_PX, is_external_link};
 use crate::media::MediaUrls;
 use crate::notify::{self, Delivery, Notice, Viewing};
+use crate::places::{Place, Places, PlacesFile};
 use crate::runtime::spawn_io;
 use crate::store::{
     ChannelEntry, ChannelKind, ChatStore, MessageRow, RowOp, ServerEntry, TimelineRow, diff_rows,
@@ -40,13 +41,6 @@ pub enum ChatEvent {
     LogOutRequested,
     /// The server no longer accepts our session.
     SessionRejected,
-}
-
-/// Which list the channel column shows.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum Place {
-    Home,
-    Server(String),
 }
 
 enum Status {
@@ -77,6 +71,10 @@ pub struct ChatView {
     place: Place,
     /// Last channel picked in each place, so switching servers comes back to it.
     selected: HashMap<Place, String>,
+    /// Where `place` and `selected` are kept between launches (`None` if
+    /// there's nowhere to keep them), and what was last written there.
+    places_file: Option<PlacesFile>,
+    saved_places: Places,
     /// File server base URL for icons, from `GET /`. `None` until loaded.
     /// Where images come from. Only the API base is known until `GET /` loads.
     media: MediaUrls,
@@ -174,7 +172,14 @@ impl ChatView {
             }
         });
         // Until `GET /` loads, only the API base (default avatars) is known.
-        let media = MediaUrls::new(api, None, None);
+        let media = MediaUrls::new(api.clone(), None, None);
+        // Start where the last launch left off. Anything since deleted is
+        // dropped once Ready arrives (`drop_stale_selection`).
+        let places_file = PlacesFile::for_account(&api, &me);
+        let saved_places = places_file
+            .as_ref()
+            .map(PlacesFile::load)
+            .unwrap_or_default();
         let mut store = ChatStore::new(me);
         store.set_media(media.clone());
         Self {
@@ -182,8 +187,10 @@ impl ChatView {
             store,
             has_ready: false,
             status: Status::Connecting { attempt: 1 },
-            place: Place::Home,
-            selected: HashMap::new(),
+            place: saved_places.place.clone(),
+            selected: saved_places.selected.clone(),
+            places_file,
+            saved_places,
             media,
             panes: HashMap::new(),
             loading: HashMap::new(),
@@ -472,6 +479,7 @@ impl ChatView {
 
     fn select_place(&mut self, place: Place, cx: &mut Context<Self>) {
         self.place = place;
+        self.remember_places();
         self.ensure_current_loaded(cx);
         cx.notify();
     }
@@ -533,14 +541,34 @@ impl ChatView {
         };
         self.place = place.clone();
         self.selected.insert(place, channel.to_string());
+        self.remember_places();
         self.ensure_current_loaded(cx);
         cx.notify();
     }
 
     fn select_channel(&mut self, id: String, cx: &mut Context<Self>) {
         self.selected.insert(self.place.clone(), id);
+        self.remember_places();
         self.ensure_current_loaded(cx);
         cx.notify();
+    }
+
+    /// Save the open place and picked channels for next launch, if they changed.
+    fn remember_places(&mut self) {
+        let Some(file) = &self.places_file else {
+            return;
+        };
+        let places = Places {
+            place: self.place.clone(),
+            selected: self.selected.clone(),
+        };
+        if places == self.saved_places {
+            return;
+        }
+        if let Err(err) = file.save(&places) {
+            log::warn!("couldn't save places: {err:#}");
+        }
+        self.saved_places = places;
     }
 
     /// Start loading the current channel's history if it isn't loaded or loading.
