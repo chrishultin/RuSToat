@@ -69,7 +69,7 @@ This milestone widens `MessageRow` from text into a small display model: avatar 
 11. **Unicode emoji** in text render through the system font (Apple Color Emoji). Shortcodes like `:smile:` aren't converted, because Stoat clients already send Unicode.
 
 ## Open Questions
-- *(Status)* **Paused after chunk 3** (2026-11-04) at the user's request so that `docs/plans/unreads-and-notifications.md` can run first. Resume at chunk 4 (images and file cards) afterwards.
+- *(Status)* **Complete** (2026-11-05). It was paused after chunk 3 (2026-11-04) so that `docs/plans/unreads-and-notifications.md` could run first, then resumed at chunk 4. See `rich-messages-and-reactions-implementation.md`.
 - *(Deferred, not blocking)* Milestone 3 ("interaction": send, reply, edit/delete own messages, typing indicators, unreads and mark-as-read) needs its own plan once this one is done.
 
 ## Plan
@@ -339,15 +339,15 @@ Store tests cover the optimistic add followed by the echo (still count 1) and ro
 6. Switch between light and dark mode. Text, code, embed cards and chips stay legible.
 
 ## Definition of Done
-- [ ] **Avatars:** message group headers show the author's avatar with the precedence in Assumption 7. Users without one get `GET /users/{id}/default_avatar`. External avatar URLs load via `{january}/proxy?url=`.
-- [ ] **Markdown:** message bodies render bold, italics, links, lists, quotes, inline code and code blocks. http(s) links open in the default browser. Edited messages re-render with the new text.
-- [ ] **Mentions:** `<@id>` and `<#id>` render as styled `@Name` and `#channel`. Hostile names can't break the formatting (tested).
-- [ ] **Custom emoji:** `:ULID:` emoji render inline at text size from `{cdn}/emojis/{id}`, and emoji-only messages render them larger. If that proves impossible, a recorded fallback shows `:name:` text.
-- [ ] **Image attachments:** images render inline within 400×300, keeping the aspect ratio. Space is reserved from metadata, so rows don't change height on load. Images over 8 MB need a click to load.
-- [ ] **Other attachments:** non-image files show a card (icon, name, size) that opens the file URL in the browser.
-- [ ] **Website embeds:** render site name, title, description, image and colour bar. Image, video and text embeds render as cards. Every external image URL goes through the January proxy.
-- [ ] **Live previews:** a link preview appears without reloading, via `MessageAppend`.
-- [ ] **Reaction chips:** emoji (Unicode or custom image) plus count, highlighted when you've reacted. They update live for `MessageReact`, `MessageUnreact` and `MessageRemoveReaction`, and disappear at zero.
-- [ ] **Reacting:** clicking a chip toggles your reaction. "+" opens a picker with common emoji and the server's custom emoji, limited to `interactions.reactions` when `restrict_reactions` is set.
-- [ ] **Reaction requests:** reactions are sent with the correct percent-encoded `PUT`/`DELETE` paths (tested). The server echo doesn't double count, and refused reactions roll back with a visible error.
-- [ ] **Checks:** `cargo test && cargo clippy --all-targets -- -D warnings` passes, and the opt-in live media checks pass.
+- [x] **Avatars:** message group headers show the author's avatar with the precedence in Assumption 7. Users without one get `GET /users/{id}/default_avatar`. External avatar URLs load via `{january}/proxy?url=`.
+- [x] **Markdown:** message bodies render bold, italics, links, lists, quotes, inline code and code blocks. http(s) links open in the default browser. Edited messages re-render with the new text.
+- [x] **Mentions:** `<@id>` and `<#id>` render as styled `@Name` and `#channel`. Hostile names can't break the formatting (tested).
+- [x] **Custom emoji:** `:ULID:` emoji render inline at text size from `{cdn}/emojis/{id}`, and emoji-only messages render them larger. If that proves impossible, a recorded fallback shows `:name:` text.
+- [x] **Image attachments:** images render inline within 400×300, keeping the aspect ratio. Space is reserved from metadata, so rows don't change height on load. Images over 8 MB need a click to load.
+- [x] **Other attachments:** non-image files show a card (icon, name, size) that opens the file URL in the browser.
+- [x] **Website embeds:** render site name, title, description, image and colour bar. Image, video and text embeds render as cards. Every external image URL goes through the January proxy.
+- [x] **Live previews:** a link preview appears without reloading, via `MessageAppend`.
+- [x] **Reaction chips:** emoji (Unicode or custom image) plus count, highlighted when you've reacted. They update live for `MessageReact`, `MessageUnreact` and `MessageRemoveReaction`, and disappear at zero.
+- [x] **Reacting:** clicking a chip toggles your reaction. "+" opens a picker with common emoji and the server's custom emoji, limited to `interactions.reactions` when `restrict_reactions` is set.
+- [x] **Reaction requests:** reactions are sent with the correct percent-encoded `PUT`/`DELETE` paths (tested). The server echo doesn't double count, and refused reactions roll back with a visible error.
+- [x] **Checks:** `cargo test && cargo clippy --all-targets -- -D warnings` passes, and the opt-in live media checks pass.

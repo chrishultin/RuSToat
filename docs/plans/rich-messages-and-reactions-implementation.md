@@ -607,3 +607,84 @@ The user checked the running app and confirmed ("Let's go").
 ### Manual Validation
 - The user tried reacting in the running app, which surfaced the two pieces of feedback above.
 - After both fixes, the user confirmed "LGTM": adding and removing via chips and the picker, the picker under the message, and the full-message picker.
+
+## Summary
+
+_Completed: 2026-11-05. Chunks 1–3 ran on 2026-11-04. The plan was then paused for `unreads-and-notifications.md`, and chunks 4–7 ran on this branch._
+
+### Chunks Completed
+1. Avatars and media URLs (`70473d6`).
+2. Markdown message bodies (`643eaa6`).
+2b. Message bubbles and grouping, inserted at the user's request (`11acc07`).
+3. Custom emoji (`6544e8d`, with the alignment and size fix `1c1c99d`). The side fix for line breaks, quote endings and `$$` KaTeX formatting came later (`2482a73`).
+4. Image attachments and file cards (`0d68051`).
+4b. In-app full-size image viewer, inserted at the user's request (`ee9d835`).
+5. Link previews and bot embeds, live via `MessageAppend` (`4d9402b`).
+6. Reaction chips, updated live (`a82c6e7`).
+- Follow-ups asked for by the user:
+  - a loading placeholder for images (`376aad1`)
+  - loading states for avatars and icons, and ThumbHash blurred previews (`9f2bbae`)
+7. Adding and removing reactions with chips and an emoji picker, including the 20-reaction limit (`cb4f7bd`).
+- Not part of this plan: another session's `03288e3` (remembering the open place) landed on this branch between chunks 4b and 5.
+
+### Divergences
+- **Chunk 1:** the webhook avatar tag is assumed; the embedded `message.user` avatar is a fallback; the live test uses a made-up ID.
+- **Chunk 2:** every `<` is escaped, because `TextView` renders raw HTML. `render_key` hashes the prepared body. Spoilers wrapping code are left as typed. A crash on multi-byte text was found live and fixed.
+- **Chunk 2b:** inserted. Spacing was tightened after feedback.
+- **Chunk 3:** emoji are sized HTML `<img>` tags, not an `image_source` resolver. Unicode emoji count towards jumbo. Ghost bubbles were replaced by an invisible surface.
+- **Chunk 4:**
+  - New `src/attachment.rs`, with the revealed set kept in the store.
+  - Lucide icon names: `FileVideoCamera` and `FileMusic`, plus a `FileText` kind.
+  - Clicking an image opens it.
+- **Chunk 4b:** inserted.
+- **Chunk 5:**
+  - New `src/embed.rs`.
+  - CSS colour names accepted as well as hex.
+  - GIF links shown as the picture alone; play badges on video previews.
+  - Unknown embed kinds are skipped individually.
+  - Another session committed in this worktree during the chunk; its commit was confirmed separate.
+- **Chunk 6:** chips use the `MessageFooter` slot, not `Bubble::reactions`, because that slot is an absolute pill that doesn't wrap.
+- **Follow-ups:**
+  - Every `img()` needed an element ID for its loading state to ever show.
+  - ThumbHash previews use the `thumbhash` and `image` crates.
+- **Chunk 7:**
+  - Errors are toasts, not inline in the row.
+  - In DMs the picker offers all servers' custom emoji.
+  - One request at a time per emoji.
+  - The "+" moved to the bubble's corner, so the picker opens under the message (user feedback).
+  - Stoat's 20-different-reactions limit, hit live as `InvalidOperation`, is now enforced in the picker and before sending.
+
+### Definition of Done
+- [x] **Avatars:** precedence per Assumption 7, `default_avatar` for users without one, external avatars via the proxy (chunk 1, user-confirmed).
+- [x] **Markdown:** formatting renders, http(s) links open in the browser, and edits re-render through `render_key` (chunk 2, user-confirmed).
+- [x] **Mentions:** styled `@Name` and `#channel`. Hostile names are escaped and tested (`markdown_prepare`).
+- [x] **Custom emoji:** inline at text size from `{cdn}/emojis/{id}`, larger for emoji-only messages (chunk 3, user-confirmed). No fallback was needed.
+- [x] **Image attachments:** within 400×300 keeping the aspect ratio, with space reserved from metadata, and a click to load images over 8 MB (chunk 4: `store_attachments` tests, user-confirmed). Added beyond the plan: the in-app viewer, loading placeholders, and ThumbHash previews.
+- [x] **Other attachments:** cards with icon, name and size that open the file (chunk 4).
+- [x] **Website embeds:** site name, title, description, image and colour bar. Image, video and text embeds show as cards. External images go through January (chunk 5: `store_embeds` tests, user-confirmed).
+- [x] **Live previews:** `MessageAppend` is decoded and applied, and the row remeasures (chunk 5 test and live check).
+- [x] **Reaction chips:** Unicode or custom emoji plus count, highlighted when yours, live for all three events, gone at zero (chunk 6: `store_reactions` tests, user-confirmed).
+- [x] **Reacting:** chips toggle, and "+" opens the picker with common emoji plus custom emoji, limited when `restrict_reactions` is set. Also limited to existing emoji at 20 reactions (chunk 7, user-confirmed).
+- [x] **Reaction requests:** percent-encoded `PUT`/`DELETE` paths are tested (`api_reactions`). The echo doesn't double count, and refusals roll back with a toast. Tested, and seen live with the limit case.
+- [x] **Checks:**
+  - `cargo test`: 210 passed, 0 failed, 5 ignored.
+  - `cargo clippy --all-targets -- -D warnings`: clean.
+  - `cargo test -- --ignored`: all 5 live checks pass (Keychain, API drift, events handshake, `default_avatar`, January proxy).
+
+### Manual Tests
+- **Tests 1, 3 and 4** (busy-channel rendering, live link preview, reacting both ways) were confirmed in their chunks.
+- **Tests 2, 5 and 6** (scrolling 300+ messages and memory, reacting without permission, light and dark mode) were listed for the user at the end. The user judged them fine ("I think those are fine") without reporting each step. Test 5's rollback path is also covered by tests, and was seen live with the 20-reaction refusal.
+
+### Remaining Manual Steps
+- None required.
+- Known limits, deliberately out of scope:
+  - **Not done:**
+    - spoiler click-to-reveal
+    - syntax highlighting
+    - video and audio playback
+    - block `$$` math
+  - **No loading state:** custom emoji inside message text, because `TextView` draws them.
+  - **Shown or updated late:**
+    - SVG site icons are left out, because the January proxy returns 400 for them.
+    - `EmojiCreate` doesn't rebuild rows already drawn.
+  - **Assumed, not configurable:** the 20-reaction limit is a constant. Stoat doesn't expose it, and 20 is confirmed live.
