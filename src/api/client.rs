@@ -4,7 +4,7 @@ use reqwest::{Client, Method};
 use revolt_models::v0::{
     AllMemberResponse, BulkMessageResponse, DataEditMessage, DataLogin, DataMessageSearch,
     DataMessageSend, MFAResponse, Member, Message, MessageSort, OptionsQueryMessages, ReplyIntent,
-    ResponseLogin, User,
+    ResponseLogin, User, UserProfile,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -531,6 +531,14 @@ impl StoatClient {
     /// they can be mentioned).
     pub async fn fetch_user(&self, id: &str) -> Result<User, ApiError> {
         self.send(Method::GET, &format!("/users/{id}"), None::<&()>)
+            .await
+    }
+
+    /// `GET /users/{id}/profile`: the bio and banner. Needs a connection to
+    /// them (a friend, a shared server, group or DM, or a bot); otherwise
+    /// it's `MissingPermission`.
+    pub async fn fetch_profile(&self, id: &str) -> Result<UserProfile, ApiError> {
+        self.send(Method::GET, &format!("/users/{id}/profile"), None::<&()>)
             .await
     }
 

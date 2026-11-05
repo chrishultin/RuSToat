@@ -28,7 +28,9 @@ use gpui_kit::*;
 use crate::api::ApiError;
 use crate::api::StoatClient;
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
-use crate::api::models::{BulkMessageResponse, FieldsMessage, MessageSort, ReplyIntent};
+use crate::api::models::{
+    BulkMessageResponse, FieldsMessage, MessageSort, ReplyIntent, UserProfile,
+};
 use crate::attachment::{AttachmentView, fit_into};
 use crate::complete::{Query, QueryKind, Suggestion, TokenRef, rank, rank_people};
 use crate::draft::{AttachmentLimits, DraftAttachment, ReplyTarget};
@@ -48,6 +50,7 @@ use crate::store::{
 use crate::ui::composer::{Composer, ComposerEvent, file_icon};
 use crate::ui::emoji_picker::emoji_grid;
 use crate::ui::math::MathPlugin;
+use crate::ui::profile_card::{CardBio, CardContent, OnLink, render_profile_card};
 
 /// How many messages to load when a channel is opened.
 pub const HISTORY_PAGE: usize = 50;
@@ -197,6 +200,13 @@ pub struct ChatView {
     viewer: Option<ViewedImage>,
     /// Focused while the viewer is open, so Esc reaches it.
     viewer_focus: FocusHandle,
+    /// The profile card, when one is open.
+    card: Option<OpenCard>,
+    /// Focused while the card is open, so Esc reaches it.
+    card_focus: FocusHandle,
+    /// Profiles fetched this session, by user ID, shown while the card
+    /// fetches them again. `None`: Stoat won't show this one.
+    profiles: HashMap<String, Option<UserProfile>>,
     /// The message whose reaction picker is open.
     picker_for: Option<String>,
     /// Reaction changes waiting on the server, as (message, emoji). Another
@@ -441,6 +451,9 @@ impl ChatView {
             banners: HashMap::new(),
             viewer: None,
             viewer_focus: cx.focus_handle(),
+            card: None,
+            card_focus: cx.focus_handle(),
+            profiles: HashMap::new(),
             picker_for: None,
             reacting: HashSet::new(),
             reply_fetches: HashSet::new(),
@@ -485,6 +498,7 @@ impl ChatView {
             ConnectionEvent::Event(ServerEvent::Ready(ready)) => {
                 let reconnect = self.has_ready;
                 self.store.apply_ready(*ready);
+                self.card = None;
                 self.has_ready = true;
                 self.status = Status::Connected;
                 self.drop_stale_selection();
@@ -2185,6 +2199,138 @@ impl ChatView {
         cx.notify();
     }
 
+    /// Open `user`'s profile card at `position`, as seen from the open
+    /// channel, and fetch their profile (bio and banner) again. The last one
+    /// fetched shows meanwhile.
+    fn open_card(
+        &mut self,
+        user: String,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.store.knows_user(&user) {
+            return;
+        }
+        self.card = Some(OpenCard {
+            user: user.clone(),
+            channel: self.current_channel().map(|c| c.id),
+            position,
+        });
+        window.focus(&self.card_focus, cx);
+        let request = spawn_io({
+            let (client, user) = (self.client.clone(), user.clone());
+            async move { client.fetch_profile(&user).await }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = request.await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(Ok(profile)) => {
+                        this.profiles.insert(user, Some(profile));
+                    }
+                    // Not connected to them closely enough: no bio or banner.
+                    Ok(Err(err))
+                        if matches!(
+                            err.error_type(),
+                            Some(revolt_result::ErrorType::MissingPermission { .. })
+                        ) =>
+                    {
+                        this.profiles.insert(user, None);
+                    }
+                    Ok(Err(err)) => log::warn!("couldn't load the profile of {user}: {err}"),
+                    Err(err) => log::warn!("profile task failed: {err:?}"),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Close the profile card. `refocus`: give focus back to the message box
+    /// (after Esc; a click elsewhere focuses what it clicked).
+    fn close_card(&mut self, refocus: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.card.take().is_none() {
+            return;
+        }
+        if refocus {
+            self.composer
+                .update(cx, |composer, cx| composer.focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    /// A card opened from another channel than the open one closes.
+    fn sync_card(&mut self) {
+        let current = self.current_channel().map(|c| c.id);
+        if self
+            .card
+            .as_ref()
+            .is_some_and(|card| card.channel != current)
+        {
+            self.card = None;
+        }
+    }
+
+    /// The open card, floating at its position and kept inside the window.
+    fn render_card(&self, open: &OpenCard, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let card = crate::profile::profile_card(&self.store, &open.user, open.channel.as_deref())?;
+        let profile = self.profiles.get(&open.user).and_then(Option::as_ref);
+        let banner_url = profile
+            .and_then(|p| p.background.as_ref())
+            .and_then(|file| self.store.media().file(file));
+        let bio = profile
+            .and_then(|p| p.content.as_deref())
+            .map(str::trim)
+            .filter(|content| !content.is_empty())
+            .map(|content| {
+                let markdown = crate::markdown::prepare(content, &self.store);
+                CardBio {
+                    render_key: crate::store::render_key(
+                        &format!("bio-{}", open.user),
+                        Some(&markdown),
+                    ),
+                    markdown,
+                }
+            });
+        let on_link: OnLink = Arc::new(|url, _, cx| {
+            if is_external_link(url) {
+                cx.open_url(url);
+            }
+        });
+        let content = CardContent {
+            card,
+            banner_url,
+            bio,
+        };
+        let element = render_profile_card(&content, Vec::new(), on_link, cx)
+            .id("profile-card")
+            .track_focus(&self.card_focus)
+            .occlude()
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    cx.stop_propagation();
+                    this.close_card(true, window, cx);
+                }
+            }))
+            .on_mouse_down_out(
+                cx.listener(|this, _, window, cx| this.close_card(false, window, cx)),
+            )
+            .on_scroll(|_, _, cx| cx.stop_propagation());
+        Some(
+            deferred(
+                anchored()
+                    .position(open.position)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(element),
+            )
+            .with_priority(1)
+            .into_any_element(),
+        )
+    }
+
     /// The full-size viewer: the image fitted to the window (never enlarged)
     /// on a dimmed backdrop, under a bar with its name and actions. It takes
     /// every click and scroll, so the messages underneath don't react.
@@ -3869,6 +4015,7 @@ impl ChatView {
             avatar_bg: theme.secondary,
             avatar_fg: theme.secondary_foreground,
             ring: theme.sidebar,
+            hover: theme.sidebar_accent,
             online: theme.success,
             idle: theme.warning,
             focus: theme.info,
@@ -3889,6 +4036,12 @@ impl ChatView {
             list.title.clone().into()
         };
         let rows = list.clone();
+        let view = cx.entity().downgrade();
+        let open_card: OpenCardAt = Rc::new(move |user, window, cx| {
+            let position = window.mouse_position();
+            view.update(cx, |this, cx| this.open_card(user, position, window, cx))
+                .ok();
+        });
         v_flex()
             .id("member-panel")
             .w(px(MEMBER_PANEL_WIDTH))
@@ -3934,7 +4087,7 @@ impl ChatView {
                         list.rows.len(),
                         move |range, _, _| {
                             range
-                                .map(|ix| render_member_row(&rows.rows[ix], colors))
+                                .map(|ix| render_member_row(&rows.rows[ix], colors, &open_card))
                                 .collect::<Vec<_>>()
                         },
                     )
@@ -3964,6 +4117,8 @@ struct MemberColors {
     avatar_fg: Hsla,
     /// Behind the presence dot, so it reads against the avatar.
     ring: Hsla,
+    /// Behind a row the mouse is over.
+    hover: Hsla,
     online: Hsla,
     idle: Hsla,
     focus: Hsla,
@@ -3983,7 +4138,7 @@ impl MemberColors {
 }
 
 /// `#rrggbb` as a colour.
-fn hex_colour(css: &str) -> Option<Hsla> {
+pub(crate) fn hex_colour(css: &str) -> Option<Hsla> {
     let digits = css.strip_prefix('#')?;
     (digits.len() == 6)
         .then(|| u32::from_str_radix(digits, 16).ok())
@@ -3991,7 +4146,14 @@ fn hex_colour(css: &str) -> Option<Hsla> {
         .map(|value| Hsla::from(rgb(value)))
 }
 
-fn render_member_row(row: &MemberListRow, colors: MemberColors) -> AnyElement {
+/// Opens a person's profile card where the mouse is.
+type OpenCardAt = Rc<dyn Fn(String, &mut Window, &mut App)>;
+
+fn render_member_row(
+    row: &MemberListRow,
+    colors: MemberColors,
+    open_card: &OpenCardAt,
+) -> AnyElement {
     match row {
         MemberListRow::Header { name, count } => h_flex()
             .h(px(MEMBER_ROW_HEIGHT))
@@ -4016,11 +4178,17 @@ fn render_member_row(row: &MemberListRow, colors: MemberColors) -> AnyElement {
                 .as_deref()
                 .and_then(hex_colour)
                 .unwrap_or(colors.foreground);
+            let (open_card, user) = (open_card.clone(), user_id.clone());
             h_flex()
+                .id(SharedString::from(format!("member-{user_id}")))
                 .h(px(MEMBER_ROW_HEIGHT))
                 .px_3()
                 .gap_2()
                 .items_center()
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|el| el.bg(colors.hover))
+                .on_click(move |_, window, cx| open_card(user.clone(), window, cx))
                 .when(!online, |el| el.opacity(0.5))
                 .child(
                     div()
@@ -4195,6 +4363,16 @@ enum RowAction {
 }
 
 type OnRowAction = Rc<dyn Fn(RowAction, &mut Window, &mut App)>;
+
+/// The open profile card.
+struct OpenCard {
+    user: String,
+    /// The channel it was opened from (which decides the server, for
+    /// roles and nickname). It closes when another channel opens.
+    channel: Option<String>,
+    /// Where it was opened, in window coordinates: its top-left corner.
+    position: Point<Pixels>,
+}
 
 #[derive(Clone)]
 struct ViewedImage {
@@ -5814,10 +5992,15 @@ impl Render for ChatView {
         self.sync_composer(window, cx);
         self.sync_side_panel(window, cx);
         self.refresh_member_list();
+        self.sync_card();
         let viewer = self
             .viewer
             .as_ref()
             .map(|image| self.render_viewer(image, window, cx).into_any_element());
+        let card = self
+            .card
+            .as_ref()
+            .and_then(|open| self.render_card(open, cx));
         let theme = cx.theme();
         let (background, foreground) = (theme.background, theme.foreground);
         div()
@@ -5832,6 +6015,7 @@ impl Render for ChatView {
                     .child(self.render_channel_list(cx))
                     .child(self.render_main(cx)),
             )
+            .children(card)
             .children(viewer)
     }
 }

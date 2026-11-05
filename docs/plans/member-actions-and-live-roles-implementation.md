@@ -104,3 +104,66 @@ None. The rail-order risk was accepted as planned: the server appears last, and 
 
 ### Manual Validation
 Deferred to the end of the milestone (manual checks are batched).
+
+## Chunk 3: Profile card from the member list
+
+### Changes Made
+- `src/profile.rs` (new, GPUI-free), registered in `src/lib.rs`: `profile_card(store, user, channel: Option<&str>) -> Option<ProfileCard>`. A `ProfileCard` has:
+  - `user_id` and `name` (the nickname in the channel's server, else the display name, else the username).
+  - `username_tag` (`username#discriminator`).
+  - `avatar_url` (the server avatar first).
+  - `presence`, and `status` (trimmed; a blank one is `None`).
+  - `pronouns` (the member's first, then the user's).
+  - `bot`.
+  - `roles: Vec<CardRole { name, colour }>`, highest first. These appear only in server channels. Roles that no longer exist are left out, and a gradient colour becomes `None`.
+  - `joined_server: Option<(server name, DateTime<Utc>)>`. The epoch placeholder from old `ServerMemberJoin` fallbacks counts as unknown.
+  - `created` (from the ULID).
+  - `relationship` and `is_me`.
+  - `None` for an unknown user.
+- `src/store.rs`: `presence_kind` is now `pub`. The colour parsing in `role_colour` moved into a new `pub fn solid_colour(css)`, which the card reuses.
+- `src/api/client.rs`: `fetch_profile(user) -> UserProfile` (`GET /users/{id}/profile`).
+- `src/ui/profile_card.rs` (new), registered in `src/ui/mod.rs`: `render_profile_card(content, actions, on_link, cx) -> Div`. The card is a fixed 340 px wide and at most 560 px tall; a long bio scrolls inside it. It draws:
+  - the banner, or a plain strip without one
+  - a 48 px avatar with a presence dot
+  - the name, with a "Bot" tag where it applies
+  - `username#discriminator`, which you click to copy
+  - Status, Pronouns, and Roles (as chips with colour dots)
+  - "Member since" for Stoat and for the server, as local dates
+  - the bio ("About me") through `TextView::markdown`
+  - an actions row, empty for now. `CardContent` / `CardBio` carry the data, and `OnLink` is the link-click callback.
+- `src/ui/chat.rs`:
+  - New state: `card: Option<OpenCard { user, channel, position }>`, `card_focus` and `profiles: HashMap<String, Option<UserProfile>>`, the per-session cache, where `None` means Stoat refused.
+  - `open_card(user, position)` focuses the card and always fetches the profile again. A 403 `MissingPermission` stores `None`, so no bio or banner and no error. Other errors are logged.
+  - `close_card(refocus)`: Esc gives focus back to the composer. A click elsewhere closes the card without moving focus.
+  - `sync_card()`, called every render, closes a card opened from a different channel. `Ready` also closes it.
+  - `render_card` builds `CardContent` from the store and the cached profile. The bio goes through `markdown::prepare`, keyed by `render_key("bio-{user}", bio)`. It's drawn as `deferred(anchored().position(p).snap_to_window_with_margin(8px))` at priority 1, with `occlude`, `track_focus`, Esc on `on_key_down`, `on_mouse_down_out` to close, and scrolling stopped.
+  - Member rows get a stable `member-{user_id}` ID, a pointer cursor, a hover background (`sidebar_accent`, through a new `MemberColors.hover`) and `on_click`, which opens the card at `window.mouse_position()` through an `OpenCardAt` callback.
+  - `hex_colour` is now `pub(crate)` so the card can share it.
+- `tests/profile.rs` (new, 9 tests):
+  - nickname and member pronouns win in a server
+  - display name and own pronouns elsewhere, with a blank nickname falling back
+  - roles highest first, with only solid colours and unknown roles left out
+  - roles follow a ranks change
+  - no roles or server join date outside server channels
+  - join dates from the membership and the ULID
+  - the bot flag and a blank status
+  - `is_me`
+  - an unknown user gives `None`
+- `tests/api_users.rs`: 3 tests for `fetch_profile`: the path, token and parsing with a banner; an empty profile; and a 403 `MissingPermission { permission: "ViewProfile" }`.
+
+### Divergences
+- **`profiles` holds `Option<UserProfile>`**, where `None` means 403. The plan sketched a separate `ProfileState` on `OpenCard`. The outcome is the same: the last result shows while the card fetches again, and a 403 hides the bio and banner without an error.
+- **The card's Markdown callback is `Arc<… + Send + Sync>`**, because `TextView::on_link_click` requires `Send + Sync`. Chunk 4 will route `stoat:user/` links through a `WeakEntity<ChatView>`, which is `Send + Sync`.
+- **The heading always shows the best name.** The web card shows the display-name line only when it differs from the username, but here it's the card's heading and `username#discriminator` is always shown below it. This is minor and only changes the presentation.
+- **Small helper refactors:** `solid_colour` extracted from `role_colour`, `presence_kind` made `pub`, and `hex_colour` made `pub(crate)`.
+- **Look-ahead:** chunk 4's link handling has to build an `OnLink` (Send + Sync) for message bodies too. That's already the shape `TextView` requires there, so the plan needs no change. Chunks 5–7 add their buttons through `render_profile_card`'s `actions` parameter, as planned.
+
+### Verification Performed
+- `cargo test --test profile --test api_users`: 14 passed.
+- `cargo test` (full): 525 passed, 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- `rustfmt --check`: the new files are clean. `chat.rs` (19), `store.rs` (15) and `client.rs` (3) are back to their `HEAD` hunk counts. From here on, a scratch script (`/tmp/fmtmine/fmtmine.py`, outside the repo) applies rustfmt's layout only to hunks containing lines this milestone added.
+- The UI can't be driven from tests. Placement, closing, and focus are part of the batched manual check.
+
+### Manual Validation
+Deferred to the end of the milestone (manual checks are batched).

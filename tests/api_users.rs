@@ -59,3 +59,60 @@ async fn fetching_a_membership_that_isnt_there_is_not_found() {
         "got {err:?}"
     );
 }
+
+#[tokio::test]
+async fn fetching_a_profile_gets_the_bio_and_banner() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/users/u-ada/profile"))
+        .and(header("x-session-token", "tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "content": "Hello, **world**",
+            "background": {
+                "_id": "file-banner", "tag": "backgrounds", "filename": "b.png",
+                "metadata": { "type": "Image", "width": 1000, "height": 300 },
+                "content_type": "image/png", "size": 1000
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let profile = client(&server).fetch_profile("u-ada").await.unwrap();
+    assert_eq!(profile.content.as_deref(), Some("Hello, **world**"));
+    assert_eq!(profile.background.unwrap().id, "file-banner");
+}
+
+#[tokio::test]
+async fn an_empty_profile_parses() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/users/u-ada/profile"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+
+    let profile = client(&server).fetch_profile("u-ada").await.unwrap();
+    assert_eq!((profile.content, profile.background), (None, None));
+}
+
+#[tokio::test]
+async fn a_profile_without_a_connection_is_missing_permission() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/users/u-stranger/profile"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "type": "MissingPermission", "permission": "ViewProfile", "location": "x"
+        })))
+        .mount(&server)
+        .await;
+
+    let err = client(&server)
+        .fetch_profile("u-stranger")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err.error_type(), Some(ErrorType::MissingPermission { permission }) if permission == "ViewProfile"),
+        "got {err:?}"
+    );
+}

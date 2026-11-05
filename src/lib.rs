@@ -22,6 +22,7 @@ pub mod notify;
 pub mod permissions;
 pub mod places;
 pub mod prefs;
+pub mod profile;
 pub mod runtime;
 pub mod search;
 pub mod session;

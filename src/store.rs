@@ -2287,7 +2287,6 @@ impl ChatStore {
     /// which can't be drawn as text: those, and anything unparseable, give
     /// `None` (the default text colour).
     pub fn role_colour(&self, server: &str, user: &str) -> Option<String> {
-        use std::str::FromStr as _;
         let server = self.servers.get(server)?;
         let member = self.member(&server.id, user)?;
         let (_, role) = member
@@ -2297,11 +2296,7 @@ impl ChatStore {
             .filter(|(_, role)| role.colour.as_deref().is_some_and(|c| !c.trim().is_empty()))
             // A higher rank is a smaller number.
             .min_by(|(a_id, a), (b_id, b)| a.rank.cmp(&b.rank).then_with(|| a_id.cmp(b_id)))?;
-        let colour = svgtypes::Color::from_str(role.colour.as_deref()?.trim()).ok()?;
-        Some(format!(
-            "#{:02x}{:02x}{:02x}",
-            colour.red, colour.green, colour.blue
-        ))
+        solid_colour(role.colour.as_deref()?)
     }
 
     /// Cache a server's full member list and its users (for `@`).
@@ -3007,9 +3002,20 @@ fn sort_messages(messages: &mut Vec<Message>) {
     messages.dedup_by(|a, b| a.id == b.id);
 }
 
+/// A role's CSS colour as `#rrggbb`, if it's a solid colour. Gradients and
+/// anything unparseable give `None`.
+pub fn solid_colour(css: &str) -> Option<String> {
+    use std::str::FromStr as _;
+    let colour = svgtypes::Color::from_str(css.trim()).ok()?;
+    Some(format!(
+        "#{:02x}{:02x}{:02x}",
+        colour.red, colour.green, colour.blue
+    ))
+}
+
 /// How `user` shows in the member list: by their presence, if they're
 /// online and not invisible.
-fn presence_kind(user: &User) -> PresenceKind {
+pub fn presence_kind(user: &User) -> PresenceKind {
     if !user.online {
         return PresenceKind::Offline;
     }
