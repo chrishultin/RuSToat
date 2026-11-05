@@ -99,3 +99,42 @@ Not exercised in this session: the over-20 MB toast and the offline Retry. Both 
 
 ### Manual Validation
 Deferred by the user ("we'll test it all later"). The chunk's checks (pasting a screenshot, pasting copied Finder files, dropping onto the message list with the overlay, pasting text unchanged) move to the plan's Manual Test 2 at completion.
+
+## Chunk 3: @mention autocomplete with chips
+
+### Changes Made
+- `src/complete.rs` (new, pure):
+  - `completion_query(text, cursor) -> Option<Query { kind: Mention | Channel | Emoji, range, query }>`. The trigger must start the text or follow whitespace or `( [ { " ' “ ‘`. The cursor must be at the end of the word. Code (an odd number of backticks earlier on the line, or inside a ``` or ~~~ fence) doesn't count. `:` needs at least 2 shortcode characters `[alnum _ + -]`.
+  - `rank(query, items, names, recent)` is generic: tier 0 is a prefix, 1 a word prefix, 2 a substring, ignoring case. Within a tier, recent items come first, then the given order. The result is cut at `MAX_SUGGESTIONS` (8). `rank_people` ranks on nickname, display name and username.
+  - `Candidate { id, name, display_name, username, avatar, recent }`.
+  - `TokenRef::{User, Channel, Emoji}`, with `wire_text()` (`<@id>`, `<#id>`, `:id:`), `token_id()` (`user:id`…) and `from_token_id`.
+  - `mention_spans(text)` finds the byte ranges of wire mentions whose IDs are real ULIDs (26 Crockford base-32 characters).
+  - `Suggestion { key, title, detail, image, glyph, insert: Insertion::{Token { token, label }, Text} }`, and `Suggestion::person`.
+- `src/store.rs`:
+  - `mention_candidates(channel)`: recent authors in the loaded history, newest first, skipping system and webhook messages. Then DM or group recipients, or the server's known members sorted by name. Each person appears once, never the user, and only known users.
+  - `token_label(channel, token)`: `@Name` (the nickname in servers), `#channel` or `:emoji:`, with fallbacks for unknown ones.
+- `src/ui/composer.rs`:
+  - `ComposerEvent::Complete(Query)`, `set_suggestions(query, suggestions, loading)` (ignored if the query moved on; the selected row is kept by key), and `completion_query()`.
+  - On `Change`, the query is recomputed unless the IME is composing (`EntityInputHandler::marked_text_range`). The popup closes on `Blur`.
+  - Capture-phase keys, which stop propagation only while the list is open: `MoveUp` and `MoveDown` (wrapping), `Enter` without Shift and `IndentInline` (Tab) accept, and `Escape` closes before the edit and reply handling.
+  - Accepting a token calls `replace_range_with_token(range, InlineToken::new(token_id, wire).with_label(label))`, then inserts a space. Text uses `set_selected_range` and `replace` (for chunk 5).
+  - The popup is absolute above the input row, the row's full width: up to 8 rows of 32 px with an avatar (or glyph), the name, a muted `@username`, and an optional "Loading members…" row. Mouse-down accepts, so focus stays in the box.
+  - Chips are drawn by `Textarea::token(render_chip)`: a pill in a 15 % primary tint, using the selection colour when selected.
+  - Text is loaded with chips: `set_text` builds `InputContent` from `mention_spans` and labels. `set_channel` and `start_edit` take a `Labeler` (`&dyn Fn(&TokenRef) -> String`), and labels are cached by token ID, so a draft restored after an edit (or on Esc) keeps its labels.
+- `src/ui/chat.rs`: `ComposerEvent::Complete` goes to `suggest(channel, query)`, which ranks `store.mention_candidates`, maps them through `Suggestion::person`, and calls `set_suggestions` (channels and emoji give nothing yet). `sync_composer` and `start_edit` pass `store.token_label` as the labeler.
+- `src/lib.rs`: `pub mod complete`.
+- `tests/complete.rs` (new, 15 tests): triggers and non-triggers (start, space, `(`, `"`, `email@x`, inline code, fences, after a chip, mid-word, bad offsets), query ranges in bytes, `:` rules (`12:30`, `1:2`, `http://x`, `:)`), ranking tiers, recent first, nicknames and display names, the cut at 8, the person suggestion's chip, `mention_spans` round trips and rejections, `mention_candidates` for DMs, groups (recent first), servers (recent, then members with nicknames) and saved messages, and chip labels.
+
+### Divergences
+- **Candidates come by event, not callback.** The composer emits `Complete(query)` and `ChatView` answers with `set_suggestions`. The same path will refresh the list when members arrive (chunk 4).
+- **Labels are passed in, not read by the composer.** `set_channel` and `start_edit` take a labeler argument, and the composer caches labels by token ID. It can't read the store itself: `ChatView` is mid-update when it calls these, so reading it would panic.
+- **`Candidate` gained `display_name`**, so a nickname and a display name can both be ranked (the plan had this in chunk 4's risk).
+- **Ranking:** "recent authors first" applies within each match tier. With an empty query (`@` alone), every name matches, so recent authors lead.
+- **No completion on cursor-only moves.** The popup is recomputed on text changes and closed on blur, not on cursor moves without typing (arrow keys left and right).
+
+### Verification Performed
+- `cargo test --test complete`: 15 passed. One expectation was corrected: the fixture's Ada has the display name "Ada L.".
+- Full suite: `cargo test` gives 303 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings` is clean.
+
+### Manual Validation
+Deferred by the user ("we'll test it all later"). The chunk's checks (`@` in a DM with arrows and Enter, a chip deleting as one unit, the mention pinging in the web app, an edit showing chips) move to the plan's Manual Tests 5 and 6.

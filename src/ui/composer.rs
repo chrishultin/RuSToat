@@ -1,13 +1,15 @@
 //! The message box under a conversation. Enter sends, Shift+Enter adds a
 //! new line, and each channel keeps its own draft, replies and attached
-//! files included.
+//! files included. `@` suggests people, and mentions show as chips.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{
-    Escape, InputEvent, MoveUp, Position, Textarea, TextareaState,
+    Enter, Escape, IndentInline, InlineToken, InlineTokenContext, InputContent, InputEvent,
+    MoveDown, MoveUp, Position, Textarea, TextareaState,
 };
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme, Disableable, Icon, Sizable, WindowExt, h_flex, v_flex};
@@ -16,6 +18,7 @@ use gpui_kit::*;
 
 use crate::api::models::ReplyIntent;
 use crate::attachment::FileKind;
+use crate::complete::{Insertion, Query, Suggestion, TokenRef, completion_query, mention_spans};
 use crate::draft::{
     AttachmentLimits, Draft, DraftAttachment, Drafts, EditStash, MAX_MESSAGE_CHARS, ReplyTarget,
     SendCheck, TooManyReplies, char_count, check_send, save_pasted_image,
@@ -37,6 +40,20 @@ pub enum ComposerEvent {
     /// The user typed (or cleared the box): `empty` if nothing's left. Not
     /// sent while editing, which isn't typing a message.
     Input { empty: bool },
+    /// Something's being completed: answer with [`Composer::set_suggestions`].
+    Complete(Query),
+}
+
+/// What gives a chip its label (`@Ada`) when text is loaded into the box.
+pub type Labeler<'a> = &'a dyn Fn(&TokenRef) -> String;
+
+/// The suggestion list above the box.
+struct Completion {
+    query: Query,
+    suggestions: Vec<Suggestion>,
+    /// More may come (the server's members are loading).
+    loading: bool,
+    selected: usize,
 }
 
 /// Shown when an edit would leave the message empty (Stoat needs at least
@@ -56,6 +73,11 @@ pub struct Composer {
     editing: EditStash,
     /// Why Enter didn't do anything (cleared when the text changes).
     hint: Option<SharedString>,
+    /// What's being completed, and the suggestions for it.
+    completion: Option<Completion>,
+    /// Chip labels seen so far, by token ID, for text that comes back
+    /// (a draft after an edit).
+    labels: HashMap<String, String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -85,6 +107,11 @@ impl Composer {
                         let empty = this.input.read(cx).value().trim().is_empty();
                         cx.emit(ComposerEvent::Input { empty });
                     }
+                    this.update_completion(window, cx);
+                    cx.notify()
+                }
+                InputEvent::Blur => {
+                    this.completion = None;
                     cx.notify()
                 }
                 _ => {}
@@ -98,6 +125,8 @@ impl Composer {
             drafts: Drafts::default(),
             editing: EditStash::default(),
             hint: None,
+            completion: None,
+            labels: HashMap::new(),
             _subscriptions: subscriptions,
         }
     }
@@ -107,11 +136,13 @@ impl Composer {
     }
 
     /// Type in `channel` from now on: the current text and replies are kept
-    /// as the old channel's draft, and `channel`'s own draft comes back.
+    /// as the old channel's draft, and `channel`'s own draft comes back,
+    /// its mentions labelled by `labels`.
     pub fn set_channel(
         &mut self,
         channel: Option<&str>,
         placeholder: SharedString,
+        labels: Labeler,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -135,6 +166,7 @@ impl Composer {
         self.channel = channel.map(str::to_string);
         self.input
             .update(cx, |input, cx| input.set_placeholder(placeholder, window, cx));
+        self.learn_labels(&text, labels);
         self.set_text(&text, window, cx);
         cx.notify();
     }
@@ -242,20 +274,149 @@ impl Composer {
         cx.notify();
     }
 
-    /// Replace the box's text, with the cursor at its end.
-    fn set_text(&self, text: &str, window: &mut Window, cx: &mut App) {
+    /// Replace the box's text, with the cursor at its end. Mentions,
+    /// channel links and custom emoji in it become chips.
+    fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let content = self.with_chips(text);
+        self.completion = None;
         self.input.update(cx, |input, cx| {
-            input.set_value(text.to_string(), window, cx);
+            input.set_value(content, window, cx);
             input.set_cursor_position(end_of(text), window, cx);
         });
     }
 
-    /// Edit the user's message `id`, whose text is `content`, in the box.
-    /// Whatever was being typed (and replied to) comes back afterwards.
+    /// `text` with a chip for each mention in it, labelled from what's been
+    /// learnt (see [`Self::learn_labels`]).
+    fn with_chips(&self, text: &str) -> InputContent {
+        let mut content = InputContent::new(text.to_string());
+        for (range, token) in mention_spans(text) {
+            let label = self
+                .labels
+                .get(&token.token_id())
+                .cloned()
+                .unwrap_or_else(|| unknown_label(&token));
+            let chip = InlineToken::new(token.token_id(), token.wire_text()).with_label(label);
+            match content.clone().with_token(range, chip) {
+                Ok(with) => content = with,
+                Err(err) => log::debug!("no chip for {token:?}: {err}"),
+            }
+        }
+        content
+    }
+
+    /// Remember labels for the mentions in `text`.
+    fn learn_labels(&mut self, text: &str, labels: Labeler) {
+        for (_, token) in mention_spans(text) {
+            self.labels.insert(token.token_id(), labels(&token));
+        }
+    }
+
+    /// Open, update or close the suggestion list for what's at the cursor.
+    /// Nothing's suggested while an input method is composing.
+    fn update_completion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let composing = self
+            .input
+            .update(cx, |input, cx| input.marked_text_range(window, cx).is_some());
+        let query = (!composing && self.channel.is_some())
+            .then(|| {
+                let input = self.input.read(cx);
+                completion_query(&input.value(), input.cursor())
+            })
+            .flatten();
+        match query {
+            None => self.completion = None,
+            Some(query) => {
+                if self.completion.as_ref().is_some_and(|c| c.query == query) {
+                    return;
+                }
+                self.completion = Some(Completion {
+                    query: query.clone(),
+                    suggestions: Vec::new(),
+                    loading: false,
+                    selected: 0,
+                });
+                cx.emit(ComposerEvent::Complete(query));
+            }
+        }
+    }
+
+    /// The suggestions for `query` (ignored if it's no longer what's being
+    /// completed). `loading`: more are on the way.
+    pub fn set_suggestions(
+        &mut self,
+        query: &Query,
+        suggestions: Vec<Suggestion>,
+        loading: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(completion) = self.completion.as_mut().filter(|c| c.query == *query) else {
+            return;
+        };
+        // Keep the same row selected if it's still there.
+        let selected = completion
+            .suggestions
+            .get(completion.selected)
+            .and_then(|old| suggestions.iter().position(|s| s.key == old.key))
+            .unwrap_or(0);
+        completion.suggestions = suggestions;
+        completion.loading = loading;
+        completion.selected = selected;
+        cx.notify();
+    }
+
+    /// What's being completed right now, if the list is open.
+    pub fn completion_query(&self) -> Option<&Query> {
+        self.completion.as_ref().map(|c| &c.query)
+    }
+
+    /// The list is open (there's something to pick, or it's loading).
+    fn completing(&self) -> bool {
+        self.completion
+            .as_ref()
+            .is_some_and(|c| !c.suggestions.is_empty() || c.loading)
+    }
+
+    /// Put suggestion `ix` in the box in place of what's being completed.
+    fn accept(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(completion) = self.completion.take() else {
+            return;
+        };
+        let Some(suggestion) = completion.suggestions.get(ix) else {
+            return;
+        };
+        let range = completion.query.range.clone();
+        match &suggestion.insert {
+            Insertion::Token { token, label } => {
+                self.labels.insert(token.token_id(), label.clone());
+                let chip = InlineToken::new(token.token_id(), token.wire_text()).with_label(label.clone());
+                self.input.update(cx, |input, cx| {
+                    if let Err(err) = input.replace_range_with_token(range, chip, window, cx) {
+                        log::warn!("couldn't insert {token:?}: {err}");
+                        return;
+                    }
+                    input.insert(" ", window, cx);
+                });
+            }
+            Insertion::Text(text) => {
+                let text = format!("{text} ");
+                self.input.update(cx, |input, cx| {
+                    input.set_selected_range(range, cx);
+                    input.replace(text, window, cx);
+                });
+            }
+        }
+        self.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Edit the user's message `id`, whose text is `content`, in the box
+    /// (its mentions labelled by `labels`). Whatever was being typed (and
+    /// replied to) comes back afterwards.
     pub fn start_edit(
         &mut self,
         id: String,
         content: &str,
+        labels: Labeler,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -263,6 +424,7 @@ impl Composer {
         let current = self.take_draft(cx);
         self.editing.begin(id, current);
         self.hint = None;
+        self.learn_labels(content, labels);
         self.set_text(content, window, cx);
         self.focus(window, cx);
         cx.notify();
@@ -341,6 +503,52 @@ impl Composer {
         }
     }
 
+    /// Esc with suggestions open: close them (before anything else Esc does).
+    fn on_escape_completion(&mut self, _: &Escape, _: &mut Window, cx: &mut Context<Self>) {
+        if self.completing() {
+            cx.stop_propagation();
+            self.completion = None;
+            cx.notify();
+        }
+    }
+
+    /// Enter or Tab with suggestions open: pick the selected one.
+    /// (Shift+Enter still adds a new line.)
+    fn on_enter(&mut self, enter: &Enter, window: &mut Window, cx: &mut Context<Self>) {
+        if self.completing() && !enter.shift {
+            self.accept_selected(window, cx);
+        }
+    }
+
+    fn on_tab(&mut self, _: &IndentInline, window: &mut Window, cx: &mut Context<Self>) {
+        if self.completing() {
+            self.accept_selected(window, cx);
+        }
+    }
+
+    fn accept_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        if let Some(selected) = self.completion.as_ref().map(|c| c.selected) {
+            self.accept(selected, window, cx);
+        }
+    }
+
+    /// Down with suggestions open: select the next one (wrapping).
+    fn on_move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
+        if self.completing() {
+            cx.stop_propagation();
+            self.move_selection(1, cx);
+        }
+    }
+
+    fn move_selection(&mut self, step: isize, cx: &mut Context<Self>) {
+        if let Some(c) = self.completion.as_mut().filter(|c| !c.suggestions.is_empty()) {
+            let len = c.suggestions.len() as isize;
+            c.selected = (c.selected as isize + step).rem_euclid(len) as usize;
+            cx.notify();
+        }
+    }
+
     /// Esc in the message box: stop editing, or else stop replying.
     fn on_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
         if self.cancel_edit(window, cx) {
@@ -354,9 +562,15 @@ impl Composer {
         cx.notify();
     }
 
-    /// Up in an empty box (not already editing): edit the last message.
-    /// Otherwise Up moves the cursor as usual.
+    /// Up with suggestions open: select the previous one. In an empty box
+    /// (not already editing): edit the last message. Otherwise Up moves the
+    /// cursor as usual.
     fn on_move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
+        if self.completing() {
+            cx.stop_propagation();
+            self.move_selection(-1, cx);
+            return;
+        }
         if self.editing.editing().is_none() && self.input.read(cx).value().is_empty() {
             cx.stop_propagation();
             cx.emit(ComposerEvent::EditLast);
@@ -564,6 +778,131 @@ pub fn file_icon(kind: FileKind) -> IconName {
     }
 }
 
+/// A chip's label when what it refers to isn't known (yet).
+fn unknown_label(token: &TokenRef) -> String {
+    match token {
+        TokenRef::User(_) => "@Unknown user".into(),
+        TokenRef::Channel(_) => "#unknown-channel".into(),
+        TokenRef::Emoji(_) => ":emoji:".into(),
+    }
+}
+
+/// A mention or channel link in the box: a pill in the primary tint.
+fn render_chip(chip: &InlineTokenContext, _: &mut Window, cx: &mut App) -> Div {
+    let theme = cx.theme();
+    div()
+        .flex()
+        .items_center()
+        .px_1()
+        .h(chip.line_height())
+        .max_w(chip.available_width())
+        .rounded(px(4.))
+        .bg(if chip.is_selected() {
+            theme.selection
+        } else {
+            theme.primary.opacity(0.15)
+        })
+        .text_color(theme.primary)
+        .font_weight(FontWeight::MEDIUM)
+        .child(div().min_w_0().truncate().child(chip.token().label().clone()))
+}
+
+/// Height of a suggestion row.
+const SUGGESTION_HEIGHT: f32 = 32.;
+/// Avatar (or emoji) size in a suggestion row.
+const SUGGESTION_IMAGE: f32 = 20.;
+
+impl Composer {
+    /// The suggestion list, just above the box and as wide as it.
+    fn render_suggestions(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let theme = cx.theme();
+        let completion = self.completion.as_ref();
+        let (suggestions, selected, loading) = completion
+            .map(|c| (c.suggestions.as_slice(), c.selected, c.loading))
+            .unwrap_or_default();
+        v_flex()
+            .id("suggestions")
+            .absolute()
+            .bottom_full()
+            .left_0()
+            .right_0()
+            .mb_1()
+            .p_1()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .shadow_md()
+            .occlude()
+            .children(suggestions.iter().enumerate().map(|(ix, suggestion)| {
+                let picture = match (&suggestion.image, &suggestion.glyph) {
+                    (Some(url), _) => img(SharedUri::from(url.clone()))
+                        .size(px(SUGGESTION_IMAGE))
+                        .flex_none()
+                        .rounded_full()
+                        .into_any_element(),
+                    (None, Some(glyph)) => div()
+                        .w(px(SUGGESTION_IMAGE))
+                        .flex_none()
+                        .text_center()
+                        .child(glyph.clone())
+                        .into_any_element(),
+                    (None, None) => div().w(px(SUGGESTION_IMAGE)).into_any_element(),
+                };
+                h_flex()
+                    .id(SharedString::from(format!("suggestion-{}", suggestion.key)))
+                    .h(px(SUGGESTION_HEIGHT))
+                    .px_2()
+                    .gap_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .when(ix == selected, |el| {
+                        el.bg(theme.accent).text_color(theme.accent_foreground)
+                    })
+                    .hover(|el| el.bg(theme.accent))
+                    // On mouse down, so the box doesn't lose focus first.
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.accept(ix, window, cx);
+                        }),
+                    )
+                    .child(picture)
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(suggestion.title.clone()),
+                    )
+                    .when_some(suggestion.detail.clone(), |el, detail| {
+                        el.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(detail),
+                        )
+                    })
+            }))
+            .when(loading, |el| {
+                el.child(
+                    div()
+                        .h(px(SUGGESTION_HEIGHT))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("Loading members…"),
+                )
+            })
+    }
+}
+
 /// Where the cursor goes at the end of `text`.
 fn end_of(text: &str) -> Position {
     let line = text.matches('\n').count();
@@ -583,6 +922,7 @@ impl Render for Composer {
         // Edits change text only, so files can't be added meanwhile.
         let editing = self.editing.editing().is_some();
         let tray = (!self.draft.attachments.is_empty()).then(|| self.render_tray(cx));
+        let suggestions = self.completing().then(|| self.render_suggestions(cx));
         let attach = Button::new("attach")
             .ghost()
             .icon(IconName::Paperclip)
@@ -597,21 +937,33 @@ impl Render for Composer {
             .pb_4()
             .gap_1()
             .on_action(cx.listener(Self::on_escape))
-            // Before the textarea moves the cursor.
+            // Before the textarea moves the cursor, sends, or indents.
             .capture_action(cx.listener(Self::on_move_up))
+            .capture_action(cx.listener(Self::on_move_down))
+            .capture_action(cx.listener(Self::on_enter))
+            .capture_action(cx.listener(Self::on_tab))
+            .capture_action(cx.listener(Self::on_escape_completion))
             .children(bar)
             .child(
                 h_flex()
+                    .relative()
                     .items_end()
                     .gap_1()
                     .child(attach)
-                    .child(div().flex_1().min_w_0().child(Textarea::new(&self.input).on_paste({
-                        let this = cx.entity().downgrade();
-                        move |item, window, cx| {
-                            this.update(cx, |this, cx| this.paste(item, window, cx))
-                                .unwrap_or(false)
-                        }
-                    }))),
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            Textarea::new(&self.input)
+                                .on_paste({
+                                    let this = cx.entity().downgrade();
+                                    move |item, window, cx| {
+                                        this.update(cx, |this, cx| this.paste(item, window, cx))
+                                            .unwrap_or(false)
+                                    }
+                                })
+                                .token(render_chip),
+                        ),
+                    )
+                    .children(suggestions),
             )
             .children(tray)
             .when_some(hint, |el, hint| {

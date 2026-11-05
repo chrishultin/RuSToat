@@ -29,6 +29,7 @@ use crate::api::StoatClient;
 use crate::api::models::ReplyIntent;
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
 use crate::attachment::{AttachmentView, fit_into};
+use crate::complete::{Query, QueryKind, Suggestion, TokenRef, rank_people};
 use crate::draft::{AttachmentLimits, DraftAttachment, ReplyTarget};
 use crate::embed::{Description, EmbedCard, EmbedImage, EmbedView};
 use crate::markdown::{JUMBO_TEXT_PX, is_external_link};
@@ -253,6 +254,12 @@ impl ChatView {
                         this.outgoing_typing
                             .on_input(&channel, *empty, std::time::Instant::now());
                     this.send_typing(signals, cx);
+                }
+                ComposerEvent::Complete(query) => {
+                    let Some(channel) = composer.read(cx).channel().map(str::to_string) else {
+                        return;
+                    };
+                    this.suggest(&channel, query, cx);
                 }
                 ComposerEvent::EditLast => {
                     let Some(channel) = composer.read(cx).channel().map(str::to_string) else {
@@ -653,13 +660,33 @@ impl ChatView {
             .children(typing_label(&names))
     }
 
+    /// Answer the message box's `query` with suggestions from what's known
+    /// about `channel`.
+    fn suggest(&mut self, channel: &str, query: &Query, cx: &mut Context<Self>) {
+        let suggestions = match query.kind {
+            QueryKind::Mention => {
+                rank_people(&query.query, &self.store.mention_candidates(channel))
+                    .iter()
+                    .map(Suggestion::person)
+                    .collect()
+            }
+            QueryKind::Channel | QueryKind::Emoji => Vec::new(),
+        };
+        self.composer.update(cx, |composer, cx| {
+            composer.set_suggestions(query, suggestions, false, cx)
+        });
+    }
+
     /// Edit the user's message `id` in the message box.
     fn start_edit(&mut self, channel: &str, id: String, window: &mut Window, cx: &mut Context<Self>) {
         let stopped = self.outgoing_typing.stop();
         self.send_typing(stopped, cx);
         let content = self.store.raw_content(channel, &id).unwrap_or_default().to_string();
-        self.composer
-            .update(cx, |composer, cx| composer.start_edit(id, &content, window, cx));
+        let store = &self.store;
+        let labels = |token: &TokenRef| store.token_label(channel, token);
+        self.composer.update(cx, |composer, cx| {
+            composer.start_edit(id, &content, &labels, window, cx)
+        });
     }
 
     /// Save an edit: shown at once, then sent. If Stoat refuses, the old
@@ -932,8 +959,10 @@ impl ChatView {
             .as_ref()
             .map(composer_placeholder)
             .unwrap_or_default();
+        let store = &self.store;
+        let labels = |token: &TokenRef| store.token_label(id.unwrap_or_default(), token);
         self.composer.update(cx, |composer, cx| {
-            composer.set_channel(id, placeholder.into(), window, cx);
+            composer.set_channel(id, placeholder.into(), &labels, window, cx);
             if id.is_some() && self.viewer.is_none() {
                 composer.focus(window, cx);
             }

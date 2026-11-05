@@ -8,6 +8,7 @@ pub mod api;
 pub mod assets;
 pub mod attachment;
 pub mod banners;
+pub mod complete;
 pub mod dock;
 pub mod draft;
 pub mod embed;

@@ -11,6 +11,7 @@ use crate::api::models::{
     SystemMessage, User,
 };
 use crate::attachment::AttachmentView;
+use crate::complete::{Candidate, TokenRef};
 use crate::draft::DraftAttachment;
 use crate::embed::EmbedView;
 use crate::media::MediaUrls;
@@ -1794,6 +1795,83 @@ impl ChatStore {
             .filter(|n| !n.trim().is_empty())
             .or_else(|| self.user_name(user))
             .unwrap_or_else(|| "Someone".into())
+    }
+
+    /// Who `@` suggests in `channel`, best first: people who wrote there
+    /// recently (newest first), then the DM's or group's recipients, or the
+    /// server's members known so far (by name). Never the user.
+    pub fn mention_candidates(&self, channel: &str) -> Vec<Candidate> {
+        let mut seen = HashSet::new();
+        let mut people = Vec::new();
+        let mut add = |id: &str, recent: bool, people: &mut Vec<Candidate>| {
+            if id != self.me && seen.insert(id.to_string())
+                && let Some(person) = self.candidate(channel, id, recent)
+            {
+                people.push(person);
+            }
+        };
+        if let Some(history) = self.histories.get(channel) {
+            for message in history.messages.iter().rev() {
+                if message.system.is_none() && message.webhook.is_none() {
+                    add(&message.author, true, &mut people);
+                }
+            }
+        }
+        match self.channels.get(channel) {
+            Some(Channel::DirectMessage { recipients, .. } | Channel::Group { recipients, .. }) => {
+                for id in recipients {
+                    add(id, false, &mut people);
+                }
+            }
+            Some(Channel::TextChannel { server, .. }) => {
+                let mut members: Vec<Candidate> = self
+                    .members
+                    .keys()
+                    .filter(|(s, _)| s == server)
+                    .filter_map(|(_, user)| self.candidate(channel, user, false))
+                    .collect();
+                members.sort_by_cached_key(|p| p.name.to_lowercase());
+                for member in members {
+                    add(&member.id, false, &mut people);
+                }
+            }
+            _ => {}
+        }
+        people
+    }
+
+    /// `user` as `@` suggests them in `channel`. `None` if they aren't known.
+    fn candidate(&self, channel: &str, user: &str, recent: bool) -> Option<Candidate> {
+        let known = self.users.get(user)?;
+        let name = self.name_in(channel, user);
+        let display = display_name(known);
+        Some(Candidate {
+            id: user.to_string(),
+            display_name: (display != name).then(|| display.to_string()),
+            name,
+            username: known.username.clone(),
+            avatar: Some(self.user_avatar_url(user)),
+            recent,
+        })
+    }
+
+    /// What a chip in the message box shows for `token`, in `channel`:
+    /// `@Name`, `#channel` or `:emoji:`.
+    pub fn token_label(&self, channel: &str, token: &TokenRef) -> String {
+        match token {
+            TokenRef::User(id) => match self.users.get(id) {
+                Some(_) => format!("@{}", self.name_in(channel, id)),
+                None => "@Unknown user".into(),
+            },
+            TokenRef::Channel(id) => match self.channel_entry(id) {
+                Some(entry) => format!("#{}", entry.name),
+                None => "#unknown-channel".into(),
+            },
+            TokenRef::Emoji(id) => match self.emojis.get(id) {
+                Some(emoji) => format!(":{}:", emoji.name),
+                None => ":emoji:".into(),
+            },
+        }
     }
 
     /// The server a channel belongs to, if it's a server channel.
