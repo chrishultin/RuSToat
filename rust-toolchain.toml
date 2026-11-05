@@ -1,0 +1,5 @@
+# gpui-pre 0.3.11 (pulled in by gpui-kit 0.9.0) uses std::hint::cold_path,
+# which Rust 1.93 still treats as unstable. Pin a newer stable for this project only.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
