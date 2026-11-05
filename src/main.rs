@@ -1,7 +1,10 @@
+use std::sync::Arc;
+
 use gpui_kit::*;
+use stoat_gpui::session::{KeychainStore, TokenStore};
 use stoat_gpui::{runtime, ui};
 
-actions!(stoat, [Quit]);
+actions!(stoat, [Quit, LogOut]);
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("stoat_gpui=info"))
@@ -16,9 +19,14 @@ fn main() {
 
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+        // No shortcut for Log Out: ⇧⌘Q is macOS's own "Log Out <user>".
         cx.set_menus(vec![Menu {
             name: "Stoat".into(),
-            items: vec![MenuItem::action("Quit Stoat", Quit)],
+            items: vec![
+                MenuItem::action("Log Out", LogOut),
+                MenuItem::separator(),
+                MenuItem::action("Quit Stoat", Quit),
+            ],
             disabled: false,
         }]);
 
@@ -35,10 +43,20 @@ fn main() {
             ..Default::default()
         };
 
-        gpui_kit::open_window(options, cx, |window, cx| {
-            cx.new(|cx| ui::AppRoot::new(window, cx))
+        let store: Arc<dyn TokenStore> = Arc::new(KeychainStore::new());
+        let (window, root) = gpui_kit::open_window(options, cx, |window, cx| {
+            cx.new(|cx| ui::AppRoot::new(store, window, cx))
         })
         .expect("failed to open the main window");
+
+        // Handled at the app level so the menu item works wherever focus is.
+        cx.on_action(move |_: &LogOut, cx| {
+            window
+                .update(cx, |_, window, cx| {
+                    root.update(cx, |root, cx| root.log_out(window, cx))
+                })
+                .ok();
+        });
 
         cx.activate(true);
         log::info!("Stoat window opened");

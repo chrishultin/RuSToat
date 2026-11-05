@@ -122,3 +122,70 @@ The window was left open for the user to inspect, and they gave the go-ahead to 
 
 ### Manual Validation
 The user logged in with their real Stoat account in the running app and confirmed that it works. They didn't say separately which paths they tried (2FA, wrong password, recovery code). Those paths are covered by the `wiremock` tests.
+
+## Chunk 3: Keychain session persistence and logout
+
+### Changes Made
+- `Cargo.toml`: added `keyring = "4.2"` (default `v1` mode, which uses Keychain Services on macOS).
+- `src/session.rs` (new):
+  - `TokenStore` trait with `load`, `save` and `clear`, keyed by **instance**, meaning the API base URL.
+    - `KeychainStore`: service `chat.stoat.gpui-poc`, account = API URL. A missing item counts as "none", and clearing a missing item is fine.
+    - `MemoryStore`: public, used by the tests.
+  - `restore(store, client) -> Restored` loads the token and checks it with `GET /users/@me`:
+    - valid: `SignedIn { token, user: Box<User> }`
+    - none saved, or rejected (`Unauthorized`): `NeedsLogin`, clearing the rejected token
+    - any other error (network, 5xx, 429): `Unverified { token, error }`, keeping the token
+  - `remember(store, instance, token)` saves a token.
+  - `log_out(store, client)` **clears the local token first**, then calls the server, and returns both results.
+  - Store calls run on `spawn_blocking`.
+  - An opt-in real-Keychain round-trip test uses the separate service `chat.stoat.gpui-poc.test`.
+- `src/api/client.rs`:
+  - `logout()` calls `POST /auth/session/logout`. A 204 or an already-rejected token (401) counts as success.
+  - `send` is split into `send_raw`, which returns the status and body bytes, and `send`, which parses JSON. This handles 204 responses with no body.
+- `src/ui/app_root.rs`: `AppRoot::new(store, …)` is now a state machine:
+  - **Restoring** ("Signing in…") goes to **SignedIn**, **Login**, or **Offline**.
+  - **Offline** shows the error with **Retry** and **Log out**.
+  - **SignedIn** shows "Logged in as …" with a **Log out** button.
+  - A fresh login saves the token in a detached task (a save failure is only logged) and then fetches the profile.
+  - `pub fn log_out` runs `session::log_out` in a detached task, so changing the screen doesn't cancel the IO, and shows the login screen right away. A failed server logout is logged with a pointer to Settings → Sessions.
+- `src/main.rs`:
+  - adds the `stoat::LogOut` action and a "Log Out" item (plus a separator) in the Stoat menu
+  - registers the action at the app level, calling `AppRoot::log_out` through the window handle so it works wherever focus is
+  - passes `Arc<KeychainStore>` into `AppRoot`
+- `src/lib.rs`: registers `session`.
+- `tests/session_restore.rs` (new): 10 `wiremock` + `MemoryStore` tests:
+  - no token: login, with no API call
+  - valid token: signed in, token kept
+  - 401: token cleared
+  - unreachable server: token kept, `Network` error
+  - 500: token kept
+  - token saved for another instance: ignored
+  - `remember` then `restore` round trip
+  - logout: sends the token and clears it
+  - logout while offline: still clears locally
+  - logout with an already-revoked token: success
+- `README.md` (new): how to run, the first-build note, the `STOAT_API_URL` override, the per-instance Keychain item, **the expected Keychain prompt after rebuilds**, Log Out behaviour, the reuse of the backend crates, and the test commands, including both opt-in checks.
+
+### Divergences
+- **Minor: `keyring` 4.2 instead of 3.x.** 4.x is the current major version. Its `v1` mode keeps the same `Entry` API (`new`, `get_password`, `set_password`, `delete_credential`, `Error::NoEntry`).
+- **Minor: Keychain account is the API URL instead of a fixed `session`.** Tokens are tied to an instance, so pointing `STOAT_API_URL` elsewhere never sends one server's token to another. A test covers this.
+- **Minor: no keyboard shortcut for Log Out.** The plan called for one, but ⇧⌘Q is macOS's own "Log Out <user>". Log Out is available from the menu and from a button in the window instead.
+- **Minor: `log_out` clears locally before calling the server.** That way a slow or offline server call can't delete the token from a quick re-login.
+- **Minor: README written now** rather than at the end, since this chunk's Keychain-prompt note needed a home.
+- No effect on later chunks: chunk 4 gets the token from `Screen::SignedIn`/`Restored::SignedIn` as planned.
+
+### Verification Performed
+- `cargo test`: 37 passed, 0 failed, 2 ignored:
+  - 12 unit tests
+  - 9 `api_login`
+  - 6 contract
+  - 10 `session_restore`
+- `cargo test --lib -- --ignored`: `keychain_store_round_trips` passed against the real login Keychain. Afterwards `security find-generic-password -s chat.stoat.gpui-poc.test` found nothing left behind.
+- `cargo clippy --all-targets -- -D warnings`: clean, after boxing `User` in `Restored::SignedIn` for `large_enum_variant`. `cargo fmt --check`: clean.
+- Launched the app. It logged `using Stoat API at https://api.stoat.chat` and `Stoat window opened`. There was no saved session yet, so restore led to the login screen.
+
+### Manual Validation
+All passed on 2026-11-04 with the user's real account:
+1. **Login:** the user logged in. The app logged `logged in as user …` and `session saved to Keychain`, and `security find-generic-password -s chat.stoat.gpui-poc` confirmed the item existed.
+2. **Relaunch:** the app was quit and relaunched (same binary, so no Keychain prompt). It logged `restored saved session for <username>` straight away, without showing the login screen.
+3. **Log out:** the user clicked Log out and confirmed they were back at the login screen and the session was gone from Stoat's Sessions. The app logged `logged out` (server logout succeeded), and the Keychain item was gone.

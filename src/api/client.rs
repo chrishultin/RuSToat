@@ -113,10 +113,43 @@ impl StoatClient {
         self.send(Method::GET, "/users/@me", None::<&()>).await
     }
 
+    /// `POST /auth/session/logout`: end this client's session on the server.
+    ///
+    /// A token the server already rejects counts as logged out.
+    pub async fn logout(&self) -> Result<(), ApiError> {
+        if self.token.is_none() {
+            return Ok(());
+        }
+        match self
+            .send_raw(Method::POST, "/auth/session/logout", None::<&()>)
+            .await
+        {
+            Ok(_) | Err(ApiError::Unauthorized) => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
     async fn send<B, T>(&self, method: Method, path: &str, body: Option<&B>) -> Result<T, ApiError>
     where
         B: Serialize + ?Sized,
         T: DeserializeOwned,
+    {
+        let (status, bytes) = self.send_raw(method, path, body).await?;
+        serde_json::from_slice(&bytes).map_err(|e| ApiError::Unexpected {
+            status: status.as_u16(),
+            detail: format!("couldn't parse response: {e}"),
+        })
+    }
+
+    /// Send a request and return the raw success body. Error statuses become [`ApiError`].
+    async fn send_raw<B>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&B>,
+    ) -> Result<(reqwest::StatusCode, Vec<u8>), ApiError>
+    where
+        B: Serialize + ?Sized,
     {
         let url = format!("{}{}", self.base_url, path);
         log::debug!("{method} {url}");
@@ -138,10 +171,6 @@ impl StoatClient {
             log::debug!("{path} failed: HTTP {status}: {err:?}");
             return Err(err);
         }
-
-        serde_json::from_slice(&bytes).map_err(|e| ApiError::Unexpected {
-            status: status.as_u16(),
-            detail: format!("couldn't parse response: {e}"),
-        })
+        Ok((status, bytes.to_vec()))
     }
 }
