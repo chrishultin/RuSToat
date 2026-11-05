@@ -6,8 +6,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::api::events::Ready;
 use crate::api::models::{
-    BulkMessageResponse, Channel, FieldsMessage, File, Member, Message, PartialMessage, Server,
-    SystemMessage, User,
+    BulkMessageResponse, Channel, Emoji, FieldsMessage, File, Member, Message, PartialMessage,
+    Server, SystemMessage, User,
 };
 use crate::media::MediaUrls;
 
@@ -84,6 +84,8 @@ pub struct MessageRow {
     pub group_end: bool,
     /// Sent by the logged-in user: drawn on the right.
     pub mine: bool,
+    /// Nothing but a few emoji: drawn large, without a bubble surface.
+    pub jumbo: bool,
 }
 
 /// Consecutive messages from one author closer together than this share a header.
@@ -113,6 +115,8 @@ pub struct ChatStore {
     histories: HashMap<String, History>,
     /// Where images come from. Set once `GET /` has loaded.
     media: MediaUrls,
+    /// Custom emoji of the user's servers, by ID.
+    emojis: HashMap<String, Emoji>,
 }
 
 impl ChatStore {
@@ -145,6 +149,11 @@ impl ChatStore {
             .members
             .into_iter()
             .map(|m| ((m.id.server.clone(), m.id.user.clone()), m))
+            .collect();
+        self.emojis = ready
+            .emojis
+            .into_iter()
+            .map(|e| (e.id.clone(), e))
             .collect();
 
         let mut seen = HashSet::new();
@@ -304,6 +313,20 @@ impl ChatStore {
         {
             *last_message_id = Some(id.to_string());
         }
+    }
+
+    /// A server emoji was added (`EmojiCreate`).
+    pub fn add_emoji(&mut self, emoji: Emoji) {
+        self.emojis.insert(emoji.id.clone(), emoji);
+    }
+
+    /// A server emoji was deleted (`EmojiDelete`).
+    pub fn remove_emoji(&mut self, id: &str) {
+        self.emojis.remove(id);
+    }
+
+    pub fn emoji(&self, id: &str) -> Option<&Emoji> {
+        self.emojis.get(id)
     }
 
     pub fn set_media(&mut self, media: MediaUrls) {
@@ -484,6 +507,11 @@ impl ChatStore {
                 // Fixed up below, once the next row is known.
                 group_end: true,
                 mine: message.author == self.me,
+                jumbo: !system
+                    && message
+                        .content
+                        .as_deref()
+                        .is_some_and(crate::markdown::is_jumbo),
             }));
             previous = Some((message, author));
         }
@@ -755,6 +783,14 @@ impl crate::markdown::Names for ChatStore {
 
     fn channel_name(&self, id: &str) -> Option<String> {
         self.channel_entry(id).map(|c| c.name)
+    }
+
+    fn emoji_name(&self, id: &str) -> Option<String> {
+        self.emojis.get(id).map(|e| e.name.clone())
+    }
+
+    fn emoji_url(&self, id: &str) -> Option<String> {
+        self.media.emoji(id)
     }
 }
 

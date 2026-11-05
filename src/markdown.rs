@@ -7,6 +7,10 @@
 //!
 //! - `<@user>` → `[@Name](stoat:user/ID)` and `<#channel>` → `[#name](stoat:channel/ID)`.
 //!   Names are escaped so a name like `*]evil[*` can't break the formatting.
+//! - `:ULID:` (custom emoji) → `<img src=… width=… height=…>`, generated here, so
+//!   it's the only HTML that reaches `TextView` (every typed `<` is escaped).
+//!   Markdown's own `![](…)` can't be sized and draws images at full size.
+//!   Messages that are only emoji ("jumbo") get bigger ones.
 //! - `||spoiler||` → an inline code span (a muted background). Hiding is deferred.
 //!   A spoiler that contains inline code is left as typed (code is split out first).
 //! - Any other `<` is escaped. `TextView` renders raw HTML, which Stoat doesn't,
@@ -19,18 +23,104 @@
 pub trait Names {
     fn user_name(&self, id: &str) -> Option<String>;
     fn channel_name(&self, id: &str) -> Option<String>;
+    /// A custom emoji's name, if it's from one of the user's servers.
+    fn emoji_name(&self, _id: &str) -> Option<String> {
+        None
+    }
+    /// Where a custom emoji's image is. `None` leaves `:ID:` as typed.
+    fn emoji_url(&self, _id: &str) -> Option<String> {
+        None
+    }
 }
+
+/// Custom emoji size inline with `text_sm` text (about 1.4× the font size).
+pub const EMOJI_PX: u32 = 20;
+/// Custom emoji size in an emoji-only ("jumbo") message.
+pub const JUMBO_EMOJI_PX: u32 = 48;
+/// Messages with more emoji than this aren't drawn jumbo.
+pub const JUMBO_MAX: usize = 10;
 
 /// Turn Stoat message content into Markdown for `TextView`.
 pub fn prepare(content: &str, names: &impl Names) -> String {
+    let emoji_px = if is_jumbo(content) {
+        JUMBO_EMOJI_PX
+    } else {
+        EMOJI_PX
+    };
     let mut out = String::with_capacity(content.len() + 16);
     for segment in segments(content) {
         match segment {
             Segment::Code(code) => out.push_str(code),
-            Segment::Text(text) => rewrite_text(text, names, &mut out),
+            Segment::Text(text) => rewrite_text(text, names, emoji_px, &mut out),
         }
     }
     out
+}
+
+/// Whether a message is nothing but 1 to [`JUMBO_MAX`] emoji (custom
+/// `:ULID:` or Unicode) and whitespace.
+pub fn is_jumbo(content: &str) -> bool {
+    use unicode_properties::UnicodeEmoji;
+    let mut count = 0;
+    let mut rest = content;
+    while let Some(c) = rest.chars().next() {
+        if custom_emoji_id(rest).is_some() {
+            count += 1;
+            rest = &rest[CUSTOM_EMOJI_LEN..];
+            continue;
+        }
+        if c.is_whitespace() {
+            // fine
+        } else if !c.is_ascii() && c.is_emoji_char_or_emoji_component() {
+            // Joiners and variation selectors are parts of one emoji.
+            if !c.is_emoji_component() {
+                count += 1;
+            }
+        } else {
+            return false;
+        }
+        rest = &rest[c.len_utf8()..];
+    }
+    (1..=JUMBO_MAX).contains(&count)
+}
+
+/// `:` + 26-character ID + `:`.
+const CUSTOM_EMOJI_LEN: usize = 28;
+
+/// The emoji ID if `text` starts with a custom emoji (`:ULID:`).
+fn custom_emoji_id(text: &str) -> Option<&str> {
+    let bytes = text.as_bytes();
+    if bytes.len() < CUSTOM_EMOJI_LEN || bytes[0] != b':' || bytes[CUSTOM_EMOJI_LEN - 1] != b':' {
+        return None;
+    }
+    // Checked as bytes first, so the slice below is on ASCII boundaries.
+    let id_bytes = &bytes[1..CUSTOM_EMOJI_LEN - 1];
+    if !id_bytes.iter().all(u8::is_ascii_alphanumeric) {
+        return None;
+    }
+    let id = &text[1..CUSTOM_EMOJI_LEN - 1];
+    crate::time::is_ulid(id).then_some(id)
+}
+
+/// A sized `<img>` for a custom emoji, or `None` to leave `:ID:` as typed.
+fn emoji_img(id: &str, names: &impl Names, px: u32) -> Option<String> {
+    let url = names.emoji_url(id)?;
+    let name = names.emoji_name(id).unwrap_or_else(|| "emoji".into());
+    Some(format!(
+        r#"<img src="{}" alt=":{}:" title=":{}:" width="{px}" height="{px}">"#,
+        html_attr(&url),
+        html_attr(&name),
+        html_attr(&name),
+    ))
+}
+
+/// Escape a value for a double-quoted HTML attribute.
+fn html_attr(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// The scheme of the links this module makes for mentions. Clicking one does nothing (yet).
@@ -151,9 +241,16 @@ fn find_closing_backticks(content: &str, from: usize, run: usize) -> Option<usiz
     None
 }
 
-fn rewrite_text(text: &str, names: &impl Names, out: &mut String) {
+fn rewrite_text(text: &str, names: &impl Names, emoji_px: u32, out: &mut String) {
     let mut rest = text;
     while !rest.is_empty() {
+        if let Some(id) = custom_emoji_id(rest)
+            && let Some(img) = emoji_img(id, names, emoji_px)
+        {
+            out.push_str(&img);
+            rest = &rest[CUSTOM_EMOJI_LEN..];
+            continue;
+        }
         if let Some(after) = rest.strip_prefix("||")
             && let Some(end) = after.find("||")
             && end > 0
@@ -173,7 +270,7 @@ fn rewrite_text(text: &str, names: &impl Names, out: &mut String) {
         // multi-byte one (emoji, CJK), and slicing mid-character panics.
         let first = rest.chars().next().map_or(1, char::len_utf8);
         let next = rest[first..]
-            .find(['<', '|'])
+            .find(['<', '|', ':'])
             .map_or(rest.len(), |i| i + first);
         out.push_str(&rest[..next]);
         rest = &rest[next..];
@@ -217,8 +314,9 @@ fn is_autolink(inner: &str) -> bool {
 
 /// Mentions as plain `@Name` text, for places links can't go (spoilers).
 fn plain_mentions(text: &str, names: &impl Names) -> String {
+    let text = plain_emoji(text, names);
     let mut out = String::with_capacity(text.len());
-    let mut rest = text;
+    let mut rest = text.as_str();
     while let Some(start) = rest.find('<') {
         out.push_str(&rest[..start]);
         let tail = &rest[start..];
@@ -243,6 +341,26 @@ fn plain_mentions(text: &str, names: &impl Names) -> String {
         }
     }
     out.push_str(rest);
+    out
+}
+
+/// Custom emoji as `:name:` text, for places images can't go (spoilers).
+fn plain_emoji(text: &str, names: &impl Names) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        if let Some(id) = custom_emoji_id(rest)
+            && let Some(name) = names.emoji_name(id)
+        {
+            out.push(':');
+            out.push_str(&name);
+            out.push(':');
+            rest = &rest[CUSTOM_EMOJI_LEN..];
+            continue;
+        }
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
     out
 }
 

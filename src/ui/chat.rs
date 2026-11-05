@@ -195,6 +195,14 @@ impl ChatView {
                     self.sync_pane(&channel, cx);
                 }
             }
+            ConnectionEvent::Event(ServerEvent::EmojiCreate(emoji)) => {
+                self.store.add_emoji(*emoji);
+                return;
+            }
+            ConnectionEvent::Event(ServerEvent::EmojiDelete { id }) => {
+                self.store.remove_emoji(&id);
+                return;
+            }
             ConnectionEvent::Event(_) => return,
             ConnectionEvent::Disconnected { reason, retry_in } => {
                 self.status = Status::Reconnecting {
@@ -999,7 +1007,15 @@ fn render_message_row(message: &MessageRow, colors: RowColors) -> AnyElement {
                 // Keyed by `render_key`, so an edit (or a renamed mention)
                 // gets a fresh parse instead of the cached one.
                 TextView::markdown(SharedString::from(message.render_key.clone()), body)
-                    .text_sm()
+                    // Emoji-only messages are drawn big (custom ones are sized
+                    // in the Markdown itself).
+                    .map(|text| {
+                        if message.jumbo {
+                            text.text_3xl()
+                        } else {
+                            text.text_sm()
+                        }
+                    })
                     .selectable(true)
                     .on_link_click(|url, _, _, cx| {
                         // Mentions are internal `stoat:` links: nothing to open yet.
@@ -1020,7 +1036,10 @@ fn render_message_row(message: &MessageRow, colors: RowColors) -> AnyElement {
         });
 
     let bubble = Bubble::new()
-        .with_variant(if message.mine {
+        .with_variant(if message.jumbo {
+            // Big emoji stand on their own, without a surface behind them.
+            BubbleVariant::Ghost
+        } else if message.mine {
             BubbleVariant::Tinted
         } else {
             BubbleVariant::Secondary

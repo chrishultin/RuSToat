@@ -5,6 +5,11 @@ use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 
 const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
+/// Whether `s` is shaped like a Stoat ID: 26 upper-case Crockford base32 characters.
+pub fn is_ulid(s: &str) -> bool {
+    s.len() == 26 && s.bytes().all(|b| CROCKFORD.contains(&b))
+}
+
 /// Milliseconds since the Unix epoch encoded in a ULID, if it is one.
 pub fn ulid_millis(id: &str) -> Option<u64> {
     let prefix = id.get(..10)?;
@@ -62,6 +67,14 @@ mod tests {
             ulid_millis("01aryz6s41tsv4rrffq69g5fav"),
             Some(1_469_918_176_385)
         );
+    }
+
+    #[test]
+    fn recognises_ulid_shapes() {
+        assert!(is_ulid("01ARYZ6S41TSV4RRFFQ69G5FAV"));
+        assert!(!is_ulid("01ARYZ6S41TSV4RRFFQ69G5FA")); // 25 chars
+        assert!(!is_ulid("01ARYZ6S41TSV4RRFFQ69G5FAI")); // I isn't Crockford
+        assert!(!is_ulid("01aryz6s41tsv4rrffq69g5fav")); // Stoat IDs are upper case
     }
 
     #[test]

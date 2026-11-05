@@ -156,3 +156,56 @@ _Added at the user's request before chunk 3: "a 'bubble' or some other identifie
 ### Manual Validation
 - **First look:** the user reported "too much space between the messages", which was fixed as described under Divergences.
 - **After the fix:** the user confirmed "Looks right" in the running app.
+
+## Chunk 3: Custom emoji
+
+### Changes Made
+- **Sizing spike** (the plan's main risk), resolved by reading gpui-base's source:
+  - gpui-base's `ImageNode` has explicit `width`/`height` fields, filled only from HTML `<img width height>` attributes. Markdown `![](url)` leaves them `None`, which means intrinsic size.
+  - Inline HTML inside a paragraph is merged into the paragraph by `append_inline_html_blocks`, images included.
+  - So a generated `<img … width=20 height=20>` renders as a sized inline image. No `image_source` resolver is needed; the `src` is the CDN URL, loaded via the chunk 1 HTTP client.
+- `Cargo.toml`: added `unicode-properties = "0.1"` (already in the dependency tree) for emoji character classes.
+- `src/time.rs`: `pub fn is_ulid()`, which requires 26 upper-case Crockford characters, plus a test.
+- `src/api/events.rs`:
+  - `"emojis"` is added to `READY_FIELDS`, and `Ready.emojis` is parsed leniently into `revolt-models` `Emoji`.
+  - New `ServerEvent::EmojiCreate(Box<Emoji>)` and `EmojiDelete { id }`, decoded and forwarded.
+  - The `Ready` log line now includes the emoji count.
+  - New unit test `emoji_events_decode`.
+- `src/store.rs`:
+  - an `emojis` map, filled by `apply_ready`, plus `add_emoji`, `remove_emoji` and `emoji()`
+  - `Names::emoji_name` (from the store) and `Names::emoji_url` (`MediaUrls::emoji`)
+  - `MessageRow.jumbo`, which is `markdown::is_jumbo(content)` for non-system messages
+- `src/markdown.rs`:
+  - `Names` gains default `emoji_name`/`emoji_url` methods.
+  - `:ULID:` in text becomes `<img src="…" alt=":name:" title=":name:" width=20 height=20>`. Attributes are HTML-escaped, and unknown emoji get the name `emoji` but still render from the CDN. The ID is validated, so `:smile:` and `12:30:45` are left alone, and the byte check happens before slicing.
+  - `is_jumbo()`: whitespace plus 1 to 10 emoji (custom `:ULID:`, or non-ASCII Unicode emoji characters; joiners, modifiers and variation selectors aren't counted separately) makes a message jumbo, and its custom emoji are 48 px.
+  - Inside spoilers, custom emoji become `:name:` text.
+  - Code is still untouched.
+- `src/ui/chat.rs`: applies `EmojiCreate`/`EmojiDelete`. Jumbo messages render their `TextView` at `text_3xl` in a `BubbleVariant::Ghost` bubble (no surface).
+- Tests:
+  - `tests/markdown_prepare.rs`: +5 tests (sized images for known and unknown emoji; non-emoji colons, near-miss IDs and times left alone; emoji in code and spoilers; jumbo detection including skin tone, VS16, 10 vs 11, and ASCII digits/`#` excluded; 48 px in jumbo messages). The multi-byte substring sweep now includes an emoji.
+  - `tests/store_emoji.rs` (new): 3 tests (Ready emoji with a broken one skipped, not fatal; create and delete events; the jumbo row flag and 48 px).
+
+### Divergences
+- **Minor, simpler than planned:** emoji are sized HTML `<img>` tags with the CDN URL directly, instead of a `stoat-emoji:` scheme plus a `TextView::image_source` resolver. The spike showed only HTML images carry a size. This is safe because `prepare` escapes every user `<`, so only HTML generated here reaches the parser.
+- **Minor, extended:** jumbo detection also covers Unicode emoji (drawn at `text_3xl`), not just custom ones. Jumbo messages use a Ghost bubble, following chunk 2b's bubble design.
+- **Minor:** `EmojiCreate`/`EmojiDelete` are handled (the plan made this optional). Already-rendered rows aren't rebuilt when an emoji is added, because their image URL doesn't depend on the emoji list, only the alt text does.
+- No effect on later chunks. Chunk 6's custom-emoji reaction chips can use `MediaUrls::emoji` and `ChatStore::emoji()`.
+
+### Verification Performed
+- `cargo test`: 111 passed, 0 failed, 5 ignored:
+  - 32 unit tests
+  - 9 `api_login`
+  - 7 contract
+  - 14 `markdown_prepare`
+  - 5 `media_urls`
+  - 10 `session_restore`
+  - 3 `store_emoji`
+  - 11 `store_history`
+  - 12 `store_live`
+  - 8 `store_ready`
+- `cargo clippy --all-targets -- -D warnings`: clean. `cargo fmt --check`: clean.
+- Live: `events: Ready (5 servers, 75 channels, 29 users, 41 emoji, 0 skipped)`, so the live emoji payload parses cleanly. The app is running with no warnings or errors.
+
+### Manual Validation
+The user checked the running app and confirmed "Looks right": custom emoji render at the right size.

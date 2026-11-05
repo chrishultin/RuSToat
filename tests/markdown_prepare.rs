@@ -1,6 +1,6 @@
 //! Stoat content → Markdown: mentions, spoilers, HTML escaping, code safety.
 
-use stoat_gpui::markdown::{Names, is_external_link, prepare};
+use stoat_gpui::markdown::{Names, is_external_link, is_jumbo, prepare};
 
 struct Fixture;
 
@@ -15,6 +15,22 @@ impl Names for Fixture {
     fn channel_name(&self, id: &str) -> Option<String> {
         (id == "ch-general").then(|| "general".into())
     }
+    fn emoji_name(&self, id: &str) -> Option<String> {
+        (id == STOAT).then(|| "stoat".into())
+    }
+    fn emoji_url(&self, id: &str) -> Option<String> {
+        Some(format!("https://cdn.example/emojis/{id}"))
+    }
+}
+
+/// A known server emoji, and one from a server the user isn't in.
+const STOAT: &str = "01ARYZ6S41TSV4RRFFQ69G5FAV";
+const OTHER: &str = "01BX5ZZKBKACTAV9WEVGEMMVRZ";
+
+fn img(id: &str, name: &str, px: u32) -> String {
+    format!(
+        r#"<img src="https://cdn.example/emojis/{id}" alt=":{name}:" title=":{name}:" width="{px}" height="{px}">"#
+    )
 }
 
 fn md(content: &str) -> String {
@@ -98,8 +114,7 @@ fn multibyte_text_never_panics_and_survives_intact() {
 
     // Every substring (on char boundaries) of a string mixing multi-byte
     // characters with every piece of syntax `prepare` looks at.
-    let tricky =
-        "⚠<@u-ada>é||🦦 spoil||`co😀de`<#ch-general>\n```\n日本\n```\n<b>ü</b> <https://x.y/ö> |";
+    let tricky = "⚠<@u-ada>é||🦦 spoil||`co😀de`<#ch-general>:01ARYZ6S41TSV4RRFFQ69G5FAV:\n```\n日本\n```\n<b>ü</b> <https://x.y/ö> |";
     let boundaries: Vec<usize> = tricky
         .char_indices()
         .map(|(i, _)| i)
@@ -110,4 +125,65 @@ fn multibyte_text_never_panics_and_survives_intact() {
             let _ = md(&tricky[start..end]);
         }
     }
+}
+
+#[test]
+fn custom_emoji_become_sized_images() {
+    assert_eq!(
+        md(&format!("nice :{STOAT}: work")),
+        format!("nice {} work", img(STOAT, "stoat", 20))
+    );
+    // Not in the user's servers: still drawn from the CDN, with a generic name.
+    assert_eq!(
+        md(&format!(":{OTHER}:!")),
+        format!("{}!", img(OTHER, "emoji", 20))
+    );
+}
+
+#[test]
+fn colons_that_are_not_custom_emoji_are_left_alone() {
+    assert_eq!(md(":smile: at 12:30:45"), ":smile: at 12:30:45");
+    assert_eq!(md("note: see below"), "note: see below");
+    // Almost an ID (25 chars, or a non-Crockford letter).
+    assert_eq!(
+        md(":01ARYZ6S41TSV4RRFFQ69G5FA:"),
+        ":01ARYZ6S41TSV4RRFFQ69G5FA:"
+    );
+    assert_eq!(
+        md(":01ARYZ6S41TSV4RRFFQ69G5FAI:"),
+        ":01ARYZ6S41TSV4RRFFQ69G5FAI:"
+    );
+}
+
+#[test]
+fn custom_emoji_in_code_and_spoilers() {
+    let code = format!("`:{STOAT}:`");
+    assert_eq!(md(&code), code);
+    assert_eq!(md(&format!("||:{STOAT}: wins||")), "`:stoat: wins`");
+}
+
+#[test]
+fn emoji_only_messages_are_jumbo() {
+    assert!(is_jumbo(&format!(":{STOAT}:")));
+    assert!(is_jumbo(&format!(" :{STOAT}: :{OTHER}: ")));
+    assert!(is_jumbo("🦦🦦"));
+    assert!(is_jumbo("👍🏽")); // skin-tone modifier is part of the emoji
+    assert!(is_jumbo("❤️")); // with variation selector
+    assert!(is_jumbo(&format!("🦦 :{STOAT}:")));
+    assert!(is_jumbo(&"🦦".repeat(10)));
+
+    assert!(!is_jumbo(&"🦦".repeat(11)));
+    assert!(!is_jumbo(&format!("hi :{STOAT}:")));
+    assert!(!is_jumbo("123")); // ASCII digits count as emoji characters in Unicode
+    assert!(!is_jumbo("#"));
+    assert!(!is_jumbo(""));
+    assert!(!is_jumbo("   "));
+}
+
+#[test]
+fn jumbo_messages_get_big_custom_emoji() {
+    assert_eq!(
+        md(&format!(":{STOAT}: :{OTHER}:")),
+        format!("{} {}", img(STOAT, "stoat", 48), img(OTHER, "emoji", 48))
+    );
 }
