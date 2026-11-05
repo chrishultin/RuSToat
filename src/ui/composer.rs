@@ -17,8 +17,8 @@ use gpui_kit::*;
 use crate::api::models::ReplyIntent;
 use crate::attachment::FileKind;
 use crate::draft::{
-    AttachmentLimits, AttachmentSource, Draft, DraftAttachment, Drafts, EditStash,
-    MAX_MESSAGE_CHARS, ReplyTarget, SendCheck, TooManyReplies, char_count, check_send,
+    AttachmentLimits, Draft, DraftAttachment, Drafts, EditStash, MAX_MESSAGE_CHARS, ReplyTarget,
+    SendCheck, TooManyReplies, char_count, check_send, save_pasted_image,
 };
 
 pub enum ComposerEvent {
@@ -171,34 +171,68 @@ impl Composer {
         .detach();
     }
 
-    /// Attach the files at `paths` (folders are skipped). Any that are too
-    /// big, or past the limit, are refused with a toast.
+    /// Attach the files at `paths` (picked or dropped; folders are
+    /// skipped). Any that are too big, or past the limit, are refused with
+    /// a toast.
     pub fn add_files(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let files = paths.into_iter().filter_map(read_file).collect();
+        self.attach(files, window, cx);
+    }
+
+    /// A paste: pasted images and copied files are attached, and not pasted
+    /// as text. Returns whether it was taken. (Text wins over an image on
+    /// the clipboard, so a paste with both is text, as usual.)
+    fn paste(&mut self, item: &ClipboardItem, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.channel.is_none() || self.editing.editing().is_some() {
+            return false;
+        }
+        let mut files = Vec::new();
+        for entry in item.entries() {
+            match entry {
+                // Copied files come with their paths as text too: attach them.
+                ClipboardEntry::ExternalPaths(paths) => {
+                    files.extend(paths.paths().iter().cloned().filter_map(read_file));
+                }
+                ClipboardEntry::Image(image) => {
+                    let saved = save_pasted_image(&pasted_dir(), image.format.extension(), &image.bytes)
+                        .map_err(|err| {
+                            log::warn!("couldn't save a pasted image: {err}");
+                            "Couldn't attach the pasted image.".to_string()
+                        });
+                    files.push(saved);
+                }
+                ClipboardEntry::String(_) => {}
+            }
+        }
+        if files.is_empty() {
+            return false;
+        }
+        self.attach(files, window, cx);
+        true
+    }
+
+    /// Add `files` to the tray. Refusals (and files that couldn't be read)
+    /// are toasted, once per reason.
+    fn attach(
+        &mut self,
+        files: Vec<Result<DraftAttachment, String>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.channel.is_none() || self.editing.editing().is_some() {
             return;
         }
         let mut refusals: Vec<String> = Vec::new();
-        for path in paths {
-            let size = match std::fs::metadata(&path) {
-                Ok(meta) if meta.is_file() => meta.len(),
-                Ok(_) => continue,
-                Err(err) => {
-                    log::warn!("couldn't read {}: {err}", path.display());
-                    refusals.push(format!("Couldn't read {}.", path.display()));
-                    continue;
-                }
+        for file in files {
+            let refusal = match file {
+                Ok(file) => match self.draft.add_attachment(file, &self.limits) {
+                    Ok(()) => continue,
+                    Err(err) => err.to_string(),
+                },
+                Err(text) => text,
             };
-            let file = DraftAttachment::from_path(path.clone(), size);
-            let file = if file.kind == FileKind::Image {
-                file.with_dimensions(crate::attachment::local_image_size(&path))
-            } else {
-                file
-            };
-            if let Err(err) = self.draft.add_attachment(file, &self.limits) {
-                let text = err.to_string();
-                if !refusals.contains(&text) {
-                    refusals.push(text);
-                }
+            if !refusals.contains(&refusal) {
+                refusals.push(refusal);
             }
         }
         for text in refusals {
@@ -423,6 +457,32 @@ impl Composer {
     }
 }
 
+/// The file at `path`, ready to attach (with an image's size), or why it
+/// can't be. `None` for a folder.
+fn read_file(path: PathBuf) -> Option<Result<DraftAttachment, String>> {
+    let size = match std::fs::metadata(&path) {
+        Ok(meta) if meta.is_file() => meta.len(),
+        Ok(_) => return None,
+        Err(err) => {
+            log::warn!("couldn't read {}: {err}", path.display());
+            return Some(Err(format!("Couldn't read {}.", path.display())));
+        }
+    };
+    let file = DraftAttachment::from_path(path, size);
+    Some(Ok(if file.kind == FileKind::Image {
+        let dimensions = crate::attachment::local_image_size(&file.path);
+        file.with_dimensions(dimensions)
+    } else {
+        file
+    }))
+}
+
+/// Where pasted images are saved before they're sent: a folder of this
+/// process's own under the temporary directory (which macOS clears out).
+fn pasted_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("rustoat-pasted-{}", std::process::id()))
+}
+
 /// Side of a file's thumbnail or icon in the tray.
 const TRAY_THUMB: f32 = 36.;
 
@@ -435,15 +495,15 @@ impl Composer {
             .gap_2()
             .children(self.draft.attachments.iter().map(|file| {
                 let local_id = file.local_id;
-                let thumb = match (&file.source, file.kind) {
-                    (AttachmentSource::Path(path), FileKind::Image) => img(path.clone())
+                let thumb = match file.kind {
+                    FileKind::Image => img(file.path.clone())
                         .size(px(TRAY_THUMB))
                         .flex_none()
                         .rounded(px(4.))
                         .object_fit(ObjectFit::Cover)
                         .with_fallback(|| Icon::new(IconName::FileImage).into_any_element())
                         .into_any_element(),
-                    (_, kind) => div()
+                    kind => div()
                         .size(px(TRAY_THUMB))
                         .flex_none()
                         .flex()
@@ -545,7 +605,13 @@ impl Render for Composer {
                     .items_end()
                     .gap_1()
                     .child(attach)
-                    .child(div().flex_1().min_w_0().child(Textarea::new(&self.input))),
+                    .child(div().flex_1().min_w_0().child(Textarea::new(&self.input).on_paste({
+                        let this = cx.entity().downgrade();
+                        move |item, window, cx| {
+                            this.update(cx, |this, cx| this.paste(item, window, cx))
+                                .unwrap_or(false)
+                        }
+                    }))),
             )
             .children(tray)
             .when_some(hint, |el, hint| {

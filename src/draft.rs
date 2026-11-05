@@ -2,8 +2,7 @@
 //! limit, replies, attached files, and drafts kept per channel.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 
 use crate::api::models::ReplyIntent;
 use crate::api::{DEFAULT_ATTACHMENT_SIZE_LIMIT, DEFAULT_MAX_ATTACHMENTS, RootConfig};
@@ -78,17 +77,8 @@ pub struct ReplyTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TooManyReplies;
 
-/// Where an attached file's bytes are.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AttachmentSource {
-    /// On disk (picked or dropped): read when the message is sent.
-    Path(PathBuf),
-    /// In memory (pasted).
-    Bytes(Arc<[u8]>),
-}
-
 /// A file attached to the message being typed, waiting in the tray under
-/// the box. It's uploaded when the message is sent.
+/// the box. It's read and uploaded when the message is sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DraftAttachment {
     /// Tells it apart from the other files in the tray (and, once sent, in
@@ -103,14 +93,20 @@ pub struct DraftAttachment {
     /// An image's width and height, if they could be read locally (so its
     /// pending row has the size the sent one will).
     pub dimensions: Option<(u32, u32)>,
-    pub source: AttachmentSource,
+    /// Where it is on disk. (Pasted images are saved to a file first, see
+    /// [`save_pasted_image`].)
+    pub path: PathBuf,
 }
 
 impl DraftAttachment {
-    /// A file of `size` bytes, named and typed after `name`.
-    pub fn new(name: String, size: u64, source: AttachmentSource) -> Self {
+    /// The file at `path`, `size` bytes long, named and typed after it.
+    pub fn from_path(path: PathBuf, size: u64) -> Self {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file".into());
         let content_type = mime_guess::from_path(&name)
             .first_or_octet_stream()
             .essence_str()
@@ -122,23 +118,49 @@ impl DraftAttachment {
             size,
             content_type,
             dimensions: None,
-            source,
+            path,
         }
-    }
-
-    /// The file at `path`, `size` bytes long.
-    pub fn from_path(path: PathBuf, size: u64) -> Self {
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "file".into());
-        Self::new(name, size, AttachmentSource::Path(path))
     }
 
     pub fn with_dimensions(mut self, dimensions: Option<(u32, u32)>) -> Self {
         self.dimensions = dimensions;
         self
     }
+}
+
+/// Save a pasted image (`extension` from its clipboard format, e.g. `png`)
+/// in `dir` as `pasted-image-{n}`, so it's attached like any other file.
+/// TIFF and BMP, which some apps copy, become PNG, which Stoat previews.
+pub fn save_pasted_image(
+    dir: &Path,
+    extension: &str,
+    bytes: &[u8],
+) -> std::io::Result<DraftAttachment> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let converted = matches!(extension, "tiff" | "tif" | "bmp")
+        .then(|| to_png(bytes))
+        .flatten();
+    let (extension, bytes) = match &converted {
+        Some(png) => ("png", png.as_slice()),
+        None => (extension, bytes),
+    };
+    std::fs::create_dir_all(dir)?;
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let path = dir.join(format!("pasted-image-{n}.{extension}"));
+    std::fs::write(&path, bytes)?;
+    let dimensions = crate::attachment::local_image_size(&path);
+    Ok(DraftAttachment::from_path(path, bytes.len() as u64).with_dimensions(dimensions))
+}
+
+/// `bytes` (an image in any format this build reads) as a PNG.
+fn to_png(bytes: &[u8]) -> Option<Vec<u8>> {
+    let image = image::load_from_memory(bytes).ok()?;
+    let mut png = Vec::new();
+    image
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .ok()?;
+    Some(png)
 }
 
 /// How many files a message may carry, and how big each may be (from

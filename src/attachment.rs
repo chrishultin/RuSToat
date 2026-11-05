@@ -10,7 +10,6 @@
 use std::sync::Arc;
 
 use crate::api::models::{File, Metadata};
-use crate::draft::AttachmentSource;
 use crate::media::MediaUrls;
 
 /// Inline images fit within this box (logical px), keeping their aspect ratio.
@@ -71,7 +70,7 @@ pub enum AttachmentView {
         kind: FileKind,
         /// For images: where to draw it from, at this display size (the
         /// size the sent message will have, when known).
-        image: Option<(AttachmentSource, u32, u32)>,
+        image: Option<(std::path::PathBuf, u32, u32)>,
         /// Uploaded so far, in thousandths.
         progress: u16,
     },

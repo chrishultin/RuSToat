@@ -29,7 +29,7 @@ use crate::api::StoatClient;
 use crate::api::models::ReplyIntent;
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
 use crate::attachment::{AttachmentView, fit_into};
-use crate::draft::{AttachmentLimits, AttachmentSource, DraftAttachment, ReplyTarget};
+use crate::draft::{AttachmentLimits, DraftAttachment, ReplyTarget};
 use crate::embed::{Description, EmbedCard, EmbedImage, EmbedView};
 use crate::markdown::{JUMBO_TEXT_PX, is_external_link};
 use crate::media::MediaUrls;
@@ -1993,6 +1993,20 @@ impl ChatView {
             .flex_1()
             .min_w_0()
             .h_full()
+            // Files dropped anywhere on the conversation are attached.
+            .relative()
+            .group(DROP_GROUP)
+            .when(channel.is_some(), |el| {
+                el.on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                    // The image viewer covers the conversation.
+                    if this.viewer.is_some() {
+                        return;
+                    }
+                    let paths = paths.paths().to_vec();
+                    this.composer
+                        .update(cx, |composer, cx| composer.add_files(paths, window, cx));
+                }))
+            })
             .when_some(banner, |el, banner| {
                 el.child(
                     div()
@@ -2010,8 +2024,39 @@ impl ChatView {
             .when_some(channel.as_ref(), |el, channel| {
                 el.child(self.render_typing_line(&channel.id, cx))
                     .child(self.composer.clone())
+                    .child(render_drop_overlay(cx))
             })
     }
+}
+
+/// Group name for the conversation, which files can be dropped on.
+const DROP_GROUP: &str = "conversation-drop";
+
+/// "Drop to attach" over the conversation, shown only while files are
+/// dragged over it.
+fn render_drop_overlay(cx: &App) -> Div {
+    let theme = cx.theme();
+    div()
+        .absolute()
+        .inset_0()
+        .p_3()
+        .invisible()
+        .group_drag_over::<ExternalPaths>(DROP_GROUP, |style| style.visible())
+        .child(
+            v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .rounded_lg()
+                .border_2()
+                .border_dashed()
+                .border_color(theme.primary)
+                .bg(theme.background.opacity(0.85))
+                .text_color(theme.primary)
+                .child(Icon::new(IconName::Paperclip).large())
+                .child(div().font_weight(FontWeight::SEMIBOLD).child("Drop to attach")),
+        )
 }
 
 #[derive(Clone, Copy)]
@@ -2691,16 +2736,11 @@ async fn upload_file(
     let mut upload = spawn_io({
         let (client, file_server, file) = (client.clone(), file_server.to_string(), file.clone());
         async move {
-            let bytes = match &file.source {
-                AttachmentSource::Path(path) => {
-                    let path = path.clone();
-                    tokio::task::spawn_blocking(move || std::fs::read(path))
-                        .await
-                        .map_err(|e| e.to_string())?
-                        .map_err(|e| format!("couldn't read it ({e})"))?
-                }
-                AttachmentSource::Bytes(bytes) => bytes.to_vec(),
-            };
+            let path = file.path.clone();
+            let bytes = tokio::task::spawn_blocking(move || std::fs::read(path))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| format!("couldn't read it ({e})"))?;
             client
                 .upload_attachment(&file_server, &file.name, &file.content_type, bytes, move |sent, total| {
                     tx.unbounded_send((sent, total)).ok();
@@ -2990,7 +3030,7 @@ fn render_attachment(
             image,
             progress,
         } => match image {
-            Some((AttachmentSource::Path(path), width, height)) => div()
+            Some((path, width, height)) => div()
                 .id(id.clone())
                 .relative()
                 .w(px(*width as f32))
@@ -3012,7 +3052,7 @@ fn render_attachment(
                 )
                 .child(upload_bar(*progress, colors).bottom(px(6.)).left(px(6.)).right(px(6.)))
                 .into_any_element(),
-            _ => file_card(id, file_icon(*kind), name, size_label, colors)
+            None => file_card(id, file_icon(*kind), name, size_label, colors)
                 .relative()
                 .child(upload_bar(*progress, colors).bottom(px(3.)).left(px(8.)).right(px(8.)))
                 .into_any_element(),

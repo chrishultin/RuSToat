@@ -66,3 +66,36 @@ Supervision: continuous. Pre-existing dirty files kept out of every commit: `.gi
 The user ran the build (`RUST_LOG=stoat_gpui=debug`, log in `/tmp/rustoat-chunk1.log`), attached a file with the paperclip and sent it. They said "I like it so far". The log shows the limits loaded (20 000 000 bytes, 5 files), the upload of a 3157-byte SVG (`image/svg+xml`) answered with `{"id": …}`, and the message sent with it.
 
 Not exercised in this session: the over-20 MB toast and the offline Retry. Both are covered by unit tests and carried to the plan's Manual Tests 3 and 4.
+
+## Chunk 2: Paste and drag-and-drop
+
+### Changes Made
+- `src/draft.rs`:
+  - `AttachmentSource` is removed. `DraftAttachment` now has `path: PathBuf`, and `from_path` is its only constructor.
+  - `save_pasted_image(dir, extension, bytes)` writes the image as `pasted-image-{n}.{ext}` (with a per-process counter) and reads its dimensions. TIFF and BMP are converted to PNG through `image` (`to_png`). Undecodable data is saved unchanged.
+- `src/ui/composer.rs`:
+  - `Textarea::on_paste` calls `Composer::paste` through a weak entity.
+  - `ExternalPaths` entries are attached, and the paste is consumed. `Image` entries are saved with `save_pasted_image` into `pasted_dir()` (`$TMPDIR/rustoat-pasted-<pid>`) and attached. Anything else falls through as text.
+  - Pasting while editing falls through.
+  - `add_files`, `paste` and the picker share `attach(Vec<Result<DraftAttachment, String>>)` (limits, plus one toast per distinct refusal) and `read_file(path)`, which skips folders and reads an image's size.
+- `src/attachment.rs`: `AttachmentView::Local.image` holds a `PathBuf`.
+- `src/store.rs` and `src/ui/chat.rs` now read files from `path`.
+- `src/ui/chat.rs`: the conversation column is a drop target:
+  - It's `.relative().group(DROP_GROUP)` with `.on_drop::<ExternalPaths>` forwarding to `Composer::add_files`. Drops are ignored while the image viewer is open, and there's no target without an open channel.
+  - `render_drop_overlay` is an absolute, normally invisible child that becomes visible through `group_drag_over::<ExternalPaths>`. It shows a dashed primary border, a translucent background, a paperclip and "Drop to attach".
+- `tests/store_pending.rs`: 3 new tests for pasted images (naming, type, size, dimensions, unique names; TIFF and BMP to PNG and the undecodable fallback; limits applying to pasted and dropped files). Existing tests are updated for `path`.
+
+### Divergences
+- **Pasted images are saved to a temp file instead of kept in memory (`Bytes`).**
+  - Every attachment is then a path. `img(path)` previews use GPUI's path-keyed image cache, which settles the plan's risk about in-memory `Image`s being re-hashed every frame. Uploads read from disk as for picked files.
+  - The files sit in `$TMPDIR/rustoat-pasted-<pid>/` and aren't deleted by the app. macOS clears `$TMPDIR` on its own.
+- **Clipboard formats (plan risk):** TIFF and BMP are converted to PNG before attaching, so Stoat can preview them.
+- **Mixed clipboards (plan risk):** no rule of ours was needed. GPUI's macOS pasteboard (`gpui-pre-macos` `pasteboard.rs`) returns a plain-text entry instead of any image when both exist. Copied files arrive as `ExternalPaths` plus a string of their paths, and we consume those as files.
+- **Drop target (plan risk):** drops are ignored while the image viewer is open, so they never land behind it.
+
+### Verification Performed
+- `cargo test --test store_pending`: 30 passed (3 new).
+- Full suite: `cargo test` gives 288 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings` is clean.
+
+### Manual Validation
+Deferred by the user ("we'll test it all later"). The chunk's checks (pasting a screenshot, pasting copied Finder files, dropping onto the message list with the overlay, pasting text unchanged) move to the plan's Manual Test 2 at completion.

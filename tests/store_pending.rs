@@ -7,7 +7,7 @@ use stoat_gpui::api::models::{BulkMessageResponse, Message};
 use stoat_gpui::api::models::ReplyIntent;
 use stoat_gpui::attachment::{AttachmentView, FileKind};
 use stoat_gpui::draft::{
-    AttachError, AttachmentLimits, AttachmentSource, Draft, DraftAttachment, Drafts,
+    AttachError, AttachmentLimits, Draft, DraftAttachment, Drafts,
     MAX_MESSAGE_CHARS, ReplyTarget, SendCheck, TooManyReplies, char_count, check_send, new_nonce,
 };
 use stoat_gpui::store::{
@@ -548,7 +548,7 @@ fn a_pending_message_shows_its_files_with_upload_progress() {
     let row = rows(&store).pop().unwrap();
     match &row.attachments[0] {
         AttachmentView::Local {
-            image: Some((AttachmentSource::Path(path), w, h)),
+            image: Some((path, w, h)),
             ..
         } => {
             assert_eq!(path.to_str(), Some("/tmp/cat.png"));
@@ -641,4 +641,95 @@ fn a_retry_after_stoat_refused_uploads_everything_again_with_a_fresh_key() {
     assert_eq!(retried.nonce, "fresh");
     assert_eq!(retried.key, "n1");
     assert_eq!(uploads(&store), vec![UploadState::Waiting, UploadState::Waiting]);
+}
+
+// Pasted images.
+
+/// A fresh folder for pasted images.
+fn paste_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("rustoat-test-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+/// A 3×2 picture encoded as `format`.
+fn picture(format: image::ImageFormat) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    image::DynamicImage::new_rgb8(3, 2)
+        .write_to(&mut std::io::Cursor::new(&mut bytes), format)
+        .unwrap();
+    bytes
+}
+
+#[test]
+fn a_pasted_image_is_saved_and_attached_like_a_file() {
+    use stoat_gpui::draft::save_pasted_image;
+    let dir = paste_dir("png");
+    let png = picture(image::ImageFormat::Png);
+    let file = save_pasted_image(&dir, "png", &png).unwrap();
+    assert!(file.name.starts_with("pasted-image-"), "{}", file.name);
+    assert!(file.name.ends_with(".png"), "{}", file.name);
+    assert_eq!(file.content_type, "image/png");
+    assert_eq!(file.kind, FileKind::Image);
+    assert_eq!(file.size, png.len() as u64);
+    assert_eq!(file.dimensions, Some((3, 2)));
+    assert_eq!(file.path.parent(), Some(dir.as_path()));
+    assert_eq!(std::fs::read(&file.path).unwrap(), png);
+
+    // Each paste gets its own name.
+    let again = save_pasted_image(&dir, "png", &png).unwrap();
+    assert_ne!(again.name, file.name);
+    assert_ne!(again.local_id, file.local_id);
+
+    let jpeg = save_pasted_image(&dir, "jpg", &picture(image::ImageFormat::Jpeg)).unwrap();
+    assert!(jpeg.name.ends_with(".jpg"));
+    assert_eq!(jpeg.content_type, "image/jpeg");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn pasted_tiff_and_bmp_become_png() {
+    use stoat_gpui::draft::save_pasted_image;
+    let dir = paste_dir("convert");
+    for (extension, format) in [("tiff", image::ImageFormat::Tiff), ("bmp", image::ImageFormat::Bmp)] {
+        let file = save_pasted_image(&dir, extension, &picture(format)).unwrap();
+        assert!(file.name.ends_with(".png"), "{}", file.name);
+        assert_eq!(file.content_type, "image/png");
+        assert_eq!(file.dimensions, Some((3, 2)));
+        let saved = std::fs::read(&file.path).unwrap();
+        assert_eq!(file.size, saved.len() as u64);
+        assert_eq!(image::guess_format(&saved).unwrap(), image::ImageFormat::Png);
+    }
+    // Unreadable TIFF is kept as it is.
+    let file = save_pasted_image(&dir, "tiff", b"not a tiff").unwrap();
+    assert!(file.name.ends_with(".tiff"));
+    assert_eq!(file.size, 10);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn pasted_images_count_toward_the_limits() {
+    use stoat_gpui::draft::save_pasted_image;
+    let dir = paste_dir("limits");
+    let png = picture(image::ImageFormat::Png);
+    let small = AttachmentLimits {
+        max_bytes: png.len() as u64 - 1,
+        max_count: 2,
+    };
+    let mut draft = Draft::default();
+    let pasted = save_pasted_image(&dir, "png", &png).unwrap();
+    assert!(matches!(
+        draft.add_attachment(pasted, &small),
+        Err(AttachError::TooBig { .. })
+    ));
+    let roomy = AttachmentLimits { max_bytes: 1 << 20, ..small };
+    draft.add_attachment(file("dropped.pdf", 1), &roomy).unwrap();
+    draft
+        .add_attachment(save_pasted_image(&dir, "png", &png).unwrap(), &roomy)
+        .unwrap();
+    assert_eq!(
+        draft.add_attachment(save_pasted_image(&dir, "png", &png).unwrap(), &roomy),
+        Err(AttachError::TooMany { max: 2 })
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
 }

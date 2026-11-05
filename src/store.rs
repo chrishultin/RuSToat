@@ -235,7 +235,7 @@ impl PendingAttachment {
                 .map_or(crate::attachment::FALLBACK_IMAGE_SIZE, |(w, h)| {
                     crate::attachment::fit_within(w as usize, h as usize)
                 });
-            (file.source.clone(), width, height)
+            (file.path.clone(), width, height)
         });
         AttachmentView::Local {
             name: file.name.clone(),
