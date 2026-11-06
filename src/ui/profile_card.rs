@@ -15,7 +15,7 @@ use gpui_kit::*;
 use crate::profile::ProfileCard;
 use crate::store::PresenceKind;
 use crate::ui::chat::{avatar, hex_colour};
-use crate::ui::markup::code_block_actions;
+use crate::ui::markup::{MarkupPlugin, code_block_actions};
 use crate::ui::math::MathPlugin;
 
 /// Width of the card.
@@ -226,6 +226,7 @@ pub fn render_profile_card(
                         bio.markdown.clone(),
                     )
                     .plugin(MathPlugin)
+                    .plugin(MarkupPlugin)
                     .code_block_actions(code_block_actions)
                     .text_sm()
                     .selectable(true)

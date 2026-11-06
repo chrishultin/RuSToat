@@ -340,3 +340,93 @@ fn review_bot_messages_keep_their_lines_quotes_and_math() {
             h(text link(text)))"
     );
 }
+
+/// A Friday afternoon in November 2026.
+const WHEN: i64 = 1_762_430_000;
+
+/// Every link in `node`, as (link text, URL).
+fn links(node: &markdown::mdast::Node) -> Vec<(String, String)> {
+    use markdown::mdast::Node;
+    let mut found = Vec::new();
+    if let Node::Link(link) = node {
+        found.push((node.to_string(), link.url.clone()));
+    }
+    for child in node.children().into_iter().flatten() {
+        found.extend(links(child));
+    }
+    found
+}
+
+#[test]
+fn timestamps_become_internal_links_that_keep_their_source() {
+    assert_eq!(
+        md("<t:1762430000>"),
+        r"[\<t\:1762430000\>](stoat:time/1762430000)"
+    );
+    assert_eq!(
+        md("at <t:1762430000:R>!"),
+        r"at [\<t\:1762430000\:R\>](stoat:time/1762430000/R)!"
+    );
+    // The link text is the tag as typed, and the URL survives parsing
+    // whatever the style's case.
+    for style in ["", ":R", ":t", ":T", ":D", ":F", ":f", ":_", ":9"] {
+        let source = format!("<t:{WHEN}{style}>");
+        let url = format!("stoat:time/{WHEN}{}", style.replace(':', "/"));
+        assert_eq!(links(&parse(&md(&source))), vec![(source.clone(), url)]);
+    }
+}
+
+#[test]
+fn malformed_timestamps_stay_as_typed() {
+    assert_eq!(md("<t:abc>"), r"\<t:abc>");
+    assert_eq!(md("<t:>"), r"\<t:>");
+    assert_eq!(md("<t:1762430000:R"), r"\<t:1762430000:R");
+    assert_eq!(md("<t:1762430000:RR>"), r"\<t:1762430000:RR>");
+    assert_eq!(md("<t:-5>"), r"\<t:-5>");
+    assert_eq!(md("<t:1762430000 >"), r"\<t:1762430000 >");
+    // Out of chrono's range.
+    assert_eq!(md("<t:99999999999999999>"), r"\<t:99999999999999999>");
+}
+
+#[test]
+fn timestamps_in_code_are_untouched() {
+    assert_eq!(md("`<t:1762430000>`"), "`<t:1762430000>`");
+    assert_eq!(
+        md("```\n<t:1762430000:R>\n```"),
+        "```\n<t:1762430000:R>\n```"
+    );
+}
+
+#[test]
+fn timestamps_next_to_mentions() {
+    assert_eq!(
+        md("<@u-ada><t:1762430000:t>"),
+        r"[@Ada L\.](stoat:user/u-ada)[\<t\:1762430000\:t\>](stoat:time/1762430000/t)"
+    );
+    let parsed = links(&parse(&md("<@u-ada><t:1762430000:t>")));
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(parsed[1].1, "stoat:time/1762430000/t");
+}
+
+#[test]
+fn plain_text_shows_timestamps_in_local_time() {
+    use chrono::TimeZone;
+    use stoat_gpui::markdown::{plain_text, snippet};
+    use stoat_gpui::time::format_timestamp;
+    let when = chrono::Local.timestamp_opt(WHEN, 0).unwrap();
+    let now = chrono::Local::now();
+    let time = format_timestamp(&when, Some('t'), &now);
+    assert_eq!(
+        plain_text("at <t:1762430000:t>", &Fixture),
+        format!("at {time}")
+    );
+    // A relative one can't update here, so it's the date and time.
+    let date_time = format_timestamp(&when, None, &now);
+    assert_eq!(plain_text("<t:1762430000:R>", &Fixture), date_time);
+    assert_eq!(
+        snippet("**due** <t:1762430000:R>", &Fixture, 80),
+        format!("due {date_time}")
+    );
+    // Malformed ones stay as typed.
+    assert_eq!(plain_text("<t:abc>", &Fixture), "<t:abc>");
+}

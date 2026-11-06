@@ -38,7 +38,9 @@ use crate::complete::{Query, QueryKind, Suggestion, TokenRef, rank, rank_people}
 use crate::draft::{AttachmentLimits, DraftAttachment, ReplyTarget};
 use crate::embed::{Description, EmbedCard, EmbedImage, EmbedView};
 use crate::friends::{AddFriendState, FRIENDS, FriendsTab};
-use crate::markdown::{InternalLink, JUMBO_TEXT_PX, is_external_link, parse_internal_link};
+use crate::markdown::{
+    InternalLink, JUMBO_TEXT_PX, has_relative_time, is_external_link, parse_internal_link,
+};
 use crate::media::MediaUrls;
 use crate::notify::{self, Delivery, Notice, Viewing};
 use crate::places::{Place, Places, PlacesFile};
@@ -55,7 +57,7 @@ use crate::typing::{OutgoingTyping, TypingSignal, TypingState, typing_label};
 use crate::ui::composer::{Composer, ComposerEvent, file_icon};
 use crate::ui::emoji_picker::emoji_grid;
 use crate::ui::friends::{RowButtons, render_add_friend, render_friends_page};
-use crate::ui::markup::code_block_actions;
+use crate::ui::markup::{MarkupPlugin, code_block_actions};
 use crate::ui::math::MathPlugin;
 use crate::ui::profile_card::{CardBio, CardContent, OnLink, render_profile_card};
 
@@ -360,11 +362,16 @@ pub struct ChatView {
     outgoing_typing: OutgoingTyping,
     /// Wakes up when a typist lapses or the user goes idle.
     typing_tick: Option<Task<()>>,
+    /// Draws relative timestamps again as time passes.
+    _relative_tick: Task<()>,
     connection: Connection,
     _events: Task<()>,
     _root: Task<()>,
     _activation: Subscription,
 }
+
+/// How often relative timestamps ("in 3 hours") are worked out again.
+const RELATIVE_TIME_TICK: Duration = Duration::from_secs(60);
 
 /// How long after a message is pinned or unpinned the open pins list is
 /// fetched again, so that a burst of changes makes one request.
@@ -424,6 +431,21 @@ impl ChatView {
                 }
                 Ok(Err(err)) => log::warn!("couldn't load API config (no images): {err}"),
                 Err(err) => log::warn!("API config task failed: {err:?}"),
+            }
+        });
+        // Relative timestamps ("in 3 hours") are worked out when drawn, so
+        // the open channel is drawn again each minute while it has any.
+        let relative_tick = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(RELATIVE_TIME_TICK).await;
+                let alive = this.update(cx, |this, cx| {
+                    if this.open_channel_has_relative_times() {
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
             }
         });
         let (connection, mut events) = events::connect(client.clone());
@@ -619,6 +641,7 @@ impl ChatView {
             typing,
             outgoing_typing: OutgoingTyping::default(),
             typing_tick: None,
+            _relative_tick: relative_tick,
             connection,
             _events: events,
             _root: root,
@@ -4003,6 +4026,22 @@ impl ChatView {
         cx.notify();
     }
 
+    /// Whether the open channel shows a relative timestamp, which needs
+    /// drawing again as time passes.
+    fn open_channel_has_relative_times(&self) -> bool {
+        let Some(channel) = self.current_channel() else {
+            return false;
+        };
+        self.panes.get(&channel.id).is_some_and(|pane| {
+            pane.rows.iter().any(|row| match row {
+                TimelineRow::Message(message) => {
+                    message.body.as_deref().is_some_and(has_relative_time)
+                }
+                _ => false,
+            })
+        })
+    }
+
     /// The picked channel for this place, or else its first channel.
     /// `None` on the Friends page, which isn't a channel.
     fn current_channel(&self) -> Option<ChannelEntry> {
@@ -5571,6 +5610,7 @@ fn render_system_row(message: &MessageRow, colors: RowColors, people: &People) -
                     SharedString::from(message.render_key.clone()),
                     message.body.clone().unwrap_or_default(),
                 )
+                .plugin(MarkupPlugin)
                 .code_block_actions(code_block_actions)
                 .text_xs()
                 .on_link_click(move |url, _, window, cx| on_link(url, window, cx)),
@@ -5652,8 +5692,9 @@ impl People {
         let people = self.clone();
         Arc::new(move |url, window, cx| match parse_internal_link(url) {
             Some(InternalLink::User(user)) => people.open_card(user, window, cx),
-            // Channel links don't go anywhere yet.
-            Some(InternalLink::Channel(_)) => {}
+            // Channel links don't go anywhere yet; `ui::markup` draws
+            // timestamps, so they aren't links.
+            Some(InternalLink::Channel(_) | InternalLink::Time { .. }) => {}
             None => {
                 if is_external_link(url) {
                     cx.open_url(url);
@@ -5801,6 +5842,7 @@ fn render_message_row(
                     TextView::markdown(SharedString::from(message.render_key.clone()), body)
                         // `$$…$$` formatting (colour, size), drawn natively.
                         .plugin(MathPlugin)
+                        .plugin(MarkupPlugin)
                         // A copy button (and the language) on each code block.
                         .code_block_actions(code_block_actions)
                         // Emoji-only messages are drawn big (custom ones are sized
@@ -6958,6 +7000,7 @@ fn render_embed_card(
             Description::Markdown { source, render_key } => {
                 TextView::markdown(SharedString::from(render_key), source)
                     .plugin(MathPlugin)
+                    .plugin(MarkupPlugin)
                     .code_block_actions(code_block_actions)
                     .text_sm()
                     .selectable(true)

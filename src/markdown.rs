@@ -11,6 +11,9 @@
 //!   it's the only HTML that reaches `TextView` (every typed `<` is escaped).
 //!   Markdown's own `![](…)` can't be sized and draws images at full size.
 //!   Messages that are only emoji ("jumbo") get bigger ones.
+//! - `<t:SECONDS>` / `<t:SECONDS:STYLE>` (a timestamp) →
+//!   `[\<t\:SECONDS\>](stoat:time/SECONDS/STYLE)`, which `ui::markup` draws
+//!   in local time. One chrono can't represent stays as typed.
 //! - `||spoiler||` → an inline code span (a muted background). Hiding is deferred.
 //!   A spoiler that contains inline code is left as typed (code is split out first).
 //! - Any other `<` is escaped. `TextView` renders raw HTML, which Stoat doesn't,
@@ -177,13 +180,26 @@ pub enum InternalLink {
     User(String),
     /// `stoat:channel/{id}`: a channel.
     Channel(String),
+    /// `stoat:time/{seconds}` or `stoat:time/{seconds}/{style}`: a
+    /// `<t:…>` timestamp (see [`crate::time::format_timestamp`]).
+    Time { seconds: i64, style: Option<char> },
 }
 
-/// The person or channel a clicked `stoat:` link points at. `None` for
+/// What a `stoat:` link (a mention, a timestamp) points at. `None` for
 /// external links and anything malformed.
 pub fn parse_internal_link(url: &str) -> Option<InternalLink> {
     let rest = url.strip_prefix(INTERNAL_SCHEME)?;
     let (kind, id) = rest.split_once('/')?;
+    if kind == "time" {
+        let (seconds, style) = match id.split_once('/') {
+            Some((seconds, style)) => (seconds, Some(timestamp_style(style)?)),
+            None => (id, None),
+        };
+        return Some(InternalLink::Time {
+            seconds: timestamp_seconds(seconds)?,
+            style,
+        });
+    }
     if id.is_empty() || id.contains(['/', '?', '#']) {
         return None;
     }
@@ -192,6 +208,58 @@ pub fn parse_internal_link(url: &str) -> Option<InternalLink> {
         "channel" => Some(InternalLink::Channel(id.to_string())),
         _ => None,
     }
+}
+
+/// The seconds and style of a timestamp's inside (`t:SECONDS` or
+/// `t:SECONDS:STYLE`), as Stoat's web client reads them
+/// (`<t:([0-9]+)(?::(\w))?>`). `None` if it isn't one, or if it's a time
+/// chrono can't represent.
+fn timestamp(inner: &str) -> Option<(i64, Option<char>)> {
+    let rest = inner.strip_prefix("t:")?;
+    let (seconds, style) = match rest.split_once(':') {
+        Some((seconds, style)) => (seconds, Some(timestamp_style(style)?)),
+        None => (rest, None),
+    };
+    Some((timestamp_seconds(seconds)?, style))
+}
+
+/// Digits that make a time chrono can represent.
+fn timestamp_seconds(digits: &str) -> Option<i64> {
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let seconds = digits.parse().ok()?;
+    chrono::DateTime::from_timestamp(seconds, 0)?;
+    Some(seconds)
+}
+
+/// A single word character (`\w`): a timestamp's style.
+fn timestamp_style(style: &str) -> Option<char> {
+    let mut chars = style.chars();
+    let c = chars.next()?;
+    (chars.next().is_none() && (c.is_ascii_alphanumeric() || c == '_')).then_some(c)
+}
+
+/// A timestamp as plain text, where it can't update (notifications, reply
+/// previews): relative ones show the date and time instead.
+fn plain_timestamp(seconds: i64, style: Option<char>) -> Option<String> {
+    let when = crate::time::local_from_seconds(seconds)?;
+    let style = style.filter(|&style| style != 'R');
+    Some(crate::time::format_timestamp(
+        &when,
+        style,
+        &chrono::Local::now(),
+    ))
+}
+
+/// Whether Markdown made by [`prepare`] has a relative (`R`) timestamp,
+/// which needs drawing again as time passes.
+pub fn has_relative_time(prepared: &str) -> bool {
+    let link = format!("]({INTERNAL_SCHEME}time/");
+    prepared.match_indices(&link).any(|(at, _)| {
+        let url = &prepared[at + 2..];
+        url[..url.find(')').unwrap_or(url.len())].ends_with("/R")
+    })
 }
 
 /// Whether a clicked link should open in the browser.
@@ -462,6 +530,13 @@ fn angle_bracket(text: &str, names: &impl Names) -> (String, usize) {
                 close + 1,
             );
         }
+        if let Some((seconds, style)) = timestamp(inner) {
+            let url = match style {
+                Some(style) => format!("{INTERNAL_SCHEME}time/{seconds}/{style}"),
+                None => format!("{INTERNAL_SCHEME}time/{seconds}"),
+            };
+            return (format!("[{}]({url})", escape(&text[..=close])), close + 1);
+        }
         if is_autolink(inner) {
             return (text[..=close].to_string(), close + 1);
         }
@@ -474,7 +549,8 @@ fn is_autolink(inner: &str) -> bool {
 }
 
 /// Message text as plain text (notification bodies): mentions as `@Name`,
-/// custom emoji as `:name:`. Markdown punctuation is left as typed.
+/// custom emoji as `:name:`, timestamps in local time. Markdown punctuation
+/// is left as typed.
 pub fn plain_text(content: &str, names: &impl Names) -> String {
     plain_mentions(content, names)
 }
@@ -555,7 +631,8 @@ fn strip_markers(line: &str) -> String {
     out
 }
 
-/// Mentions as plain `@Name` text, for places links can't go (spoilers).
+/// Mentions as plain `@Name` text and timestamps in local time, for places
+/// links can't go (spoilers).
 fn plain_mentions(text: &str, names: &impl Names) -> String {
     let text = plain_emoji(text, names);
     let mut out = String::with_capacity(text.len());
@@ -568,7 +645,10 @@ fn plain_mentions(text: &str, names: &impl Names) -> String {
             let name = match (inner.strip_prefix('@'), inner.strip_prefix('#')) {
                 (Some(user), _) => format!("@{}", names.user_name(user)?),
                 (_, Some(channel)) => format!("#{}", names.channel_name(channel)?),
-                _ => return None,
+                _ => {
+                    let (seconds, style) = timestamp(inner)?;
+                    plain_timestamp(seconds, style)?
+                }
             };
             Some((name, end + 1))
         });
@@ -711,9 +791,42 @@ mod tests {
             "stoat:user",
             "stoat:server/s",
             "stoat:user/a/b",
+            "stoat:time/",
+            "stoat:time/abc",
+            "stoat:time/12/",
+            "stoat:time/12/RR",
+            "stoat:time/12/R/x",
+            "stoat:time/-12",
+            "stoat:time/99999999999999999999",
         ] {
             assert_eq!(parse_internal_link(url), None, "{url}");
         }
+    }
+
+    #[test]
+    fn internal_links_parse_to_timestamps() {
+        assert_eq!(
+            parse_internal_link("stoat:time/1762430000"),
+            Some(InternalLink::Time {
+                seconds: 1_762_430_000,
+                style: None
+            })
+        );
+        assert_eq!(
+            parse_internal_link("stoat:time/1762430000/R"),
+            Some(InternalLink::Time {
+                seconds: 1_762_430_000,
+                style: Some('R')
+            })
+        );
+    }
+
+    #[test]
+    fn relative_timestamps_are_found_in_prepared_markdown() {
+        assert!(has_relative_time(r"in [\<t\:1\:R\>](stoat:time/1/R)!"));
+        assert!(!has_relative_time(r"[\<t\:1\:F\>](stoat:time/1/F)"));
+        assert!(!has_relative_time(r"[\<t\:1\>](stoat:time/1)"));
+        assert!(!has_relative_time("plain /R) text"));
     }
 
     #[test]
