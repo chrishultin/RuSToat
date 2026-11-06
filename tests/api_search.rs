@@ -5,6 +5,7 @@ use revolt_result::ErrorType;
 use serde_json::json;
 use stoat_gpui::api::models::{BulkMessageResponse, MessageSort};
 use stoat_gpui::api::{ApiError, StoatClient};
+use stoat_gpui::search::{SearchCursor, page_limit};
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -41,7 +42,7 @@ async fn a_search_posts_the_query_with_users_and_no_pinned() {
         .await;
 
     let page = client(&server)
-        .search_messages("ch-general", "hello", MessageSort::Latest, 50)
+        .search_messages("ch-general", "hello", MessageSort::Latest, 50, None)
         .await
         .unwrap();
     let BulkMessageResponse::MessagesAndUsers {
@@ -78,7 +79,7 @@ async fn the_chosen_sort_is_sent() {
             .mount(&server)
             .await;
         client(&server)
-            .search_messages("ch-general", "x", sort, 50)
+            .search_messages("ch-general", "x", sort, 50, None)
             .await
             .unwrap();
     }
@@ -94,7 +95,7 @@ async fn a_bare_array_of_messages_parses_too() {
         .await;
 
     let page = client(&server)
-        .search_messages("ch-general", "one", MessageSort::Latest, 50)
+        .search_messages("ch-general", "one", MessageSort::Latest, 50, None)
         .await
         .unwrap();
     assert!(matches!(page, BulkMessageResponse::JustMessages(ref m) if m.len() == 2));
@@ -113,7 +114,7 @@ async fn a_search_without_matches_is_an_empty_page() {
         .await;
 
     let page = client(&server)
-        .search_messages("ch-general", "nothing", MessageSort::Latest, 50)
+        .search_messages("ch-general", "nothing", MessageSort::Latest, 50, None)
         .await
         .unwrap();
     assert!(
@@ -133,7 +134,7 @@ async fn a_refused_search_is_an_invalid_operation_error() {
         .await;
 
     let err = client(&server)
-        .search_messages("ch-general", "hi", MessageSort::Latest, 50)
+        .search_messages("ch-general", "hi", MessageSort::Latest, 50, None)
         .await
         .unwrap_err();
     assert!(
@@ -154,7 +155,7 @@ async fn a_channel_that_cant_be_read_is_a_missing_permission_error() {
         .await;
 
     let err = client(&server)
-        .search_messages("ch-locked", "hi", MessageSort::Latest, 50)
+        .search_messages("ch-locked", "hi", MessageSort::Latest, 50, None)
         .await
         .unwrap_err();
     assert!(
@@ -173,7 +174,7 @@ async fn searching_too_fast_is_rate_limited() {
         .await;
 
     let err = client(&server)
-        .search_messages("ch-general", "hi", MessageSort::Latest, 50)
+        .search_messages("ch-general", "hi", MessageSort::Latest, 50, None)
         .await
         .unwrap_err();
     assert!(
@@ -185,4 +186,68 @@ async fn searching_too_fast_is_rate_limited() {
         ),
         "{err:?}"
     );
+}
+
+/// Searches with `cursor` and `sort`, expecting exactly `body`.
+async fn search_sends(sort: MessageSort, cursor: Option<SearchCursor>, body: serde_json::Value) {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/channels/ch-general/search"))
+        .and(body_json(body))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let limit = page_limit(&sort);
+    client(&server)
+        .search_messages("ch-general", "x", sort, limit, cursor)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn the_next_latest_page_is_before_the_last_result() {
+    search_sends(
+        MessageSort::Latest,
+        Some(SearchCursor::Before(MSG.into())),
+        json!({
+            "query": "x",
+            "limit": 50,
+            "before": MSG,
+            "sort": "Latest",
+            "include_users": true
+        }),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn the_next_oldest_page_is_after_the_last_result() {
+    search_sends(
+        MessageSort::Oldest,
+        Some(SearchCursor::After(MSG.into())),
+        json!({
+            "query": "x",
+            "limit": 50,
+            "after": MSG,
+            "sort": "Oldest",
+            "include_users": true
+        }),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_relevance_search_asks_for_a_hundred() {
+    search_sends(
+        MessageSort::Relevance,
+        None,
+        json!({
+            "query": "x",
+            "limit": 100,
+            "sort": "Relevance",
+            "include_users": true
+        }),
+    )
+    .await;
 }

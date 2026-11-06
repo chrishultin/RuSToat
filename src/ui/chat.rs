@@ -48,7 +48,10 @@ use crate::places::{Place, Places, PlacesFile};
 use crate::profile::{RelationshipAction, UserMenuItem};
 use crate::runtime::spawn_io;
 use crate::safety::{LinkCheck, SafetyFile, SafetySettings, classify, is_own_instance, origin};
-use crate::search::{MAX_QUERY_CHARS, PINS_LIMIT, QueryCheck, RESULT_LIMIT, check_query};
+use crate::search::{
+    MAX_QUERY_CHARS, PINS_LIMIT, QueryCheck, RELEVANCE_LIMIT, SearchCursor, check_query,
+    next_cursor, page_limit,
+};
 use crate::store::{
     ChannelEntry, ChannelKind, ChannelSection, ChatStore, MemberList, MemberListRow, MessageRow,
     PendingAttachment, PendingMessage, PendingState, PickerEmoji, PresenceKind, ReactionEmoji,
@@ -215,11 +218,25 @@ struct SearchPanel {
 
 enum SearchState {
     Loading,
-    Results(Rc<Vec<MessageRow>>),
+    Results {
+        rows: Rc<Vec<MessageRow>>,
+        more: MoreState,
+    },
     Empty,
     /// The query had this many characters: too many to send.
     TooLong(usize),
     Error(SharedString),
+}
+
+/// Whether a search's results may go on past the pages shown, and fetching
+/// the next one. `Ready` and `Failed` keep where the next page starts.
+enum MoreState {
+    /// The last page was short, or the search is by Relevance: that's all.
+    None,
+    /// There may be more ("Load more").
+    Ready(SearchCursor),
+    Loading,
+    Failed(SearchCursor, SharedString),
 }
 
 pub struct ChatView {
@@ -350,7 +367,8 @@ pub struct ChatView {
     /// Counts searches, so that an answer for an old one (or for another
     /// channel) can be told from the one being waited for and dropped.
     search_seq: u64,
-    /// The search in flight. Replacing or dropping it cancels the request.
+    /// The search in flight, or its next page ("Load more"). Replacing or
+    /// dropping it cancels the request.
     search_task: Option<Task<()>>,
     /// The same for the pinned messages list: counts requests (including
     /// refreshes), so that an old answer is dropped.
@@ -1777,9 +1795,11 @@ impl ChatView {
         let client = self.client.clone();
         let request = spawn_io({
             let channel = channel.clone();
+            let sort = sort.clone();
             async move {
+                let limit = page_limit(&sort);
                 client
-                    .search_messages(&channel, &query, sort, RESULT_LIMIT)
+                    .search_messages(&channel, &query, sort, limit, None)
                     .await
             }
         });
@@ -1790,7 +1810,7 @@ impl ChatView {
                     return;
                 }
                 let state = match result {
-                    Ok(Ok(page)) => this.search_results(&channel, page),
+                    Ok(Ok(page)) => this.search_results(&channel, &sort, page),
                     Ok(Err(err)) => {
                         log::warn!("searching {channel} failed: {err:?}");
                         SearchState::Error(search_error_text(&err))
@@ -1819,14 +1839,114 @@ impl ChatView {
         self.store.result_rows(channel, &messages)
     }
 
-    /// What the panel shows for a search's `page` in `channel`.
-    fn search_results(&mut self, channel: &str, page: BulkMessageResponse) -> SearchState {
-        let rows = self.result_rows(channel, page);
+    /// What the panel shows for the first `page` of a `sort` search in
+    /// `channel`.
+    fn search_results(
+        &mut self,
+        channel: &str,
+        sort: &MessageSort,
+        page: BulkMessageResponse,
+    ) -> SearchState {
+        let (rows, more) = self.search_page(channel, sort, page);
         if rows.is_empty() {
             SearchState::Empty
         } else {
-            SearchState::Results(Rc::new(rows))
+            SearchState::Results {
+                rows: Rc::new(rows),
+                more,
+            }
         }
+    }
+
+    /// Rows for a page of a `sort` search in `channel`, and whether there may
+    /// be a page after it. The cursor comes from the messages as Stoat sent
+    /// them, before any are left out of the rows.
+    fn search_page(
+        &mut self,
+        channel: &str,
+        sort: &MessageSort,
+        page: BulkMessageResponse,
+    ) -> (Vec<MessageRow>, MoreState) {
+        let messages = self.store.absorb_results(page);
+        self.forget_member_lists();
+        let ids: Vec<&str> = messages.iter().map(|m| m.id.as_str()).collect();
+        let more = next_cursor(sort, &ids).map_or(MoreState::None, MoreState::Ready);
+        (self.store.result_rows(channel, &messages), more)
+    }
+
+    /// "Load more" (or its Retry): ask for the page after the results shown.
+    /// It lands only if the panel still shows the same search, so a new
+    /// search, a change of sort or channel, or closing the panel drops it.
+    fn load_more_search(&mut self, cx: &mut Context<Self>) {
+        let SidePanel::Search(panel) = &mut self.side_panel else {
+            return;
+        };
+        let SearchState::Results { more, .. } = &mut panel.state else {
+            return;
+        };
+        let cursor = match more {
+            MoreState::Ready(cursor) | MoreState::Failed(cursor, _) => cursor.clone(),
+            MoreState::None | MoreState::Loading => return,
+        };
+        *more = MoreState::Loading;
+        let (channel, query, sort, seq) = (
+            panel.channel.clone(),
+            panel.query.clone(),
+            panel.sort.clone(),
+            panel.seq,
+        );
+        let client = self.client.clone();
+        let request = spawn_io({
+            let channel = channel.clone();
+            let sort = sort.clone();
+            let cursor = cursor.clone();
+            async move {
+                let limit = page_limit(&sort);
+                client
+                    .search_messages(&channel, &query, sort, limit, Some(cursor))
+                    .await
+            }
+        });
+        self.search_task = Some(cx.spawn(async move |this, cx| {
+            let result = request.await;
+            this.update(cx, |this, cx| {
+                if !matches!(&this.side_panel, SidePanel::Search(panel) if panel.seq == seq) {
+                    return;
+                }
+                let page = match result {
+                    Ok(Ok(page)) => Ok(this.search_page(&channel, &sort, page)),
+                    Ok(Err(err)) => {
+                        log::warn!("loading more of a search in {channel} failed: {err:?}");
+                        Err(search_error_text(&err))
+                    }
+                    Err(err) => {
+                        log::warn!("search task failed: {err:?}");
+                        Err("Something went wrong searching.".into())
+                    }
+                };
+                let SidePanel::Search(panel) = &mut this.side_panel else {
+                    return;
+                };
+                let SearchState::Results { rows, more } = &mut panel.state else {
+                    return;
+                };
+                match page {
+                    Ok((new_rows, next)) => {
+                        let shown: HashSet<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+                        let new_rows: Vec<MessageRow> = new_rows
+                            .into_iter()
+                            .filter(|row| !shown.contains(row.id.as_str()))
+                            .collect();
+                        Rc::make_mut(rows).extend(new_rows);
+                        *more = next;
+                    }
+                    Err(error) => *more = MoreState::Failed(cursor, error),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
     }
 
     /// Esc in the search box: forget the search and give the panel back to
@@ -5200,15 +5320,53 @@ impl ChatView {
                 colors.danger,
             ),
             SearchState::Error(error) => note(error.clone(), colors.danger),
-            SearchState::Results(rows) => {
-                let count = if rows.len() as i64 >= RESULT_LIMIT {
-                    format!("The first {} matches", rows.len())
+            SearchState::Results { rows, more } => {
+                let count = if panel.sort == MessageSort::Relevance
+                    && rows.len() as i64 >= RELEVANCE_LIMIT
+                {
+                    format!("The top {} matches", rows.len())
+                } else if !matches!(more, MoreState::None) {
+                    format!("{}+ matches", rows.len())
                 } else if rows.len() == 1 {
                     "1 match".to_string()
                 } else {
                     format!("{} matches", rows.len())
                 };
-                self.render_result_list("search-results", rows, count, channel, cx)
+                let footer = match more {
+                    MoreState::None => None,
+                    MoreState::Ready(_) => Some(
+                        div()
+                            .px_3()
+                            .pt_1()
+                            .child(
+                                Button::new("search-load-more")
+                                    .xsmall()
+                                    .label("Load more")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.load_more_search(cx)),
+                                    ),
+                            )
+                            .into_any_element(),
+                    ),
+                    MoreState::Loading => Some(note("Loading…".into(), colors.muted)),
+                    MoreState::Failed(_, error) => Some(
+                        v_flex()
+                            .pt_1()
+                            .child(note(error.clone(), colors.danger))
+                            .child(
+                                div().px_3().child(
+                                    Button::new("search-load-more-retry")
+                                        .xsmall()
+                                        .label("Retry")
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.load_more_search(cx)),
+                                        ),
+                                ),
+                            )
+                            .into_any_element(),
+                    ),
+                };
+                self.render_result_list("search-results", rows, count, footer, channel, cx)
             }
         };
         v_flex()
@@ -5253,13 +5411,15 @@ impl ChatView {
     }
 
     /// A count and `rows` as compact messages, for the search and pins
-    /// panels. Clicking one asks to jump to it; nothing else on them is live
-    /// (they're not kept up to date message by message).
+    /// panels, with `footer` (if any) after the last. Clicking one asks to
+    /// jump to it; nothing else on them is live (they're not kept up to date
+    /// message by message).
     fn render_result_list(
         &self,
         id: &'static str,
         rows: &Rc<Vec<MessageRow>>,
         count: String,
+        footer: Option<AnyElement>,
         channel: &ChannelEntry,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -5301,7 +5461,8 @@ impl ChatView {
                         rows.iter().map(|row| {
                             render_preview_row(row, colors, &on_action, &people, &pickers)
                         }),
-                    ),
+                    )
+                    .children(footer),
             )
             .into_any_element()
     }
@@ -5358,7 +5519,7 @@ impl ChatView {
                 } else {
                     format!("{} pinned messages", rows.len())
                 };
-                self.render_result_list("pinned-messages", rows, count, channel, cx)
+                self.render_result_list("pinned-messages", rows, count, None, channel, cx)
             }
         };
         v_flex()

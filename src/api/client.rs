@@ -10,6 +10,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use super::ApiError;
+use crate::search::SearchCursor;
 
 /// Uploads are handed to the connection in pieces this big, for progress.
 const UPLOAD_CHUNK: usize = 64 * 1024;
@@ -454,18 +455,20 @@ impl StoatClient {
     /// `POST /channels/{channel}/search`: up to `limit` (1 to 100) messages
     /// in `channel` that match `query` (1 to 64 characters), in `sort` order,
     /// with their authors. Stoat matches whole words, stemmed, not substrings,
-    /// and searches one channel only.
+    /// and searches one channel only. `cursor` asks for the page after an
+    /// earlier one (see [`SearchCursor`]).
     pub async fn search_messages(
         &self,
         channel: &str,
         query: &str,
         sort: MessageSort,
         limit: i64,
+        cursor: Option<SearchCursor>,
     ) -> Result<BulkMessageResponse, ApiError> {
         self.send(
             Method::POST,
             &format!("/channels/{channel}/search"),
-            Some(&search_body(query, sort, limit)),
+            Some(&search_body(query, sort, limit, cursor)),
         )
         .await
     }
@@ -763,13 +766,23 @@ fn encode_path_segment(segment: &str) -> String {
 /// The body of a message search. Stoat refuses `pinned` together with
 /// `query`, even `pinned: false`, so unset fields are left out rather than
 /// sent as `null` (the same way as [`StoatClient::send_message`]).
-fn search_body(query: &str, sort: MessageSort, limit: i64) -> serde_json::Value {
+fn search_body(
+    query: &str,
+    sort: MessageSort,
+    limit: i64,
+    cursor: Option<SearchCursor>,
+) -> serde_json::Value {
+    let (before, after) = match cursor {
+        Some(SearchCursor::Before(id)) => (Some(id), None),
+        Some(SearchCursor::After(id)) => (None, Some(id)),
+        None => (None, None),
+    };
     let body = DataMessageSearch {
         query: Some(query.to_string()),
         pinned: None,
         limit: Some(limit),
-        before: None,
-        after: None,
+        before,
+        after,
         sort,
         include_users: Some(true),
     };
@@ -873,7 +886,7 @@ mod tests {
 
     #[test]
     fn search_body_has_no_pinned_and_no_nulls() {
-        let body = search_body("hello", MessageSort::Latest, 50);
+        let body = search_body("hello", MessageSort::Latest, 50, None);
         assert_eq!(
             body,
             json!({
@@ -893,7 +906,7 @@ mod tests {
             (MessageSort::Oldest, "Oldest"),
             (MessageSort::Relevance, "Relevance"),
         ] {
-            assert_eq!(search_body("x", sort, 50)["sort"], name);
+            assert_eq!(search_body("x", sort, 50, None)["sort"], name);
         }
     }
 
