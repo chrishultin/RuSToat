@@ -7,9 +7,80 @@
 //! tones; the user's default tone is applied when an emoji is drawn or
 //! inserted ([`toned`]). So changing the tone recolours everything,
 //! recently used emoji included.
+//!
+//! Emoji newer than the system's emoji font are left out everywhere here
+//! (see [`hide_undrawable`]), so they're never offered as a box with a
+//! question mark.
+
+use std::collections::HashSet;
+use std::sync::OnceLock;
 
 use crate::complete::{Insertion, MAX_SUGGESTIONS, Suggestion, TokenRef};
 use crate::prefs::Tone;
+
+/// Characters the system's emoji font has no glyph for. Unset (nothing
+/// hidden) until [`hide_undrawable`].
+static MISSING: OnceLock<HashSet<char>> = OnceLock::new();
+
+/// Leave out every emoji with a character `has_glyph` says the emoji font
+/// can't draw (Unicode's newest, before the OS catches up). Called once at
+/// launch; later calls do nothing. Returns how many emoji are hidden.
+pub fn hide_undrawable(has_glyph: impl Fn(char) -> bool) -> usize {
+    let mut chars: HashSet<char> = HashSet::new();
+    for emoji in emojis::iter() {
+        chars.extend(emoji.as_str().chars());
+        for toned in emoji.skin_tones().into_iter().flatten() {
+            chars.extend(toned.as_str().chars());
+        }
+    }
+    let missing = chars.into_iter().filter(|&c| !has_glyph(c)).collect();
+    let _ = MISSING.set(missing);
+    emojis::iter().filter(|emoji| !drawable(emoji)).count()
+}
+
+/// Leave out emoji Apple Color Emoji can't draw, at launch. Returns how
+/// many are hidden, or `None` if the font isn't there (nothing's hidden).
+#[cfg(target_os = "macos")]
+pub fn hide_undrawable_by_system_font() -> Option<usize> {
+    use std::ptr::NonNull;
+
+    use objc2_core_foundation::CFString;
+    use objc2_core_text::CTFont;
+
+    const FAMILY: &str = "Apple Color Emoji";
+    // SAFETY: a null matrix means the identity transform.
+    let font = unsafe { CTFont::with_name(&CFString::from_str(FAMILY), 16.0, std::ptr::null()) };
+    // CoreText substitutes another font for a missing one, which has no emoji.
+    // SAFETY: `font` is a valid CTFont.
+    if unsafe { font.family_name() }.to_string() != FAMILY {
+        return None;
+    }
+    Some(hide_undrawable(|c| {
+        let mut chars = [0u16; 2];
+        let chars = c.encode_utf16(&mut chars);
+        let mut glyphs = [0u16; 2];
+        // SAFETY: both buffers hold `chars.len()` (1 or 2) elements.
+        unsafe {
+            font.glyphs_for_characters(
+                NonNull::new_unchecked(chars.as_mut_ptr()),
+                NonNull::new_unchecked(glyphs.as_mut_ptr()),
+                chars.len() as isize,
+            )
+        }
+    }))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn hide_undrawable_by_system_font() -> Option<usize> {
+    None
+}
+
+/// Whether the emoji font can draw all of `emoji`.
+fn drawable(emoji: &emojis::Emoji) -> bool {
+    MISSING
+        .get()
+        .is_none_or(|missing| !emoji.as_str().chars().any(|c| missing.contains(&c)))
+}
 
 /// A server's custom emoji.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,7 +162,7 @@ pub fn search_all(query: &str, custom: &[CustomEmoji], limit: usize) -> Vec<Emoj
     let custom = custom
         .iter()
         .filter_map(|emoji| Some((tier(&query, [emoji.name.as_str()])?, EmojiChoice::Custom(emoji.clone()))));
-    let unicode = emojis::iter().filter_map(|emoji| {
+    let unicode = emojis::iter().filter(|emoji| drawable(emoji)).filter_map(|emoji| {
         let name = emoji.name().to_lowercase();
         let tier = tier(&query, emoji.shortcodes().chain([name.as_str()]))?;
         Some((tier, EmojiChoice::unicode(emoji)))
@@ -131,9 +202,12 @@ fn tier<'a>(query: &str, names: impl IntoIterator<Item = &'a str>) -> Option<u8>
 }
 
 /// The Unicode emoji whose shortcode is exactly `code` (`smile` → 😄), in
-/// `tone` if it has skin tones (`wave` → 👋🏻 in [`Tone::Light`]).
+/// `tone` if it has skin tones (`wave` → 👋🏻 in [`Tone::Light`]). `None`
+/// for one the emoji font can't draw, so `:code:` stays as typed.
 pub fn by_shortcode(code: &str, tone: Tone) -> Option<&'static str> {
-    emojis::get_by_shortcode(code).map(|emoji| toned(emoji.as_str(), tone))
+    emojis::get_by_shortcode(code)
+        .filter(|emoji| drawable(emoji))
+        .map(|emoji| toned(emoji.as_str(), tone))
 }
 
 /// `emoji` in `tone`, if it has skin tones; otherwise (😄, flags, custom
@@ -145,6 +219,7 @@ pub fn toned(emoji: &'static str, tone: Tone) -> &'static str {
     }
     emojis::get(emoji)
         .and_then(|e| e.with_skin_tone(tone.skin_tone()))
+        .filter(|e| drawable(e))
         .map_or(emoji, |e| e.as_str())
 }
 
@@ -155,12 +230,13 @@ pub fn custom_by_name<'a>(custom: &'a [CustomEmoji], name: &str) -> Option<&'a C
 }
 
 /// Every Unicode emoji, by category in Unicode (CLDR) order, with each
-/// category's name. Default skin tones only.
+/// category's name. Default skin tones only, and only ones the emoji font
+/// can draw.
 pub fn groups() -> Vec<(&'static str, Vec<EmojiChoice>)> {
     emojis::Group::iter()
         .map(|group| {
             let emoji = emojis::iter()
-                .filter(|emoji| emoji.group() == group)
+                .filter(|emoji| emoji.group() == group && drawable(emoji))
                 .map(EmojiChoice::unicode)
                 .collect();
             (group_name(group), emoji)

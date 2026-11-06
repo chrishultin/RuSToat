@@ -99,6 +99,13 @@ fn main() {
     app.on_reopen(MainWindow::show);
     app.run(|cx| {
         gpui_kit::init(cx);
+        // Emoji newer than the system's emoji font (the `emojis` crate can be
+        // a Unicode version ahead) stay out of the picker and completions.
+        match stoat_gpui::emoji::hide_undrawable_by_system_font() {
+            Some(0) => {}
+            Some(hidden) => log::info!("hiding {hidden} emoji the system font can't draw"),
+            None => log::warn!("no system emoji font found; showing every emoji"),
+        }
         // The saved palette before any window opens, so there's no flash of
         // the default theme.
         stoat_gpui::themes::register(cx);
