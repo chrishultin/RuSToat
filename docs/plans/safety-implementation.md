@@ -143,3 +143,47 @@ Pending (batched to the end).
 
 ### Manual Validation
 Pending (batched to the end).
+
+## Summary
+
+_Completed: 2026-11-06_
+
+### Chunks Completed
+1. Blocked users' messages fold into "N blocked messages", revealed for the session by clicking (`2b9d141`).
+2. External links ask before opening, with a per-account trust list in `safety.json` (`deaf25f`).
+3. Links whose text isn't their address carry it to the dialog (`stoat:link?…`), with the "You clicked on" and "Be careful!" levels (`00e72ea`).
+4. Mature channels are behind an 18+ gate. Nothing loads or is acknowledged until the user enters (`27916fc`).
+
+### Divergences
+All minor, and listed under each chunk:
+- A blocked run read partway puts the divider after it.
+- `reveal_blocked_run_of` is in the store.
+- Blocked-author reply previews also drop `author_id`.
+- Embed descriptions use `People::link_handler` (so mentions there open cards).
+- The link dialog uses a custom footer.
+- Embed links pass no text.
+- `shows_address` also decodes `%`, ignores case, and matches scheme-less text against any scheme.
+- Reference links resolve through `Definition`s.
+- Typed `stoat:link` URLs get their real text.
+- An email address as link text is `Text`.
+- `jump_to_message` is gated.
+- The age gate's box state is per channel.
+- A `ChannelUpdate` for the open channel reloads it.
+
+### Definition of Done
+- [x] Runs of `Blocked` authors show as "1 blocked message" / "N blocked messages", clicking shows them for the session, and replies preview "Blocked user". Covered by `tests/store_blocked.rs`; not yet tried by hand.
+- [x] Every external link (messages, embeds, bios) asks, except own-instance URLs, attachments and trusted origins. Covered by code review and the `safety` unit tests; not yet tried by hand.
+- [x] "Don't ask me again" appears only for `Plain` links and trusts the origin per account, across relaunches (`SafetyFile` round-trip tests).
+- [x] A different-address text gives "Be careful!", and Continue waits for "I understand the risk" (`classify` tests, and `ready()` gates the button, Enter and `follow_link_prompt`).
+- [x] Mature text channels and groups are gated, with no load or acknowledgement until entered, and the confirmation and channels are saved per account (`store_mature` and `safety` tests).
+- [x] `cargo test` (681 passed) and `cargo clippy --all-targets -- -D warnings` pass, and no file's rustfmt drift grew.
+- [ ] Every chunk's manual check recorded here: **not done.** The user chose to merge to main and move on to the next milestone without running them.
+
+### Remaining Manual Steps
+The plan's manual checks haven't been run. They need a second account and a server where a channel can be marked mature:
+1. Chunk 1: block an account, post 3 + 1 (another author) + 2 messages, and expect "3 blocked messages", the other message, then "2 blocked messages". Click to reveal, and check it survives a channel switch. A reply to a hidden message previews "Blocked user". Unblock and re-block update at once.
+2. Chunk 2: a bare URL asks. "Don't ask me again" persists across relaunches. `mailto:` always asks with no checkbox. Attachments don't ask.
+3. Chunk 3: `[google.com](https://example.com)` gives "Be careful!" with Continue disabled until ticked. `[the docs](https://example.com)` gives "You clicked on" with no trust box. Also try embed titles, a YouTube card and `<https://…>`.
+4. Chunk 4: the gate shows with no messages and the channel stays unread. "Enter channel" is disabled until ticked. Entering loads the channel and marks it read. After a relaunch it opens straight in. A second mature channel has the box pre-ticked. Marking an open, never-entered channel mature puts the gate up live.
+5. Two accounts don't share trust or entered channels.
+6. Light and dark themes are readable for the blocked row, both dialog variants and the gate.
