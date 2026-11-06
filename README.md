@@ -36,7 +36,7 @@ RUST_LOG=stoat_gpui=debug cargo run
 
 ### Notifications: running as an app bundle
 
-New messages notify according to your Stoat notification settings. The Dock icon shows a badge for unread DMs and mentions. A plain `cargo run` shows notices as in-app toasts only, because macOS only lets an app post notification banners when it runs from an app bundle. To get banners, run it bundled:
+New messages notify according to your Stoat notification settings. The Dock icon shows a badge for unread DMs and mentions. Closing the window disconnects every account and clears the badge, but RuSToat keeps running: click its Dock icon to open the window again and reconnect. A plain `cargo run` shows notices as in-app toasts only, because macOS only lets an app post notification banners when it runs from an app bundle. To get banners, run it bundled:
 
 ```bash
 scripts/run-bundled.sh
