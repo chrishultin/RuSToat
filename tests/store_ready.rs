@@ -87,18 +87,18 @@ fn servers_without_saved_ordering_keep_ready_order() {
 #[test]
 fn server_channels_are_grouped_uncategorized_first() {
     let sections = store().server_channels("srv-alpha");
-    let shape: Vec<(Option<&str>, Vec<&str>)> = sections
+    let shape: Vec<(Option<&str>, Option<&str>, Vec<&str>)> = sections
         .iter()
-        .map(|s| (s.title.as_deref(), names(&s.channels)))
+        .map(|s| (s.title.as_deref(), s.id.as_deref(), names(&s.channels)))
         .collect();
     assert_eq!(
         shape,
         vec![
             // `ch-no-access` is listed by the server but absent from Ready: hidden.
-            (None, vec!["welcome"]),
+            (None, None, vec!["welcome"]),
             // `ch-secret` is likewise hidden; the category itself stays.
-            (Some("Chat"), vec!["general", "random"]),
-            (Some("Voice"), vec!["hangout"]),
+            (Some("Chat"), Some("cat-chat"), vec!["general", "random"]),
+            (Some("Voice"), Some("cat-voice"), vec!["hangout"]),
             // "Archive" only references a missing channel, so it's omitted.
         ]
     );

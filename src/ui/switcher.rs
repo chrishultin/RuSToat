@@ -88,7 +88,7 @@ pub fn render_switcher(
                 item.selected,
                 item.unread && !item.selected,
                 if item.selected { 0 } else { item.mentions },
-                Some(("Log Out", log_out)),
+                vec![("Log Out", log_out)],
                 on_click,
                 cx,
             )
@@ -103,7 +103,7 @@ pub fn render_switcher(
         adding,
         false,
         0,
-        None,
+        Vec::new(),
         on_add,
         cx,
     );

@@ -46,9 +46,9 @@ use crate::profile::{RelationshipAction, UserMenuItem};
 use crate::runtime::spawn_io;
 use crate::search::{MAX_QUERY_CHARS, PINS_LIMIT, QueryCheck, RESULT_LIMIT, check_query};
 use crate::store::{
-    ChannelEntry, ChannelKind, ChatStore, MemberList, MemberListRow, MessageRow, PendingAttachment,
-    PendingMessage, PendingState, PickerEmoji, PresenceKind, ReactionEmoji, ReplyPreview,
-    ReplyState, RowOp, ServerEntry, TimelineRow, diff_rows, display_name,
+    ChannelEntry, ChannelKind, ChannelSection, ChatStore, MemberList, MemberListRow, MessageRow,
+    PendingAttachment, PendingMessage, PendingState, PickerEmoji, PresenceKind, ReactionEmoji,
+    ReplyPreview, ReplyState, RowOp, ServerEntry, TimelineRow, diff_rows, display_name,
 };
 use crate::typing::{OutgoingTyping, TypingSignal, TypingState, typing_label};
 use crate::ui::composer::{Composer, ComposerEvent, file_icon};
@@ -173,6 +173,9 @@ pub struct ChatView {
     /// File server base URL for icons, from `GET /`. `None` until loaded.
     /// Where images come from. Only the API base is known until `GET /` loads.
     media: MediaUrls,
+    /// The instance's web client, for message links (`app` from `GET /`).
+    /// `None` until it loads, or if the instance doesn't say.
+    web_app: Option<String>,
     panes: HashMap<String, Pane>,
     /// History requests in flight, by channel. Results always land in their
     /// own channel, so a slow one can't overwrite the channel being viewed.
@@ -336,8 +339,12 @@ impl ChatView {
                 Ok(Ok(root)) => {
                     let media = MediaUrls::from_root(&api, &root);
                     let limits = AttachmentLimits::from_root(&root);
-                    log::debug!("media: {media:?}, attachments: {limits:?}");
+                    log::debug!(
+                        "media: {media:?}, attachments: {limits:?}, web app: {:?}",
+                        root.app
+                    );
                     this.update(cx, |this, cx| {
+                        this.web_app = root.app;
                         this.set_media(media, cx);
                         this.composer
                             .update(cx, |composer, _| composer.set_limits(limits));
@@ -484,6 +491,7 @@ impl ChatView {
             places_file,
             saved_places,
             media,
+            web_app: None,
             panes: HashMap::new(),
             loading: HashMap::new(),
             load_errors: HashMap::new(),
@@ -1087,6 +1095,14 @@ impl ChatView {
                     cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
                 }
             }
+            RowAction::CopyLink(id) => {
+                if let Some(app) = &self.web_app {
+                    let server = self.store.channel_server(channel);
+                    let link = crate::links::message_link(app, server, channel, &id);
+                    cx.write_to_clipboard(ClipboardItem::new_string(link));
+                }
+            }
+            RowAction::CopyId(id) => cx.write_to_clipboard(ClipboardItem::new_string(id)),
             RowAction::JumpTo(id) => self.jump_to_message(channel, id, window, cx),
         }
         cx.notify();
@@ -3677,15 +3693,14 @@ impl ChatView {
         self.load_older(channel, cx);
     }
 
-    fn sections(&self) -> Vec<(Option<String>, Vec<ChannelEntry>)> {
+    fn sections(&self) -> Vec<ChannelSection> {
         match &self.place {
-            Place::Home => vec![(None, self.store.home_channels())],
-            Place::Server(id) => self
-                .store
-                .server_channels(id)
-                .into_iter()
-                .map(|s| (s.title, s.channels))
-                .collect(),
+            Place::Home => vec![ChannelSection {
+                title: None,
+                id: None,
+                channels: self.store.home_channels(),
+            }],
+            Place::Server(id) => self.store.server_channels(id),
         }
     }
 
@@ -3702,7 +3717,7 @@ impl ChatView {
         }
         self.sections()
             .into_iter()
-            .flat_map(|(_, channels)| channels)
+            .flat_map(|section| section.channels)
             .next()
     }
 
@@ -3736,7 +3751,7 @@ impl ChatView {
             self.place == Place::Home,
             home_unread,
             home_mentions,
-            None,
+            Vec::new(),
             cx.listener(|this, _, _, cx| this.select_place(Place::Home, cx)),
             cx,
         );
@@ -3755,6 +3770,12 @@ impl ChatView {
                     view.update(cx, |this, cx| this.mark_server_read(server_id, cx))
                         .ok();
                 });
+                let copy_id: MenuAction = {
+                    let server_id = server.id.clone();
+                    Rc::new(move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(server_id.clone()))
+                    })
+                };
                 rail_button(
                     SharedString::from(format!("rail-{}", server.id)),
                     icon,
@@ -3762,7 +3783,7 @@ impl ChatView {
                     selected,
                     server.unread,
                     server.mentions,
-                    Some(("Mark as read", mark_read)),
+                    vec![("Mark as read", mark_read), ("Copy server ID", copy_id)],
                     cx.listener(move |this, _, _, cx| this.select_place(place.clone(), cx)),
                     cx,
                 )
@@ -3804,27 +3825,31 @@ impl ChatView {
         };
         let current = self.current_channel().map(|c| c.id);
         let sections = self.sections();
-        let empty = sections.iter().all(|(_, channels)| channels.is_empty());
+        let empty = sections.iter().all(|section| section.channels.is_empty());
         let muted = cx.theme().muted_foreground;
 
         let rows: Vec<_> = sections
             .into_iter()
-            .map(|(title, channels)| {
+            .map(|section| {
+                let header = section.title.map(|title| {
+                    let id = section.id.clone().unwrap_or_default();
+                    div()
+                        .id(SharedString::from(format!("category-{id}")))
+                        .px_2()
+                        .pt_3()
+                        .pb_1()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(muted)
+                        .child(title.to_uppercase())
+                        .context_menu(move |menu, _, _| {
+                            menu.item(copy_id_item("Copy category ID", id.clone()))
+                        })
+                });
                 v_flex()
                     .gap_0p5()
-                    .when_some(title, |el, title| {
-                        el.child(
-                            div()
-                                .px_2()
-                                .pt_3()
-                                .pb_1()
-                                .text_xs()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(muted)
-                                .child(title.to_uppercase()),
-                        )
-                    })
-                    .children(channels.into_iter().map(|channel| {
+                    .children(header)
+                    .children(section.channels.into_iter().map(|channel| {
                         let selected = current.as_deref() == Some(channel.id.as_str());
                         self.render_channel_row(channel, selected, cx)
                     }))
@@ -3912,7 +3937,7 @@ impl ChatView {
         channel: ChannelEntry,
         selected: bool,
         cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
+    ) -> AnyElement {
         let theme = cx.theme();
         let hover_bg = theme.sidebar_accent;
         let hover_fg = theme.sidebar_accent_foreground;
@@ -3957,6 +3982,10 @@ impl ChatView {
             })
             .child(div().flex_1().min_w_0().truncate().child(channel.name))
             .when(mentions > 0, |el| el.child(mention_badge(mentions, cx)))
+            .context_menu(move |menu, _, _| {
+                menu.item(copy_id_item("Copy channel ID", channel.id.clone()))
+            })
+            .into_any_element()
     }
 
     fn render_user_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -4138,6 +4167,7 @@ impl ChatView {
                         let pickers = Rc::new(Pickers {
                             choices: Rc::new(self.store.reaction_choices(&channel.id)),
                             open_for: self.picker_for.clone(),
+                            can_link: self.web_app.is_some(),
                         });
                         let view = cx.entity().downgrade();
                         let channel_id = channel.id.clone();
@@ -4561,6 +4591,7 @@ impl ChatView {
         let pickers = Pickers {
             choices: Rc::default(),
             open_for: None,
+            can_link: false,
         };
         let people = self.people(Some(channel.id.clone()), cx);
         v_flex()
@@ -5026,6 +5057,10 @@ enum RowAction {
     Reply(ReplyTarget),
     /// Copy a message's text as typed (its Markdown source).
     CopyText(String),
+    /// Copy a link to a message in the instance's web client.
+    CopyLink(String),
+    /// Copy a message's ID.
+    CopyId(String),
     /// Edit one of the user's messages in the message box.
     Edit(String),
     /// Delete one of the user's messages, after asking (unless Shift was
@@ -5125,6 +5160,9 @@ struct Pickers {
     choices: Rc<Vec<PickerEmoji>>,
     /// The message whose picker is open.
     open_for: Option<String>,
+    /// Whether the message menu offers "Copy message link": only when the
+    /// instance says where its web client is.
+    can_link: bool,
 }
 
 fn render_row(
@@ -5592,6 +5630,7 @@ fn render_message_row(
     // Right-click anywhere on the row (text, padding, avatar).
     let (on_action, id, mine) = (on_action.clone(), message.id.clone(), message.mine);
     let (can_pin, pinned) = (message.can_pin, message.pinned);
+    let can_link = pickers.can_link;
     let reply = reply_target(message);
     row.context_menu(move |menu, _, _| {
         let act = |action: RowAction| {
@@ -5609,6 +5648,18 @@ fn render_message_row(
             PopupMenuItem::new("Copy text")
                 .icon(IconName::Copy)
                 .on_click(act(RowAction::CopyText(id.clone()))),
+        )
+        .when(can_link, |menu| {
+            menu.item(
+                PopupMenuItem::new("Copy message link")
+                    .icon(IconName::Link)
+                    .on_click(act(RowAction::CopyLink(id.clone()))),
+            )
+        })
+        .item(
+            PopupMenuItem::new("Copy message ID")
+                .icon(IconName::IdCard)
+                .on_click(act(RowAction::CopyId(id.clone()))),
         )
         .when(can_pin, |menu| {
             let toggle = {
@@ -6727,12 +6778,19 @@ fn server_icon(server: &ServerEntry, media: &MediaUrls, selected: bool) -> AnyEl
     }
 }
 
+/// A right-click menu item that copies an ID (a channel's, a category's).
+fn copy_id_item(label: &'static str, id: String) -> PopupMenuItem {
+    PopupMenuItem::new(label)
+        .icon(IconName::IdCard)
+        .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(id.clone())))
+}
+
 /// What a rail button's right-click menu item does.
 pub(crate) type MenuAction = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
 /// A rail button, with a marker on the left edge when selected (an icon image
 /// covers the button's own highlight colour). Also used by the account
-/// switcher. `menu` is a right-click menu item: its label and action.
+/// switcher. `menu` is its right-click menu: each item's label and action.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn rail_button(
     id: impl Into<ElementId>,
@@ -6741,7 +6799,7 @@ pub(crate) fn rail_button(
     selected: bool,
     unread: bool,
     mentions: usize,
-    menu: Option<(&'static str, MenuAction)>,
+    menu: Vec<(&'static str, MenuAction)>,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> Div {
@@ -6776,17 +6834,20 @@ pub(crate) fn rail_button(
         .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         .child(content);
     // Right-click: e.g. "Mark as read" on servers.
-    let button = match menu {
-        Some((label, action)) => button
-            .context_menu(move |menu, _, _| {
-                let action = action.clone();
-                menu.item(
-                    PopupMenuItem::new(label)
-                        .on_click(move |event, window, cx| action(event, window, cx)),
-                )
+    let button = if menu.is_empty() {
+        button.into_any_element()
+    } else {
+        button
+            .context_menu(move |popup, _, _| {
+                menu.iter().fold(popup, |popup, (label, action)| {
+                    let action = action.clone();
+                    popup.item(
+                        PopupMenuItem::new(*label)
+                            .on_click(move |event, window, cx| action(event, window, cx)),
+                    )
+                })
             })
-            .into_any_element(),
-        None => button.into_any_element(),
+            .into_any_element()
     };
 
     div()

@@ -34,6 +34,10 @@ pub struct RootConfig {
     pub version: String,
     /// Events websocket URL, e.g. `wss://events.stoat.chat`.
     pub ws: String,
+    /// The instance's web client, e.g. `https://stoat.chat`. Message links
+    /// point here (see [`crate::links`]). Older instances may not send it.
+    #[serde(default)]
+    pub app: Option<String>,
     #[serde(default)]
     pub features: RootFeatures,
 }

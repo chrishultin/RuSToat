@@ -22,6 +22,7 @@ gpui_kit::assets::icon_assets!(
         House,
         IdCard,
         Image,
+        Link,
         MessageCircle,
         Paperclip,
         Pencil,
@@ -80,8 +81,8 @@ mod tests {
         assert!(AppAssets.load("icons/loader.svg").unwrap().is_some());
     }
 
-    /// Every icon the app draws, so none renders blank. The person menu,
-    /// profile card and Friends page use these.
+    /// Every icon the app draws, so none renders blank. The person and
+    /// message menus, profile card and Friends page use these.
     #[test]
     fn people_icons_load() {
         for icon in [
@@ -90,6 +91,7 @@ mod tests {
             IconName::Copy,
             IconName::Ellipsis,
             IconName::IdCard,
+            IconName::Link,
             IconName::MessageCircle,
             IconName::ShieldCheck,
             IconName::UserCheck,

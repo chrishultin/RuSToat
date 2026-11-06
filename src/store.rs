@@ -48,6 +48,8 @@ pub enum ChannelKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelSection {
     pub title: Option<String>,
+    /// The category's ID (`None` = uncategorized).
+    pub id: Option<String>,
     pub channels: Vec<ChannelEntry>,
 }
 
@@ -2826,6 +2828,7 @@ impl ChatStore {
         if !uncategorized.is_empty() {
             sections.push(ChannelSection {
                 title: None,
+                id: None,
                 channels: uncategorized,
             });
         }
@@ -2839,6 +2842,7 @@ impl ChatStore {
             if !channels.is_empty() {
                 sections.push(ChannelSection {
                     title: Some(category.title.clone()),
+                    id: Some(category.id.clone()),
                     channels,
                 });
             }
