@@ -31,3 +31,22 @@ Baseline before any change: 611 tests passed, clippy clean, `src/ui/chat.rs` rus
 
 ### Manual Validation
 Deferred to the end (see the plan's chunk 1 manual check).
+
+## Chunk 2: Quote a message into the message box
+
+### Changes Made
+- `src/draft.rs`: `pub fn quote(content)` prefixes each line with `> ` (a blank line becomes `>`, using `str::lines`, so a trailing newline or CRLF adds no extra line) and adds a blank line after. `pub fn append_quote(existing, quote)` puts the quote on a line of its own. There are two unit tests.
+- `src/ui/composer.rs`: `Composer::append_quote(content, labels, window, cx)`. It quotes `content`, appends it to the box's current value, learns labels for the mentions in the quote, then calls `set_text` (which rebuilds chips for the whole value and puts the cursor at the end) and focuses the box.
+- `src/ui/chat.rs`: `RowAction::Quote(id)`, handled by reading `store.raw_content` and labelling with `store.token_label`, as `start_edit` does. The "Quote" menu item sits right after "Reply" and only when `message.body.is_some()`, so attachment-only messages don't get it. System messages use `render_system_row`, which has no menu.
+- `src/assets.rs`: `TextQuote` added to `ExtraIcons` and to the icon-loads test.
+
+### Divergences
+- The composer method is called `append_quote(content, labels, …)` rather than `append_text(text, …)`. It takes the raw content and quotes it itself, so the caller can't forget to.
+
+### Verification Performed
+- `cargo test`: 613 passed (2 new), 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- Formatted `draft.rs` and `assets.rs` (clean at HEAD). `composer.rs` drift is still 14 (14 at HEAD), and `chat.rs` is still 17.
+
+### Manual Validation
+Deferred to the end (see the plan's chunk 2 manual check).

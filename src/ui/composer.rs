@@ -29,7 +29,8 @@ use crate::prefs::Tone;
 use crate::ui::emoji_picker::{EmojiBrowser, OnBrowsePick, OnTone};
 use crate::draft::{
     AttachmentLimits, Draft, DraftAttachment, Drafts, EditStash, MAX_MESSAGE_CHARS, ReplyTarget,
-    SendCheck, TooManyReplies, can_send, char_count, check_send, save_pasted_image,
+    SendCheck, TooManyReplies, append_quote, can_send, char_count, check_send, quote,
+    save_pasted_image,
 };
 
 pub enum ComposerEvent {
@@ -650,6 +651,24 @@ impl Composer {
         self.hint = None;
         self.learn_labels(content, labels);
         self.set_text(content, window, cx);
+        self.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Add `content` to the box as a quote, under whatever's being typed
+    /// (its mentions labelled by `labels`), and focus the box: "Quote" in
+    /// a message's menu.
+    pub fn append_quote(
+        &mut self,
+        content: &str,
+        labels: Labeler,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let quoted = quote(content);
+        let text = append_quote(&self.input.read(cx).value(), &quoted);
+        self.learn_labels(&quoted, labels);
+        self.set_text(&text, window, cx);
         self.focus(window, cx);
         cx.notify();
     }

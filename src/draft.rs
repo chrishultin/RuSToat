@@ -444,6 +444,33 @@ pub fn new_nonce(now_ms: u64) -> String {
     format!("rustoat-{now_ms}-{count}-{random:016x}")
 }
 
+/// `content` as a Markdown quote, ready to type a reply under: each line
+/// starts `> ` (a blank one is just `>`), and a blank line follows. As
+/// Stoat's web client quotes a message.
+pub fn quote(content: &str) -> String {
+    let mut quoted = String::new();
+    for line in content.lines() {
+        if line.is_empty() {
+            quoted.push('>');
+        } else {
+            quoted.push_str("> ");
+            quoted.push_str(line);
+        }
+        quoted.push('\n');
+    }
+    quoted.push('\n');
+    quoted
+}
+
+/// What's in the box (`existing`) with `quote` added on a line of its own.
+pub fn append_quote(existing: &str, quote: &str) -> String {
+    if existing.is_empty() || existing.ends_with('\n') {
+        format!("{existing}{quote}")
+    } else {
+        format!("{existing}\n{quote}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, SystemTime};
@@ -488,6 +515,28 @@ mod tests {
         assert!(!can_send("", true, true));
         assert!(can_send(&"a".repeat(MAX_MESSAGE_CHARS), false, true));
         assert!(!can_send(&"a".repeat(MAX_MESSAGE_CHARS + 1), false, true));
+    }
+
+    #[test]
+    fn a_quote_prefixes_every_line_and_ends_with_a_blank_line() {
+        assert_eq!(quote("hello"), "> hello\n\n");
+        assert_eq!(quote("one\ntwo"), "> one\n> two\n\n");
+        // A blank line inside stays part of the quote.
+        assert_eq!(quote("one\n\ntwo"), "> one\n>\n> two\n\n");
+        // A trailing newline doesn't add an empty quoted line.
+        assert_eq!(quote("one\n"), "> one\n\n");
+        assert_eq!(quote("one\r\ntwo"), "> one\n> two\n\n");
+    }
+
+    #[test]
+    fn a_quote_goes_on_a_line_of_its_own() {
+        let q = quote("hi");
+        assert_eq!(append_quote("", &q), "> hi\n\n");
+        assert_eq!(append_quote("look", &q), "look\n> hi\n\n");
+        assert_eq!(append_quote("look\n", &q), "look\n> hi\n\n");
+        // A second quote goes under the first.
+        let twice = append_quote(&append_quote("", &q), &quote("again"));
+        assert_eq!(twice, "> hi\n\n> again\n\n");
     }
 
     #[test]

@@ -1166,6 +1166,15 @@ impl ChatView {
                 pin,
                 confirmed: false,
             } => self.confirm_pin(channel.to_string(), id, pin, window, cx),
+            RowAction::Quote(id) => {
+                if let Some(content) = self.store.raw_content(channel, &id) {
+                    let store = &self.store;
+                    let labels = |token: &TokenRef| store.token_label(channel, token);
+                    self.composer.update(cx, |composer, cx| {
+                        composer.append_quote(content, &labels, window, cx)
+                    });
+                }
+            }
             RowAction::CopyText(id) => {
                 if let Some(text) = self.store.raw_content(channel, &id) {
                     cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
@@ -5365,6 +5374,8 @@ enum RowAction {
     JumpTo(String),
     /// Reply to a message (from the hover toolbar or the right-click menu).
     Reply(ReplyTarget),
+    /// Quote a message (by ID) in the message box.
+    Quote(String),
     /// Copy a message's text as typed (its Markdown source).
     CopyText(String),
     /// Copy a link to a message in the instance's web client.
@@ -5960,6 +5971,8 @@ fn render_message_row(
     let (on_action, id, mine) = (on_action.clone(), message.id.clone(), message.mine);
     let (can_pin, pinned) = (message.can_pin, message.pinned);
     let can_link = pickers.can_link;
+    // Only messages with text can be quoted.
+    let has_text = message.body.is_some();
     let reply = reply_target(message);
     row.context_menu(move |menu, _, _| {
         let act = |action: RowAction| {
@@ -5973,6 +5986,13 @@ fn render_message_row(
                 .icon(IconName::Reply)
                 .on_click(act(RowAction::Reply(reply.clone()))),
         )
+        .when(has_text, |menu| {
+            menu.item(
+                PopupMenuItem::new("Quote")
+                    .icon(IconName::TextQuote)
+                    .on_click(act(RowAction::Quote(id.clone()))),
+            )
+        })
         .item(
             PopupMenuItem::new("Mark as unread")
                 .icon(IconName::Mail)
