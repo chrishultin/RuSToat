@@ -203,6 +203,9 @@ pub struct ChatView {
     /// The one read-acknowledgement waiting to go out: (channel, message, task).
     /// Replacing it (newer message, other channel) cancels the old one.
     pending_ack: Option<(String, String, Task<()>)>,
+    /// The channel the user marked unread ("Mark as unread"). It isn't
+    /// marked read again until they leave it or send a message there.
+    held_unread: Option<String>,
     /// This account's ID, in its banners' and toasts' tags.
     account_id: String,
     /// Whether this account is the one on screen. A hidden account keeps
@@ -510,6 +513,7 @@ impl ChatView {
             jumps: HashMap::new(),
             highlight_task: None,
             pending_ack: None,
+            held_unread: None,
             account_id,
             active: true,
             account_label: None,
@@ -1111,6 +1115,7 @@ impl ChatView {
                 }
             }
             RowAction::CopyId(id) => cx.write_to_clipboard(ClipboardItem::new_string(id)),
+            RowAction::MarkUnread(id) => self.mark_unread(channel, &id, cx),
             RowAction::JumpTo(id) => self.jump_to_message(channel, id, window, cx),
         }
         cx.notify();
@@ -3105,6 +3110,7 @@ impl ChatView {
         if !active {
             self.pending_ack = None;
             // Coming back counts as opening the channel again.
+            self.held_unread = None;
             if let Some((channel, _)) = self.unread_marker.take() {
                 self.sync_pane(&channel, cx);
             }
@@ -3267,6 +3273,8 @@ impl ChatView {
             return;
         }
         let left = self.unread_marker.take().map(|(c, _)| c);
+        // Left the channel marked unread: it can be marked read again.
+        self.held_unread = None;
         if let Some(channel) = current {
             let after = self
                 .store
@@ -3652,6 +3660,9 @@ impl ChatView {
         let Some(channel) = self.current_channel().map(|c| c.id) else {
             return;
         };
+        if self.held_unread.as_ref() == Some(&channel) {
+            return;
+        }
         // What's on screen isn't the newest message, so reading it says
         // nothing about the messages after it.
         if !self.store.is_at_present(&channel) {
@@ -3713,12 +3724,48 @@ impl ChatView {
     /// sent. Stoat doesn't do this itself, and the store already counts the
     /// user's own messages as read, so [`Self::maybe_ack_current`] never would.
     fn ack_sent(&mut self, channel: &str, message: &str, cx: &mut Context<Self>) {
-        // The user has replied, so a divider above their reply says nothing.
+        // The user has replied, so a divider above their reply says nothing,
+        // and the channel they marked unread has been read after all.
         self.clear_unread_divider(channel, cx);
+        if self.held_unread.as_deref() == Some(channel) {
+            self.held_unread = None;
+        }
         // A pending ack for something older would move the read position back.
         if matches!(&self.pending_ack, Some((c, m, _)) if c == channel && m.as_str() < message) {
             self.pending_ack = None;
         }
+        self.post_ack(channel, message, "sent", cx);
+    }
+
+    /// "Mark as unread" on message `id`: move the read position back to the
+    /// message before it, here and on Stoat (other clients follow), and
+    /// keep the channel unread until the user leaves it. The divider moves
+    /// there too.
+    fn mark_unread(&mut self, channel: &str, id: &str, cx: &mut Context<Self>) {
+        // The oldest loaded message has nothing before it in memory, so it's
+        // acknowledged itself, as revite does: the channel is unread from the
+        // message after it, one late.
+        let read = self
+            .store
+            .message_before(channel, id)
+            .unwrap_or(id)
+            .to_string();
+        if matches!(&self.pending_ack, Some((c, ..)) if c == channel) {
+            self.pending_ack = None;
+        }
+        self.held_unread = Some(channel.to_string());
+        self.store.set_read_position(channel, Some(&read));
+        if self.current_channel().is_some_and(|c| c.id == channel) {
+            self.unread_marker = Some((channel.to_string(), Some(read.clone())));
+        }
+        self.sync_pane(channel, cx);
+        self.post_ack(channel, &read, "marked unread", cx);
+        cx.notify();
+    }
+
+    /// Send `PUT /channels/{channel}/ack/{message}`, logging the outcome
+    /// (`why` says what it was for).
+    fn post_ack(&self, channel: &str, message: &str, why: &'static str, cx: &mut Context<Self>) {
         let client = self.client.clone();
         let request = spawn_io({
             let (channel, message) = (channel.to_string(), message.to_string());
@@ -3726,7 +3773,7 @@ impl ChatView {
         });
         let (channel, message) = (channel.to_string(), message.to_string());
         cx.spawn(async move |_, _| match request.await {
-            Ok(Ok(())) => log::debug!("acked {channel} up to {message} (sent)"),
+            Ok(Ok(())) => log::debug!("acked {channel} up to {message} ({why})"),
             Ok(Err(err)) => log::warn!("couldn't mark {channel} read: {err:?}"),
             Err(err) => log::warn!("ack task failed: {err:?}"),
         })
@@ -5123,6 +5170,8 @@ enum RowAction {
     CopyLink(String),
     /// Copy a message's ID.
     CopyId(String),
+    /// Make the channel unread from this message on.
+    MarkUnread(String),
     /// Edit one of the user's messages in the message box.
     Edit(String),
     /// Delete one of the user's messages, after asking (unless Shift was
@@ -5719,6 +5768,11 @@ fn render_message_row(
             PopupMenuItem::new("Reply")
                 .icon(IconName::Reply)
                 .on_click(act(RowAction::Reply(reply.clone()))),
+        )
+        .item(
+            PopupMenuItem::new("Mark as unread")
+                .icon(IconName::Mail)
+                .on_click(act(RowAction::MarkUnread(id.clone()))),
         )
         .item(
             PopupMenuItem::new("Copy text")

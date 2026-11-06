@@ -71,3 +71,29 @@ The user ran the app, copied message links (server channel and DM) and opened th
 
 ### Manual Validation
 The user had a second account post in a channel, opened it, and confirmed the divider sits above the first new message, stays while reading, and is gone after switching away and back.
+
+## Chunk 3: Mark as unread
+
+### Changes Made
+- `src/store.rs`: `ChatStore::set_read_position(channel, Option<&str>)` sets the read position outright, backwards too. Mentions older than it aren't restored (assumption 2). `ChatStore::message_before(channel, id)` returns the previous loaded message, or `None` for the oldest loaded message or an unknown ID.
+- `src/ui/chat.rs`:
+  - `RowAction::MarkUnread(id)`, and "Mark as unread" (Lucide `Mail` icon) under "Reply" in the message menu.
+  - `ChatView.held_unread: Option<String>`. `maybe_ack_current` skips that channel. It's cleared when the open channel changes (in `sync_unread_marker`), when the account is hidden (`set_active(false)`), and by `ack_sent`.
+  - `mark_unread` works out the message before the one clicked. If there isn't one in memory, it uses the message itself, as revite does, with a comment saying the divider then falls one message late. It cancels a pending ack for the channel, holds the channel unread, sets the read position, points `unread_marker` at the same message (when it's the open channel), re-syncs the pane, and sends the ack.
+  - `post_ack(channel, message, why)` is the ack request and its logging, now shared by `ack_sent` and `mark_unread`.
+- `src/assets.rs`: embeds `Mail`; the icon test covers it.
+- `tests/store_unreads.rs`: moving the read position back makes the channel unread, `apply_ack` still can't move it back, and `None` means nothing read. Also `message_before` for a middle message, the oldest loaded one, an unloaded ID and a channel with no history.
+
+### Divergences
+- **Minor:** the ack request moved into a shared `post_ack` helper instead of being repeated.
+- **Minor:** hiding the account (switching accounts) also releases the hold, consistent with chunk 2 treating coming back as opening the channel again.
+- The plan's risk that Stoat might ignore a backwards ack didn't happen: the request succeeded (`acked … (marked unread)` in the log), and the web client showed the channel unread. No `tests/api_unreads.rs` case was added, because the request shape is the existing `ack_message`, which is already covered.
+
+### Verification Performed
+- `cargo test --test store_unreads`: 27 passed (2 new).
+- `cargo test`: 589 passed, 0 failed, 5 ignored.
+- `cargo clippy --all-targets`: no warnings.
+- rustfmt drift in `chat.rs` and `store.rs` unchanged (17 and 15); `assets.rs` and `tests/store_unreads.rs` clean.
+
+### Manual Validation
+The user marked a message unread and confirmed the following. The unread dot and the moved divider appear. The channel stays unread while open, and the web client shows it unread. It's read again after leaving and coming back. The app log shows Stoat accepted the backwards ack.

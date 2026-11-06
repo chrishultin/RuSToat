@@ -520,3 +520,41 @@ fn no_divider_when_the_read_position_is_newer_than_the_loaded_history() {
     let store = general_with(&["u-ada", "u-bob", "u-ada", "u-bob"], false);
     assert_eq!(divided(&store, NEWER), ["0001", "0002", "0003", "0004"]);
 }
+
+// Mark as unread.
+
+#[test]
+fn moving_the_read_position_back_makes_a_channel_unread() {
+    // Read up to its last message, GENERAL_LAST.
+    let mut store = store();
+    let (earlier, earliest) = ("01JC0000000000000000000003", "01JC0000000000000000000001");
+    assert!(!store.is_unread("ch-general"));
+    store.set_read_position("ch-general", Some(earlier));
+    assert!(store.is_unread("ch-general"));
+    assert_eq!(store.read_position("ch-general"), Some(earlier));
+    assert_eq!(
+        store.unacked_latest("ch-general").as_deref(),
+        Some(GENERAL_LAST)
+    );
+    // The usual ack still can't move it back.
+    store.apply_ack("ch-general", earliest);
+    assert_eq!(store.read_position("ch-general"), Some(earlier));
+    // Nothing read at all.
+    store.set_read_position("ch-general", None);
+    assert_eq!(store.read_position("ch-general"), None);
+    assert!(store.is_unread("ch-general"));
+}
+
+#[test]
+fn the_message_before_is_the_previous_loaded_one() {
+    let store = general_with(&["u-ada", "u-bob", "u-ada", "u-bob"], false);
+    assert_eq!(store.message_before("ch-general", M3), Some(M2));
+    // The oldest loaded message has nothing before it in memory.
+    assert_eq!(store.message_before("ch-general", M1), None);
+    assert_eq!(
+        store.message_before("ch-general", NEWER),
+        None,
+        "not loaded"
+    );
+    assert_eq!(store.message_before("dm-ada", M2), None, "no history");
+}

@@ -1232,6 +1232,22 @@ impl ChatStore {
         self.read_states.get(channel)?.last_id.as_deref()
     }
 
+    /// Move `channel`'s read position to `message_id` (`None`: nothing read),
+    /// even backwards: "Mark as unread". Mentions older than the new position
+    /// aren't brought back; the store only keeps newer ones.
+    pub fn set_read_position(&mut self, channel: &str, message_id: Option<&str>) {
+        let state = self.read_states.entry(channel.to_string()).or_default();
+        state.last_id = message_id.map(str::to_string);
+    }
+
+    /// The loaded message just before `id` in `channel`. `None` if `id` is
+    /// the oldest loaded message, or isn't loaded.
+    pub fn message_before(&self, channel: &str, id: &str) -> Option<&str> {
+        let messages = &self.histories.get(channel)?.messages;
+        let ix = messages.iter().position(|m| m.id == id)?;
+        Some(messages.get(ix.checked_sub(1)?)?.id.as_str())
+    }
+
     /// The channel has been read up to `message_id` (here, or by another of
     /// the user's sessions via `ChannelAck`). Never moves the position back.
     pub fn apply_ack(&mut self, channel: &str, message_id: &str) {
