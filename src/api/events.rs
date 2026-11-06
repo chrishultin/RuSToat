@@ -199,6 +199,11 @@ pub enum ServerEvent {
     ServerDelete {
         id: String,
     },
+    /// The user's relationship with `user` changed (a friend request, a
+    /// block…), on either side. `user.relationship` is the new one.
+    UserRelationship {
+        user: Box<User>,
+    },
     /// An event type this client doesn't handle (yet). Holds the `type` tag.
     Unknown(String),
 }
@@ -614,6 +619,19 @@ fn decode(mut value: Value, out: &mut Vec<ServerEvent>) {
                 ServerEvent::ServerDelete { id: d.id }
             }))
         }
+        // `id` is whose relationship it is (the user); `user` is the other
+        // person.
+        "UserRelationship" => {
+            #[derive(Deserialize)]
+            struct Relationship {
+                user: User,
+            }
+            out.push(decode_as(value, &kind, |r: Relationship| {
+                ServerEvent::UserRelationship {
+                    user: Box::new(r.user),
+                }
+            }))
+        }
         other => out.push(ServerEvent::Unknown(other.to_string())),
     }
 }
@@ -1015,7 +1033,8 @@ async fn session(
                         | ServerEvent::ServerRoleDelete { .. }
                         | ServerEvent::ServerRoleRanksUpdate { .. }
                         | ServerEvent::ServerCreate { .. }
-                        | ServerEvent::ServerDelete { .. }) => {
+                        | ServerEvent::ServerDelete { .. }
+                        | ServerEvent::UserRelationship { .. }) => {
                             Some(ConnectionEvent::Event(message_event))
                         }
                     };
@@ -1439,5 +1458,21 @@ mod tests {
     fn server_delete_decodes() {
         let events = parse_frame(r#"{"type":"ServerDelete","id":"srv-1"}"#);
         assert!(matches!(events.as_slice(), [ServerEvent::ServerDelete { id }] if id == "srv-1"));
+    }
+
+    #[test]
+    fn user_relationship_decodes_the_other_person() {
+        let events = parse_frame(
+            r#"{"type":"UserRelationship","id":"u-me",
+                "user":{"_id":"u-bob","username":"bob","discriminator":"0001","relationship":"Incoming","online":true}}"#,
+        );
+        let [ServerEvent::UserRelationship { user }] = events.as_slice() else {
+            panic!("got {events:?}");
+        };
+        assert_eq!(user.id, "u-bob");
+        assert_eq!(
+            user.relationship,
+            revolt_models::v0::RelationshipStatus::Incoming
+        );
     }
 }

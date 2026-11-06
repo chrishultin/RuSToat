@@ -552,6 +552,32 @@ impl StoatClient {
             .await
     }
 
+    /// `PUT /users/{id}/friend`: send them a friend request, or accept
+    /// theirs. Stoat answers with them, as they now relate to the user.
+    pub async fn add_friend(&self, id: &str) -> Result<User, ApiError> {
+        self.send(Method::PUT, &format!("/users/{id}/friend"), None::<&()>)
+            .await
+    }
+
+    /// `DELETE /users/{id}/friend`: reject or cancel a friend request, or
+    /// stop being friends.
+    pub async fn remove_friend(&self, id: &str) -> Result<User, ApiError> {
+        self.send(Method::DELETE, &format!("/users/{id}/friend"), None::<&()>)
+            .await
+    }
+
+    /// `PUT /users/{id}/block`: block them (bots too).
+    pub async fn block_user(&self, id: &str) -> Result<User, ApiError> {
+        self.send(Method::PUT, &format!("/users/{id}/block"), None::<&()>)
+            .await
+    }
+
+    /// `DELETE /users/{id}/block`: unblock them.
+    pub async fn unblock_user(&self, id: &str) -> Result<User, ApiError> {
+        self.send(Method::DELETE, &format!("/users/{id}/block"), None::<&()>)
+            .await
+    }
+
     /// `PUT /channels/{channel}/ack/{message}`: the user has read `channel`
     /// up to and including `message`.
     pub async fn ack_message(&self, channel: &str, message: &str) -> Result<(), ApiError> {

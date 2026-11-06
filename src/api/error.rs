@@ -69,6 +69,16 @@ impl ApiError {
         )
     }
 
+    /// Stoat says a friend request or block is already as asked
+    /// (`AlreadyFriends`, `AlreadySentRequest`, `NoEffect`): another client
+    /// got there first.
+    pub fn relationship_already_done(&self) -> bool {
+        matches!(
+            self.error_type(),
+            Some(ErrorType::AlreadyFriends | ErrorType::AlreadySentRequest | ErrorType::NoEffect)
+        )
+    }
+
     /// The Stoat error type, if the server sent one.
     pub fn error_type(&self) -> Option<&ErrorType> {
         match self {
@@ -96,6 +106,16 @@ fn describe(error: &ErrorType) -> String {
         }
         ErrorType::AlreadyPinned => "That message is already pinned.".into(),
         ErrorType::NotPinned => "That message isn't pinned.".into(),
+        ErrorType::AlreadyFriends => "You're already friends.".into(),
+        ErrorType::AlreadySentRequest => "You've already sent them a friend request.".into(),
+        ErrorType::Blocked => "You've blocked them. Unblock them first.".into(),
+        ErrorType::BlockedByOther => "They've blocked you.".into(),
+        ErrorType::NotFriends => "You aren't friends.".into(),
+        ErrorType::IsBot => "Bots can't be friends.".into(),
+        ErrorType::TooManyPendingFriendRequests { max } => {
+            format!("You have too many pending friend requests (at most {max}).")
+        }
+        ErrorType::NoEffect => "Nothing changed.".into(),
         other => {
             let name: &'static str = other.into();
             format!("Stoat returned an error: {name}")
@@ -178,5 +198,25 @@ mod tests {
         assert!(!other.pin_already_done());
         assert!(!ApiError::Unauthorized.pin_already_done());
         assert_eq!(pinned.to_string(), "That message is already pinned.");
+    }
+
+    #[test]
+    fn relationship_errors_read_well_and_some_count_as_done() {
+        let friends =
+            ApiError::from_response(StatusCode::CONFLICT, br#"{"type":"AlreadyFriends"}"#);
+        let blocked =
+            ApiError::from_response(StatusCode::FORBIDDEN, br#"{"type":"BlockedByOther"}"#);
+        let too_many = ApiError::from_response(
+            StatusCode::BAD_REQUEST,
+            br#"{"type":"TooManyPendingFriendRequests","max":100}"#,
+        );
+        assert!(friends.relationship_already_done());
+        assert!(!blocked.relationship_already_done());
+        assert!(!too_many.relationship_already_done());
+        assert_eq!(blocked.to_string(), "They've blocked you.");
+        assert_eq!(
+            too_many.to_string(),
+            "You have too many pending friend requests (at most 100)."
+        );
     }
 }

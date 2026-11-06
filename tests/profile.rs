@@ -5,7 +5,10 @@ use revolt_permissions::DEFAULT_PERMISSION_SERVER;
 use serde_json::{Value, json};
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::api::models::RelationshipStatus;
-use stoat_gpui::profile::{CardRole, UserMenuItem, can_message, dm_with, profile_card, user_menu};
+use stoat_gpui::profile::{
+    CardRole, RelationshipAction, UserMenuItem, can_message, dm_with, friend_buttons, profile_card,
+    user_menu,
+};
 use stoat_gpui::store::{ChatStore, PresenceKind};
 
 /// 2026-01-01T00:00:00Z as a ULID prefix, so "account created" is known.
@@ -223,6 +226,7 @@ fn the_dm_with_someone_is_found_open_or_closed() {
 
 mod menu {
     use super::*;
+    use RelationshipAction::*;
     use UserMenuItem::*;
 
     #[test]
@@ -233,6 +237,9 @@ mod menu {
                 Profile,
                 Message,
                 Mention,
+                Separator,
+                Relationship(RemoveFriend),
+                Relationship(Block),
                 Separator,
                 CopyUsername,
                 CopyUserId
@@ -263,7 +270,98 @@ mod menu {
         assert!(user_menu(&store, "u-bot", Some("ch")).contains(&Message));
         assert_eq!(
             user_menu(&store, "u-plain", Some("ch")),
-            [Profile, Mention, Separator, CopyUsername, CopyUserId]
+            [
+                Profile,
+                Mention,
+                Separator,
+                Relationship(AddFriend),
+                Separator,
+                Relationship(Block),
+                Separator,
+                CopyUsername,
+                CopyUserId
+            ]
         );
+    }
+
+    /// `u-plain`, related to the user by `relationship`.
+    fn related(relationship: &str) -> ChatStore {
+        let mut store = store();
+        store.apply_relationship(
+            serde_json::from_value(user("u-plain", json!({ "relationship": relationship })))
+                .unwrap(),
+        );
+        store
+    }
+
+    /// The relationship items in `u-plain`'s menu.
+    fn relationship_items(store: &ChatStore) -> Vec<RelationshipAction> {
+        user_menu(store, "u-plain", Some("ch"))
+            .into_iter()
+            .filter_map(|item| match item {
+                Relationship(action) => Some(action),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn relationship_items_and_card_buttons_follow_the_relationship() {
+        let cases: [(&str, &[RelationshipAction], &[RelationshipAction]); 6] = [
+            ("None", &[AddFriend, Block], &[AddFriend]),
+            (
+                "Incoming",
+                &[AcceptFriend, RejectFriend, Block],
+                &[AcceptFriend, RejectFriend],
+            ),
+            ("Outgoing", &[CancelFriend, Block], &[CancelFriend]),
+            ("Friend", &[RemoveFriend, Block], &[]),
+            ("Blocked", &[Unblock], &[]),
+            // Blocked by them: they can still be blocked back.
+            ("BlockedOther", &[Block], &[]),
+        ];
+        for (relationship, menu, buttons) in cases {
+            let store = related(relationship);
+            assert_eq!(relationship_items(&store), menu, "{relationship}");
+            assert_eq!(friend_buttons(&store, "u-plain"), buttons, "{relationship}");
+            let card = profile_card(&store, "u-plain", Some("ch")).unwrap();
+            assert_eq!(card.friend_buttons, buttons, "{relationship}");
+        }
+    }
+
+    #[test]
+    fn yourself_and_bots_have_no_friend_items() {
+        let store = store();
+        // "User" is how Stoat marks the user themselves.
+        assert!(
+            !user_menu(&store, "u-me", Some("ch"))
+                .iter()
+                .any(|i| matches!(i, Relationship(_)))
+        );
+        assert!(friend_buttons(&store, "u-me").is_empty());
+        // A bot can be blocked, not friended.
+        let bot: Vec<_> = user_menu(&store, "u-bot", Some("ch"))
+            .into_iter()
+            .filter(|i| matches!(i, Relationship(_)))
+            .collect();
+        assert_eq!(bot, [Relationship(Block)]);
+        assert!(friend_buttons(&store, "u-bot").is_empty());
+    }
+
+    #[test]
+    fn only_remove_friend_and_block_are_confirmed() {
+        let confirmed: Vec<_> = [
+            AddFriend,
+            AcceptFriend,
+            RejectFriend,
+            CancelFriend,
+            RemoveFriend,
+            Block,
+            Unblock,
+        ]
+        .into_iter()
+        .filter(|a| a.needs_confirming())
+        .collect();
+        assert_eq!(confirmed, [RemoveFriend, Block]);
     }
 }

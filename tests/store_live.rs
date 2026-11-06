@@ -790,3 +790,59 @@ fn a_closed_dm_reopened_here_shows_in_home_until_closed_again() {
     assert!(!in_home(&store));
     assert!(!store.shows_channel("dm-closed"));
 }
+
+// --- relationships -------------------------------------------------------
+
+fn relationship_event(user: serde_json::Value) -> stoat_gpui::api::models::User {
+    let frame = serde_json::json!({ "type": "UserRelationship", "id": "u-me", "user": user });
+    let Some(ServerEvent::UserRelationship { user }) = parse_frame(&frame.to_string()).pop() else {
+        panic!("UserRelationship");
+    };
+    *user
+}
+
+#[test]
+fn a_relationship_change_updates_or_adds_the_user() {
+    use stoat_gpui::api::models::RelationshipStatus;
+    let mut store = store_with_page(50);
+    let before = store.user("u-bob").unwrap().relationship.clone();
+    assert_ne!(before, RelationshipStatus::Incoming);
+    let bob = relationship_event(serde_json::json!({
+        "_id": "u-bob", "username": "bob", "discriminator": "0001", "relationship": "Incoming", "online": true
+    }));
+    assert!(store.apply_relationship(bob.clone()));
+    assert_eq!(
+        store.user("u-bob").unwrap().relationship,
+        RelationshipStatus::Incoming
+    );
+    // The same again (the route's answer, then the event) changes nothing.
+    assert!(!store.apply_relationship(bob));
+
+    let stranger = relationship_event(serde_json::json!({
+        "_id": "u-new", "username": "new", "discriminator": "0002", "relationship": "Incoming", "online": false
+    }));
+    assert!(store.apply_relationship(stranger));
+    assert!(store.knows_user("u-new"));
+}
+
+#[test]
+fn becoming_friends_offers_message_and_remove_friend() {
+    use stoat_gpui::profile::{RelationshipAction, UserMenuItem, can_message, user_menu};
+    let mut store = store_with_page(50);
+    let carol = |relationship: &str| {
+        relationship_event(serde_json::json!({
+            "_id": "u-carol", "username": "carol", "discriminator": "0003",
+            "relationship": relationship, "online": true
+        }))
+    };
+    store.apply_relationship(carol("None"));
+    assert!(!can_message(&store, "u-carol"));
+
+    store.apply_relationship(carol("Friend"));
+    assert!(can_message(&store, "u-carol"));
+    let menu = user_menu(&store, "u-carol", Some("ch-general"));
+    assert!(menu.contains(&UserMenuItem::Message));
+    assert!(menu.contains(&UserMenuItem::Relationship(
+        RelationshipAction::RemoveFriend
+    )));
+}

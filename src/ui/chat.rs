@@ -41,7 +41,7 @@ use crate::markdown::{InternalLink, JUMBO_TEXT_PX, is_external_link, parse_inter
 use crate::media::MediaUrls;
 use crate::notify::{self, Delivery, Notice, Viewing};
 use crate::places::{Place, Places, PlacesFile};
-use crate::profile::UserMenuItem;
+use crate::profile::{RelationshipAction, UserMenuItem};
 use crate::runtime::spawn_io;
 use crate::search::{MAX_QUERY_CHARS, PINS_LIMIT, QueryCheck, RESULT_LIMIT, check_query};
 use crate::typing::{OutgoingTyping, TypingSignal, TypingState, typing_label};
@@ -212,6 +212,8 @@ pub struct ChatView {
     profiles: HashMap<String, Option<UserProfile>>,
     /// The person whose DM is being asked for ("Message" on their card).
     dm_opening: Option<String>,
+    /// People whose friend request or block is on its way to Stoat.
+    relationship_pending: HashSet<String>,
     /// The message whose reaction picker is open.
     picker_for: Option<String>,
     /// Reaction changes waiting on the server, as (message, emoji). Another
@@ -460,6 +462,7 @@ impl ChatView {
             card_focus: cx.focus_handle(),
             profiles: HashMap::new(),
             dm_opening: None,
+            relationship_pending: HashSet::new(),
             picker_for: None,
             reacting: HashSet::new(),
             reply_fetches: HashSet::new(),
@@ -788,6 +791,14 @@ impl ChatView {
             ConnectionEvent::Event(ServerEvent::ServerDelete { id }) => {
                 log::info!("live: server {id} deleted");
                 self.leave_server(&id, cx);
+            }
+            ConnectionEvent::Event(ServerEvent::UserRelationship { user }) => {
+                log::debug!(
+                    "live: relationship with {} is {:?}",
+                    user.id,
+                    user.relationship
+                );
+                self.relationship_changed(*user);
             }
             ConnectionEvent::Event(_) => return,
             ConnectionEvent::Disconnected { reason, retry_in } => {
@@ -2263,6 +2274,129 @@ impl ChatView {
         cx.notify();
     }
 
+    /// Change how the user relates to `user` (a friend request, a block).
+    /// Remove friend and Block are asked about first, unless `confirmed`
+    /// (Shift was held). Stoat answers with them as they now relate, which
+    /// updates the card and menus; a `UserRelationship` follows too. One
+    /// already as asked (another client got there first) is fine; other
+    /// refusals get a toast.
+    fn set_relationship(
+        &mut self,
+        user: String,
+        action: RelationshipAction,
+        confirmed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if action.needs_confirming() && !confirmed {
+            self.confirm_relationship(user, action, window, cx);
+            return;
+        }
+        if !self.relationship_pending.insert(user.clone()) {
+            return;
+        }
+        cx.notify();
+        let request = spawn_io({
+            let (client, user) = (self.client.clone(), user.clone());
+            async move {
+                match action {
+                    RelationshipAction::AddFriend | RelationshipAction::AcceptFriend => {
+                        client.add_friend(&user).await
+                    }
+                    RelationshipAction::RejectFriend
+                    | RelationshipAction::CancelFriend
+                    | RelationshipAction::RemoveFriend => client.remove_friend(&user).await,
+                    RelationshipAction::Block => client.block_user(&user).await,
+                    RelationshipAction::Unblock => client.unblock_user(&user).await,
+                }
+            }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.relationship_pending.remove(&user);
+                cx.notify();
+                let error: SharedString = match result {
+                    Ok(Ok(person)) => {
+                        log::info!("{action:?} {user}: now {:?}", person.relationship);
+                        this.relationship_changed(person);
+                        return;
+                    }
+                    Ok(Err(err)) if err.relationship_already_done() => {
+                        log::debug!("{action:?} {user} was already done");
+                        return;
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't {action:?} {user}: {err:?}");
+                        err.to_string().into()
+                    }
+                    Err(err) => {
+                        log::warn!("relationship task failed: {err:?}");
+                        "Couldn't reach Stoat. Try again.".into()
+                    }
+                };
+                window.push_notification(Notification::error(error), cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Ask before removing a friend or blocking someone.
+    fn confirm_relationship(
+        &mut self,
+        user: String,
+        action: RelationshipAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = self
+            .store
+            .user(&user)
+            .map(|person| display_name(person).to_string())
+            .unwrap_or_else(|| "them".into());
+        let (title, description, ok): (SharedString, SharedString, &'static str) = match action {
+            RelationshipAction::Block => (
+                format!("Block {name}").into(),
+                "They won't be able to message you or send you friend requests. \
+                 Hold Shift when choosing Block to skip this."
+                    .into(),
+                "Block",
+            ),
+            _ => (
+                format!("Remove {name} as a friend").into(),
+                "Hold Shift when choosing Remove friend to skip this.".into(),
+                "Remove friend",
+            ),
+        };
+        let view = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (view, user) = (view.clone(), user.clone());
+            alert
+                .confirm()
+                .title(title.clone())
+                .description(description.clone())
+                .ok_text(ok)
+                .ok_variant(ButtonVariant::Danger)
+                .cancel_text("Cancel")
+                .on_ok(move |_, window, cx| {
+                    let user = user.clone();
+                    view.update(cx, |this, cx| {
+                        this.set_relationship(user, action, true, window, cx)
+                    })
+                    .ok();
+                    true
+                })
+        });
+    }
+
+    /// Someone's relationship to the user changed (a route's answer, or
+    /// `UserRelationship`): the card, menus and member list follow.
+    fn relationship_changed(&mut self, person: crate::api::models::User) {
+        self.store.apply_relationship(person);
+        self.forget_member_lists();
+    }
+
     /// "Message" on `user`'s card: open the DM with them. One that's known
     /// opens here (reopened if it was closed). Otherwise Stoat is asked for
     /// it, which creates it if it's allowed (see [`crate::profile::can_message`]).
@@ -2326,6 +2460,27 @@ impl ChatView {
     /// "…" for the rest of their menu.
     fn card_actions(&self, user: &str, people: &People, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut actions = Vec::new();
+        let pending = self.relationship_pending.contains(user);
+        for action in crate::profile::friend_buttons(&self.store, user) {
+            let target = user.to_string();
+            let (label, icon) = relationship_label(action);
+            let button = Button::new(SharedString::from(format!("card-{action:?}")))
+                .small()
+                .icon(icon)
+                .disabled(pending)
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    let shift = event.modifiers().shift;
+                    this.set_relationship(target.clone(), action, shift, window, cx)
+                }));
+            // Accept and Add are labelled; Reject is just its icon, beside Accept.
+            let button = match action {
+                RelationshipAction::AddFriend => button.primary().label("Add friend"),
+                RelationshipAction::AcceptFriend => button.primary().label("Accept"),
+                RelationshipAction::CancelFriend => button.outline().label("Cancel request"),
+                _ => button.outline().tooltip(label),
+            };
+            actions.push(button.into_any_element());
+        }
         if crate::profile::can_message(&self.store, user) {
             let opening = self.dm_opening.as_deref() == Some(user);
             let target = user.to_string();
@@ -2369,10 +2524,14 @@ impl ChatView {
         user: String,
         channel: Option<String>,
         item: UserMenuItem,
+        shift: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match item {
+            UserMenuItem::Relationship(action) => {
+                self.set_relationship(user, action, shift, window, cx)
+            }
             UserMenuItem::Profile => self.open_card(user, window.mouse_position(), window, cx),
             UserMenuItem::Message => self.message_user(user, window, cx),
             UserMenuItem::Mention => {
@@ -4767,9 +4926,17 @@ impl People {
                     let (view, user, channel) =
                         (people.view.clone(), user.clone(), people.channel.clone());
                     menu.item(PopupMenuItem::new(label).icon(icon).on_click(
-                        move |_, window, cx| {
+                        move |event: &ClickEvent, window, cx| {
+                            let shift = event.modifiers().shift;
                             view.update(cx, |this, cx| {
-                                this.on_user_menu(user.clone(), channel.clone(), item, window, cx)
+                                this.on_user_menu(
+                                    user.clone(),
+                                    channel.clone(),
+                                    item,
+                                    shift,
+                                    window,
+                                    cx,
+                                )
                             })
                             .ok();
                         },
@@ -4787,8 +4954,22 @@ fn user_menu_label(item: UserMenuItem) -> Option<(&'static str, IconName)> {
         UserMenuItem::Mention => ("Mention", IconName::AtSign),
         UserMenuItem::CopyUsername => ("Copy username", IconName::Copy),
         UserMenuItem::CopyUserId => ("Copy user ID", IconName::IdCard),
+        UserMenuItem::Relationship(action) => relationship_label(action),
         UserMenuItem::Separator => return None,
     })
+}
+
+/// A relationship action as a menu item or button.
+fn relationship_label(action: RelationshipAction) -> (&'static str, IconName) {
+    match action {
+        RelationshipAction::AddFriend => ("Add friend", IconName::UserPlus),
+        RelationshipAction::AcceptFriend => ("Accept friend request", IconName::UserCheck),
+        RelationshipAction::RejectFriend => ("Reject friend request", IconName::UserX),
+        RelationshipAction::CancelFriend => ("Cancel friend request", IconName::UserX),
+        RelationshipAction::RemoveFriend => ("Remove friend", IconName::UserMinus),
+        RelationshipAction::Block => ("Block", IconName::Ban),
+        RelationshipAction::Unblock => ("Unblock", IconName::ShieldCheck),
+    }
 }
 
 /// Vertical space above the first bubble of a group (between senders).

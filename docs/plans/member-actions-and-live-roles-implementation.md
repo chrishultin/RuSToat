@@ -310,3 +310,115 @@ Deferred to the end of the milestone (manual checks are batched).
 
 ### Manual Validation
 Deferred to the end of the milestone (manual checks are batched).
+
+## Chunk 7: Friend requests and blocking
+
+### Changes Made
+- `src/api/client.rs`: `add_friend` (`PUT /users/{id}/friend`), `remove_friend` (`DELETE …/friend`), `block_user` (`PUT …/block`) and `unblock_user` (`DELETE …/block`). Each returns the target `User`.
+- `src/api/error.rs`:
+  - Readable messages for `AlreadyFriends`, `AlreadySentRequest`, `Blocked`, `BlockedByOther`, `NotFriends`, `IsBot`, `TooManyPendingFriendRequests { max }` and `NoEffect`.
+  - New `relationship_already_done()`, true for `AlreadyFriends`, `AlreadySentRequest` and `NoEffect`, which count as success (Assumption 4).
+  - A unit test.
+- `src/api/events.rs`: `UserRelationship { user: Box<User> }`, which ignores the top-level `id` (the recipient) and is forwarded to the UI. A parse test, with no `status` field.
+- `src/store.rs`: `apply_relationship(user) -> bool` upserts the whole user and returns whether the relationship changed. Route answers and events both go through it.
+- `src/profile.rs`:
+  - New `RelationshipAction { AddFriend, AcceptFriend, RejectFriend, CancelFriend, RemoveFriend, Block, Unblock }`. `needs_confirming()` is true for RemoveFriend and Block.
+  - New `friend_buttons(store, user)`, following the web client's rules: Add for a non-bot with `None`, Accept and Reject for `Incoming`, Cancel for `Outgoing`, and nothing for yourself.
+  - New `UserMenuItem::Relationship(action)`. `user_menu` now has four groups: [Profile, Message, Mention], [friend requests], [Remove friend (friends only), then Block or Unblock (anyone but yourself)], [the copy items].
+  - `ProfileCard.friend_buttons`.
+- `src/ui/chat.rs`:
+  - `set_relationship(user, action, confirmed)`:
+    - Remove friend and Block go through `confirm_relationship` first unless Shift was held. That's a danger-styled alert like `confirm_delete`, whose text mentions Shift.
+    - One request at a time per person (`relationship_pending`).
+    - The route's answer goes through `relationship_changed`, which applies it and forgets the member lists.
+    - "Already done" errors are silent. Other errors become a toast with Stoat's message, and a failed task gets "Couldn't reach Stoat. Try again."
+  - Person menus pass Shift through to `on_user_menu`.
+  - `relationship_label` gives labels and icons: UserPlus, UserCheck, UserX, UserMinus, Ban, ShieldCheck.
+  - The card's actions row starts with the friend buttons: "Add friend" and "Accept" (primary), Reject (an icon-only outline button with a tooltip), and "Cancel request" (outline). They're disabled while a request is pending.
+  - The `UserRelationship` event goes through `relationship_changed`, then `cx.notify()`. The card and menus read the store, so they follow live.
+- Tests:
+  - `tests/api_users.rs`:
+    - Each route's method, path and token, with the returned user's relationship (`Outgoing`, `None`, `Blocked`, `None`).
+    - `AlreadyFriends` (409, counts as done), `BlockedByOther` (403, doesn't) and `TooManyPendingFriendRequests { max: 100 }` (400) decode.
+  - `tests/profile.rs`:
+    - Menu items and card buttons for `None`, `Incoming`, `Outgoing`, `Friend`, `Blocked` and `BlockedOther`.
+    - Yourself (`User`) gets no friend items or buttons, and a bot gets only Block.
+    - Only RemoveFriend and Block are confirmed.
+    - The friend and plain-member menus' full item lists.
+  - `tests/store_live.rs`:
+    - `apply_relationship` updates a known user, reports no change on a repeat, and adds an unknown user.
+    - The relationship pipeline: a non-friend can't be messaged, then a `UserRelationship` (`Friend`) makes `can_message` true and the menu shows Message and Remove friend.
+
+### Divergences
+- **The relationship items are one `UserMenuItem::Relationship(RelationshipAction)` variant**, not seven separate variants. The card's buttons and the menu share `RelationshipAction`, `relationship_label` and `set_relationship`. The rules and order are unchanged.
+- **A blocked user is still offered Message** if a DM exists (Assumption 1, as the plan's risk expected). Sending would fail server-side.
+- **Look-ahead:** none needed; this was the last chunk.
+
+### Verification Performed
+- `cargo test --test api_users --test profile --test store_live`: 10 + 19 + 33 passed.
+- `cargo test --lib events`: 27 passed. `cargo test --lib error`: 10 passed.
+- `cargo test` (full): 551 passed, 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- `rustfmt --check` hunk counts are at their `HEAD` values in every touched file, and `src/profile.rs`, `tests/profile.rs` and `tests/api_users.rs` are clean.
+
+### Manual Validation
+Deferred to the end of the milestone (manual checks are batched).
+
+## Summary
+
+_Completed: 2026-11-05 (code). The batched manual checks are still to do._
+
+### Chunks Completed
+1. Live role and server edits (`acc0e99`)
+2. Joining and deleted servers, live (`c98d2c0`)
+3. Profile card from the member list (`9cb26b8`)
+4. Opening the card from authors, replies, system messages and mentions (`c2fe3d6`)
+5. "Message": open a DM (`1030ee9`)
+6. Right-click menu on people (`24a0cc4`)
+7. Friend requests and blocking (this commit)
+
+### Divergences
+- **Process:** the user chose to batch the manual checks at the end, after chunk 1. Commit signing (1Password SSH) timed out twice at chunk 4, and the commit went through once the user had dealt with it.
+- **Chunk 1:**
+  - The `Ready` fixture's `default_permissions: 0` became `DEFAULT_PERMISSION_SERVER`, since it was unrealistic and hid every channel once the filter was in.
+  - The rail's unread and mention counts skip hidden channels.
+  - `ensure_current_loaded` runs after every permission change.
+- **Chunk 2:** none.
+- **Chunk 3:**
+  - The profile cache is `HashMap<String, Option<UserProfile>>`.
+  - The card's link callback is `Send + Sync`.
+  - The best name is always the card's heading.
+  - Small helper refactors: `solid_colour`, and `presence_kind` / `hex_colour` made public.
+- **Chunk 4:**
+  - `author_id` is `None` for system messages and webhooks, while pending rows have the user.
+  - Embed descriptions keep external-only links.
+  - A mention click in a search or pins result may also jump to the result.
+- **Chunk 5:** `shows_channel` hides closed DMs, and `ChannelUpdate` drops stale selections.
+- **Chunk 6:**
+  - System-message names have no right-click menu, because they're `TextView` links like mentions. The card's "…" covers them.
+  - No composer unit test, because there are no window-backed tests.
+  - The card closes on mouse-up outside, so the "…" menu works.
+  - The `People` refactor.
+- **Chunk 7:** the relationship items are one `UserMenuItem::Relationship(RelationshipAction)` variant.
+- **Formatting:** `cargo fmt --check` already failed at `HEAD` (`3b89e68`) because of drift in many files. The milestone kept every touched file at or below its `HEAD` hunk count, and new files are clean.
+
+### Definition of Done
+- [x] **Live server edits:** the four events are decoded and applied, sections, colours, order, `can_pin` and `can_view` update live (`tests/store_roles.rs`), and the `permissions.rs` doc is updated.
+- [x] **Hidden channels:** a channel a role edit hides leaves the list at once, and the `Ready` fixture guard passes.
+- [x] **Joining and deleted servers:** `ServerCreate` adds the server, channels and emojis and fetches `GET /servers/{id}/members/{me}`, and `ServerDelete` goes through `leave_server`.
+- [x] **Profile card:**
+  - It opens on left-click from member rows, author avatars and names, reply-preview authors, system-message names and `stoat:user/` links.
+  - It fetches the profile on open, shows Assumption 5's fields, and closes on a click outside, Esc, a channel switch or `Ready`.
+  - The automated parts are done; the look and behaviour still need the manual check.
+- [x] **"Message":** shown exactly when `can_message`; it opens an existing DM locally or creates one; a 403 shows the toast.
+- [~] **Right-click menu:**
+  - It's on member rows, author avatars and names, and reply-preview authors, and the card's "…" shows the same items.
+  - Its order is unit-tested, Mention inserts a chip, and the copy items copy `username#discriminator` and the ID.
+  - **Not met:** system-message names have no right-click menu (only left-click and "…"), for the same `TextView` reason as mentions.
+- [x] **Friends and blocks:** the documented routes are used and the returned user is applied, Remove friend and Block confirm unless Shift is held, and `UserRelationship` updates the card and menu live.
+- [~] **Checks:**
+  - `cargo test` (551 passed) and `cargo clippy --all-targets -- -D warnings` pass.
+  - **Not met:** `cargo fmt --check` fails, but only because of drift that predates this milestone. None of it is in this milestone's code.
+
+### Remaining Manual Steps
+Every chunk's manual check, batched, and the plan's Manual Tests 1–6. They're walked through with the user after this commit. Chunk 7's check needs a second account.

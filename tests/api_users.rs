@@ -172,3 +172,91 @@ async fn a_dm_with_a_non_friend_is_missing_send_message() {
         "got {err:?}"
     );
 }
+
+fn user_json(relationship: &str) -> serde_json::Value {
+    json!({
+        "_id": "u-bob", "username": "bob", "discriminator": "0001",
+        "relationship": relationship, "online": true
+    })
+}
+
+#[tokio::test]
+async fn friend_and_block_routes_answer_with_the_user() {
+    use stoat_gpui::api::models::RelationshipStatus;
+    let server = MockServer::start().await;
+    for (verb, route, relationship) in [
+        ("PUT", "/users/u-bob/friend", "Outgoing"),
+        ("DELETE", "/users/u-bob/friend", "None"),
+        ("PUT", "/users/u-bob/block", "Blocked"),
+        ("DELETE", "/users/u-bob/block", "None"),
+    ] {
+        Mock::given(method(verb))
+            .and(path(route))
+            .and(header("x-session-token", "tok"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(user_json(relationship)))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let client = client(&server);
+    assert_eq!(
+        client.add_friend("u-bob").await.unwrap().relationship,
+        RelationshipStatus::Outgoing
+    );
+    assert_eq!(
+        client.remove_friend("u-bob").await.unwrap().relationship,
+        RelationshipStatus::None
+    );
+    assert_eq!(
+        client.block_user("u-bob").await.unwrap().relationship,
+        RelationshipStatus::Blocked
+    );
+    assert_eq!(
+        client.unblock_user("u-bob").await.unwrap().relationship,
+        RelationshipStatus::None
+    );
+}
+
+#[tokio::test]
+async fn relationship_refusals_decode() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/users/u-friend/friend"))
+        .respond_with(
+            ResponseTemplate::new(409)
+                .set_body_json(json!({ "type": "AlreadyFriends", "location": "x" })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/users/u-blocker/friend"))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .set_body_json(json!({ "type": "BlockedByOther", "location": "x" })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/users/u-popular/friend"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(
+            json!({ "type": "TooManyPendingFriendRequests", "max": 100, "location": "x" }),
+        ))
+        .mount(&server)
+        .await;
+    let client = client(&server);
+
+    let err = client.add_friend("u-friend").await.unwrap_err();
+    assert!(matches!(err.error_type(), Some(ErrorType::AlreadyFriends)));
+    assert!(err.relationship_already_done());
+
+    let err = client.add_friend("u-blocker").await.unwrap_err();
+    assert!(matches!(err.error_type(), Some(ErrorType::BlockedByOther)));
+    assert!(!err.relationship_already_done());
+
+    let err = client.add_friend("u-popular").await.unwrap_err();
+    assert!(matches!(
+        err.error_type(),
+        Some(ErrorType::TooManyPendingFriendRequests { max: 100 })
+    ));
+}

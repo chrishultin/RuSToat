@@ -2513,6 +2513,17 @@ impl ChatStore {
         true
     }
 
+    /// Someone's relationship to the user changed: a friend or block route's
+    /// answer, or `UserRelationship` (both carry the whole user, with the new
+    /// `relationship`). They're added if unknown. Returns true if the
+    /// relationship changed.
+    pub fn apply_relationship(&mut self, user: User) -> bool {
+        let before = self.users.get(&user.id).map(|u| u.relationship.clone());
+        let changed = before.as_ref() != Some(&user.relationship);
+        self.users.insert(user.id.clone(), user);
+        changed
+    }
+
     /// Cache a user fetched on their own (someone who just joined a server).
     pub fn add_user(&mut self, user: User) {
         self.users.insert(user.id.clone(), user);

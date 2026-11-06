@@ -32,6 +32,8 @@ pub struct ProfileCard {
     pub created: Option<DateTime<Utc>>,
     /// Their relationship to the user.
     pub relationship: RelationshipStatus,
+    /// The friend buttons the card shows (see [`friend_buttons`]).
+    pub friend_buttons: Vec<RelationshipAction>,
     /// The card is the user's own.
     pub is_me: bool,
 }
@@ -114,6 +116,7 @@ pub fn profile_card(store: &ChatStore, user: &str, channel: Option<&str>) -> Opt
         joined_server,
         created,
         relationship: person.relationship.clone(),
+        friend_buttons: friend_buttons(store, user),
         is_me: user == store.me(),
     })
 }
@@ -157,17 +160,76 @@ pub enum UserMenuItem {
     Message,
     /// Put a mention of them in the message box.
     Mention,
+    /// Change how the user relates to them (friend requests, blocks).
+    Relationship(RelationshipAction),
     Separator,
     /// Copy `username#discriminator`.
     CopyUsername,
     CopyUserId,
 }
 
+/// A change to how the user relates to someone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelationshipAction {
+    /// Send a friend request.
+    AddFriend,
+    /// Accept theirs.
+    AcceptFriend,
+    /// Turn theirs down.
+    RejectFriend,
+    /// Take back the user's own.
+    CancelFriend,
+    RemoveFriend,
+    Block,
+    Unblock,
+}
+
+impl RelationshipAction {
+    /// Whether it's asked about first (unless Shift is held).
+    pub fn needs_confirming(self) -> bool {
+        matches!(self, Self::RemoveFriend | Self::Block)
+    }
+}
+
+/// The friend-request actions for `user` (the web client's rules): Add to
+/// a stranger who isn't a bot, Accept or Reject an incoming request, and
+/// Cancel an outgoing one. The card shows these as buttons.
+pub fn friend_buttons(store: &ChatStore, user: &str) -> Vec<RelationshipAction> {
+    use RelationshipAction::*;
+    let Some(person) = store.user(user).filter(|_| user != store.me()) else {
+        return Vec::new();
+    };
+    match person.relationship {
+        RelationshipStatus::None if person.bot.is_none() => vec![AddFriend],
+        RelationshipStatus::Incoming => vec![AcceptFriend, RejectFriend],
+        RelationshipStatus::Outgoing => vec![CancelFriend],
+        _ => Vec::new(),
+    }
+}
+
+/// Remove friend (for friends), then Block or Unblock (anyone but the user).
+fn standing_actions(store: &ChatStore, user: &str) -> Vec<RelationshipAction> {
+    use RelationshipAction::*;
+    let Some(person) = store.user(user).filter(|_| user != store.me()) else {
+        return Vec::new();
+    };
+    let mut actions = Vec::new();
+    if person.relationship == RelationshipStatus::Friend {
+        actions.push(RemoveFriend);
+    }
+    actions.push(if person.relationship == RelationshipStatus::Blocked {
+        Unblock
+    } else {
+        Block
+    });
+    actions
+}
+
 /// The menu for `user`, as seen from `channel`, in the web client's order:
-/// Profile, Message, Mention, then the copy items. Message follows
-/// [`can_message`]; Mention is only for others, in server channels and
-/// groups (where the message box can mention them). Groups are split by
-/// separators.
+/// Profile, Message, Mention; the friend requests; Remove friend and Block
+/// or Unblock; then the copy items. Message follows [`can_message`];
+/// Mention is only for others, in server channels and groups (where the
+/// message box can mention them). Groups are split by separators.
 pub fn user_menu(store: &ChatStore, user: &str, channel: Option<&str>) -> Vec<UserMenuItem> {
     use UserMenuItem::*;
     let me = user == store.me();
@@ -183,7 +245,15 @@ pub fn user_menu(store: &ChatStore, user: &str, channel: Option<&str>) -> Vec<Us
     if mentionable && !me {
         people.push(Mention);
     }
-    let groups = [people, vec![CopyUsername, CopyUserId]];
+    let requests = friend_buttons(store, user)
+        .into_iter()
+        .map(Relationship)
+        .collect();
+    let standing = standing_actions(store, user)
+        .into_iter()
+        .map(Relationship)
+        .collect();
+    let groups = [people, requests, standing, vec![CopyUsername, CopyUserId]];
     let mut items = Vec::new();
     for group in groups.into_iter().filter(|group| !group.is_empty()) {
         if !items.is_empty() {
