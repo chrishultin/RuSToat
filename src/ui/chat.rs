@@ -58,7 +58,7 @@ use crate::store::{
     ReplyPreview, ReplyState, RowOp, ServerEntry, TimelineRow, diff_rows, display_name,
     fold_sections, with_unread_divider,
 };
-use crate::time::format_duration_short;
+use crate::time::{format_countdown, format_duration_short, ulid_millis};
 use crate::typing::{OutgoingTyping, TypingSignal, TypingState, typing_label};
 use crate::ui::composer::{Composer, ComposerEvent, file_icon};
 use crate::ui::emoji_picker::emoji_grid;
@@ -393,6 +393,9 @@ pub struct ChatView {
     outgoing_typing: OutgoingTyping,
     /// Wakes up when a typist lapses or the user goes idle.
     typing_tick: Option<Task<()>>,
+    /// Wakes up as each second of the open channel's slowmode cooldown runs
+    /// out, to count down. `None` when it isn't counting.
+    slowmode_tick: Option<Task<()>>,
     /// Draws relative timestamps again as time passes.
     _relative_tick: Task<()>,
     connection: Connection,
@@ -681,6 +684,7 @@ impl ChatView {
             typing,
             outgoing_typing: OutgoingTyping::default(),
             typing_tick: None,
+            slowmode_tick: None,
             _relative_tick: relative_tick,
             connection,
             _events: events,
@@ -1016,6 +1020,11 @@ impl ChatView {
                         Delivery::Toast => self.show_toast(notice, window, cx),
                     }
                 }
+            }
+            ConnectionEvent::Event(ServerEvent::UserSlowmodes(slowmodes)) => {
+                log::debug!("live: {} slowmode cooldowns", slowmodes.len());
+                self.store.apply_slowmodes(&slowmodes, now_ms());
+                self.schedule_slowmode_tick(cx);
             }
             ConnectionEvent::Event(_) => return,
             ConnectionEvent::Disconnected { reason, retry_in } => {
@@ -1523,13 +1532,16 @@ impl ChatView {
             .children(self.render_slowmode_badge(channel))
     }
 
-    /// `channel`'s slowmode, if it has one: "Slowmode 30s", or "Slowmode
-    /// (exempt)" for those who may bypass it.
+    /// `channel`'s slowmode, if it has one: "Slowmode 30s", "Slowmode
+    /// (exempt)" for those who may bypass it, or the time left ("0:24")
+    /// while the user waits to send again.
     fn render_slowmode_badge(&self, channel: &str) -> Option<AnyElement> {
         let secs = self.store.slowmode(channel)?;
         let duration = format_duration_short(secs);
         let label = if self.store.can_bypass_slowmode(channel) {
             "Slowmode (exempt)".to_string()
+        } else if let Some(left) = self.store.cooldown_left(channel, now_ms()) {
+            format_countdown(left)
         } else {
             format!("Slowmode {duration}")
         };
@@ -2646,6 +2658,15 @@ impl ChatView {
                 let (reason, answered) = match result {
                     Ok(Ok(message)) => {
                         log::debug!("sent {} in {channel}", message.id);
+                        // Count down at once: Stoat's `UserSlowmodes` may
+                        // come later, and replaces this when it does.
+                        if let Some(secs) = this.store.slowmode(&channel)
+                            && !this.store.can_bypass_slowmode(&channel)
+                        {
+                            let sent = ulid_millis(&message.id).unwrap_or_else(now_ms);
+                            this.store.start_cooldown(&channel, secs, sent);
+                            this.schedule_slowmode_tick(cx);
+                        }
                         this.ack_sent(&channel, &message.id, cx);
                         if this.store.apply_message(message) {
                             this.sync_pane(&channel, cx);
@@ -2666,6 +2687,12 @@ impl ChatView {
                     }
                     Ok(Err(err)) => {
                         log::warn!("couldn't send in {channel}: {err:?}");
+                        // Sent too soon after another (from another client,
+                        // or before the cooldown was known): count down.
+                        if let Some(secs) = err.slowmode_retry_after() {
+                            this.store.start_cooldown(&channel, secs, now_ms());
+                            this.schedule_slowmode_tick(cx);
+                        }
                         let answered = !matches!(err, ApiError::Network(_));
                         (send_error_text(&err), answered)
                     }
@@ -2688,6 +2715,7 @@ impl ChatView {
     /// Point the message box at the open channel (swapping drafts), and
     /// focus it when the channel changes.
     fn sync_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_send_block(cx);
         let channel = self.current_channel();
         let id = channel.as_ref().map(|c| c.id.as_str());
         if self.composer.read(cx).channel() == id {
@@ -2707,6 +2735,56 @@ impl ChatView {
             if id.is_some() && self.viewer.is_none() {
                 composer.focus(window, cx);
             }
+        });
+    }
+
+    /// Hold the message box back while the open channel's slowmode cooldown
+    /// runs, showing the time left, and count it down.
+    fn sync_send_block(&mut self, cx: &mut Context<Self>) {
+        let channel = self.current_channel().map(|c| c.id);
+        let left = channel.and_then(|channel| self.send_block_left(&channel, now_ms()));
+        if left.is_some() && self.slowmode_tick.is_none() {
+            self.schedule_slowmode_tick(cx);
+        }
+        let block = left.map(|secs| SharedString::from(format_countdown(secs)));
+        self.composer
+            .update(cx, |composer, cx| composer.set_send_block(block, cx));
+    }
+
+    /// Seconds before the user may send in `channel` again: its slowmode's
+    /// cooldown, unless the user is exempt or slowmode is off now.
+    fn send_block_left(&self, channel: &str, now_ms: u64) -> Option<u64> {
+        if self.store.slowmode(channel).is_none() || self.store.can_bypass_slowmode(channel) {
+            return None;
+        }
+        self.store.cooldown_left(channel, now_ms)
+    }
+
+    /// Wake up when the next second of the open channel's cooldown runs out,
+    /// to redraw the countdown (and let the user send at 0:00). Replaces
+    /// the previous wake-up; none while there's nothing to count down.
+    fn schedule_slowmode_tick(&mut self, cx: &mut Context<Self>) {
+        let now = now_ms();
+        let ends = self
+            .current_channel()
+            .and_then(|channel| self.store.cooldown_ends(&channel.id, now));
+        self.slowmode_tick = ends.map(|ends| {
+            // Until the shown seconds change: what's left past a whole second.
+            let wait = match (ends - now) % 1000 {
+                0 => 1000,
+                part => part,
+            };
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(wait))
+                    .await;
+                this.update(cx, |this, cx| {
+                    this.store.prune_cooldowns(now_ms());
+                    this.schedule_slowmode_tick(cx);
+                    cx.notify();
+                })
+                .ok();
+            })
         });
     }
 
@@ -7159,6 +7237,11 @@ fn edit_error_text(err: &ApiError) -> SharedString {
 /// Stoat has seen this send's idempotency key before.
 fn is_duplicate(err: &ApiError) -> bool {
     matches!(err.error_type(), Some(revolt_result::ErrorType::DuplicateNonce))
+}
+
+/// Milliseconds since the Unix epoch, now (for slowmode cooldowns).
+fn now_ms() -> u64 {
+    notify::now_ms().max(0) as u64
 }
 
 /// What a failed message says under it.

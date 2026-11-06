@@ -73,3 +73,86 @@ fn removing_it_from_a_live_frame_turns_it_off() {
     store.apply_channel_update(&id, *data, &clear);
     assert_eq!(store.slowmode("ch-slow"), None);
 }
+
+fn slowmodes(frame: serde_json::Value) -> Vec<stoat_gpui::api::models::ChannelSlowmode> {
+    use stoat_gpui::api::events::{ServerEvent, parse_frame};
+    let Some(ServerEvent::UserSlowmodes(list)) = parse_frame(&frame.to_string()).pop() else {
+        panic!("user slowmodes");
+    };
+    list
+}
+
+#[test]
+fn an_event_starts_a_countdown_that_runs_out() {
+    let mut store = store();
+    let list = slowmodes(json!({
+        "type": "UserSlowmodes",
+        "slowmodes": [{ "channel_id": "ch-slow", "duration": 30, "retry_after": 30 }]
+    }));
+    store.apply_slowmodes(&list, 1_000_000);
+    assert_eq!(store.cooldown_left("ch-slow", 1_000_000), Some(30));
+    assert_eq!(store.cooldown_left("ch-slow", 1_005_500), Some(25));
+    assert_eq!(store.cooldown_left("ch-slow", 1_029_001), Some(1));
+    assert_eq!(store.cooldown_ends("ch-slow", 1_000_000), Some(1_030_000));
+    assert_eq!(store.cooldown_left("ch-slow", 1_030_000), None);
+    assert_eq!(store.cooldown_ends("ch-slow", 1_030_000), None);
+    store.prune_cooldowns(1_030_000);
+    assert_eq!(store.cooldown_left("ch-slow", 1_000_000), None);
+}
+
+#[test]
+fn a_later_event_replaces_the_cooldown() {
+    let mut store = store();
+    store.start_cooldown("ch-slow", 30, 1_000_000);
+    // The server's own figure, a little later: it wins.
+    let list = slowmodes(json!({
+        "type": "UserSlowmodes",
+        "slowmodes": [{ "channel_id": "ch-slow", "duration": 30, "retry_after": 28 }]
+    }));
+    store.apply_slowmodes(&list, 1_003_000);
+    assert_eq!(store.cooldown_left("ch-slow", 1_003_000), Some(28));
+    assert_eq!(store.cooldown_ends("ch-slow", 1_003_000), Some(1_031_000));
+}
+
+#[test]
+fn a_cooldown_can_start_from_a_messages_time() {
+    let mut store = store();
+    // The ULID README's example ID was made at 1469918176385 ms.
+    let sent = stoat_gpui::time::ulid_millis("01ARYZ6S41TSV4RRFFQ69G5FAV").unwrap();
+    store.start_cooldown("ch-slow", 30, sent);
+    assert_eq!(store.cooldown_left("ch-slow", 1_469_918_176_385), Some(30));
+    assert_eq!(store.cooldown_left("ch-slow", 1_469_918_196_385), Some(10));
+    assert_eq!(store.cooldown_left("ch-slow", 1_469_918_206_385), None);
+}
+
+#[test]
+fn cooldowns_are_per_channel() {
+    let mut store = store();
+    let list = slowmodes(json!({
+        "type": "UserSlowmodes",
+        "slowmodes": [
+            { "channel_id": "ch-slow", "duration": 30, "retry_after": 30 },
+            { "channel_id": "ch-plain", "duration": 600, "retry_after": 120 }
+        ]
+    }));
+    store.apply_slowmodes(&list, 0);
+    assert_eq!(store.cooldown_left("ch-slow", 0), Some(30));
+    assert_eq!(store.cooldown_left("ch-plain", 0), Some(120));
+    assert_eq!(store.cooldown_left("ch-zero", 0), None);
+    // An event about one channel leaves the others' cooldowns alone.
+    let list = slowmodes(json!({
+        "type": "UserSlowmodes",
+        "slowmodes": [{ "channel_id": "ch-slow", "duration": 30, "retry_after": 5 }]
+    }));
+    store.apply_slowmodes(&list, 0);
+    assert_eq!(store.cooldown_left("ch-slow", 0), Some(5));
+    assert_eq!(store.cooldown_left("ch-plain", 0), Some(120));
+}
+
+#[test]
+fn cooldowns_survive_a_new_ready() {
+    let mut store = store();
+    store.start_cooldown("ch-slow", 30, 0);
+    store.apply_ready(Default::default());
+    assert_eq!(store.cooldown_left("ch-slow", 0), Some(30));
+}

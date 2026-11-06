@@ -81,6 +81,10 @@ struct Completion {
 /// one character).
 const EMPTY_EDIT_TEXT: &str = "To delete the message, use Delete.";
 
+/// How the hint starts when Enter is held back by slowmode (see
+/// [`Composer::set_send_block`]); the time left follows.
+const SLOWMODE_HINT: &str = "Slowmode: wait ";
+
 pub struct Composer {
     input: Entity<TextareaState>,
     /// The channel being typed in.
@@ -94,6 +98,9 @@ pub struct Composer {
     editing: EditStash,
     /// Why Enter didn't do anything (cleared when the text changes).
     hint: Option<SharedString>,
+    /// Sending is held back for this long ("0:24", the channel's slowmode
+    /// cooldown). Edits aren't.
+    send_block: Option<SharedString>,
     /// What's being completed, and the suggestions for it.
     completion: Option<Completion>,
     /// Chip labels seen so far, by token ID, for text that comes back
@@ -176,6 +183,7 @@ impl Composer {
             drafts: Drafts::default(),
             editing: EditStash::default(),
             hint: None,
+            send_block: None,
             completion: None,
             labels: HashMap::new(),
             last_text: String::new(),
@@ -698,6 +706,26 @@ impl Composer {
         self.input.update(cx, |input, cx| input.focus(window, cx));
     }
 
+    /// Hold sending back while `block` (the time left, "0:24") is shown, or
+    /// stop holding it back with `None`. A slowmode hint already showing
+    /// follows the time left, and goes when it ends.
+    pub fn set_send_block(&mut self, block: Option<SharedString>, cx: &mut Context<Self>) {
+        if self.send_block == block {
+            return;
+        }
+        if self
+            .hint
+            .as_ref()
+            .is_some_and(|hint| hint.starts_with(SLOWMODE_HINT))
+        {
+            self.hint = block
+                .as_ref()
+                .map(|left| format!("{SLOWMODE_HINT}{left}").into());
+        }
+        self.send_block = block;
+        cx.notify();
+    }
+
     /// Reply to `target` too, and focus the box to type the reply.
     pub fn add_reply(
         &mut self,
@@ -732,6 +760,12 @@ impl Composer {
         }
         // Blank and too-long messages stay in the box (the count says why).
         if let SendCheck::Ready(text) = check_send(&text, !self.draft.attachments.is_empty()) {
+            // So does everything during a slowmode cooldown.
+            if let Some(left) = &self.send_block {
+                self.hint = Some(format!("{SLOWMODE_HINT}{left}").into());
+                cx.notify();
+                return;
+            }
             let replies = self.draft.reply_intents();
             self.draft.replies.clear();
             let attachments = std::mem::take(&mut self.draft.attachments);
@@ -1248,20 +1282,22 @@ impl Render for Composer {
             .tooltip("Attach files")
             .disabled(editing)
             .on_click(cx.listener(|this, _, window, cx| this.pick_files(window, cx)));
-        // Does what Enter does, so it's off when Enter wouldn't send.
-        let sendable = can_send(
-            &self.input.read(cx).value(),
-            !self.draft.attachments.is_empty(),
-            editing,
-        );
+        // Does what Enter does, so it's off when Enter wouldn't send. During
+        // a slowmode cooldown it counts down instead.
+        let blocked = self.send_block.clone().filter(|_| !editing);
+        let sendable = blocked.is_none()
+            && can_send(
+                &self.input.read(cx).value(),
+                !self.draft.attachments.is_empty(),
+                editing,
+            );
         let send = Button::new("send")
             .ghost()
-            .icon(if editing {
-                IconName::Check
-            } else {
-                IconName::SendHorizontal
+            .map(|button| match &blocked {
+                Some(left) => button.label(left.clone()).tooltip("Slowmode"),
+                None if editing => button.icon(IconName::Check).tooltip("Save edit"),
+                None => button.icon(IconName::SendHorizontal).tooltip("Send"),
             })
-            .tooltip(if editing { "Save edit" } else { "Send" })
             .disabled(!sendable)
             .on_click(cx.listener(|this, _, window, cx| {
                 this.submit(window, cx);

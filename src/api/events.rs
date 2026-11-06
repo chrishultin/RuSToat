@@ -12,9 +12,10 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
 use revolt_models::v0::{
-    Channel, ChannelUnread, Embed, Emoji, FieldsChannel, FieldsMember, FieldsMessage, FieldsRole,
-    FieldsServer, FieldsUser, Member, MemberCompositeKey, Message, PartialChannel, PartialMember,
-    PartialMessage, PartialRole, PartialServer, PartialUser, Server, User,
+    Channel, ChannelSlowmode, ChannelUnread, Embed, Emoji, FieldsChannel, FieldsMember,
+    FieldsMessage, FieldsRole, FieldsServer, FieldsUser, Member, MemberCompositeKey, Message,
+    PartialChannel, PartialMember, PartialMessage, PartialRole, PartialServer, PartialUser, Server,
+    User,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -204,6 +205,10 @@ pub enum ServerEvent {
     UserRelationship {
         user: Box<User>,
     },
+    /// The user's slowmode cooldowns still running: sent after each message
+    /// the user sends in a slowmode channel (from any client), and again on
+    /// every (re)connect. `retry_after` is in seconds.
+    UserSlowmodes(Vec<ChannelSlowmode>),
     /// An event type this client doesn't handle (yet). Holds the `type` tag.
     Unknown(String),
 }
@@ -632,6 +637,15 @@ fn decode(mut value: Value, out: &mut Vec<ServerEvent>) {
                 }
             }))
         }
+        "UserSlowmodes" => {
+            #[derive(Deserialize)]
+            struct Slowmodes {
+                slowmodes: Vec<ChannelSlowmode>,
+            }
+            out.push(decode_as(value, &kind, |s: Slowmodes| {
+                ServerEvent::UserSlowmodes(s.slowmodes)
+            }))
+        }
         other => out.push(ServerEvent::Unknown(other.to_string())),
     }
 }
@@ -1034,7 +1048,8 @@ async fn session(
                         | ServerEvent::ServerRoleRanksUpdate { .. }
                         | ServerEvent::ServerCreate { .. }
                         | ServerEvent::ServerDelete { .. }
-                        | ServerEvent::UserRelationship { .. }) => {
+                        | ServerEvent::UserRelationship { .. }
+                        | ServerEvent::UserSlowmodes(_)) => {
                             Some(ConnectionEvent::Event(message_event))
                         }
                     };
@@ -1164,6 +1179,29 @@ mod tests {
         );
         assert!(matches!(&events[0], ServerEvent::EmojiCreate(e) if e.name == "stoat"));
         assert!(matches!(&events[1], ServerEvent::EmojiDelete { id } if id.starts_with("01ARYZ")));
+    }
+
+    #[test]
+    fn user_slowmodes_decode() {
+        let events = parse_frame(
+            r#"{"type":"UserSlowmodes","slowmodes":[
+                {"channel_id":"ch-slow","duration":30,"retry_after":12},
+                {"channel_id":"ch-slower","duration":600,"retry_after":599}
+            ]}"#,
+        );
+        let [ServerEvent::UserSlowmodes(slowmodes)] = events.as_slice() else {
+            panic!("expected UserSlowmodes, got {events:?}");
+        };
+        assert_eq!(slowmodes.len(), 2);
+        assert_eq!(slowmodes[0].channel_id, "ch-slow");
+        assert_eq!(slowmodes[0].duration, 30);
+        assert_eq!(slowmodes[0].retry_after, 12);
+        assert_eq!(slowmodes[1].retry_after, 599);
+        // None running (what a reconnect sends when nothing is cooling down).
+        assert!(matches!(
+            parse_frame(r#"{"type":"UserSlowmodes","slowmodes":[]}"#).as_slice(),
+            [ServerEvent::UserSlowmodes(s)] if s.is_empty()
+        ));
     }
 
     #[test]

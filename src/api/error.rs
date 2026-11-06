@@ -34,9 +34,16 @@ pub enum ApiError {
 }
 
 impl ApiError {
-    /// Classify a non-success HTTP response.
+    /// Classify a non-success HTTP response. A 429 is `RateLimited`, except
+    /// a slowmode refusal (`{"type":"InSlowmode","retry_after":N}`, in
+    /// seconds), which is the Stoat error it is.
     pub fn from_response(status: StatusCode, body: &[u8]) -> Self {
         if status == StatusCode::TOO_MANY_REQUESTS {
+            if let Ok(err) = serde_json::from_slice::<StoatError>(body)
+                && matches!(err.error_type, ErrorType::InSlowmode { .. })
+            {
+                return ApiError::Api(err);
+            }
             #[derive(Deserialize)]
             struct RateLimit {
                 retry_after: Option<u64>,
@@ -79,6 +86,15 @@ impl ApiError {
         )
     }
 
+    /// Seconds left before the user may send again, if Stoat refused a
+    /// message because of the channel's slowmode.
+    pub fn slowmode_retry_after(&self) -> Option<u64> {
+        match self.error_type() {
+            Some(ErrorType::InSlowmode { retry_after }) => Some(*retry_after),
+            _ => None,
+        }
+    }
+
     /// The Stoat error type, if the server sent one.
     pub fn error_type(&self) -> Option<&ErrorType> {
         match self {
@@ -116,6 +132,12 @@ fn describe(error: &ErrorType) -> String {
             format!("You have too many pending friend requests (at most {max}).")
         }
         ErrorType::NoEffect => "Nothing changed.".into(),
+        ErrorType::InSlowmode { retry_after } => {
+            format!(
+                "Slowmode: try again in {}",
+                crate::time::format_countdown(*retry_after)
+            )
+        }
         other => {
             let name: &'static str = other.into();
             format!("Stoat returned an error: {name}")

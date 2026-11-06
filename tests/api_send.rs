@@ -141,6 +141,35 @@ async fn sending_too_fast_is_rate_limited() {
         ),
         "{err:?}"
     );
+    assert_eq!(err.slowmode_retry_after(), None);
+}
+
+#[tokio::test]
+async fn sending_during_slowmode_is_an_in_slowmode_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/channels/ch-general/messages"))
+        .respond_with(ResponseTemplate::new(429).set_body_json(json!({
+            "type": "InSlowmode",
+            "retry_after": 12,
+            "location": "crates/delta/src/routes/channels/message_send.rs:120:21"
+        })))
+        .mount(&server)
+        .await;
+
+    let err = client(&server)
+        .send_message("ch-general", "hi", &[], &[], KEY)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err.error_type(),
+            Some(ErrorType::InSlowmode { retry_after: 12 })
+        ),
+        "{err:?}"
+    );
+    assert_eq!(err.slowmode_retry_after(), Some(12));
+    assert_eq!(err.to_string(), "Slowmode: try again in 0:12");
 }
 
 #[tokio::test]

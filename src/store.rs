@@ -6,7 +6,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::api::events::Ready;
 use crate::api::models::{
-    AllMemberResponse, BulkMessageResponse, Channel, Embed, Emoji, EmojiParent, FieldsChannel, FieldsMember,
+    AllMemberResponse, BulkMessageResponse, Channel, ChannelSlowmode, Embed, Emoji, EmojiParent, FieldsChannel, FieldsMember,
     FieldsMessage, FieldsRole, FieldsServer, FieldsUser, File, Member, MemberCompositeKey, Message,
     MessageFlags, PartialChannel, PartialMember, PartialMessage, PartialRole, PartialServer, PartialUser,
     Presence, ReplyIntent, Role, Server, SystemMessage, User,
@@ -18,6 +18,7 @@ use crate::draft::DraftAttachment;
 use crate::embed::EmbedView;
 use crate::media::MediaUrls;
 use crate::notify::{self, NotificationSettings};
+use crate::slowmode::Cooldowns;
 
 /// One entry in the channel list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -524,6 +525,9 @@ pub struct ChatStore {
     reply_sources: HashMap<String, ReplySource>,
     /// The message just jumped to, whose row is highlighted.
     highlight: Option<String>,
+    /// The user's slowmode cooldowns. Kept across a new `Ready`: Stoat sends
+    /// the running ones again after it.
+    cooldowns: Cooldowns,
 }
 
 impl ChatStore {
@@ -2316,6 +2320,35 @@ impl ChatStore {
     /// (see [`crate::permissions::can_pin`]).
     pub fn can_pin(&self, channel: &str) -> bool {
         crate::permissions::can_pin(self, &self.me, channel)
+    }
+
+    /// What a `UserSlowmodes` event says, received at `now_ms`: the user's
+    /// cooldowns in the channels it lists (see [`Cooldowns::apply`]).
+    pub fn apply_slowmodes(&mut self, slowmodes: &[ChannelSlowmode], now_ms: u64) {
+        self.cooldowns.apply(slowmodes, now_ms);
+    }
+
+    /// Make the user wait `secs` seconds from `from_ms` before sending in
+    /// `channel` again.
+    pub fn start_cooldown(&mut self, channel: &str, secs: u64, from_ms: u64) {
+        self.cooldowns.start(channel, secs, from_ms);
+    }
+
+    /// Whole seconds (rounded up) before the user may send in `channel`
+    /// again, or `None` if they may now.
+    pub fn cooldown_left(&self, channel: &str, now_ms: u64) -> Option<u64> {
+        self.cooldowns.left(channel, now_ms)
+    }
+
+    /// Forget cooldowns that have ended by `now_ms`.
+    pub fn prune_cooldowns(&mut self, now_ms: u64) {
+        self.cooldowns.prune(now_ms);
+    }
+
+    /// When `channel`'s cooldown ends (milliseconds since the epoch), if
+    /// it's still running at `now_ms`.
+    pub fn cooldown_ends(&self, channel: &str, now_ms: u64) -> Option<u64> {
+        self.cooldowns.ends(channel, now_ms)
     }
 
     /// Whether the user is exempt from `channel`'s slowmode
