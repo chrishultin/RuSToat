@@ -2,6 +2,7 @@ pub mod app_root;
 pub mod chat;
 pub mod composer;
 pub mod emoji_picker;
+pub mod friends;
 pub mod login;
 pub mod math;
 pub mod profile_card;

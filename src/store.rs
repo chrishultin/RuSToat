@@ -2678,6 +2678,11 @@ impl ChatStore {
         self.users.get(id)
     }
 
+    /// Every user the client knows, in no order.
+    pub fn users(&self) -> impl Iterator<Item = &User> {
+        self.users.values()
+    }
+
     pub fn server(&self, id: &str) -> Option<&Server> {
         self.servers.get(id)
     }

@@ -14,6 +14,7 @@ pub mod dock;
 pub mod draft;
 pub mod embed;
 pub mod emoji;
+pub mod friends;
 pub mod http;
 pub mod markdown;
 pub mod math;

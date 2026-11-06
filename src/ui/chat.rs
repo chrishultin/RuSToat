@@ -37,6 +37,7 @@ use crate::attachment::{AttachmentView, fit_into};
 use crate::complete::{Query, QueryKind, Suggestion, TokenRef, rank, rank_people};
 use crate::draft::{AttachmentLimits, DraftAttachment, ReplyTarget};
 use crate::embed::{Description, EmbedCard, EmbedImage, EmbedView};
+use crate::friends::{FRIENDS, FriendsTab};
 use crate::markdown::{InternalLink, JUMBO_TEXT_PX, is_external_link, parse_internal_link};
 use crate::media::MediaUrls;
 use crate::notify::{self, Delivery, Notice, Viewing};
@@ -44,14 +45,15 @@ use crate::places::{Place, Places, PlacesFile};
 use crate::profile::{RelationshipAction, UserMenuItem};
 use crate::runtime::spawn_io;
 use crate::search::{MAX_QUERY_CHARS, PINS_LIMIT, QueryCheck, RESULT_LIMIT, check_query};
-use crate::typing::{OutgoingTyping, TypingSignal, TypingState, typing_label};
 use crate::store::{
     ChannelEntry, ChannelKind, ChatStore, MemberList, MemberListRow, MessageRow, PendingAttachment,
     PendingMessage, PendingState, PickerEmoji, PresenceKind, ReactionEmoji, ReplyPreview,
     ReplyState, RowOp, ServerEntry, TimelineRow, diff_rows, display_name,
 };
+use crate::typing::{OutgoingTyping, TypingSignal, TypingState, typing_label};
 use crate::ui::composer::{Composer, ComposerEvent, file_icon};
 use crate::ui::emoji_picker::emoji_grid;
+use crate::ui::friends::render_friends_page;
 use crate::ui::math::MathPlugin;
 use crate::ui::profile_card::{CardBio, CardContent, OnLink, render_profile_card};
 
@@ -214,6 +216,8 @@ pub struct ChatView {
     dm_opening: Option<String>,
     /// People whose friend request or block is on its way to Stoat.
     relationship_pending: HashSet<String>,
+    /// The Friends page's open tab (while Home's Friends row is picked).
+    friends_tab: FriendsTab,
     /// The message whose reaction picker is open.
     picker_for: Option<String>,
     /// Reaction changes waiting on the server, as (message, emoji). Another
@@ -463,6 +467,7 @@ impl ChatView {
             profiles: HashMap::new(),
             dm_opening: None,
             relationship_pending: HashSet::new(),
+            friends_tab: FriendsTab::default(),
             picker_for: None,
             reacting: HashSet::new(),
             reply_fetches: HashSet::new(),
@@ -734,7 +739,7 @@ impl ChatView {
                         self.sync_pane(&channel, cx);
                     }
                     self.refresh_suggestions(cx);
-                } else if id != self.store.me() && !listed {
+                } else if id != self.store.me() && !listed && !self.friends_lists(&id) {
                     // Someone else's presence or status: nothing on screen.
                     return;
                 }
@@ -941,9 +946,10 @@ impl ChatView {
         {
             self.place = Place::Home;
         }
-        // Also channels a role edit has hidden.
-        self.selected
-            .retain(|_, channel| self.store.shows_channel(channel));
+        // Also channels a role edit has hidden. The Friends page stays.
+        self.selected.retain(|place, channel| {
+            (*place == Place::Home && channel == FRIENDS) || self.store.shows_channel(channel)
+        });
     }
 
     /// Image URLs are known: give them to the store and redraw anything loaded.
@@ -1411,6 +1417,15 @@ impl ChatView {
             && self
                 .current_channel()
                 .is_some_and(|c| self.store.lists_member(&c.id, user))
+    }
+
+    /// Whether the Friends page is on screen and may list `user` (anyone
+    /// the user has a relationship with).
+    fn friends_lists(&self, user: &str) -> bool {
+        self.friends_open()
+            && self.store.user(user).is_some_and(|person| {
+                person.relationship != crate::api::models::RelationshipStatus::None
+            })
     }
 
     /// Open or close the member list, and tell the owner to remember it.
@@ -2884,12 +2899,14 @@ impl ChatView {
     }
 
     /// Show `channel`: switch to its server (or Home) and select it.
+    /// [`FRIENDS`] opens Home's Friends page.
     pub fn open_channel(&mut self, channel: &str, cx: &mut Context<Self>) {
         let place = match self.store.channel(channel) {
             Some(crate::api::models::Channel::TextChannel { server, .. }) => {
                 Place::Server(server.clone())
             }
             Some(_) => Place::Home,
+            None if channel == FRIENDS => Place::Home,
             None => return,
         };
         self.place = place.clone();
@@ -3425,7 +3442,11 @@ impl ChatView {
     }
 
     /// The picked channel for this place, or else its first channel.
+    /// `None` on the Friends page, which isn't a channel.
     fn current_channel(&self) -> Option<ChannelEntry> {
+        if self.friends_open() {
+            return None;
+        }
         if let Some(id) = self.selected.get(&self.place)
             && let Some(entry) = self.store.channel_entry(id)
         {
@@ -3435,6 +3456,15 @@ impl ChatView {
             .into_iter()
             .flat_map(|(_, channels)| channels)
             .next()
+    }
+
+    /// Whether Home is open on its Friends page.
+    fn friends_open(&self) -> bool {
+        self.place == Place::Home
+            && self
+                .selected
+                .get(&Place::Home)
+                .is_some_and(|id| id == FRIENDS)
     }
 
     fn status_line(&self) -> SharedString {
@@ -3553,6 +3583,9 @@ impl ChatView {
             })
             .collect();
 
+        let friends =
+            (self.place == Place::Home && self.has_ready).then(|| self.render_friends_row(cx));
+
         let theme = cx.theme();
         v_flex()
             .w(px(240.))
@@ -3582,7 +3615,8 @@ impl ChatView {
                     .when(!self.has_ready, |el| {
                         el.child(div().p_2().text_sm().text_color(muted).child("Loading…"))
                     })
-                    .when(self.has_ready && empty, |el| {
+                    .children(friends)
+                    .when(self.has_ready && empty && self.place != Place::Home, |el| {
                         el.child(
                             div()
                                 .p_2()
@@ -3594,6 +3628,35 @@ impl ChatView {
                     .children(rows),
             )
             .child(self.render_user_panel(cx))
+    }
+
+    /// Home's Friends row, with a badge counting friend requests.
+    fn render_friends_row(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let theme = cx.theme();
+        let selected = self.friends_open();
+        let (hover_bg, hover_fg) = (theme.sidebar_accent, theme.sidebar_accent_foreground);
+        let incoming = crate::friends::incoming_count(&self.store);
+        h_flex()
+            .id("channel-friends")
+            .gap_2()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .cursor_pointer()
+            .text_sm()
+            .when(selected, |el| {
+                el.bg(theme.sidebar_accent)
+                    .text_color(theme.sidebar_accent_foreground)
+                    .font_weight(FontWeight::MEDIUM)
+            })
+            .when(!selected, |el| {
+                el.text_color(theme.muted_foreground)
+                    .hover(move |style| style.bg(hover_bg).text_color(hover_fg))
+            })
+            .on_click(cx.listener(|this, _, _, cx| this.select_channel(FRIENDS.into(), cx)))
+            .child(Icon::new(IconName::Users).small())
+            .child(div().flex_1().min_w_0().truncate().child("Friends"))
+            .when(incoming > 0, |el| el.child(mention_badge(incoming, cx)))
     }
 
     fn render_channel_row(
@@ -3705,7 +3768,10 @@ impl ChatView {
             )
     }
 
-    fn render_main(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_main(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.friends_open() && self.has_ready {
+            return self.render_friends(cx);
+        }
         let theme = cx.theme();
         let channel = self.current_channel();
         let banner = match (&self.status, self.has_ready) {
@@ -4033,6 +4099,43 @@ impl ChatView {
                     .when_some(side_panel, |el, panel| el.child(panel)),
             )
             .when(channel.is_some(), |el| el.child(render_drop_overlay(cx)))
+            .into_any_element()
+    }
+
+    /// The Friends page, in place of a channel.
+    fn render_friends(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let colors = MemberColors {
+            foreground: theme.foreground,
+            muted: theme.muted_foreground,
+            avatar_bg: theme.secondary,
+            avatar_fg: theme.secondary_foreground,
+            ring: theme.background,
+            hover: theme.secondary,
+            online: theme.success,
+            idle: theme.warning,
+            focus: theme.info,
+            busy: theme.danger,
+        };
+        let lists = crate::friends::friend_lists(&self.store);
+        let incoming = lists.incoming.len();
+        let view = cx.entity().downgrade();
+        let on_tab = move |tab, _: &mut Window, cx: &mut App| {
+            view.update(cx, |this, cx| {
+                this.friends_tab = tab;
+                cx.notify();
+            })
+            .ok();
+        };
+        render_friends_page(
+            &lists,
+            self.friends_tab,
+            incoming,
+            colors,
+            on_tab,
+            self.people(None, cx),
+            cx,
+        )
     }
 
     /// Build the member list the panel shows for the open channel, unless
@@ -4430,23 +4533,23 @@ const MEMBER_ROW_HEIGHT: f32 = 42.;
 
 /// The colours a member row is drawn with.
 #[derive(Clone, Copy)]
-struct MemberColors {
-    foreground: Hsla,
-    muted: Hsla,
-    avatar_bg: Hsla,
-    avatar_fg: Hsla,
+pub(crate) struct MemberColors {
+    pub(crate) foreground: Hsla,
+    pub(crate) muted: Hsla,
+    pub(crate) avatar_bg: Hsla,
+    pub(crate) avatar_fg: Hsla,
     /// Behind the presence dot, so it reads against the avatar.
-    ring: Hsla,
+    pub(crate) ring: Hsla,
     /// Behind a row the mouse is over.
-    hover: Hsla,
-    online: Hsla,
-    idle: Hsla,
-    focus: Hsla,
-    busy: Hsla,
+    pub(crate) hover: Hsla,
+    pub(crate) online: Hsla,
+    pub(crate) idle: Hsla,
+    pub(crate) focus: Hsla,
+    pub(crate) busy: Hsla,
 }
 
 impl MemberColors {
-    fn presence(&self, presence: PresenceKind) -> Hsla {
+    pub(crate) fn presence(&self, presence: PresenceKind) -> Hsla {
         match presence {
             PresenceKind::Online => self.online,
             PresenceKind::Idle => self.idle,
@@ -4870,7 +4973,7 @@ fn person_target(
 /// What the people shown in a channel's views (names, avatars, mentions)
 /// do: open their profile card, or their menu of things to do with them.
 #[derive(Clone)]
-struct People {
+pub(crate) struct People {
     view: WeakEntity<ChatView>,
     /// The channel they're shown in (where Mention mentions them).
     channel: Option<String>,
@@ -4878,7 +4981,7 @@ struct People {
 
 impl People {
     /// Open `user`'s card where the mouse is.
-    fn open_card(&self, user: String, window: &mut Window, cx: &mut App) {
+    pub(crate) fn open_card(&self, user: String, window: &mut Window, cx: &mut App) {
         let position = window.mouse_position();
         self.view
             .update(cx, |this, cx| this.open_card(user, position, window, cx))
@@ -4904,7 +5007,7 @@ impl People {
 
     /// `user`'s menu (see [`crate::profile::user_menu`]), worked out when it
     /// opens. Without `profile`, there's no Profile item (it's for the card).
-    fn menu(
+    pub(crate) fn menu(
         &self,
         user: &str,
         profile: bool,
