@@ -55,6 +55,7 @@ use crate::typing::{OutgoingTyping, TypingSignal, TypingState, typing_label};
 use crate::ui::composer::{Composer, ComposerEvent, file_icon};
 use crate::ui::emoji_picker::emoji_grid;
 use crate::ui::friends::{RowButtons, render_add_friend, render_friends_page};
+use crate::ui::markup::code_block_actions;
 use crate::ui::math::MathPlugin;
 use crate::ui::profile_card::{CardBio, CardContent, OnLink, render_profile_card};
 
@@ -5559,6 +5560,7 @@ fn render_system_row(message: &MessageRow, colors: RowColors, people: &People) -
                     SharedString::from(message.render_key.clone()),
                     message.body.clone().unwrap_or_default(),
                 )
+                .code_block_actions(code_block_actions)
                 .text_xs()
                 .on_link_click(move |url, _, window, cx| on_link(url, window, cx)),
             ),
@@ -5788,6 +5790,8 @@ fn render_message_row(
                     TextView::markdown(SharedString::from(message.render_key.clone()), body)
                         // `$$…$$` formatting (colour, size), drawn natively.
                         .plugin(MathPlugin)
+                        // A copy button (and the language) on each code block.
+                        .code_block_actions(code_block_actions)
                         // Emoji-only messages are drawn big (custom ones are sized
                         // in the Markdown itself).
                         .map(|text| {
@@ -6934,6 +6938,7 @@ fn render_embed_card(
             Description::Markdown { source, render_key } => {
                 TextView::markdown(SharedString::from(render_key), source)
                     .plugin(MathPlugin)
+                    .code_block_actions(code_block_actions)
                     .text_sm()
                     .selectable(true)
                     .on_link_click(|url, _, _, cx| {

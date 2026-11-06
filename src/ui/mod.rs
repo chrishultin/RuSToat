@@ -6,6 +6,7 @@ pub mod composer;
 pub mod emoji_picker;
 pub mod friends;
 pub mod login;
+pub mod markup;
 pub mod math;
 pub mod profile_card;
 pub mod settings;

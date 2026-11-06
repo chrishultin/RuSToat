@@ -50,7 +50,7 @@ Some milestones lay foundations that later ones reuse. When the earlier one's pl
 - Collapsible channel categories, remembered per account
 - Keyboard shortcuts: move between channels and servers, jump to present, mark a channel or server read, switch accounts
 
-### Milestone 10: Message markup (M)
+### Milestone 10: Message markup (M). Plan: [`message-markup.md`](message-markup.md)
 - Role mentions (`<%role>`), `@everyone` and `@online`: drawn in the role's colour, offered in autocomplete, and counted as mentions when they include you
 - `<t:…>` timestamps, shown in your time zone, or as relative time ("in 3 hours") where the tag asks for it
 - Text spoilers that stay hidden until clicked
