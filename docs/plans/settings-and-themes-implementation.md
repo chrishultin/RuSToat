@@ -38,3 +38,33 @@ Run with `scripts/run-bundled.sh` (two accounts signed in). The user confirmed:
 - The shortcut list shows the right keys for every row.
 - The Stoat menu shows "Settings… ⌘,"; the Accounts menu still shows ⌘1, ⌘2.
 - Closing Settings leaves the main window and accounts alone.
+
+## Chunk 2: Themes
+
+### Changes Made
+- `assets/themes/{ayu,catppuccin,everforest,flexoki,gruvbox,macos-classic,solarized}.json` (new): vendored unchanged from gpui-component commit `48ac25b50c81ca5e34ec1631e3efabe22f4af64a` (`main`, 2026-11-06). `assets/themes/README.md` names the source, commit and licences (Apache-2.0 files, MIT palettes).
+- `src/prefs.rs`: new `Palette` (8 variants; `ALL`, `label()`, `from_label()`, `light_name()`, `dark_name()`) and `Appearance` (`System`, `Light`, `Dark`; `ALL`, `label()`, `from_label()`) serde enums; `Prefs.palette` and `Prefs.appearance`, defaulting to Default / System through the struct's `#[serde(default)]`. Two new tests: a pre-themes file loads with Default / System and keeps its other fields; labels round-trip.
+- `src/themes.rs` (new): `BUNDLED` (file name, `include_str!` contents), `load_bundled(&mut ThemeRegistry)`, `register(cx)` (logs a file that fails), `apply(palette, appearance, cx)` (sets `Theme::light_theme` / `dark_theme` to the palette's configs, falling back to the defaults with a warning if a name is missing, then `Theme::change(mode)`, where System reads `cx.window_appearance()`), and `apply_current(cx)` (from `AppPrefs`). Re-exports `Palette` and `Appearance`.
+- `src/ui/app_prefs.rs` (new): `AppPrefs` global with `init(cx)` (loads `prefs.json`), `get(cx)`, and `update(cx, |prefs| ..)` (saves and notifies `observe_global` observers only when something changed).
+- `src/ui/app_root.rs`: dropped `prefs` / `prefs_file`; skin tone and member-list state are read and written through `AppPrefs`; the window-appearance observer (and the call in `new`) is `themes::apply_current` instead of `Theme::sync_system_appearance`.
+- `src/ui/settings.rs`: `appearance_page` (first in the sidebar, `Palette` icon) with Palette and Appearance dropdowns (`SettingField::dropdown`, labels as values, defaults Default / System so the page's reset button works). `SettingsView::new` now takes the window and context: it re-renders when `AppPrefs` changes and re-applies the theme when macOS's appearance changes, so System works with the main window closed.
+- `src/main.rs`: after `gpui_kit::init`, `themes::register`, `AppPrefs::init`, `themes::apply_current` (before any window opens), and an `observe_global::<AppPrefs>` that re-applies the theme only when palette or appearance changed.
+- `src/assets.rs`: `settings_icons_load` also checks `Palette` (a default icon).
+- `src/lib.rs`, `src/ui/mod.rs`: the new modules.
+- `tests/themes.rs` (new): each bundled file parses into a `ThemeRegistry::default()`; each non-Default palette's light and dark names exist with the right mode (Default's are gpui-component's built-ins, which aren't reachable without an `App`, so the test pins their names); 8 palettes with unique labels.
+
+### Divergences
+- Minor: `Palette` and `Appearance` live in `src/prefs.rs` (plain data next to `Tone`) rather than `src/themes.rs`; `themes` re-exports them.
+- Minor: the Settings window also observes the window appearance (not in the plan), so Appearance System follows macOS with the main window closed.
+- Risk resolved: every palette file omits the sidebar colours and most omit `danger` / `link`, but gpui-component 0.9 derives missing colours from the palette's own (`apply_config`'s fallbacks), not from the default theme. No vendored file was edited.
+- Risk resolved: the `Theme` global already exists after `gpui_kit::init` (its `theme::init` calls `Theme::change`), so `apply` sets the configs then calls `Theme::change` once.
+
+### Verification Performed
+- `cargo test --test themes`: 3 passed.
+- `cargo test`: 608 passed, 0 failed.
+- `cargo clippy --all-targets`: no warnings.
+- `rustfmt --check` drift unchanged (0) in `src/ui/app_root.rs`, `src/prefs.rs`, `src/assets.rs`, `src/main.rs`; new files formatted.
+- Launch log shows no "couldn't load a bundled theme" error.
+
+### Manual Validation
+Run with `scripts/run-bundled.sh`. The user checked the palettes and appearances in Settings and reported it looks good. The relaunch checks (palette and appearance kept with no flash of Default; skin tone and member list remembered) were waived by the user; persistence is covered only by the `prefs.rs` unit tests and the unchanged `PrefsFile` save path.

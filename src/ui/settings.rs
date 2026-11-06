@@ -5,12 +5,16 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::kbd::Kbd;
-use gpui_kit::component::setting::{SettingGroup, SettingItem, SettingPage, Settings};
+use gpui_kit::component::setting::{
+    SettingField, SettingGroup, SettingItem, SettingPage, Settings,
+};
 use gpui_kit::component::{ActiveTheme, h_flex};
 use gpui_kit::*;
 
 use crate::shortcuts::{self, Group, Keys, Shortcut};
+use crate::themes::{self, Appearance, Palette};
 use crate::ui::AppRoot;
+use crate::ui::app_prefs::AppPrefs;
 
 /// Builds one section of the window, each time the window renders.
 pub type PageFn = fn(&SettingsView, &mut App) -> SettingPage;
@@ -20,16 +24,34 @@ pub struct SettingsView {
     /// The main window's content, for sections about the account on screen.
     root: WeakEntity<AppRoot>,
     pages: Vec<PageFn>,
+    _subscriptions: [Subscription; 2],
 }
 
 impl SettingsView {
-    pub fn new(root: WeakEntity<AppRoot>, pages: Vec<PageFn>) -> Self {
-        Self { root, pages }
+    pub fn new(
+        root: WeakEntity<AppRoot>,
+        pages: Vec<PageFn>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let subscriptions = [
+            // Show what the sections read from the preferences, whichever
+            // window changed them.
+            cx.observe_global::<AppPrefs>(|_, cx| cx.notify()),
+            // Follow macOS's light/dark setting even with the main window
+            // closed.
+            cx.observe_window_appearance(window, |_, _, cx| themes::apply_current(cx)),
+        ];
+        Self {
+            root,
+            pages,
+            _subscriptions: subscriptions,
+        }
     }
 
     /// The app's own sections, in sidebar order.
     pub fn app_pages() -> Vec<PageFn> {
-        vec![shortcuts_page]
+        vec![appearance_page, shortcuts_page]
     }
 
     /// The main window's content, if it's still open.
@@ -46,6 +68,57 @@ impl Render for SettingsView {
             .bg(cx.theme().background)
             .child(Settings::new("settings").pages(pages))
     }
+}
+
+/// Appearance: the colour palette, and light, dark or following macOS.
+fn appearance_page(_: &SettingsView, _: &mut App) -> SettingPage {
+    let palettes = Palette::ALL
+        .iter()
+        .map(|p| (p.label().into(), p.label().into()))
+        .collect();
+    let appearances = Appearance::ALL
+        .iter()
+        .map(|a| (a.label().into(), a.label().into()))
+        .collect();
+    SettingPage::new("Appearance")
+        .icon(IconName::Palette)
+        .group(
+            SettingGroup::new()
+                .item(
+                    SettingItem::new(
+                        "Palette",
+                        SettingField::dropdown(
+                            palettes,
+                            |cx| AppPrefs::get(cx).palette.label().into(),
+                            |label, cx| {
+                                if let Some(palette) = Palette::from_label(&label) {
+                                    AppPrefs::update(cx, |prefs| prefs.palette = palette);
+                                }
+                            },
+                        )
+                        .default_value(Palette::default().label()),
+                    )
+                    .description(
+                        "The colours of every window. Each has a light and a dark version.",
+                    ),
+                )
+                .item(
+                    SettingItem::new(
+                        "Appearance",
+                        SettingField::dropdown(
+                            appearances,
+                            |cx| AppPrefs::get(cx).appearance.label().into(),
+                            |label, cx| {
+                                if let Some(appearance) = Appearance::from_label(&label) {
+                                    AppPrefs::update(cx, |prefs| prefs.appearance = appearance);
+                                }
+                            },
+                        )
+                        .default_value(Appearance::default().label()),
+                    )
+                    .description("Light or dark, or System to follow macOS."),
+                ),
+        )
 }
 
 /// Keyboard Shortcuts: every shortcut, with its keys read from the keymap.

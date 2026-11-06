@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod app_prefs;
 pub mod app_root;
 pub mod chat;
 pub mod composer;

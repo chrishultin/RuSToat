@@ -1,5 +1,6 @@
 //! App-wide preferences, kept between launches: the default skin tone for
-//! emoji, and whether the member list is open. Like [`crate::places`], plain data with no GPUI, saved
+//! emoji, whether the member list is open, and the colour palette and
+//! appearance. Like [`crate::places`], plain data with no GPUI, saved
 //! as a small JSON file in the app's folder and read and written
 //! synchronously.
 
@@ -59,6 +60,108 @@ impl Tone {
     }
 }
 
+/// A colour palette, each with a light and a dark theme. Our own type, so
+/// the saved file doesn't depend on the theme files' names.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Palette {
+    /// gpui-component's own themes, as before there was a choice.
+    #[default]
+    Default,
+    Ayu,
+    Catppuccin,
+    Everforest,
+    Flexoki,
+    Gruvbox,
+    MacosClassic,
+    Solarized,
+}
+
+impl Palette {
+    /// Every palette, in the order Settings offers them.
+    pub const ALL: [Palette; 8] = [
+        Palette::Default,
+        Palette::Ayu,
+        Palette::Catppuccin,
+        Palette::Everforest,
+        Palette::Flexoki,
+        Palette::Gruvbox,
+        Palette::MacosClassic,
+        Palette::Solarized,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Palette::Default => "Default",
+            Palette::Ayu => "Ayu",
+            Palette::Catppuccin => "Catppuccin",
+            Palette::Everforest => "Everforest",
+            Palette::Flexoki => "Flexoki",
+            Palette::Gruvbox => "Gruvbox",
+            Palette::MacosClassic => "macOS Classic",
+            Palette::Solarized => "Solarized",
+        }
+    }
+
+    /// The palette with this [`Self::label`].
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.label() == label)
+    }
+
+    /// The name of its light theme, as the theme file gives it.
+    pub fn light_name(self) -> &'static str {
+        match self {
+            Palette::Default => "Default Light",
+            Palette::Ayu => "Ayu Light",
+            Palette::Catppuccin => "Catppuccin Latte",
+            Palette::Everforest => "Everforest Light",
+            Palette::Flexoki => "Flexoki Light",
+            Palette::Gruvbox => "Gruvbox Light",
+            Palette::MacosClassic => "macOS Classic Light",
+            Palette::Solarized => "Solarized Light",
+        }
+    }
+
+    /// The name of its dark theme.
+    pub fn dark_name(self) -> &'static str {
+        match self {
+            Palette::Default => "Default Dark",
+            Palette::Ayu => "Ayu Dark",
+            Palette::Catppuccin => "Catppuccin Mocha",
+            Palette::Everforest => "Everforest Dark",
+            Palette::Flexoki => "Flexoki Dark",
+            Palette::Gruvbox => "Gruvbox Dark",
+            Palette::MacosClassic => "macOS Classic Dark",
+            Palette::Solarized => "Solarized Dark",
+        }
+    }
+}
+
+/// Light or dark, or whichever macOS is using.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Appearance {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    pub const ALL: [Appearance; 3] = [Appearance::System, Appearance::Light, Appearance::Dark];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Appearance::System => "System",
+            Appearance::Light => "Light",
+            Appearance::Dark => "Dark",
+        }
+    }
+
+    /// The appearance with this [`Self::label`].
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|a| a.label() == label)
+    }
+}
+
 /// Everything saved in `prefs.json`. Missing fields take their defaults,
 /// so older and newer files both load.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +171,8 @@ pub struct Prefs {
     /// The right-hand panel shows the member list (as the web client's
     /// toggle does). On until the user turns it off.
     pub member_list_open: bool,
+    pub palette: Palette,
+    pub appearance: Appearance,
 }
 
 impl Default for Prefs {
@@ -75,6 +180,8 @@ impl Default for Prefs {
         Self {
             skin_tone: Tone::default(),
             member_list_open: true,
+            palette: Palette::default(),
+            appearance: Appearance::default(),
         }
     }
 }
@@ -152,6 +259,8 @@ mod tests {
         let prefs = Prefs {
             skin_tone: Tone::MediumDark,
             member_list_open: false,
+            palette: Palette::MacosClassic,
+            appearance: Appearance::Dark,
         };
         file.save(&prefs).unwrap();
         assert_eq!(file.load(), prefs);
@@ -204,5 +313,34 @@ mod tests {
         std::fs::write(&path, br#"{"member_list_open":false}"#).unwrap();
         assert!(!PrefsFile::at(&path).load().member_list_open);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_file_from_before_themes_gets_the_default_palette_following_the_system() {
+        let dir = temp_dir("themes");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("prefs.json");
+        std::fs::write(&path, br#"{"skin_tone":"Medium","member_list_open":false}"#).unwrap();
+        let old = PrefsFile::at(&path).load();
+        assert_eq!(old.palette, Palette::Default);
+        assert_eq!(old.appearance, Appearance::System);
+        assert_eq!(old.skin_tone, Tone::Medium);
+        assert!(!old.member_list_open);
+        std::fs::write(&path, br#"{"palette":"Gruvbox","appearance":"Light"}"#).unwrap();
+        let new = PrefsFile::at(&path).load();
+        assert_eq!(new.palette, Palette::Gruvbox);
+        assert_eq!(new.appearance, Appearance::Light);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn labels_name_their_palette_and_appearance() {
+        for palette in Palette::ALL {
+            assert_eq!(Palette::from_label(palette.label()), Some(palette));
+        }
+        for appearance in Appearance::ALL {
+            assert_eq!(Appearance::from_label(appearance.label()), Some(appearance));
+        }
+        assert_eq!(Palette::from_label("Nord"), None);
     }
 }

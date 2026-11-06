@@ -4,17 +4,18 @@ use std::sync::Arc;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::{ActiveTheme, Theme, WindowExt, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, WindowExt, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::accounts::{self, AccountEntry, AccountList, AccountsFile};
 use crate::api::StoatClient;
 use crate::notify;
-use crate::prefs::{Prefs, PrefsFile, Tone};
+use crate::prefs::Tone;
 use crate::runtime::spawn_io;
 use crate::session::{self, Restored, TokenStore};
 use crate::store::display_name;
+use crate::ui::app_prefs::AppPrefs;
 use crate::ui::chat::{ChatEvent, ChatView};
 use crate::ui::login::{LoginEvent, LoginView};
 use crate::ui::switcher::{
@@ -73,10 +74,6 @@ pub struct AppRoot {
     shown: Shown,
     /// The count last shown on the Dock icon, to only touch AppKit on change.
     dock_badge: usize,
-    /// App-wide preferences (the default skin tone), shared by every
-    /// account, and where they're saved (`None` without a home directory).
-    prefs: Prefs,
-    prefs_file: Option<PrefsFile>,
     _appearance: Subscription,
 }
 
@@ -87,11 +84,11 @@ impl AppRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Follow the macOS light/dark setting, now and when it changes.
-        Theme::sync_system_appearance(Some(window), cx);
-        let appearance = cx.observe_window_appearance(window, |_, window, cx| {
-            Theme::sync_system_appearance(Some(window), cx);
-        });
+        // Follow the macOS light/dark setting, now and when it changes
+        // (for Appearance System).
+        crate::themes::apply_current(cx);
+        let appearance =
+            cx.observe_window_appearance(window, |_, _, cx| crate::themes::apply_current(cx));
         // Banners: ask for permission up front. GPUI keeps one click handler
         // for the whole app, so it's registered here and routed by account.
         crate::banners::request_permission();
@@ -145,9 +142,6 @@ impl AppRoot {
             .ok();
         });
 
-        let prefs_file = PrefsFile::in_app_dir();
-        let prefs = prefs_file.as_ref().map(PrefsFile::load).unwrap_or_default();
-
         Self {
             default_instance,
             store,
@@ -156,8 +150,6 @@ impl AppRoot {
             states: HashMap::new(),
             shown: Shown::Loading { _task: task },
             dock_badge: 0,
-            prefs,
-            prefs_file,
             _appearance: appearance,
         }
     }
@@ -197,14 +189,7 @@ impl AppRoot {
     /// A new default skin tone, chosen in one account's emoji picker: save
     /// it, and give it to every account.
     fn set_skin_tone(&mut self, tone: Tone, cx: &mut Context<Self>) {
-        if self.prefs.skin_tone != tone {
-            self.prefs.skin_tone = tone;
-            if let Some(file) = &self.prefs_file
-                && let Err(err) = file.save(&self.prefs)
-            {
-                log::warn!("couldn't save preferences: {err:#}");
-            }
-        }
+        AppPrefs::update(cx, |prefs| prefs.skin_tone = tone);
         let views: Vec<Entity<ChatView>> = self
             .states
             .values()
@@ -221,14 +206,7 @@ impl AppRoot {
     /// The member list was opened or closed in one account's view: save it,
     /// and give it to every account.
     fn set_member_list_open(&mut self, open: bool, cx: &mut Context<Self>) {
-        if self.prefs.member_list_open != open {
-            self.prefs.member_list_open = open;
-            if let Some(file) = &self.prefs_file
-                && let Err(err) = file.save(&self.prefs)
-            {
-                log::warn!("couldn't save preferences: {err:#}");
-            }
-        }
+        AppPrefs::update(cx, |prefs| prefs.member_list_open = open);
         let views: Vec<Entity<ChatView>> = self
             .states
             .values()
@@ -449,8 +427,8 @@ impl AppRoot {
         let client = self.client_for(id).with_token(token.clone());
         let account = id.to_string();
         let active = self.shown_account() == Some(id);
-        let tone = self.prefs.skin_tone;
-        let member_list_open = self.prefs.member_list_open;
+        let prefs = AppPrefs::get(cx);
+        let (tone, member_list_open) = (prefs.skin_tone, prefs.member_list_open);
         let view = cx.new(|cx| {
             let mut view = ChatView::new(client, me, account, window, cx);
             view.set_active(active, cx);

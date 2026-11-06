@@ -2,10 +2,18 @@ use std::sync::Arc;
 
 use gpui_kit::*;
 use stoat_gpui::accounts::{AccountsFile, FileAccounts, MemoryAccounts};
+use stoat_gpui::prefs::{Appearance, Palette};
 use stoat_gpui::session::{MigratingStore, TokenStore};
 use stoat_gpui::ui::actions::*;
+use stoat_gpui::ui::app_prefs::AppPrefs;
 use stoat_gpui::ui::settings::SettingsView;
 use stoat_gpui::{runtime, ui};
+
+/// The theme the preferences ask for.
+fn theme_choice(cx: &App) -> (Palette, Appearance) {
+    let prefs = AppPrefs::get(cx);
+    (prefs.palette, prefs.appearance)
+}
 
 /// Handle ⌘(index + 1): show that account, if the window is open.
 fn on_switch_account<A: Action>(index: usize, cx: &mut App) {
@@ -97,6 +105,21 @@ fn main() {
     });
     app.run(|cx| {
         gpui_kit::init(cx);
+        // The saved palette before any window opens, so there's no flash of
+        // the default theme.
+        stoat_gpui::themes::register(cx);
+        AppPrefs::init(cx);
+        stoat_gpui::themes::apply_current(cx);
+        // And again whenever Settings changes the palette or appearance.
+        let mut shown = theme_choice(cx);
+        cx.observe_global::<AppPrefs>(move |cx| {
+            let choice = theme_choice(cx);
+            if choice != shown {
+                shown = choice;
+                stoat_gpui::themes::apply_current(cx);
+            }
+        })
+        .detach();
         // After gpui_kit's bindings, so the chat shortcuts win over theirs.
         ui::chat::init(cx);
 
@@ -296,8 +319,8 @@ impl SettingsWindow {
             .try_global::<MainWindow>()
             .and_then(|main| Some(main.current.as_ref()?.1.clone()))
             .unwrap_or_else(WeakEntity::new_invalid);
-        let (window, _) = gpui_kit::open_window(options, cx, |_, cx| {
-            cx.new(|_| SettingsView::new(root, SettingsView::app_pages()))
+        let (window, _) = gpui_kit::open_window(options, cx, |window, cx| {
+            cx.new(|cx| SettingsView::new(root, SettingsView::app_pages(), window, cx))
         })?;
         cx.activate(true);
         window
