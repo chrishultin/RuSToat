@@ -6,9 +6,11 @@
 //!
 //! - `<t:…>` timestamps, in local time (or relative, for `R`), with the
 //!   full date and time on hover.
+//! - Hidden spoilers: each word a bar, revealed (for the session) by a click.
 //!
 //! Also the copy button on fenced code blocks ([`code_block_actions`]).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Local;
@@ -32,14 +34,44 @@ const NAME: &str = "stoat-markup";
 /// How strongly a timestamp's background shows the text colour behind it.
 const PILL_TINT: f32 = 0.12;
 
+/// A hidden spoiler's line height, in ems: a little under the text's, so
+/// the bars on two lines don't touch.
+const SPOILER_LINE_HEIGHT: f32 = 1.3;
+
 /// What a claimed link stands for.
 enum Markup {
-    Time { seconds: i64, style: Option<char> },
+    Time {
+        seconds: i64,
+        style: Option<char>,
+    },
+    /// One word (with the space after it) of a hidden spoiler.
+    Spoiler {
+        index: usize,
+        first: bool,
+        last: bool,
+        text: String,
+    },
 }
+
+/// Reveals spoiler `n` of the message being drawn.
+pub type RevealSpoiler = Arc<dyn Fn(usize, &mut Window, &mut App) + Send + Sync>;
 
 /// Draws the `stoat:` links [`crate::markdown::prepare`] makes for markup
 /// (see the module docs). Mentions are left to `TextView` as links.
-pub struct MarkupPlugin;
+#[derive(Default)]
+pub struct MarkupPlugin {
+    reveal: Option<RevealSpoiler>,
+}
+
+impl MarkupPlugin {
+    /// Hidden spoilers are revealed through `reveal` when clicked. Without
+    /// it (bios, embeds) they stay hidden.
+    pub fn revealing(reveal: RevealSpoiler) -> Self {
+        Self {
+            reveal: Some(reveal),
+        }
+    }
+}
 
 impl MarkdownPlugin for MarkupPlugin {
     fn name(&self) -> &str {
@@ -67,6 +99,24 @@ impl MarkdownPlugin for MarkupPlugin {
                         .markdown(source),
                 )
             }
+            InternalLink::Spoiler { index, word, words } => {
+                let text = node.to_string();
+                // Copying a hidden spoiler doesn't give it away either.
+                let copied = if word == 0 { "[spoiler]" } else { " " };
+                Some(
+                    MarkdownNode::new(
+                        NAME,
+                        Markup::Spoiler {
+                            index,
+                            first: word == 0,
+                            last: word + 1 == words,
+                            text,
+                        },
+                    )
+                    .text(copied)
+                    .markdown(copied),
+                )
+            }
             InternalLink::User(_) | InternalLink::Channel(_) => None,
         }
     }
@@ -76,12 +126,26 @@ impl MarkdownPlugin for MarkupPlugin {
         node: &MarkdownNode,
         context: &InlineRenderContext,
         window: &mut Window,
-        _cx: &mut App,
+        cx: &mut App,
     ) -> Option<InlineElement> {
         // Several of the same timestamp in one message each need their own id.
         let at = node.source_range().map_or(0, |range| range.start);
         match node.data::<Markup>()? {
             Markup::Time { seconds, style } => render_time(*seconds, *style, at, context, window),
+            Markup::Spoiler {
+                index,
+                first,
+                last,
+                text,
+            } => Some(render_spoiler_word(
+                text,
+                (*first, *last),
+                at,
+                self.reveal.clone().map(|reveal| (*index, reveal)),
+                context,
+                window,
+                cx,
+            )),
         }
     }
 }
@@ -119,6 +183,46 @@ fn render_time(
         .child(label)
         .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx));
     Some(InlineElement::new(pill).with_baseline(baseline))
+}
+
+/// One word of a hidden spoiler: a bar the size of the word, rounded at
+/// the spoiler's two ends. Clicking it reveals the whole spoiler, when
+/// `reveal` (the spoiler's index and how) is given.
+fn render_spoiler_word(
+    text: &str,
+    (first, last): (bool, bool),
+    at: usize,
+    reveal: Option<(usize, RevealSpoiler)>,
+    context: &InlineRenderContext,
+    window: &mut Window,
+    cx: &App,
+) -> InlineElement {
+    let font = context.text_style().font();
+    let size = context.font_size();
+    let line_height = size * SPOILER_LINE_HEIGHT;
+    let text_system = window.text_system();
+    let baseline = text_system.baseline_offset(text_system.resolve_font(&font), size, line_height);
+    let radius = size * 0.25;
+    let bar = div()
+        .id(("stoat-spoiler", at))
+        .flex_none()
+        .whitespace_nowrap()
+        .font(font)
+        .text_size(size)
+        .line_height(line_height)
+        // The word is there to size the bar, not to be read.
+        .text_color(transparent_black())
+        .bg(cx.theme().muted_foreground)
+        .when(first, |el| el.rounded_l(radius))
+        .when(last, |el| el.rounded_r(radius))
+        .child(text.to_string())
+        .when_some(reveal, |el, (index, reveal)| {
+            el.cursor_pointer()
+                // A press here mustn't start a text selection.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_, window, cx| reveal(index, window, cx))
+        });
+    InlineElement::new(bar).with_baseline(baseline)
 }
 
 /// How long the copy button shows a check mark after a click.

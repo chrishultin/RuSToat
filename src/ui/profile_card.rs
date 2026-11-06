@@ -226,7 +226,7 @@ pub fn render_profile_card(
                         bio.markdown.clone(),
                     )
                     .plugin(MathPlugin)
-                    .plugin(MarkupPlugin)
+                    .plugin(MarkupPlugin::default())
                     .code_block_actions(code_block_actions)
                     .text_sm()
                     .selectable(true)

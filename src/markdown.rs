@@ -14,8 +14,12 @@
 //! - `<t:SECONDS>` / `<t:SECONDS:STYLE>` (a timestamp) →
 //!   `[\<t\:SECONDS\>](stoat:time/SECONDS/STYLE)`, which `ui::markup` draws
 //!   in local time. One chrono can't represent stays as typed.
-//! - `||spoiler||` → an inline code span (a muted background). Hiding is deferred.
-//!   A spoiler that contains inline code is left as typed (code is split out first).
+//! - `||spoiler||`, numbered from 0 in the message: until revealed, each
+//!   word (with the space after it) → `[word ](stoat:spoiler/N/W/C)` (word `W`
+//!   of `C`), which `ui::markup` draws as a bar; once revealed, an inline code
+//!   span (a muted background). Mentions and emoji inside are flattened to
+//!   text. A spoiler that contains inline code is left as typed (code is
+//!   split out first).
 //! - Any other `<` is escaped. `TextView` renders raw HTML, which Stoat doesn't,
 //!   so `<b>` or `<not a mention>` must show as typed. Autolinks
 //!   (`<https://…>`, `<mailto:…>`) are kept.
@@ -54,8 +58,15 @@ pub const JUMBO_TEXT_PX: f32 = 60.;
 /// Messages with more emoji than this aren't drawn jumbo.
 pub const JUMBO_MAX: usize = 10;
 
-/// Turn Stoat message content into Markdown for `TextView`.
+/// Turn Stoat message content into Markdown for `TextView`, with every
+/// spoiler hidden.
 pub fn prepare(content: &str, names: &impl Names) -> String {
+    prepare_with(content, names, |_| false)
+}
+
+/// [`prepare`], with spoiler `n` (counting from 0 in the message) shown
+/// when `revealed(n)`.
+pub fn prepare_with(content: &str, names: &impl Names, revealed: impl Fn(usize) -> bool) -> String {
     let emoji_px = if is_jumbo(content) {
         JUMBO_EMOJI_PX
     } else {
@@ -69,6 +80,10 @@ pub fn prepare(content: &str, names: &impl Names) -> String {
     };
     let mut out = String::with_capacity(content.len() + 16);
     let mut offset = 0;
+    let mut spoilers = Spoilers {
+        next: 0,
+        revealed: &revealed,
+    };
     for segment in segments(&content) {
         match segment {
             Segment::Code(code) => out.push_str(code),
@@ -79,7 +94,7 @@ pub fn prepare(content: &str, names: &impl Names) -> String {
                     offset,
                     text,
                 };
-                rewrite_text(text, names, emoji_px, &mut out);
+                rewrite_text(text, names, emoji_px, &mut spoilers, &mut out);
             }
         }
         offset += segment.as_str().len();
@@ -183,6 +198,13 @@ pub enum InternalLink {
     /// `stoat:time/{seconds}` or `stoat:time/{seconds}/{style}`: a
     /// `<t:…>` timestamp (see [`crate::time::format_timestamp`]).
     Time { seconds: i64, style: Option<char> },
+    /// `stoat:spoiler/{index}/{word}/{words}`: word `word` of the `words`
+    /// in hidden spoiler `index` (see [`prepare_with`]).
+    Spoiler {
+        index: usize,
+        word: usize,
+        words: usize,
+    },
 }
 
 /// What a `stoat:` link (a mention, a timestamp) points at. `None` for
@@ -198,6 +220,19 @@ pub fn parse_internal_link(url: &str) -> Option<InternalLink> {
         return Some(InternalLink::Time {
             seconds: timestamp_seconds(seconds)?,
             style,
+        });
+    }
+    if kind == "spoiler" {
+        let mut numbers = id.split('/').map(|n| {
+            (!n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| n.parse::<usize>().ok())
+                .flatten()
+        });
+        let (index, word, words) = (numbers.next()??, numbers.next()??, numbers.next()??);
+        return (numbers.next().is_none() && word < words).then_some(InternalLink::Spoiler {
+            index,
+            word,
+            words,
         });
     }
     if id.is_empty() || id.contains(['/', '?', '#']) {
@@ -442,7 +477,55 @@ struct Text<'a> {
     text: &'a str,
 }
 
-fn rewrite_text(segment: Text<'_>, names: &impl Names, emoji_px: u32, out: &mut String) {
+/// Numbers a message's spoilers and says which are revealed.
+struct Spoilers<'a> {
+    next: usize,
+    revealed: &'a dyn Fn(usize) -> bool,
+}
+
+/// The spoiler at the start of `text` (`||inside||`, on one line, with
+/// something inside): what's inside, and the rest after it.
+fn spoiler(text: &str) -> Option<(&str, &str)> {
+    let after = text.strip_prefix("||")?;
+    let end = after.find("||")?;
+    (end > 0 && !after[..end].contains('\n')).then(|| (&after[..end], &after[end + 2..]))
+}
+
+/// Spoiler `index` (`text`, already plain), hidden: each word with the
+/// whitespace after it is its own link, so the bar wraps between words.
+fn hidden_spoiler(text: &str, index: usize) -> String {
+    // Each piece runs from the start of one word to the start of the next;
+    // leading whitespace goes with the first.
+    let mut starts = vec![0];
+    let (mut seen_word, mut after_space) = (false, false);
+    for (at, c) in text.char_indices() {
+        if !c.is_whitespace() {
+            if seen_word && after_space {
+                starts.push(at);
+            }
+            seen_word = true;
+        }
+        after_space = c.is_whitespace();
+    }
+    let words = starts.len();
+    let mut out = String::new();
+    for (word, &start) in starts.iter().enumerate() {
+        let end = starts.get(word + 1).copied().unwrap_or(text.len());
+        out.push_str(&format!(
+            "[{}]({INTERNAL_SCHEME}spoiler/{index}/{word}/{words})",
+            escape(&text[start..end])
+        ));
+    }
+    out
+}
+
+fn rewrite_text(
+    segment: Text<'_>,
+    names: &impl Names,
+    emoji_px: u32,
+    spoilers: &mut Spoilers<'_>,
+    out: &mut String,
+) {
     let text = segment.text;
     let mut rest = text;
     while !rest.is_empty() {
@@ -459,13 +542,16 @@ fn rewrite_text(segment: Text<'_>, names: &impl Names, emoji_px: u32, out: &mut 
             rest = &rest[CUSTOM_EMOJI_LEN..];
             continue;
         }
-        if let Some(after) = rest.strip_prefix("||")
-            && let Some(end) = after.find("||")
-            && end > 0
-            && !after[..end].contains('\n')
-        {
-            out.push_str(&code_span(&plain_mentions(&after[..end], names)));
-            rest = &after[end + 2..];
+        if let Some((inside, after)) = spoiler(rest) {
+            let index = spoilers.next;
+            spoilers.next += 1;
+            let text = plain_mentions(inside, names);
+            if (spoilers.revealed)(index) {
+                out.push_str(&code_span(&text));
+            } else {
+                out.push_str(&hidden_spoiler(&text, index));
+            }
+            rest = after;
             continue;
         }
         if rest.starts_with('<') {
@@ -549,10 +635,38 @@ fn is_autolink(inner: &str) -> bool {
 }
 
 /// Message text as plain text (notification bodies): mentions as `@Name`,
-/// custom emoji as `:name:`, timestamps in local time. Markdown punctuation
-/// is left as typed.
+/// custom emoji as `:name:`, timestamps in local time, and spoilers as
+/// `[spoiler]`, so they don't give anything away. Markdown punctuation is
+/// left as typed.
 pub fn plain_text(content: &str, names: &impl Names) -> String {
-    plain_mentions(content, names)
+    plain_mentions(&hide_spoilers(content), names)
+}
+
+/// Every spoiler outside code as `[spoiler]`.
+fn hide_spoilers(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    for segment in segments(content) {
+        let Segment::Text(text) = segment else {
+            out.push_str(segment.as_str());
+            continue;
+        };
+        let mut rest = text;
+        while let Some(at) = rest.find("||") {
+            out.push_str(&rest[..at]);
+            match spoiler(&rest[at..]) {
+                Some((_, after)) => {
+                    out.push_str("[spoiler]");
+                    rest = after;
+                }
+                None => {
+                    out.push_str("||");
+                    rest = &rest[at + 2..];
+                }
+            }
+        }
+        out.push_str(rest);
+    }
+    out
 }
 
 /// A one-line plain-text preview of message content (reply previews): the
@@ -565,7 +679,9 @@ pub fn snippet(content: &str, names: &impl Names, max_chars: usize) -> String {
         // Code fences alone say nothing; the code under them does.
         .find(|line| !line.is_empty() && !line.starts_with("```"))
         .unwrap_or_default();
-    let text = plain_text(&strip_markers(strip_line_prefix(line)), names);
+    // Spoilers go before the markers, which would drop their `||`.
+    let line = hide_spoilers(strip_line_prefix(line));
+    let text = plain_text(&strip_markers(&line), names);
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     match text.char_indices().nth(max_chars) {
         Some((cut, _)) => format!("{}…", text[..cut].trim_end()),
@@ -819,6 +935,52 @@ mod tests {
                 style: Some('R')
             })
         );
+    }
+
+    #[test]
+    fn internal_links_parse_to_spoiler_words() {
+        assert_eq!(
+            parse_internal_link("stoat:spoiler/2/0/3"),
+            Some(InternalLink::Spoiler {
+                index: 2,
+                word: 0,
+                words: 3
+            })
+        );
+        for url in [
+            "stoat:spoiler/",
+            "stoat:spoiler/1",
+            "stoat:spoiler/1/0",
+            "stoat:spoiler/1/3/3",
+            "stoat:spoiler/1/0/2/9",
+            "stoat:spoiler/a/0/1",
+            "stoat:spoiler/1//1",
+        ] {
+            assert_eq!(parse_internal_link(url), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn hidden_spoilers_are_one_link_per_word() {
+        assert_eq!(hidden_spoiler("he", 0), "[he](stoat:spoiler/0/0/1)");
+        assert_eq!(
+            hidden_spoiler("he wins", 1),
+            "[he ](stoat:spoiler/1/0/2)[wins](stoat:spoiler/1/1/2)"
+        );
+        // Leading whitespace joins the first word; runs of it stay together.
+        assert_eq!(
+            hidden_spoiler(" a  b ", 0),
+            "[ a  ](stoat:spoiler/0/0/2)[b ](stoat:spoiler/0/1/2)"
+        );
+        assert_eq!(hidden_spoiler("   ", 0), "[   ](stoat:spoiler/0/0/1)");
+        assert_eq!(hidden_spoiler("a.b", 0), r"[a\.b](stoat:spoiler/0/0/1)");
+    }
+
+    #[test]
+    fn spoilers_are_hidden_outside_code() {
+        assert_eq!(hide_spoilers("a ||b|| c ||d||"), "a [spoiler] c [spoiler]");
+        assert_eq!(hide_spoilers("`||b||` ||"), "`||b||` ||");
+        assert_eq!(hide_spoilers("||||"), "||||");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Stoat content → Markdown: mentions, spoilers, HTML escaping, code safety,
 //! line breaks, quotes and `$$…$$` math.
 
-use stoat_gpui::markdown::{Names, is_external_link, is_jumbo, prepare};
+use stoat_gpui::markdown::{Names, is_external_link, is_jumbo, prepare, prepare_with};
 
 struct Fixture;
 
@@ -85,15 +85,59 @@ fn nothing_is_rewritten_inside_code() {
     assert_eq!(md("``a ` <b>``"), "``a ` <b>``");
 }
 
+/// [`md`] with every spoiler revealed.
+fn revealed(content: &str) -> String {
+    prepare_with(content, &Fixture, |_| true)
+}
+
 #[test]
-fn spoilers_become_code_spans_with_plain_mentions() {
-    assert_eq!(md("the end: ||he wins||"), "the end: `he wins`");
-    assert_eq!(md("||<@u-ada> did it||"), "`@Ada L. did it`");
+fn revealed_spoilers_become_code_spans_with_plain_mentions() {
+    assert_eq!(revealed("the end: ||he wins||"), "the end: `he wins`");
+    assert_eq!(revealed("||<@u-ada> did it||"), "`@Ada L. did it`");
     // A spoiler wrapped around inline code is left as typed; the code still renders.
+    assert_eq!(revealed("||has `ticks`||"), "||has `ticks`||");
     assert_eq!(md("||has `ticks`||"), "||has `ticks`||");
     // Unclosed or empty markers are left alone.
     assert_eq!(md("a || b"), "a || b");
     assert_eq!(md("||||"), "||||");
+    assert_eq!(revealed("||||"), "||||");
+}
+
+#[test]
+fn hidden_spoilers_become_one_link_per_word() {
+    assert_eq!(
+        md("the end: ||he wins||"),
+        "the end: [he ](stoat:spoiler/0/0/2)[wins](stoat:spoiler/0/1/2)"
+    );
+    // Mentions inside are flattened to text, and escaped.
+    assert_eq!(
+        md("||<@u-ada> did it||"),
+        r"[\@Ada ](stoat:spoiler/0/0/4)[L\. ](stoat:spoiler/0/1/4)[did ](stoat:spoiler/0/2/4)[it](stoat:spoiler/0/3/4)"
+    );
+    // Each word stays a link, with its space, once parsed.
+    let words = links(&parse(&md("a ||he *wins* big|| b")));
+    assert_eq!(
+        words,
+        vec![
+            ("he ".to_string(), "stoat:spoiler/0/0/3".to_string()),
+            ("*wins* ".to_string(), "stoat:spoiler/0/1/3".to_string()),
+            ("big".to_string(), "stoat:spoiler/0/2/3".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn spoilers_are_numbered_through_the_message() {
+    let content = "||one|| and ||two||\n`||code||` ||three||";
+    assert_eq!(
+        md(content),
+        "[one](stoat:spoiler/0/0/1) and [two](stoat:spoiler/1/0/1)  \n`||code||` [three](stoat:spoiler/2/0/1)"
+    );
+    // Only the revealed one shows.
+    assert_eq!(
+        prepare_with(content, &Fixture, |n| n == 1),
+        "[one](stoat:spoiler/0/0/1) and `two`  \n`||code||` [three](stoat:spoiler/2/0/1)"
+    );
 }
 
 #[test]
@@ -111,7 +155,8 @@ fn multibyte_text_never_panics_and_survives_intact() {
     // The crash: a text run starting with a multi-byte character.
     assert_eq!(md("⚠ heads up"), "⚠ heads up");
     assert_eq!(md("⚠<@u-ada>⚠"), r"⚠[@Ada L\.](stoat:user/u-ada)⚠");
-    assert_eq!(md("日本語 || 🦦 ||"), "日本語 ` 🦦 `");
+    assert_eq!(revealed("日本語 || 🦦 ||"), "日本語 ` 🦦 `");
+    assert_eq!(md("日本語 || 🦦 ||"), "日本語 [ 🦦 ](stoat:spoiler/0/0/1)");
 
     // Every substring (on char boundaries) of a string mixing multi-byte
     // characters with every piece of syntax `prepare` looks at.
@@ -160,7 +205,11 @@ fn colons_that_are_not_custom_emoji_are_left_alone() {
 fn custom_emoji_in_code_and_spoilers() {
     let code = format!("`:{STOAT}:`");
     assert_eq!(md(&code), code);
-    assert_eq!(md(&format!("||:{STOAT}: wins||")), "`:stoat: wins`");
+    assert_eq!(revealed(&format!("||:{STOAT}: wins||")), "`:stoat: wins`");
+    assert_eq!(
+        md(&format!("||:{STOAT}: wins||")),
+        r"[\:stoat\: ](stoat:spoiler/0/0/2)[wins](stoat:spoiler/0/1/2)"
+    );
 }
 
 #[test]
@@ -429,4 +478,19 @@ fn plain_text_shows_timestamps_in_local_time() {
     );
     // Malformed ones stay as typed.
     assert_eq!(plain_text("<t:abc>", &Fixture), "<t:abc>");
+}
+
+#[test]
+fn plain_text_never_gives_a_spoiler_away() {
+    use stoat_gpui::markdown::{plain_text, snippet};
+    assert_eq!(
+        plain_text("the end: ||<@u-ada> wins||!", &Fixture),
+        "the end: [spoiler]!"
+    );
+    assert_eq!(
+        snippet("> **twist**: ||he wins||", &Fixture, 80),
+        "twist: [spoiler]"
+    );
+    // In code it isn't a spoiler.
+    assert_eq!(plain_text("`||x||`", &Fixture), "`||x||`");
 }

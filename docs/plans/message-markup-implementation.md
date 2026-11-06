@@ -95,3 +95,55 @@ Deferred to the end (see the plan's chunk 2 manual check).
 
 ### Manual Validation
 Deferred to the end (see the plan's chunk 3 manual check).
+
+## Chunk 4: Spoilers hidden until clicked
+
+### Changes Made
+- `src/markdown.rs`:
+  - `prepare_with(content, names, revealed: impl Fn(usize) -> bool)`. `prepare` now means "none revealed".
+  - Spoilers are numbered through the message by a `Spoilers` counter threaded through `rewrite_text`, counting only text that becomes a spoiler. A new `spoiler()` helper holds the existing rules (one line, not empty).
+  - A hidden spoiler goes through `hidden_spoiler(text, index)`: each word, with the whitespace after it (leading whitespace joins the first word), becomes `[escaped](stoat:spoiler/N/W/C)`.
+  - A revealed spoiler is today's code span. Both are built from the flattened `plain_mentions` text.
+  - `InternalLink::Spoiler { index, word, words }`.
+  - `plain_text` and `snippet` go through a new `hide_spoilers`, which gives `[spoiler]` outside code. `snippet` hides spoilers before `strip_markers`, which would otherwise drop the `||`.
+  - Module doc updated.
+  - Unit tests for link parsing, `hidden_spoiler` and `hide_spoilers`.
+- `src/store.rs`: `revealed_spoilers: HashSet<(String, usize)>` and `reveal_spoiler(message, index)`, next to `revealed_images`. `message_row` calls `prepare_with(c, self, |n| revealed_spoilers.contains(&(id, n)))`.
+- `src/ui/markup.rs`:
+  - `MarkupPlugin` is now a struct with `reveal: Option<RevealSpoiler>` (`Arc<dyn Fn(usize, &mut Window, &mut App) + Send + Sync>`). `MarkupPlugin::default()` can't reveal; `MarkupPlugin::revealing(f)` can.
+  - `parse` claims spoiler links and keeps the word (`node.to_string()`) and whether it's first or last.
+  - `render_spoiler_word` draws the word in transparent text on a `muted_foreground` bar, with a line height of 1.3 em so bars on adjacent lines don't touch. The bar is rounded on the left for the first word and on the right for the last.
+  - When it can reveal, the bar gets `cursor_pointer`, stops mouse-down propagation, and calls `reveal(index)` on click.
+  - Copying a hidden word gives `[spoiler]` for the first word and a space for the rest.
+- `src/ui/chat.rs`:
+  - `People::spoiler_revealer(message)` captures the view's `WeakEntity`, the pane's channel and the message ID.
+  - `ChatView::reveal_spoiler` calls `store.reveal_spoiler` and `sync_pane`.
+  - The message body uses `MarkupPlugin::revealing(…)`, except in search and pin previews (`preview`), where a click jumps. System rows and embeds use `MarkupPlugin::default()`.
+  - The link handler ignores `InternalLink::Spoiler`.
+- `src/ui/profile_card.rs`: `MarkupPlugin::default()`.
+- Tests:
+  - `tests/markdown_prepare.rs`:
+    - Existing code-span expectations now use a `revealed()` helper.
+    - New tests for the hidden form (with a parse check that each word's trailing space survives as link text), numbering across the message with one revealed, and `[spoiler]` in `plain_text`/`snippet`.
+    - The multibyte test covers both forms.
+  - `tests/store_replies.rs`: the snippet expectation is now `gone [spoiler] code`.
+  - `tests/store_spoilers.rs` (new):
+    - rows start hidden
+    - `reveal_spoiler` changes that row's body and `render_key`, and not the other message's
+    - a reveal survives the history being replaced
+
+### Divergences
+- **The plugin gets a reveal callback, not `(message id, WeakEntity<ChatView>)`.** `People` already holds the `WeakEntity` and the channel, and its `link_handler` is already sent across a `Send + Sync` closure, so the plan's `Send + Sync` risk didn't come up.
+- **Hidden word URLs carry the word number and count:** `stoat:spoiler/N/W/C`, not `stoat:spoiler/N`. The plugin needs them to round only the ends of the bar, and to put `[spoiler]` on the first word's copy text only.
+- **Wrapping is coarser than the plan pictured.** GPUI's line wrapper treats each plugin object as a placeholder letter, so adjacent hidden words have no break opportunity between them. A hidden spoiler wraps like one long word: it moves to the next line whole if it fits there, and otherwise breaks between word objects as an overflow fallback. It never overflows the bubble.
+- **Spoilers in search and pin results aren't clickable,** because clicking a result jumps to it.
+- **As the plan says, spoilers in bios and embed descriptions stay hidden for good,** since nothing reveals them. Before this chunk they showed as a muted span. Worth revisiting if that turns out to be annoying.
+
+### Verification Performed
+- `cargo test`: 633 passed (9 new), 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- Formatted `markup.rs`, `profile_card.rs`, `tests/markdown_prepare.rs` and `tests/store_spoilers.rs`.
+- Drift unchanged: `markdown.rs` 1, `store.rs` 15 (15 at HEAD), `tests/store_replies.rs` 5 (5 at HEAD), `chat.rs` 17.
+
+### Manual Validation
+Deferred to the end (see the plan's chunk 4 manual check).

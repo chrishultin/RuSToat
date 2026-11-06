@@ -57,7 +57,7 @@ use crate::typing::{OutgoingTyping, TypingSignal, TypingState, typing_label};
 use crate::ui::composer::{Composer, ComposerEvent, file_icon};
 use crate::ui::emoji_picker::emoji_grid;
 use crate::ui::friends::{RowButtons, render_add_friend, render_friends_page};
-use crate::ui::markup::{MarkupPlugin, code_block_actions};
+use crate::ui::markup::{MarkupPlugin, RevealSpoiler, code_block_actions};
 use crate::ui::math::MathPlugin;
 use crate::ui::profile_card::{CardBio, CardContent, OnLink, render_profile_card};
 
@@ -4026,6 +4026,22 @@ impl ChatView {
         cx.notify();
     }
 
+    /// Show spoiler `index` of `message` (in `channel`) for the rest of the
+    /// session.
+    fn reveal_spoiler(
+        &mut self,
+        channel: Option<&str>,
+        message: &str,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        self.store.reveal_spoiler(message, index);
+        if let Some(channel) = channel {
+            self.sync_pane(channel, cx);
+        }
+        cx.notify();
+    }
+
     /// Whether the open channel shows a relative timestamp, which needs
     /// drawing again as time passes.
     fn open_channel_has_relative_times(&self) -> bool {
@@ -5610,7 +5626,7 @@ fn render_system_row(message: &MessageRow, colors: RowColors, people: &People) -
                     SharedString::from(message.render_key.clone()),
                     message.body.clone().unwrap_or_default(),
                 )
-                .plugin(MarkupPlugin)
+                .plugin(MarkupPlugin::default())
                 .code_block_actions(code_block_actions)
                 .text_xs()
                 .on_link_click(move |url, _, window, cx| on_link(url, window, cx)),
@@ -5657,6 +5673,18 @@ pub(crate) struct People {
 }
 
 impl People {
+    /// What clicking a hidden spoiler in `message` does: reveal it.
+    fn spoiler_revealer(&self, message: &str) -> RevealSpoiler {
+        let (view, channel, message) =
+            (self.view.clone(), self.channel.clone(), message.to_string());
+        Arc::new(move |index, _, cx| {
+            view.update(cx, |this, cx| {
+                this.reveal_spoiler(channel.as_deref(), &message, index, cx)
+            })
+            .ok();
+        })
+    }
+
     /// Open `user`'s card where the mouse is.
     pub(crate) fn open_card(&self, user: String, window: &mut Window, cx: &mut App) {
         let position = window.mouse_position();
@@ -5693,8 +5721,10 @@ impl People {
         Arc::new(move |url, window, cx| match parse_internal_link(url) {
             Some(InternalLink::User(user)) => people.open_card(user, window, cx),
             // Channel links don't go anywhere yet; `ui::markup` draws
-            // timestamps, so they aren't links.
-            Some(InternalLink::Channel(_) | InternalLink::Time { .. }) => {}
+            // timestamps and spoilers, so they aren't links.
+            Some(
+                InternalLink::Channel(_) | InternalLink::Time { .. } | InternalLink::Spoiler { .. },
+            ) => {}
             None => {
                 if is_external_link(url) {
                     cx.open_url(url);
@@ -5842,7 +5872,13 @@ fn render_message_row(
                     TextView::markdown(SharedString::from(message.render_key.clone()), body)
                         // `$$…$$` formatting (colour, size), drawn natively.
                         .plugin(MathPlugin)
-                        .plugin(MarkupPlugin)
+                        // Timestamps, and spoilers revealed by a click
+                        // (not in search results, where a click jumps).
+                        .plugin(if preview {
+                            MarkupPlugin::default()
+                        } else {
+                            MarkupPlugin::revealing(people.spoiler_revealer(&message.id))
+                        })
                         // A copy button (and the language) on each code block.
                         .code_block_actions(code_block_actions)
                         // Emoji-only messages are drawn big (custom ones are sized
@@ -7000,7 +7036,7 @@ fn render_embed_card(
             Description::Markdown { source, render_key } => {
                 TextView::markdown(SharedString::from(render_key), source)
                     .plugin(MathPlugin)
-                    .plugin(MarkupPlugin)
+                    .plugin(MarkupPlugin::default())
                     .code_block_actions(code_block_actions)
                     .text_sm()
                     .selectable(true)

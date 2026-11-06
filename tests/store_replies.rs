@@ -201,7 +201,7 @@ fn snip(text: &str) -> String {
 fn snippets_are_one_plain_line() {
     assert_eq!(snip("\n\nfirst line\nsecond"), "first line");
     assert_eq!(snip("**bold** and *it* and __under__"), "bold and it and under");
-    assert_eq!(snip("~~gone~~ ||secret|| `code`"), "gone secret code");
+    assert_eq!(snip("~~gone~~ ||secret|| `code`"), "gone [spoiler] code");
     assert_eq!(snip("see [the docs](https://example.com) now"), "see the docs now");
     assert_eq!(snip("# Heading"), "Heading");
     assert_eq!(snip("> quoted"), "quoted");

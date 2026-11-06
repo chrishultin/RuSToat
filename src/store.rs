@@ -498,6 +498,8 @@ pub struct ChatStore {
     other_emojis: HashMap<String, Emoji>,
     /// Large images the user chose to load ("Show image"), by file ID.
     revealed_images: HashSet<String>,
+    /// Spoilers the user clicked to see, as (message ID, spoiler index).
+    revealed_spoilers: HashSet<(String, usize)>,
     /// Read positions by channel ID.
     read_states: HashMap<String, ReadState>,
     /// The user's notification levels and mutes.
@@ -1906,6 +1908,12 @@ impl ChatStore {
         self.revealed_images.insert(file_id.to_string());
     }
 
+    /// Show spoiler `index` (counting from 0) of `message` for the rest of
+    /// the session. Its row's body changes from bars to the text.
+    pub fn reveal_spoiler(&mut self, message: &str, index: usize) {
+        self.revealed_spoilers.insert((message.to_string(), index));
+    }
+
     /// A user's own avatar, or their generated default.
     pub fn user_avatar_url(&self, user_id: &str) -> String {
         self.users
@@ -2084,7 +2092,11 @@ impl ChatStore {
                 .content
                 .as_deref()
                 .filter(|c| !c.is_empty())
-                .map(|c| crate::markdown::prepare(c, self)),
+                .map(|c| {
+                    crate::markdown::prepare_with(c, self, |n| {
+                        self.revealed_spoilers.contains(&(message.id.clone(), n))
+                    })
+                }),
         };
         MessageRow {
             id: message.id.clone(),
