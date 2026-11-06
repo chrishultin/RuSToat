@@ -14,8 +14,9 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::api::models::{Channel, Message, MessageFlags, Presence, RelationshipStatus};
+use crate::friends::FRIENDS;
 use crate::markdown;
-use crate::store::{ChatStore, channel_id};
+use crate::store::{ChatStore, channel_id, display_name};
 
 /// The author ID Stoat uses for system messages.
 const SYSTEM_AUTHOR: &str = "00000000000000000000000000";
@@ -260,6 +261,45 @@ pub fn should_notify(
         channel: message.channel.clone(),
         title,
         body: truncate(&body, BODY_MAX_CHARS),
+    })
+}
+
+/// Whether `user`'s new relationship, after `was`, is a new friend request
+/// to the user that should notify, and what the notice says. Only a change
+/// to Incoming from anything else notifies (a request already pending at
+/// `Ready` never comes through here). Busy silences it; Focus doesn't, as a
+/// request is aimed at the user, like a mention. Nor does it notify while the
+/// user is looking at the Friends page's Pending tab (`viewing_pending`) with
+/// the window in front.
+///
+/// Every request shares one tag (and the Friends page as its "channel"), so
+/// a newer one replaces the older, and a click opens the page.
+pub fn friend_request_notice(
+    store: &ChatStore,
+    user: &str,
+    was: &RelationshipStatus,
+    viewing_pending: bool,
+    window_active: bool,
+) -> Option<Notice> {
+    let person = store.user(user).filter(|_| user != store.me())?;
+    if person.relationship != RelationshipStatus::Incoming || *was == RelationshipStatus::Incoming {
+        return None;
+    }
+    if window_active && viewing_pending {
+        return None;
+    }
+    if store.my_presence() == Some(Presence::Busy) {
+        return None;
+    }
+    let name = display_name(person);
+    Some(Notice {
+        tag: FRIENDS.to_string(),
+        channel: FRIENDS.to_string(),
+        title: "Friend request".to_string(),
+        body: truncate(
+            &format!("{name} sent you a friend request."),
+            BODY_MAX_CHARS,
+        ),
     })
 }
 

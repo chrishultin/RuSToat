@@ -2,10 +2,11 @@
 //! one test per skip rule, plus titles, bodies, and muted-channel indicators.
 
 use stoat_gpui::api::events::{Ready, ServerEvent, parse_frame};
-use stoat_gpui::api::models::Message;
+use stoat_gpui::api::models::{Message, RelationshipStatus};
+use stoat_gpui::friends::FRIENDS;
 use stoat_gpui::notify;
 use stoat_gpui::notify::{
-    Delivery, Notice, NotificationSettings, Viewing, delivery, should_notify,
+    Delivery, Notice, NotificationSettings, Viewing, delivery, friend_request_notice, should_notify,
 };
 use stoat_gpui::store::ChatStore;
 
@@ -428,4 +429,132 @@ fn banner_tags_round_trip_with_the_account() {
 #[test]
 fn banner_tags_from_before_accounts_are_just_the_channel() {
     assert_eq!(notify::parse_banner_tag("01CHANNEL"), (None, "01CHANNEL"));
+}
+
+// --- friend requests -----------------------------------------------------
+
+/// `user` now relates to the user as `relationship` (a `UserRelationship`).
+/// Returns how they related before.
+fn relate(store: &mut ChatStore, user: &str, relationship: &str) -> RelationshipStatus {
+    let frame = serde_json::json!({
+        "type": "UserRelationship", "id": "u-me",
+        "user": {
+            "_id": user, "username": user.trim_start_matches("u-"), "discriminator": "0001",
+            "display_name": "Carol C.", "relationship": relationship, "online": true
+        }
+    });
+    let Some(ServerEvent::UserRelationship { user }) = parse_frame(&frame.to_string()).pop() else {
+        panic!("UserRelationship");
+    };
+    store.apply_relationship(*user).unwrap_or_default()
+}
+
+#[test]
+fn a_new_friend_request_notifies() {
+    let mut store = default_store();
+    let was = relate(&mut store, "u-carol", "Incoming");
+    let notice =
+        friend_request_notice(&store, "u-carol", &was, false, false).expect("a new request");
+    assert_eq!(notice.title, "Friend request");
+    assert_eq!(notice.body, "Carol C. sent you a friend request.");
+    // Every request shares the Friends page's tag, so a newer one replaces it.
+    assert_eq!(notice.tag, FRIENDS);
+    assert_eq!(notice.channel, FRIENDS);
+
+    // Whatever they were before (here, a friend), Incoming is new.
+    let was = relate(&mut store, "u-ada", "Incoming");
+    assert_eq!(was, RelationshipStatus::Friend);
+    assert!(friend_request_notice(&store, "u-ada", &was, false, true).is_some());
+}
+
+#[test]
+fn a_request_that_was_already_pending_does_not_notify_again() {
+    let mut store = default_store();
+    relate(&mut store, "u-carol", "Incoming");
+    let was = relate(&mut store, "u-carol", "Incoming");
+    assert_eq!(was, RelationshipStatus::Incoming);
+    assert_eq!(
+        friend_request_notice(&store, "u-carol", &was, false, false),
+        None
+    );
+}
+
+#[test]
+fn busy_silences_friend_requests_and_focus_does_not() {
+    let mut busy = store("{}", Some("Busy"));
+    let was = relate(&mut busy, "u-carol", "Incoming");
+    assert_eq!(
+        friend_request_notice(&busy, "u-carol", &was, false, false),
+        None
+    );
+
+    let mut focus = store("{}", Some("Focus"));
+    let was = relate(&mut focus, "u-carol", "Incoming");
+    assert!(friend_request_notice(&focus, "u-carol", &was, false, false).is_some());
+}
+
+#[test]
+fn looking_at_pending_skips_only_while_the_window_is_active() {
+    let mut store = default_store();
+    let was = relate(&mut store, "u-carol", "Incoming");
+    assert_eq!(
+        friend_request_notice(&store, "u-carol", &was, true, true),
+        None
+    );
+    assert!(friend_request_notice(&store, "u-carol", &was, true, false).is_some());
+    assert!(friend_request_notice(&store, "u-carol", &was, false, true).is_some());
+}
+
+#[test]
+fn other_relationship_changes_do_not_notify() {
+    let mut store = default_store();
+    for relationship in ["Outgoing", "Friend", "Blocked", "BlockedOther", "None"] {
+        let was = relate(&mut store, "u-carol", relationship);
+        assert_eq!(
+            friend_request_notice(&store, "u-carol", &was, false, false),
+            None,
+            "{relationship}"
+        );
+    }
+    // An Incoming request turning into a friendship doesn't either.
+    relate(&mut store, "u-carol", "Incoming");
+    let was = relate(&mut store, "u-carol", "Friend");
+    assert_eq!(
+        friend_request_notice(&store, "u-carol", &was, false, false),
+        None
+    );
+    // Nor does an unknown user, or the user themselves.
+    assert_eq!(
+        friend_request_notice(&store, "u-nobody", &RelationshipStatus::None, false, false),
+        None
+    );
+    assert_eq!(
+        friend_request_notice(&store, "u-me", &RelationshipStatus::None, false, false),
+        None
+    );
+}
+
+#[test]
+fn a_request_then_its_acceptance_through_the_store() {
+    use stoat_gpui::friends::{friend_lists, incoming_count};
+    let mut store = default_store();
+    let (_, mentions) = store.home_summary();
+    let attention = store.attention_count();
+
+    let was = relate(&mut store, "u-carol", "Incoming");
+    assert_eq!(incoming_count(&store), 1);
+    assert_eq!(friend_lists(&store).incoming.len(), 1);
+    assert_eq!(store.home_summary().1, mentions + 1);
+    assert_eq!(store.attention_count(), attention + 1);
+    assert!(friend_request_notice(&store, "u-carol", &was, false, false).is_some());
+
+    // The route's answer after Accept.
+    relate(&mut store, "u-carol", "Friend");
+    let lists = friend_lists(&store);
+    assert!(lists.incoming.is_empty());
+    assert!(lists.all.iter().any(|row| row.user_id == "u-carol"));
+    assert!(lists.online.iter().any(|row| row.user_id == "u-carol"));
+    assert_eq!(incoming_count(&store), 0);
+    assert_eq!(store.home_summary().1, mentions);
+    assert_eq!(store.attention_count(), attention);
 }

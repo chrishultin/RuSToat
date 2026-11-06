@@ -810,18 +810,21 @@ fn a_relationship_change_updates_or_adds_the_user() {
     let bob = relationship_event(serde_json::json!({
         "_id": "u-bob", "username": "bob", "discriminator": "0001", "relationship": "Incoming", "online": true
     }));
-    assert!(store.apply_relationship(bob.clone()));
+    assert_eq!(store.apply_relationship(bob.clone()), Some(before));
     assert_eq!(
         store.user("u-bob").unwrap().relationship,
         RelationshipStatus::Incoming
     );
     // The same again (the route's answer, then the event) changes nothing.
-    assert!(!store.apply_relationship(bob));
+    assert_eq!(
+        store.apply_relationship(bob),
+        Some(RelationshipStatus::Incoming)
+    );
 
     let stranger = relationship_event(serde_json::json!({
         "_id": "u-new", "username": "new", "discriminator": "0002", "relationship": "Incoming", "online": false
     }));
-    assert!(store.apply_relationship(stranger));
+    assert_eq!(store.apply_relationship(stranger), None);
     assert!(store.knows_user("u-new"));
 }
 

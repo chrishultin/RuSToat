@@ -194,3 +194,91 @@ The look-ahead found nothing to change in chunk 5.
 
 ### Manual Validation
 Deferred to the batched checks at the end.
+
+## Chunk 5: Notices for new requests
+
+### Changes Made
+- `src/store.rs`: `apply_relationship` returns `Option<RelationshipStatus>` instead of `bool`: how they related before, or `None` if they weren't known. The type is spelled out in full to keep out of the import block's old rustfmt hunk.
+- `src/notify.rs`: `friend_request_notice(store, user, was, viewing_pending, window_active) -> Option<Notice>`.
+  - It only notifies when the person (known, and not the user) is now Incoming and `was` wasn't.
+  - Nothing while the window is active with Pending in view, or while the user is Busy. Focus still notifies.
+  - The notice: `tag` and `channel` are `FRIENDS`, the title is "Friend request", and the body is "{display name} sent you a friend request." (truncated like message bodies).
+- `src/ui/chat.rs`:
+  - `relationship_changed` returns `apply_relationship`'s previous relationship.
+  - The `UserRelationship` handler (route answers don't notify) works out the notice. `viewing_pending` is: this account shown, Friends open, and the Pending tab. It delivers through `notify::delivery`: `show_toast` or the new `show_friend_banner`.
+  - `show_friend_banner` shows a system notification tagged `banner_tag(account, FRIENDS)`, with the account label like message banners, and sets the new `friend_banner: bool`. It isn't in `self.banners`, which is keyed by message.
+  - `dismiss_friend_banner` takes the banner away if one is showing. It's called:
+    - from `sync_outside` once `incoming_count == 0`
+    - from the new `friends_seen`, after `open_channel`, `select_channel` and `select_place` land on Friends
+    - from the window-activation observer when the window comes to the front with this account shown on Friends
+  - `open_channel(FRIENDS)` also sets `friends_tab = Pending`. Toast clicks already call `open_channel(notice.channel)`, and banner clicks reach it through `AppRoot::open_notice`.
+- `src/ui/app_root.rs`: unchanged. I checked that `open_notice` parses the tag, shows the account, and calls `open_channel("friends")`.
+- Tests:
+  - `tests/store_live.rs`: the relationship test now checks the returned previous relationship (`Some(before)`, `Some(Incoming)` the second time, and `None` for a stranger).
+  - `tests/notify_rules.rs`, 6 new tests:
+    - a new request notifies with the right title, body, tag and channel, whatever it was before
+    - a request already Incoming doesn't notify again
+    - Busy silences it and Focus doesn't
+    - Pending in view only silences it while the window is active
+    - Outgoing, Friend, Blocked, BlockedOther, None and Incoming → Friend don't notify, and neither do unknown users or the user
+    - the store pipeline: an Incoming event raises `incoming_count`, the Incoming list, the Home badge and the Dock count and gives a notice, and the Friend answer after Accept puts them in All and Online and clears every count
+
+### Divergences
+Minor:
+- **The banner isn't dismissed just because Friends is open in `sync_outside`.** A banner only shows while the window is in the background, and `sync_outside` runs straight after, so a Friends page that's already open would have taken the banner away at once. It's dismissed when Friends is chosen or opened from a notice, or when the window comes back to the front on it (the activation observer), and once no requests are left. That matches "once the Friends page is open" for a page the user actually sees.
+- **`friend_request_notice` treats an unknown previous relationship as `None`.** The caller passes `unwrap_or_default()`, so a request from someone the client didn't know notifies.
+
+### Verification Performed
+- `cargo test --test notify_rules --test store_live`: 24 + 33 passed.
+- `cargo test`: 574 passed, 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt: `src/notify.rs` and `tests/notify_rules.rs` are clean, as at the baseline. `src/store.rs` stayed at 15 hunks and `src/ui/chat.rs` at 16 (baseline 18). `tests/store_live.rs` is clean.
+
+### Manual Validation
+Deferred to the batched checks at the end. This chunk's check needs a second account, and the bundled app (`scripts/run-bundled.sh`) for banners.
+
+## Summary
+
+_Completed: 2026-11-05_
+
+### Chunks Completed
+1. The Friends page, read-only: a Friends row in Home and a page with Online, All, Pending and Blocked tabs. Rows open the card and the menu, and the page is kept across reconnects and launches (`7d573af`).
+2. Inline row buttons: Accept, Reject, Cancel, Unblock and Message (`12e0567`).
+3. Adding a friend by `username#1234`, with readable refusals (`1b0a44f`).
+4. Incoming requests count on the Home, switcher and Dock badges (`40a412e`).
+5. A toast or banner for a new request, opening Friends → Pending, with banner dismissal (this commit).
+
+### Divergences
+All minor; none needed the user to decide:
+- Chunk 1:
+  - The status line and presence dot are for friends only.
+  - Offline rows aren't dimmed.
+  - Home no longer says "Nothing here yet."
+  - `People` and `MemberColors` became `pub(crate)`.
+  - An out-of-order import in `chat.rs` was moved, clearing one old rustfmt hunk.
+- Chunk 2: `row_actions` takes a user ID, and `render_friends_page` allows `too_many_arguments`.
+- Chunk 3:
+  - `check_username` checks only the shape (Stoat judges the name).
+  - `InvalidProperty` is worded on the add-friend path, not in the generic `describe`.
+  - `AddFriendState` is GPUI-free in `src/friends.rs`.
+  - A request that accepts theirs reads "You're now friends with …".
+  - The field has an "ADD FRIEND" label.
+- Chunk 5: the banner is dismissed when Friends is seen (chosen, opened from a notice, or back in front), not whenever it's open. An unknown previous relationship counts as None.
+
+### Definition of Done
+- [x] **The Friends row:** Home's list starts with Friends (with an incoming-request badge), which opens the page.
+- [x] **Remembered:** `FRIENDS` survives `drop_stale_selection` (on reconnect and permission changes) and is saved in `places.json`. Still to be checked by hand.
+- [x] **Tabs:** Online, All, Pending (Incoming, Outgoing) and Blocked, from `friends::friend_lists`, sorted by name. They're live on `UserRelationship` and `UserUpdate`, and unit-tested for every relationship.
+- [x] **Rows:** click opens the card and right-click the menu. The buttons are Accept and Reject, Cancel, Unblock and Message, through `set_relationship` and `message_user`.
+- [x] **Add friend:** `username#1234` sends `POST /users/friend`. Every listed refusal shows readable text under the field (tested).
+- [x] **Badges:** each incoming request adds one to the Home rail, the switcher and the Dock, and the counts clear when it's handled (tested).
+- [x] **Notices:** a new incoming request gives a toast or banner per `notify::delivery`, but not while Busy or with Pending in view. Clicking opens Friends → Pending, and the banner is dismissed once no requests remain or Friends is seen (see Divergences). Banners still need checking by hand, bundled.
+- [x] **The rest of the app is unchanged while Friends is open:**
+  - `current_channel()` is `None`, so there are no acks, typing, history loads or member fetches.
+  - The composer saves its draft through `set_channel(None)` and isn't drawn, so nothing can be sent.
+- [~] **Checks:**
+  - `cargo test` (574 passed) and `cargo clippy --all-targets -- -D warnings` pass.
+  - **Not met:** `cargo fmt --check` still fails, but only because of drift that predates this milestone. No touched file has more hunks than at `6e89d8f` (`chat.rs` went from 18 to 16), and every new file is clean.
+
+### Remaining Manual Steps
+Every chunk's manual check and the plan's Manual Tests 1–6, plus milestone 7's batched checks, which were never done in the app (especially its friend and block flows). Chunks 2, 3 and 5 need a second account, and chunk 5's banners need the bundled app (`scripts/run-bundled.sh`).

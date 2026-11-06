@@ -201,6 +201,9 @@ pub struct ChatView {
     /// macOS banners still showing: channel → the message it's for.
     /// Dismissed once the channel is read past it.
     banners: HashMap<String, String>,
+    /// A friend request's banner is showing. Dismissed once no requests
+    /// are left, or the Friends page is seen.
+    friend_banner: bool,
     /// The image open in the full-size viewer, over everything else.
     viewer: Option<ViewedImage>,
     /// Focused while the viewer is open, so Esc reaches it.
@@ -310,7 +313,10 @@ impl ChatView {
     ) -> Self {
         // Coming back to the window counts as reading what's on screen.
         let activation = cx.observe_window_activation(window, |this, window, cx| {
-            this.maybe_ack_current(window, cx)
+            this.maybe_ack_current(window, cx);
+            if window.is_window_active() && this.active && this.friends_open() {
+                this.dismiss_friend_banner(cx);
+            }
         });
         let root = spawn_io({
             let client = client.clone();
@@ -483,6 +489,7 @@ impl ChatView {
             active: true,
             account_label: None,
             banners: HashMap::new(),
+            friend_banner: false,
             viewer: None,
             viewer_focus: cx.focus_handle(),
             card: None,
@@ -829,7 +836,26 @@ impl ChatView {
                     user.id,
                     user.relationship
                 );
-                self.relationship_changed(*user);
+                let id = user.id.clone();
+                let was = self.relationship_changed(*user).unwrap_or_default();
+                // Only this event can bring a request: the user's own
+                // actions never make anyone Incoming.
+                let window_active = window.is_window_active();
+                let viewing_pending =
+                    self.active && self.friends_open() && self.friends_tab == FriendsTab::Pending;
+                let notice = notify::friend_request_notice(
+                    &self.store,
+                    &id,
+                    &was,
+                    viewing_pending,
+                    window_active,
+                );
+                if let Some(notice) = notice {
+                    match notify::delivery(window_active, crate::banners::available()) {
+                        Delivery::Banner => self.show_friend_banner(notice, cx),
+                        Delivery::Toast => self.show_toast(notice, window, cx),
+                    }
+                }
             }
             ConnectionEvent::Event(_) => return,
             ConnectionEvent::Disconnected { reason, retry_in } => {
@@ -2432,10 +2458,15 @@ impl ChatView {
     }
 
     /// Someone's relationship to the user changed (a route's answer, or
-    /// `UserRelationship`): the card, menus and member list follow.
-    fn relationship_changed(&mut self, person: crate::api::models::User) {
-        self.store.apply_relationship(person);
+    /// `UserRelationship`): the card, menus, member list and Friends page
+    /// follow. Returns how they related before (`None` if unknown).
+    fn relationship_changed(
+        &mut self,
+        person: crate::api::models::User,
+    ) -> Option<crate::api::models::RelationshipStatus> {
+        let was = self.store.apply_relationship(person);
         self.forget_member_lists();
+        was
     }
 
     /// Send a friend request to whoever is typed in the Friends page's
@@ -2850,6 +2881,7 @@ impl ChatView {
     fn select_place(&mut self, place: Place, cx: &mut Context<Self>) {
         self.place = place;
         self.remember_places();
+        self.friends_seen(cx);
         self.ensure_current_loaded(cx);
         cx.notify();
     }
@@ -2895,6 +2927,30 @@ impl ChatView {
         self.banners.insert(notice.channel, message_id);
     }
 
+    /// A macOS banner for a new friend request while RuSToat is in the
+    /// background. All of an account's share one tag, so a newer request
+    /// replaces the older banner, and a click opens Friends → Pending (see
+    /// [`Self::open_channel`]).
+    fn show_friend_banner(&mut self, notice: Notice, cx: &mut Context<Self>) {
+        let notice = self.labelled(notice);
+        log::debug!("banner: {} | {}", notice.title, notice.body);
+        cx.show_system_notification(SystemNotification {
+            tag: notify::banner_tag(&self.account_id, FRIENDS).into(),
+            title: notice.title.into(),
+            body: notice.body.into(),
+            actions: Vec::new(),
+        });
+        self.friend_banner = true;
+    }
+
+    /// Take the friend request's banner away, if one is showing.
+    fn dismiss_friend_banner(&mut self, cx: &mut App) {
+        if std::mem::take(&mut self.friend_banner) {
+            log::debug!("banner: dismissing friend requests");
+            cx.dismiss_system_notification(&notify::banner_tag(&self.account_id, FRIENDS));
+        }
+    }
+
     /// Keep what's outside the window in step with this account, after any
     /// change: take away banners for channels read since (here, in another
     /// session, by posting, or with Mark as read), delete pasted images no
@@ -2915,6 +2971,10 @@ impl ChatView {
             }
             !read
         });
+        // Every request handled (here or elsewhere).
+        if self.friend_banner && crate::friends::incoming_count(&self.store) == 0 {
+            self.dismiss_friend_banner(cx);
+        }
         self.store.attention_count()
     }
 
@@ -2978,7 +3038,8 @@ impl ChatView {
     }
 
     /// Show `channel`: switch to its server (or Home) and select it.
-    /// [`FRIENDS`] opens Home's Friends page.
+    /// [`FRIENDS`] (a friend request's notice) opens Home's Friends page on
+    /// its Pending tab.
     pub fn open_channel(&mut self, channel: &str, cx: &mut Context<Self>) {
         let place = match self.store.channel(channel) {
             Some(crate::api::models::Channel::TextChannel { server, .. }) => {
@@ -2990,7 +3051,11 @@ impl ChatView {
         };
         self.place = place.clone();
         self.selected.insert(place, channel.to_string());
+        if channel == FRIENDS {
+            self.friends_tab = FriendsTab::Pending;
+        }
         self.remember_places();
+        self.friends_seen(cx);
         self.ensure_current_loaded(cx);
         cx.notify();
     }
@@ -2998,8 +3063,17 @@ impl ChatView {
     fn select_channel(&mut self, id: String, cx: &mut Context<Self>) {
         self.selected.insert(self.place.clone(), id);
         self.remember_places();
+        self.friends_seen(cx);
         self.ensure_current_loaded(cx);
         cx.notify();
+    }
+
+    /// After choosing what's open: on the Friends page, its banner has been
+    /// seen.
+    fn friends_seen(&mut self, cx: &mut Context<Self>) {
+        if self.friends_open() {
+            self.dismiss_friend_banner(cx);
+        }
     }
 
     /// Save the open place and picked channels for next launch, if they changed.
