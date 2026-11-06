@@ -571,6 +571,30 @@ impl Composer {
             .is_some_and(|c| !c.suggestions.is_empty() || c.loading)
     }
 
+    /// Put a mention of `user` (a chip labelled `label`, then a space) at
+    /// the cursor, and focus the box: "Mention" in a person's menu.
+    pub fn insert_mention(
+        &mut self,
+        user: &str,
+        label: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let token = TokenRef::User(user.to_string());
+        self.labels.insert(token.token_id(), label.clone());
+        let chip = InlineToken::new(token.token_id(), token.wire_text()).with_label(label);
+        self.input.update(cx, |input, cx| {
+            if let Err(err) = input.replace_with_token(chip, window, cx) {
+                log::warn!("couldn't insert {token:?}: {err}");
+                return;
+            }
+            input.insert(" ", window, cx);
+        });
+        self.last_text = self.input.read(cx).value().to_string();
+        self.focus(window, cx);
+        cx.notify();
+    }
+
     /// Put suggestion `ix` in the box in place of what's being completed.
     fn accept(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(completion) = self.completion.take() else {

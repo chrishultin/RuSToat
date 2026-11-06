@@ -147,6 +147,53 @@ pub fn can_message(store: &ChatStore, user: &str) -> bool {
     friend_or_bot || dm_with(store, user).is_some()
 }
 
+/// An entry in the menu of things to do with a person (right-click, or
+/// the card's "…").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserMenuItem {
+    /// Open their profile card.
+    Profile,
+    /// Open the DM with them (see [`can_message`]).
+    Message,
+    /// Put a mention of them in the message box.
+    Mention,
+    Separator,
+    /// Copy `username#discriminator`.
+    CopyUsername,
+    CopyUserId,
+}
+
+/// The menu for `user`, as seen from `channel`, in the web client's order:
+/// Profile, Message, Mention, then the copy items. Message follows
+/// [`can_message`]; Mention is only for others, in server channels and
+/// groups (where the message box can mention them). Groups are split by
+/// separators.
+pub fn user_menu(store: &ChatStore, user: &str, channel: Option<&str>) -> Vec<UserMenuItem> {
+    use UserMenuItem::*;
+    let me = user == store.me();
+    let mentionable = channel
+        .and_then(|channel| store.channel(channel))
+        .is_some_and(|channel| {
+            matches!(channel, Channel::TextChannel { .. } | Channel::Group { .. })
+        });
+    let mut people = vec![Profile];
+    if can_message(store, user) {
+        people.push(Message);
+    }
+    if mentionable && !me {
+        people.push(Mention);
+    }
+    let groups = [people, vec![CopyUsername, CopyUserId]];
+    let mut items = Vec::new();
+    for group in groups.into_iter().filter(|group| !group.is_empty()) {
+        if !items.is_empty() {
+            items.push(Separator);
+        }
+        items.extend(group);
+    }
+    items
+}
+
 /// A Stoat timestamp as a date. The placeholder a membership gets when an
 /// old server didn't send one (the Unix epoch) counts as unknown.
 fn utc(timestamp: &impl serde::Serialize) -> Option<DateTime<Utc>> {

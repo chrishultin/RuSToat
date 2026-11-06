@@ -5,7 +5,7 @@ use revolt_permissions::DEFAULT_PERMISSION_SERVER;
 use serde_json::{Value, json};
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::api::models::RelationshipStatus;
-use stoat_gpui::profile::{CardRole, can_message, dm_with, profile_card};
+use stoat_gpui::profile::{CardRole, UserMenuItem, can_message, dm_with, profile_card, user_menu};
 use stoat_gpui::store::{ChatStore, PresenceKind};
 
 /// 2026-01-01T00:00:00Z as a ULID prefix, so "account created" is known.
@@ -219,4 +219,51 @@ fn the_dm_with_someone_is_found_open_or_closed() {
     assert_eq!(dm_with(&store, "u-bob"), None);
     // Not Saved Notes, nor a group.
     assert_eq!(dm_with(&store, "u-me"), None);
+}
+
+mod menu {
+    use super::*;
+    use UserMenuItem::*;
+
+    #[test]
+    fn a_friend_in_a_server_channel_has_every_item_in_order() {
+        assert_eq!(
+            user_menu(&store(), "u-bob", Some("ch")),
+            [
+                Profile,
+                Message,
+                Mention,
+                Separator,
+                CopyUsername,
+                CopyUserId
+            ]
+        );
+    }
+
+    #[test]
+    fn mention_is_for_server_channels_and_groups_only() {
+        let store = store();
+        assert!(user_menu(&store, ADA, Some("grp")).contains(&Mention));
+        assert!(!user_menu(&store, ADA, Some("dm")).contains(&Mention));
+        assert!(!user_menu(&store, ADA, None).contains(&Mention));
+    }
+
+    #[test]
+    fn your_own_menu_has_no_message_or_mention() {
+        assert_eq!(
+            user_menu(&store(), "u-me", Some("ch")),
+            [Profile, Separator, CopyUsername, CopyUserId]
+        );
+    }
+
+    #[test]
+    fn message_follows_can_message() {
+        let store = store();
+        assert!(!user_menu(&store, "u-plain", Some("ch")).contains(&Message));
+        assert!(user_menu(&store, "u-bot", Some("ch")).contains(&Message));
+        assert_eq!(
+            user_menu(&store, "u-plain", Some("ch")),
+            [Profile, Mention, Separator, CopyUsername, CopyUserId]
+        );
+    }
 }

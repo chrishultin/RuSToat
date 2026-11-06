@@ -10,7 +10,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::bubble::{Bubble, BubbleContent, BubbleReactions, BubbleVariant};
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
-use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::message::{
     Message as MessageLayout, MessageAlignment, MessageAvatar, MessageContent, MessageFooter,
     MessageHeader,
@@ -41,6 +41,7 @@ use crate::markdown::{InternalLink, JUMBO_TEXT_PX, is_external_link, parse_inter
 use crate::media::MediaUrls;
 use crate::notify::{self, Delivery, Notice, Viewing};
 use crate::places::{Place, Places, PlacesFile};
+use crate::profile::UserMenuItem;
 use crate::runtime::spawn_io;
 use crate::search::{MAX_QUERY_CHARS, PINS_LIMIT, QueryCheck, RESULT_LIMIT, check_query};
 use crate::typing::{OutgoingTyping, TypingSignal, TypingState, typing_label};
@@ -963,9 +964,6 @@ impl ChatView {
             RowAction::ViewImage(image) => {
                 self.viewer = Some(image);
                 window.focus(&self.viewer_focus, cx);
-            }
-            RowAction::OpenCard { user } => {
-                self.open_card(user, window.mouse_position(), window, cx);
             }
             RowAction::ToggleReaction { message, emoji } => {
                 self.picker_for = None;
@@ -2231,6 +2229,7 @@ impl ChatView {
             user: user.clone(),
             channel: self.current_channel().map(|c| c.id),
             position,
+            closing: false,
         });
         window.focus(&self.card_focus, cx);
         let request = spawn_io({
@@ -2323,8 +2322,9 @@ impl ChatView {
         .detach();
     }
 
-    /// The buttons on `user`'s card: Message, if they can be messaged.
-    fn card_actions(&self, user: &str, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// The buttons on `user`'s card: Message, if they can be messaged, and
+    /// "…" for the rest of their menu.
+    fn card_actions(&self, user: &str, people: &People, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut actions = Vec::new();
         if crate::profile::can_message(&self.store, user) {
             let opening = self.dm_opening.as_deref() == Some(user);
@@ -2343,28 +2343,59 @@ impl ChatView {
                     .into_any_element(),
             );
         }
+        actions.push(
+            Button::new("card-more")
+                .ghost()
+                .small()
+                .icon(IconName::Ellipsis)
+                .tooltip("More")
+                .dropdown_menu(people.menu(user, false))
+                .into_any_element(),
+        );
         actions
     }
 
-    /// What clicking a link in Markdown does: a person (a mention, or a name
-    /// in a system message) opens their card, and web links open in the
-    /// browser.
-    fn link_handler(cx: &Context<Self>) -> OnLink {
-        let view = cx.entity().downgrade();
-        Arc::new(move |url, window, cx| match parse_internal_link(url) {
-            Some(InternalLink::User(user)) => {
-                let position = window.mouse_position();
-                view.update(cx, |this, cx| this.open_card(user, position, window, cx))
-                    .ok();
+    /// What the people shown in `channel` do when clicked (see [`People`]).
+    fn people(&self, channel: Option<String>, cx: &Context<Self>) -> People {
+        People {
+            view: cx.entity().downgrade(),
+            channel,
+        }
+    }
+
+    /// An item of a person's menu was chosen.
+    fn on_user_menu(
+        &mut self,
+        user: String,
+        channel: Option<String>,
+        item: UserMenuItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match item {
+            UserMenuItem::Profile => self.open_card(user, window.mouse_position(), window, cx),
+            UserMenuItem::Message => self.message_user(user, window, cx),
+            UserMenuItem::Mention => {
+                let Some(channel) = channel else {
+                    return;
+                };
+                let label = self
+                    .store
+                    .token_label(&channel, &TokenRef::User(user.clone()));
+                self.close_card(false, window, cx);
+                self.composer.update(cx, |composer, cx| {
+                    composer.insert_mention(&user, label, window, cx)
+                });
             }
-            // Channel links don't go anywhere yet.
-            Some(InternalLink::Channel(_)) => {}
-            None => {
-                if is_external_link(url) {
-                    cx.open_url(url);
+            UserMenuItem::CopyUsername => {
+                if let Some(person) = self.store.user(&user) {
+                    let tag = format!("{}#{}", person.username, person.discriminator);
+                    cx.write_to_clipboard(ClipboardItem::new_string(tag));
                 }
             }
-        })
+            UserMenuItem::CopyUserId => cx.write_to_clipboard(ClipboardItem::new_string(user)),
+            UserMenuItem::Separator => {}
+        }
     }
 
     /// Close the profile card. `refocus`: give focus back to the message box
@@ -2378,6 +2409,18 @@ impl ChatView {
                 .update(cx, |composer, cx| composer.focus(window, cx));
         }
         cx.notify();
+    }
+
+    /// A button came up outside the card: close it if it went down outside.
+    fn finish_closing_card(
+        &mut self,
+        _: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.card.as_ref().is_some_and(|card| card.closing) {
+            self.close_card(false, window, cx);
+        }
     }
 
     /// A card opened from another channel than the open one closes.
@@ -2413,13 +2456,14 @@ impl ChatView {
                     markdown,
                 }
             });
-        let on_link = Self::link_handler(cx);
+        let people = self.people(open.channel.clone(), cx);
+        let on_link = people.link_handler();
         let content = CardContent {
             card,
             banner_url,
             bio,
         };
-        let actions = self.card_actions(&open.user, cx);
+        let actions = self.card_actions(&open.user, &people, cx);
         let element = render_profile_card(&content, actions, on_link, cx)
             .id("profile-card")
             .track_focus(&self.card_focus)
@@ -2430,9 +2474,13 @@ impl ChatView {
                     this.close_card(true, window, cx);
                 }
             }))
-            .on_mouse_down_out(
-                cx.listener(|this, _, window, cx| this.close_card(false, window, cx)),
-            )
+            .on_mouse_down_out(cx.listener(|this, _, _, _| {
+                if let Some(card) = &mut this.card {
+                    card.closing = true;
+                }
+            }))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::finish_closing_card))
+            .on_mouse_up_out(MouseButton::Right, cx.listener(Self::finish_closing_card))
             .on_scroll(|_, _, cx| cx.stop_propagation());
         Some(
             deferred(
@@ -3626,7 +3674,7 @@ impl ChatView {
                             })
                             .ok();
                         });
-                        let on_link = Self::link_handler(cx);
+                        let people = self.people(Some(channel.id.clone()), cx);
                         let older = if self.loading_older.contains_key(&channel.id) {
                             Some(
                                 div()
@@ -3724,9 +3772,7 @@ impl ChatView {
                                     SharedString::from(format!("messages-{}", channel.id)),
                                     pane.scroller.clone(),
                                     move |ix, _window, _cx| {
-                                        render_row(
-                                            &rows[ix], colors, &on_action, &on_link, &pickers,
-                                        )
+                                        render_row(&rows[ix], colors, &on_action, &people, &pickers)
                                     },
                                 )
                                 // The scroller's default rows are spaced for whole
@@ -3996,7 +4042,7 @@ impl ChatView {
             choices: Rc::default(),
             open_for: None,
         };
-        let on_link = Self::link_handler(cx);
+        let people = self.people(Some(channel.id.clone()), cx);
         v_flex()
             .flex_1()
             .min_h_0()
@@ -4016,9 +4062,11 @@ impl ChatView {
                     .min_h_0()
                     .overflow_y_scroll()
                     .pb_2()
-                    .children(rows.iter().map(|row| {
-                        render_preview_row(row, colors, &on_action, &on_link, &pickers)
-                    })),
+                    .children(
+                        rows.iter().map(|row| {
+                            render_preview_row(row, colors, &on_action, &people, &pickers)
+                        }),
+                    ),
             )
             .into_any_element()
     }
@@ -4154,12 +4202,7 @@ impl ChatView {
             list.title.clone().into()
         };
         let rows = list.clone();
-        let view = cx.entity().downgrade();
-        let open_card: OpenCardAt = Rc::new(move |user, window, cx| {
-            let position = window.mouse_position();
-            view.update(cx, |this, cx| this.open_card(user, position, window, cx))
-                .ok();
-        });
+        let people = self.people(Some(channel.id.clone()), cx);
         v_flex()
             .id("member-panel")
             .w(px(MEMBER_PANEL_WIDTH))
@@ -4205,7 +4248,7 @@ impl ChatView {
                         list.rows.len(),
                         move |range, _, _| {
                             range
-                                .map(|ix| render_member_row(&rows.rows[ix], colors, &open_card))
+                                .map(|ix| render_member_row(&rows.rows[ix], colors, &people))
                                 .collect::<Vec<_>>()
                         },
                     )
@@ -4264,14 +4307,7 @@ pub(crate) fn hex_colour(css: &str) -> Option<Hsla> {
         .map(|value| Hsla::from(rgb(value)))
 }
 
-/// Opens a person's profile card where the mouse is.
-type OpenCardAt = Rc<dyn Fn(String, &mut Window, &mut App)>;
-
-fn render_member_row(
-    row: &MemberListRow,
-    colors: MemberColors,
-    open_card: &OpenCardAt,
-) -> AnyElement {
+fn render_member_row(row: &MemberListRow, colors: MemberColors, people: &People) -> AnyElement {
     match row {
         MemberListRow::Header { name, count } => h_flex()
             .h(px(MEMBER_ROW_HEIGHT))
@@ -4296,7 +4332,7 @@ fn render_member_row(
                 .as_deref()
                 .and_then(hex_colour)
                 .unwrap_or(colors.foreground);
-            let (open_card, user) = (open_card.clone(), user_id.clone());
+            let (open, user) = (people.clone(), user_id.clone());
             h_flex()
                 .id(SharedString::from(format!("member-{user_id}")))
                 .h(px(MEMBER_ROW_HEIGHT))
@@ -4306,7 +4342,7 @@ fn render_member_row(
                 .rounded_md()
                 .cursor_pointer()
                 .hover(|el| el.bg(colors.hover))
-                .on_click(move |_, window, cx| open_card(user.clone(), window, cx))
+                .on_click(move |_, window, cx| open.open_card(user.clone(), window, cx))
                 .when(!online, |el| el.opacity(0.5))
                 .child(
                     div()
@@ -4355,6 +4391,7 @@ fn render_member_row(
                             )
                         }),
                 )
+                .context_menu(people.menu(user_id, true))
                 .into_any_element()
         }
     }
@@ -4478,9 +4515,6 @@ enum RowAction {
         pin: bool,
         confirmed: bool,
     },
-    /// Open a person's profile card where the mouse is (their name or
-    /// avatar was clicked).
-    OpenCard { user: String },
 }
 
 type OnRowAction = Rc<dyn Fn(RowAction, &mut Window, &mut App)>;
@@ -4493,6 +4527,10 @@ struct OpenCard {
     channel: Option<String>,
     /// Where it was opened, in window coordinates: its top-left corner.
     position: Point<Pixels>,
+    /// A mouse button went down outside it: it closes when the button comes
+    /// back up. (Closing on the press would also close the "…" menu, which
+    /// is outside the card, before a click on one of its items lands.)
+    closing: bool,
 }
 
 #[derive(Clone)]
@@ -4570,7 +4608,7 @@ fn render_row(
     row: &TimelineRow,
     colors: RowColors,
     on_action: &OnRowAction,
-    on_link: &OnLink,
+    people: &People,
     pickers: &Pickers,
 ) -> AnyElement {
     match row {
@@ -4593,10 +4631,10 @@ fn render_row(
             )
             .into_any_element(),
         TimelineRow::Message(message) if message.system => {
-            render_system_row(message, colors, on_link)
+            render_system_row(message, colors, people)
         }
         TimelineRow::Message(message) => {
-            render_message_row(message, colors, on_action, on_link, pickers, false)
+            render_message_row(message, colors, on_action, people, pickers, false)
         }
     }
 }
@@ -4607,18 +4645,18 @@ fn render_preview_row(
     row: &MessageRow,
     colors: RowColors,
     on_action: &OnRowAction,
-    on_link: &OnLink,
+    people: &People,
     pickers: &Pickers,
 ) -> AnyElement {
     if row.system {
-        render_system_row(row, colors, on_link)
+        render_system_row(row, colors, people)
     } else {
-        render_message_row(row, colors, on_action, on_link, pickers, true)
+        render_message_row(row, colors, on_action, people, pickers, true)
     }
 }
 
-fn render_system_row(message: &MessageRow, colors: RowColors, on_link: &OnLink) -> AnyElement {
-    let on_link = on_link.clone();
+fn render_system_row(message: &MessageRow, colors: RowColors, people: &People) -> AnyElement {
+    let on_link = people.link_handler();
     // Centred between the two sides of the conversation. The people in it
     // are links that open their cards.
     h_flex()
@@ -4645,27 +4683,112 @@ fn render_system_row(message: &MessageRow, colors: RowColors, on_link: &OnLink) 
 
 /// `child` (an author's name or avatar), opening `user`'s profile card when
 /// clicked, and only that: the row's own click (a jump) doesn't happen too.
-/// Without a person (a webhook or system message), just `child`.
+/// Right-clicking it opens the person's menu instead of the row's. Without a
+/// person (a webhook or system message), just `child`.
 fn person_target(
     id: SharedString,
     user: Option<&str>,
-    on_action: &OnRowAction,
+    people: &People,
     child: impl IntoElement,
 ) -> AnyElement {
     let Some(user) = user else {
         return div().flex_none().child(child).into_any_element();
     };
-    let (on_action, user) = (on_action.clone(), user.to_string());
+    let (open, target) = (people.clone(), user.to_string());
     div()
         .id(id)
         .flex_none()
         .cursor_pointer()
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
-            on_action(RowAction::OpenCard { user: user.clone() }, window, cx)
+            open.open_card(target.clone(), window, cx)
         })
         .child(child)
+        .context_menu(people.menu(user, true))
         .into_any_element()
+}
+
+/// What the people shown in a channel's views (names, avatars, mentions)
+/// do: open their profile card, or their menu of things to do with them.
+#[derive(Clone)]
+struct People {
+    view: WeakEntity<ChatView>,
+    /// The channel they're shown in (where Mention mentions them).
+    channel: Option<String>,
+}
+
+impl People {
+    /// Open `user`'s card where the mouse is.
+    fn open_card(&self, user: String, window: &mut Window, cx: &mut App) {
+        let position = window.mouse_position();
+        self.view
+            .update(cx, |this, cx| this.open_card(user, position, window, cx))
+            .ok();
+    }
+
+    /// What clicking a link in Markdown does: a person (a mention, or a
+    /// name in a system message) opens their card, and web links open in
+    /// the browser.
+    fn link_handler(&self) -> OnLink {
+        let people = self.clone();
+        Arc::new(move |url, window, cx| match parse_internal_link(url) {
+            Some(InternalLink::User(user)) => people.open_card(user, window, cx),
+            // Channel links don't go anywhere yet.
+            Some(InternalLink::Channel(_)) => {}
+            None => {
+                if is_external_link(url) {
+                    cx.open_url(url);
+                }
+            }
+        })
+    }
+
+    /// `user`'s menu (see [`crate::profile::user_menu`]), worked out when it
+    /// opens. Without `profile`, there's no Profile item (it's for the card).
+    fn menu(
+        &self,
+        user: &str,
+        profile: bool,
+    ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+        let (people, user) = (self.clone(), user.to_string());
+        move |menu, _, cx| {
+            let Some(view) = people.view.upgrade() else {
+                return menu;
+            };
+            let items =
+                crate::profile::user_menu(&view.read(cx).store, &user, people.channel.as_deref());
+            items
+                .into_iter()
+                .filter(|item| profile || *item != UserMenuItem::Profile)
+                .fold(menu, |menu, item| {
+                    let Some((label, icon)) = user_menu_label(item) else {
+                        return menu.separator();
+                    };
+                    let (view, user, channel) =
+                        (people.view.clone(), user.clone(), people.channel.clone());
+                    menu.item(PopupMenuItem::new(label).icon(icon).on_click(
+                        move |_, window, cx| {
+                            view.update(cx, |this, cx| {
+                                this.on_user_menu(user.clone(), channel.clone(), item, window, cx)
+                            })
+                            .ok();
+                        },
+                    ))
+                })
+        }
+    }
+}
+
+/// A person's menu item as shown; `None` for a separator.
+fn user_menu_label(item: UserMenuItem) -> Option<(&'static str, IconName)> {
+    Some(match item {
+        UserMenuItem::Profile => ("Profile", IconName::CircleUser),
+        UserMenuItem::Message => ("Message", IconName::MessageCircle),
+        UserMenuItem::Mention => ("Mention", IconName::AtSign),
+        UserMenuItem::CopyUsername => ("Copy username", IconName::Copy),
+        UserMenuItem::CopyUserId => ("Copy user ID", IconName::IdCard),
+        UserMenuItem::Separator => return None,
+    })
 }
 
 /// Vertical space above the first bubble of a group (between senders).
@@ -4688,7 +4811,7 @@ fn render_message_row(
     message: &MessageRow,
     colors: RowColors,
     on_action: &OnRowAction,
-    on_link: &OnLink,
+    people: &People,
     pickers: &Pickers,
     preview: bool,
 ) -> AnyElement {
@@ -4749,7 +4872,7 @@ fn render_message_row(
                         // A click on a result jumps; it doesn't select.
                         .selectable(!preview)
                         .on_link_click({
-                            let on_link = on_link.clone();
+                            let on_link = people.link_handler();
                             move |url, _, window, cx| on_link(url, window, cx)
                         }),
                 )
@@ -4814,7 +4937,7 @@ fn render_message_row(
         MessageAvatar::new().child(person_target(
             format!("avatar-target-{}", message.id).into(),
             author_id,
-            on_action,
+            people,
             avatar(
                 format!("avatar-{}", message.id),
                 message.avatar.clone(),
@@ -4838,7 +4961,7 @@ fn render_message_row(
             .child(person_target(
                 format!("author-{}", message.id).into(),
                 author_id,
-                on_action,
+                people,
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
                     .when(author_id.is_some(), |el| el.hover(|el| el.underline()))
@@ -4854,13 +4977,10 @@ fn render_message_row(
         .content(
             MessageContent::new()
                 .when(!message.replies.is_empty(), |el| {
-                    el.gap(px(REPLY_GAP)).children(
-                        message
-                            .replies
-                            .iter()
-                            .enumerate()
-                            .map(|(ix, reply)| render_reply_preview(message, ix, reply, colors, on_action)),
-                    )
+                    el.gap(px(REPLY_GAP))
+                        .children(message.replies.iter().enumerate().map(|(ix, reply)| {
+                            render_reply_preview(message, ix, reply, colors, on_action, people)
+                        }))
                 })
                 .bubble(bubble),
         )
@@ -5010,6 +5130,7 @@ fn render_reply_preview(
     reply: &ReplyPreview,
     colors: RowColors,
     on_action: &OnRowAction,
+    people: &People,
 ) -> AnyElement {
     let id = SharedString::from(format!("reply-{}-{ix}", message.id));
     let line = h_flex()
@@ -5041,7 +5162,7 @@ fn render_reply_preview(
                 .child(person_target(
                     format!("{id}-author").into(),
                     author_id,
-                    on_action,
+                    people,
                     h_flex()
                         .gap_1()
                         .child(avatar(

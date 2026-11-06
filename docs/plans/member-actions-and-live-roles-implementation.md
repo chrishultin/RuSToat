@@ -259,3 +259,54 @@ Deferred to the end of the milestone (manual checks are batched).
 
 ### Manual Validation
 Deferred to the end of the milestone (manual checks are batched).
+
+## Chunk 6: Right-click menu on people
+
+### Changes Made
+- `src/profile.rs`:
+  - `UserMenuItem { Profile, Message, Mention, Separator, CopyUsername, CopyUserId }`.
+  - `user_menu(store, user, channel)` builds the menu in the web client's order, with separators between non-empty groups:
+    - Profile always.
+    - Message when `can_message`.
+    - Mention only for others, in server channels and groups.
+    - Copy username and Copy user ID always.
+- `src/ui/composer.rs`: `insert_mention(user, label)` inserts a `<@id>` chip at the cursor and then a space, through the same `replace_with_token` path the emoji picker uses. It records the label first (so no raw `<@01H…>` shows) and focuses the box.
+- `src/ui/chat.rs`:
+  - New `People { view: WeakEntity<ChatView>, channel }` replaces chunk 4's `OnLink` parameter and `ChatView::link_handler`. It's built by `ChatView::people(channel)` and provides:
+    - `open_card(user)`, at the mouse
+    - `link_handler()` (chunk 4's link behaviour)
+    - `menu(user, profile)`: a `PopupMenu` builder that reads `user_menu` from the store when the menu opens, so relationship changes show without re-rendering the row. `profile = false` leaves out Profile, for the card.
+  - `user_menu_label` gives each item's label and icon (CircleUser, MessageCircle, AtSign, Copy, IdCard).
+  - `on_user_menu(user, channel, item)`:
+    - Profile opens the card at the mouse.
+    - Message calls `message_user`.
+    - Mention closes the card and calls `composer.insert_mention` with `store.token_label(channel, @user)`.
+    - Copy username writes `username#discriminator`, and Copy user ID writes the ID.
+  - The menu is attached with `context_menu(people.menu(user, true))` to:
+    - member rows, keyed by their stable `member-{user_id}` ID
+    - `person_target`, which covers author avatars and names (timeline and previews) and reply-preview authors
+  - `person_target` and the member rows now open the card through `People` rather than `RowAction`, so chunk 4's `RowAction::OpenCard` is removed. `render_row`, `render_preview_row`, `render_system_row`, `render_message_row`, `render_reply_preview` and `render_member_row` take `&People`.
+  - `card_actions` adds a ghost "…" button (Ellipsis icon, "More" tooltip) with `dropdown_menu(people.menu(user, false))`.
+  - **Closing on an outside click** is now two steps. A mouse-down outside sets `OpenCard.closing`, and a left or right mouse-up outside (`finish_closing_card`) then closes the card. Closing on the press removed the card and its "…" menu before a click on a menu item (the menu is outside the card's bounds) could land.
+- `tests/profile.rs`: a `menu` module with 4 tests:
+  - a friend in a server channel gets every item, in order
+  - Mention appears in a group, not in a DM or with no channel
+  - your own menu has no Message or Mention
+  - Message follows `can_message` (a plain member doesn't get it, a bot does), with the exact item list for a plain member
+
+### Divergences
+- **System-message names don't get a right-click menu.** The plan listed them among the menu targets, but chunk 4 made them links inside a `TextView`, like mentions, so they can't hold a context menu. Left-click opens their card, and its "…" shows the same items. This is the same trade-off the plan accepted for mentions (Assumption 3).
+- **No composer unit test for `insert_mention`.** The repo has no GPUI window-backed tests, and the composer's text box needs a `Window`. The plan made this test conditional ("if the existing composer tests allow one without a window"). It's covered by the batched manual check (Mention puts a chip in the box, and it sends as a mention).
+- **The card's outside-click close happens on mouse-up**, as described above. This is the plan's chunk 3 risk about outside clicks, solved differently because the "…" menu arrived.
+- **The `People` refactor** replaces chunk 4's separate `on_link` parameter. The behaviour is unchanged.
+- **Look-ahead:** chunk 7's friend and block items extend `UserMenuItem` and `user_menu`, which `People::menu` and `on_user_menu` already route, and its card button joins `card_actions`. No plan change is needed.
+
+### Verification Performed
+- `cargo test --test profile`: 16 passed.
+- `cargo test` (full): 542 passed, 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- `rustfmt --check` hunks: `chat.rs` 18 (`HEAD` 19, because a line this chunk edited had old drift), `composer.rs` 14 (unchanged). The new code in `profile.rs` and `tests/profile.rs` is rustfmt-clean.
+- The format helper script once dropped an import while applying an import-reordering hunk. The build caught it, and the import was restored. The script now refuses any hunk that changes more than whitespace, braces and commas.
+
+### Manual Validation
+Deferred to the end of the milestone (manual checks are batched).
