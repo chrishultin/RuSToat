@@ -113,3 +113,33 @@ Pending (batched to the end).
 
 ### Manual Validation
 Pending (batched to the end).
+
+## Chunk 4: Age gate on mature channels
+
+### Changes Made
+- `src/store.rs`: `is_mature(channel)` is true for a `TextChannel` or `Group` with `nsfw: true`. A server's own `nsfw` is ignored. DMs and Saved Notes are never mature. The existing `apply_channel_update` already merges `nsfw`.
+- `src/safety.rs`: `SafetySettings::allows(channel)` (`adult_confirmed && mature_channels.contains`) and `enter(channel)` (sets both). Tests for each, and for `enter` round-tripping through `SafetyFile`.
+- `src/assets.rs`: a `safety_icons_load` test that `UserX` (chunk 1's row) and `TriangleAlert` (a default component icon) load.
+- `src/ui/chat.rs`:
+  - `age_gate_tick: Option<(channel, bool)>`. The box's state applies only to the channel it was set in; anywhere else it starts as `safety.adult_confirmed`, so it resets on channel change without a hook.
+  - `gated(channel)` = `store.is_mature && !safety.allows`.
+  - `ensure_current_loaded`, `maybe_ack_current`, `search_for`, `toggle_pins` and `jump_to_message` do nothing for a gated channel.
+  - `enter_mature_channel` calls `safety.enter`, saves, resets the box state, then `ensure_current_loaded`.
+  - `render_main` computes `gated`/`usable`. While gated it draws `render_age_gate` in place of the body (built before `theme` is borrowed), and it hides the typing line, the composer, the search box, the pins button, and the file drop target and overlay. The member-list toggle stays.
+  - `render_age_gate`: a centred card, at most `AGE_GATE_WIDTH` (420px) wide, with a 40px `TriangleAlert` in the warning colour, `#name` (or the group's name), "This channel is marked as mature.", the "I confirm that I am at least 18 years old." `Checkbox`, and a primary "Enter channel" button, disabled until ticked.
+  - The `ChannelUpdate` handler now also calls `ensure_current_loaded` when the update is for the open channel, so a channel that stops being mature loads at once. Turning it mature needs nothing: `render_main` checks `gated` on every render, and the handler already notifies.
+- `tests/store_mature.rs` (new): `is_mature` for a mature text channel, a group, a plain channel, a DM, Saved Notes and an unknown channel, and a `ChannelUpdate` turning `nsfw` on and off.
+
+### Divergences
+- Minor: `jump_to_message` is gated too, so a jump can't load a gated channel's history behind the gate. The plan named only `ensure_current_loaded` and `maybe_ack_current`.
+- Minor: the box state is `Option<(channel, bool)>` rather than a `bool` reset on channel change, so no channel-change hook is needed.
+- Minor: when the open channel stops being mature, the `ChannelUpdate` handler loads it straight away.
+- The store tests are in a new `tests/store_mature.rs`. The plan didn't name a file.
+
+### Verification Performed
+- `cargo test --test store_mature`: 2 passed. `cargo test --lib safety assets`: all passed.
+- `cargo test`: 681 passed, 0 failed. `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt: `src/store.rs` (15) and `src/ui/chat.rs` (17) have the same diff as HEAD. `src/safety.rs`, `src/assets.rs` and `tests/store_mature.rs` are formatted and have 0.
+
+### Manual Validation
+Pending (batched to the end).

@@ -113,6 +113,15 @@ mod tests {
         }
     }
 
+    /// The blocked-messages row and the age gate.
+    #[test]
+    fn safety_icons_load() {
+        for icon in [IconName::UserX, IconName::TriangleAlert] {
+            let path = icon.path();
+            assert!(AppAssets.load(&path).unwrap().is_some(), "{path} missing");
+        }
+    }
+
     /// The settings window's sidebar icons.
     #[test]
     fn settings_icons_load() {

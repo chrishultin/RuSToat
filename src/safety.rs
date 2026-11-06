@@ -37,6 +37,19 @@ impl SafetySettings {
     pub fn trust(&mut self, url: &str) -> bool {
         origin(url).is_some_and(|origin| self.trusted_origins.insert(origin))
     }
+
+    /// Whether mature channel `channel` may be shown: the user confirmed
+    /// their age and entered it.
+    pub fn allows(&self, channel: &str) -> bool {
+        self.adult_confirmed && self.mature_channels.contains(channel)
+    }
+
+    /// The age gate's "Enter channel": confirmed 18 or over, and `channel`
+    /// entered.
+    pub fn enter(&mut self, channel: &str) {
+        self.adult_confirmed = true;
+        self.mature_channels.insert(channel.to_string());
+    }
 }
 
 /// The whole file: account key → that account's settings.
@@ -363,6 +376,37 @@ mod tests {
         assert!(mismatch("https://example.com.evil.io", "example.com"));
         assert!(mismatch("mailto:a@evil.io", "example.com"));
         assert!(mismatch("https://example.com", "http://google.com"));
+    }
+
+    #[test]
+    fn a_mature_channel_needs_the_confirmation_and_entering() {
+        let mut settings = SafetySettings::default();
+        assert!(!settings.allows("C1"));
+        settings.mature_channels.insert("C1".into());
+        assert!(!settings.allows("C1"), "not confirmed");
+        settings = SafetySettings {
+            adult_confirmed: true,
+            ..SafetySettings::default()
+        };
+        assert!(!settings.allows("C1"), "not entered");
+        settings.enter("C1");
+        assert!(settings.allows("C1"));
+        assert!(!settings.allows("C2"), "each channel is entered once");
+    }
+
+    #[test]
+    fn entering_is_saved() {
+        let dir = temp_dir("enter");
+        let path = dir.join("safety.json");
+        let mut settings = SafetySettings::default();
+        settings.enter("C1");
+        SafetyFile::at(&path, "https://a", "U1")
+            .save(&settings)
+            .unwrap();
+        let loaded = SafetyFile::at(&path, "https://a", "U1").load();
+        assert!(loaded.adult_confirmed);
+        assert!(loaded.allows("C1"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -2328,6 +2328,16 @@ impl ChatStore {
         crate::permissions::can_mention_everyone(self, &self.me, channel)
     }
 
+    /// Whether `channel` is marked mature (NSFW): a server channel or group
+    /// with `nsfw` set. A server's own `nsfw` doesn't count, as in Stoat's
+    /// web client, and DMs and Saved Notes can't be mature.
+    pub fn is_mature(&self, channel: &str) -> bool {
+        matches!(
+            self.channels.get(channel),
+            Some(Channel::TextChannel { nsfw: true, .. } | Channel::Group { nsfw: true, .. })
+        )
+    }
+
     /// Whether the right-hand panel can list `channel`'s people: server
     /// channels and groups, not DMs or Saved Notes.
     pub fn has_member_list(&self, channel: &str) -> bool {

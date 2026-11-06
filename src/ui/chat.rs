@@ -243,6 +243,9 @@ pub struct ChatView {
     /// The external link the open "External links can be dangerous!" dialog
     /// asks about.
     link_prompt: Option<LinkPrompt>,
+    /// The age gate's "I am at least 18" box, as the user set it in this
+    /// channel. In any other channel it starts as `safety.adult_confirmed`.
+    age_gate_tick: Option<(String, bool)>,
     /// File server base URL for icons, from `GET /`. `None` until loaded.
     /// Where images come from. Only the API base is known until `GET /` loads.
     media: MediaUrls,
@@ -601,6 +604,7 @@ impl ChatView {
             safety_file,
             safety,
             link_prompt: None,
+            age_gate_tick: None,
             media,
             web_app: None,
             unread_marker: None,
@@ -831,8 +835,12 @@ impl ChatView {
                 // A hidden channel, or a DM closed elsewhere, can't stay open.
                 let selected = self.selected.len();
                 self.drop_stale_selection();
+                let open = self.current_channel().is_some_and(|c| c.id == id);
                 if self.selected.len() != selected {
                     self.remember_places();
+                    self.ensure_current_loaded(cx);
+                } else if open {
+                    // It may no longer be marked mature, so not gated.
                     self.ensure_current_loaded(cx);
                 }
             }
@@ -1249,6 +1257,10 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Nothing loads behind the age gate.
+        if self.gated(channel) {
+            return;
+        }
         if self.store.has_message(channel, &id) {
             self.jumps.remove(channel);
             self.store.reveal_blocked_run_of(channel, &id);
@@ -1697,6 +1709,9 @@ impl ChatView {
         let Some(channel) = self.current_channel().map(|c| c.id) else {
             return;
         };
+        if self.gated(&channel) {
+            return;
+        }
         let sort = self.search_sort(&channel);
         match check_query(&text) {
             QueryCheck::Empty => {}
@@ -1841,6 +1856,9 @@ impl ChatView {
         let Some(channel) = self.current_channel().map(|c| c.id) else {
             return;
         };
+        if self.gated(&channel) {
+            return;
+        }
         if matches!(&self.side_panel, SidePanel::Pins(panel) if panel.channel == channel) {
             self.close_pins(cx);
         } else {
@@ -3480,9 +3498,27 @@ impl ChatView {
         if let Some(channel) = self.current_channel()
             && self.store.history(&channel.id).is_none()
             && !self.loading.contains_key(&channel.id)
+            && !self.gated(&channel.id)
         {
             self.load_history(channel.id, cx);
         }
+    }
+
+    /// Whether `channel` is behind the age gate: marked mature, and the user
+    /// hasn't entered it (see [`SafetySettings::allows`]). Until they do, it
+    /// isn't loaded, marked read or searched.
+    fn gated(&self, channel: &str) -> bool {
+        self.store.is_mature(channel) && !self.safety.allows(channel)
+    }
+
+    /// The age gate's "Enter channel": remember that the user is 18 or over
+    /// and entered `channel`, then load it.
+    fn enter_mature_channel(&mut self, channel: &str, cx: &mut Context<Self>) {
+        self.safety.enter(channel);
+        self.save_safety();
+        self.age_gate_tick = None;
+        self.ensure_current_loaded(cx);
+        cx.notify();
     }
 
     fn load_history(&mut self, channel: String, cx: &mut Context<Self>) {
@@ -3955,7 +3991,7 @@ impl ChatView {
         let Some(channel) = self.current_channel().map(|c| c.id) else {
             return;
         };
-        if self.held_unread.as_ref() == Some(&channel) {
+        if self.held_unread.as_ref() == Some(&channel) || self.gated(&channel) {
             return;
         }
         // What's on screen isn't the newest message, so reading it says
@@ -4623,6 +4659,9 @@ impl ChatView {
         }
         let theme = cx.theme();
         let channel = self.current_channel();
+        // Behind the age gate: no messages, message box, search or pins.
+        let gated = channel.as_ref().is_some_and(|c| self.gated(&c.id));
+        let usable = channel.is_some() && !gated;
         let banner = match (&self.status, self.has_ready) {
             (Status::Reconnecting { reason, retry_in }, _) => Some(format!(
                 "Connection lost ({reason}). Retrying in {}s…",
@@ -4677,9 +4716,9 @@ impl ChatView {
             })
             // Right side: search in every channel, but DMs and Saved Notes
             // have no member list to toggle.
-            .when(channel.is_some(), |el| el.child(search_box))
+            .when(usable, |el| el.child(search_box))
             // Pins are in every channel.
-            .when(channel.is_some(), |el| {
+            .when(usable, |el| {
                 let open = matches!(
                     (&self.side_panel, &channel),
                     (SidePanel::Pins(panel), Some(c)) if panel.channel == c.id
@@ -4715,6 +4754,10 @@ impl ChatView {
             );
 
         let side_panel = channel.as_ref().and_then(|c| self.render_side_panel(c, cx));
+        let age_gate = channel
+            .as_ref()
+            .filter(|_| gated)
+            .map(|c| self.render_age_gate(c, cx));
         let colors = row_colors(cx);
         let theme = cx.theme();
         let placeholder = |text: SharedString| {
@@ -4728,6 +4771,7 @@ impl ChatView {
                 .into_any_element()
         };
         let body = match &channel {
+            _ if let Some(gate) = age_gate => gate,
             None if self.has_ready => placeholder("Pick a conversation from the sidebar.".into()),
             None => placeholder("Loading your servers and conversations…".into()),
             Some(channel) => {
@@ -4904,7 +4948,7 @@ impl ChatView {
 
         let (warning, warning_foreground) = (theme.warning, theme.warning_foreground);
         let mut conversation = v_flex().flex_1().min_w_0().h_full().child(body);
-        if let Some(channel) = &channel {
+        if let Some(channel) = channel.as_ref().filter(|_| !gated) {
             conversation = conversation
                 .child(self.render_typing_line(&channel.id, cx))
                 .child(self.composer.clone());
@@ -4917,7 +4961,7 @@ impl ChatView {
             // Files dropped anywhere on the conversation are attached.
             .relative()
             .group(DROP_GROUP)
-            .when(channel.is_some(), |el| {
+            .when(usable, |el| {
                 el.on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                     // The image viewer covers the conversation.
                     if this.viewer.is_some() {
@@ -4948,7 +4992,75 @@ impl ChatView {
                     .child(conversation)
                     .when_some(side_panel, |el, panel| el.child(panel)),
             )
-            .when(channel.is_some(), |el| el.child(render_drop_overlay(cx)))
+            .when(usable, |el| el.child(render_drop_overlay(cx)))
+            .into_any_element()
+    }
+
+    /// In place of a mature channel's messages until the user enters it:
+    /// what it is, an "I am at least 18" box, and "Enter channel".
+    fn render_age_gate(&self, channel: &ChannelEntry, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let ticked = match &self.age_gate_tick {
+            Some((id, ticked)) if *id == channel.id => *ticked,
+            _ => self.safety.adult_confirmed,
+        };
+        let name = match channel.kind {
+            ChannelKind::Text { .. } => format!("#{}", channel.name),
+            _ => channel.name.clone(),
+        };
+        let (tick_id, enter_id) = (channel.id.clone(), channel.id.clone());
+        v_flex()
+            .flex_1()
+            .items_center()
+            .justify_center()
+            .p_6()
+            .child(
+                v_flex()
+                    .max_w(px(AGE_GATE_WIDTH))
+                    .items_center()
+                    .gap_3()
+                    .p_6()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.secondary)
+                    .child(
+                        Icon::new(IconName::TriangleAlert)
+                            .size(px(40.))
+                            .text_color(theme.warning),
+                    )
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::BOLD)
+                            .text_center()
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child("This channel is marked as mature."),
+                    )
+                    .child(
+                        Checkbox::new("age-gate-confirm")
+                            .label("I confirm that I am at least 18 years old.")
+                            .checked(ticked)
+                            .on_click(cx.listener(move |this, ticked: &bool, _, cx| {
+                                this.age_gate_tick = Some((tick_id.clone(), *ticked));
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("age-gate-enter")
+                            .primary()
+                            .label("Enter channel")
+                            .disabled(!ticked)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.enter_mature_channel(&enter_id, cx)
+                            })),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -7202,6 +7314,9 @@ fn viewable_embed_image(
         .cursor_pointer()
         .on_click(move |_, window, cx| on_action(RowAction::ViewImage(viewed.clone()), window, cx))
 }
+
+/// Widest the age gate's card gets.
+const AGE_GATE_WIDTH: f32 = 420.;
 
 /// Widest an embed card gets: a large image plus the card's padding and bar.
 const EMBED_CARD_MAX_WIDTH: f32 = 432.;
