@@ -127,3 +127,35 @@ The user marked a message unread and confirmed the following. The unread dot and
 
 ### Manual Validation
 The user folded a category (its channels hid except the open one), had a mention reappear in a folded category, and relaunched with the category still folded. All confirmed.
+
+## Chunk 5: Keyboard shortcuts in a channel
+
+### Changes Made
+- `src/nav.rs` (new, in `lib.rs`): `neighbour(items, current, step, eligible)` finds the eligible item `step` places away, wrapping round and never returning `current`. With no current (or one not listed) it starts from the matching end. Plain data, no GPUI.
+- `src/ui/chat.rs`:
+  - `actions!(chat, [PrevChannel, NextChannel, PrevUnread, NextUnread, PrevServer, NextServer, JumpToPresent, MarkServerRead])`.
+  - `chat::init(cx)` binds ⌥↑/↓, ⌥⇧↑/↓, ⌘⌥↑/↓, Esc and ⇧Esc in the `ChatView` key context. It binds ⌥⇧↑/↓ and ⌘⌥↑/↓ again in `ChatView > Input`, so that inside the chat view they beat the text input's add-cursor-above/below bindings for the same keys. That works because GPUI prefers the later binding at equal depth, and `chat::init` runs after `gpui_kit::init`.
+  - The render root has `key_context("ChatView")` and the action handlers. It also handles the input's `Escape` action when it bubbles up unhandled.
+  - `move_channel(step, unread_only)` walks `visible_sections()` (folded channels skipped), with Home's Friends row first. `move_server(step)` walks Home then `store.servers()`. Both select through the existing `select_channel` and `select_place`.
+  - `go_to_present`: at the present it scrolls the pane to the end; otherwise it calls the existing `jump_to_present`. Then `mark_read_now` acks the latest message straight away (cancelling any pending ack and releasing a "Mark as unread" hold).
+  - ⇧Esc calls the existing `mark_server_read` for the open server; on Home it does nothing.
+  - `shortcuts_blocked` makes every handler `cx.propagate()` while the image viewer or emoji picker is open, so their own Esc and arrow keys still work. GPUI dispatches actions before key-down listeners, and the viewer closes on a key-down.
+- `src/ui/composer.rs`: `emoji_picker_open()`. Esc already fell through (`on_escape` calls `cx.propagate()` when there's no edit or reply to cancel, and completion has its own capture), so nothing else changed.
+- `src/main.rs`: calls `ui::chat::init(cx)` right after `gpui_kit::init(cx)`.
+- `tests/nav.rs` (new): next and previous wrap, no current item, unread-only filtering (the current item never counts), Home-then-servers order, and single or empty lists.
+
+### Divergences
+- **Minor (Open Question resolved):** the input binds nothing to ⌥↑/⌥↓, so those keys don't move the cursor in the message box. The channel moves therefore work everywhere in the chat view, including the message box. The plan's fallback ("only when the box is empty or unfocused") wasn't needed.
+- **Minor:** the text input binds ⌥⇧↑/↓ and ⌘⌥↑/↓ to multi-cursor editing, which the plan didn't anticipate. Those keys were also bound in the `ChatView > Input` context, so the shortcuts win inside the chat view. The search and dialog inputs elsewhere keep the input's own behaviour only outside the chat view.
+- **Wraps or stops:** every walker **wraps round**, as the manual check asked us to decide.
+- **Minor:** Home's Friends row counts as a channel for ⌥↑/↓, but it's never "unread" for ⌥⇧↑/↓.
+- **Minor:** the walker is `crate::nav::neighbour`, in a non-UI module so `tests/` can reach it.
+
+### Verification Performed
+- `cargo test --test nav`: 5 passed.
+- `cargo test`: 598 passed, 0 failed, 5 ignored.
+- `cargo clippy --all-targets`: no warnings.
+- `src/nav.rs`, `tests/nav.rs` and `src/main.rs` are rustfmt-clean. Drift in `chat.rs` and `composer.rs` is unchanged (17 and 14).
+
+### Manual Validation
+The user went through ⌥↑/↓, ⌥⇧↑/↓, ⌘⌥↑/↓, Esc (scrolled up, and in the message box while editing, replying and autocompleting) and ⇧Esc, and confirmed they all work.

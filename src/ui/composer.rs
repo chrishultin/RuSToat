@@ -564,6 +564,11 @@ impl Composer {
         self.completion.as_ref().map(|c| &c.query)
     }
 
+    /// Whether the emoji picker is open (it has Esc and the arrow keys).
+    pub fn emoji_picker_open(&self) -> bool {
+        self.emoji_picker.is_some()
+    }
+
     /// The list is open (there's something to pick, or it's loading).
     fn completing(&self) -> bool {
         self.completion

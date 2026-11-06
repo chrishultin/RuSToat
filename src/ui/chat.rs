@@ -58,6 +58,57 @@ use crate::ui::friends::{RowButtons, render_add_friend, render_friends_page};
 use crate::ui::math::MathPlugin;
 use crate::ui::profile_card::{CardBio, CardContent, OnLink, render_profile_card};
 
+actions!(
+    chat,
+    [
+        /// The channel above the open one in the list (⌥↑).
+        PrevChannel,
+        /// The channel below the open one (⌥↓).
+        NextChannel,
+        /// The nearest unread channel above (⌥⇧↑).
+        PrevUnread,
+        /// The nearest unread channel below (⌥⇧↓).
+        NextUnread,
+        /// The server above in the rail, Home first (⌘⌥↑).
+        PrevServer,
+        /// The server below in the rail (⌘⌥↓).
+        NextServer,
+        /// Go to the newest message and mark the channel read (Esc).
+        JumpToPresent,
+        /// Mark the open server read (⇧Esc).
+        MarkServerRead,
+    ]
+);
+
+/// The key context of a [`ChatView`]: its shortcuts work anywhere in it.
+const KEY_CONTEXT: &str = "ChatView";
+
+/// Bind the chat shortcuts. Call after `gpui_kit::init`, so the message
+/// box's own bindings for the same keys (extra cursors) lose to these.
+pub fn init(cx: &mut App) {
+    // Text fields bind these to extra cursors; a chat box has no use for
+    // those, so in the chat view the keys move around instead.
+    let moves = |context| {
+        [
+            KeyBinding::new("alt-shift-up", PrevUnread, Some(context)),
+            KeyBinding::new("alt-shift-down", NextUnread, Some(context)),
+            KeyBinding::new("cmd-alt-up", PrevServer, Some(context)),
+            KeyBinding::new("cmd-alt-down", NextServer, Some(context)),
+        ]
+    };
+    cx.bind_keys(moves(KEY_CONTEXT));
+    cx.bind_keys(moves("ChatView > Input"));
+    cx.bind_keys([
+        // Text fields don't use these, so they work in the message box too.
+        KeyBinding::new("alt-up", PrevChannel, Some(KEY_CONTEXT)),
+        KeyBinding::new("alt-down", NextChannel, Some(KEY_CONTEXT)),
+        KeyBinding::new("shift-escape", MarkServerRead, Some(KEY_CONTEXT)),
+        // In a text field, Esc is the field's own `Escape` first; when
+        // nothing there uses it, it reaches the view (`on_escape`).
+        KeyBinding::new("escape", JumpToPresent, Some(KEY_CONTEXT)),
+    ]);
+}
+
 /// How many messages to load when a channel is opened.
 pub const HISTORY_PAGE: usize = 50;
 
@@ -3803,6 +3854,106 @@ impl ChatView {
         .detach();
     }
 
+    /// Whether a shortcut should leave the keys alone: the image viewer or
+    /// the emoji picker is open, and they're its keys.
+    fn shortcuts_blocked(&self, cx: &App) -> bool {
+        self.viewer.is_some() || self.composer.read(cx).emoji_picker_open()
+    }
+
+    /// ⌥↑/⌥↓ (and with ⇧, `unread_only`): open the channel `step` places
+    /// away in the list as shown (folded channels are skipped), wrapping
+    /// round at the ends. Home's Friends row counts as a channel.
+    fn move_channel(&mut self, step: isize, unread_only: bool, cx: &mut Context<Self>) {
+        if self.shortcuts_blocked(cx) {
+            cx.propagate();
+            return;
+        }
+        let mut ids = Vec::new();
+        let mut unread = HashSet::new();
+        if self.place == Place::Home && self.has_ready {
+            ids.push(FRIENDS.to_string());
+        }
+        for channel in self.visible_sections().into_iter().flat_map(|s| s.channels) {
+            if channel.unread || channel.mentions > 0 {
+                unread.insert(channel.id.clone());
+            }
+            ids.push(channel.id);
+        }
+        let current = if self.friends_open() {
+            Some(FRIENDS.to_string())
+        } else {
+            self.current_channel().map(|c| c.id)
+        };
+        let next = crate::nav::neighbour(&ids, current.as_ref(), step, |id| {
+            !unread_only || unread.contains(id)
+        });
+        if let Some(id) = next.cloned() {
+            self.select_channel(id, cx);
+        }
+    }
+
+    /// ⌘⌥↑/⌘⌥↓: open the place `step` away in the rail (Home, then the
+    /// servers), wrapping round at the ends.
+    fn move_server(&mut self, step: isize, cx: &mut Context<Self>) {
+        if self.shortcuts_blocked(cx) {
+            cx.propagate();
+            return;
+        }
+        let places: Vec<Place> = std::iter::once(Place::Home)
+            .chain(
+                self.store
+                    .servers()
+                    .into_iter()
+                    .map(|s| Place::Server(s.id)),
+            )
+            .collect();
+        if let Some(place) = crate::nav::neighbour(&places, Some(&self.place), step, |_| true) {
+            self.select_place(place.clone(), cx);
+        }
+    }
+
+    /// Esc: show the open channel's newest message and mark it read now.
+    /// In the message box, only once Esc has nothing to cancel there.
+    fn go_to_present(&mut self, cx: &mut Context<Self>) {
+        let channel = self.current_channel().map(|c| c.id);
+        let Some(channel) = channel.filter(|_| !self.shortcuts_blocked(cx)) else {
+            cx.propagate();
+            return;
+        };
+        if self.store.is_at_present(&channel) {
+            if let Some(pane) = self.panes.get(&channel) {
+                pane.scroller
+                    .update(cx, |scroller, cx| scroller.scroll_to_end(cx));
+            }
+        } else {
+            self.jump_to_present(channel.clone(), cx);
+        }
+        self.mark_read_now(&channel, cx);
+    }
+
+    /// Mark `channel` read straight away (no [`ACK_DELAY`]), even if the
+    /// user marked it unread.
+    fn mark_read_now(&mut self, channel: &str, cx: &mut Context<Self>) {
+        if self.held_unread.as_deref() == Some(channel) {
+            self.held_unread = None;
+        }
+        let Some(latest) = self.store.unacked_latest(channel) else {
+            return;
+        };
+        self.pending_ack = None;
+        self.store.apply_ack(channel, &latest);
+        self.post_ack(channel, &latest, "Esc", cx);
+        cx.notify();
+    }
+
+    /// ⇧Esc: mark the open server read. Nothing on Home.
+    fn on_mark_server_read(&mut self, _: &MarkServerRead, _: &mut Window, cx: &mut Context<Self>) {
+        match &self.place {
+            Place::Server(id) => self.mark_server_read(id.clone(), cx),
+            Place::Home => cx.propagate(),
+        }
+    }
+
     fn retry_older(&mut self, channel: String, cx: &mut Context<Self>) {
         self.older_errors.remove(&channel);
         self.load_older(channel, cx);
@@ -7106,6 +7257,16 @@ impl Render for ChatView {
         let theme = cx.theme();
         let (background, foreground) = (theme.background, theme.foreground);
         div()
+            .key_context(KEY_CONTEXT)
+            .on_action(cx.listener(|this, _: &PrevChannel, _, cx| this.move_channel(-1, false, cx)))
+            .on_action(cx.listener(|this, _: &NextChannel, _, cx| this.move_channel(1, false, cx)))
+            .on_action(cx.listener(|this, _: &PrevUnread, _, cx| this.move_channel(-1, true, cx)))
+            .on_action(cx.listener(|this, _: &NextUnread, _, cx| this.move_channel(1, true, cx)))
+            .on_action(cx.listener(|this, _: &PrevServer, _, cx| this.move_server(-1, cx)))
+            .on_action(cx.listener(|this, _: &NextServer, _, cx| this.move_server(1, cx)))
+            .on_action(cx.listener(|this, _: &JumpToPresent, _, cx| this.go_to_present(cx)))
+            .on_action(cx.listener(|this, _: &Escape, _, cx| this.go_to_present(cx)))
+            .on_action(cx.listener(Self::on_mark_server_read))
             .relative()
             .size_full()
             .child(

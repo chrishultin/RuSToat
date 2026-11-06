@@ -56,6 +56,8 @@ fn main() {
     });
     app.run(|cx| {
         gpui_kit::init(cx);
+        // After gpui_kit's bindings, so the chat shortcuts win over theirs.
+        ui::chat::init(cx);
 
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);

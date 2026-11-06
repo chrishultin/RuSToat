@@ -19,6 +19,7 @@ pub mod http;
 pub mod links;
 pub mod markdown;
 pub mod math;
+pub mod nav;
 pub mod media;
 pub mod notify;
 pub mod permissions;
