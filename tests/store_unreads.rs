@@ -450,6 +450,7 @@ fn shape(rows: &[TimelineRow]) -> Vec<String> {
             TimelineRow::NewMessages => "new".to_string(),
             TimelineRow::Message(m) if m.continuation => format!("{}+", &m.id[22..]),
             TimelineRow::Message(m) => m.id[22..].to_string(),
+            TimelineRow::Blocked { .. } => "blocked".to_string(),
         })
         .collect()
 }

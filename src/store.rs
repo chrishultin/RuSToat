@@ -96,6 +96,12 @@ pub enum TimelineRow {
     /// "New messages": where the user left off (see [`with_unread_divider`]).
     NewMessages,
     Message(MessageRow),
+    /// A run of consecutive messages from users the user blocked, hidden
+    /// behind "N blocked messages" until clicked (see
+    /// [`ChatStore::reveal_blocked`]). Their IDs, oldest first.
+    Blocked {
+        ids: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,6 +169,9 @@ pub const MAX_REPLIES: usize = 5;
 
 /// Longest reply-preview snippet, in characters.
 pub const SNIPPET_CHARS: usize = 100;
+
+/// Who a reply preview says wrote the original, when it's a blocked user.
+pub const BLOCKED_AUTHOR: &str = "Blocked user";
 
 /// The "↱ Name: snippet" line above a reply.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -500,6 +509,8 @@ pub struct ChatStore {
     revealed_images: HashSet<String>,
     /// Spoilers the user clicked to see, as (message ID, spoiler index).
     revealed_spoilers: HashSet<(String, usize)>,
+    /// Messages from blocked users the user clicked to see, by ID.
+    revealed_blocked: HashSet<String>,
     /// Read positions by channel ID.
     read_states: HashMap<String, ReadState>,
     /// The user's notification levels and mutes.
@@ -979,6 +990,16 @@ impl ChatStore {
             },
         };
         match original {
+            // Not who it is, nor what they said (as Stoat's web client).
+            Ok(original) if self.is_blocked(&original.author) => ReplyPreview {
+                id: id.to_string(),
+                author: BLOCKED_AUTHOR.into(),
+                author_id: None,
+                avatar: None,
+                snippet: String::new(),
+                mentions_author: false,
+                state: ReplyState::Loaded,
+            },
             Ok(original) => ReplyPreview {
                 id: id.to_string(),
                 author: self.author_name(original),
@@ -1919,6 +1940,39 @@ impl ChatStore {
         self.revealed_spoilers.insert((message.to_string(), index));
     }
 
+    /// Show these messages from blocked users (a [`TimelineRow::Blocked`]
+    /// row's IDs) for the rest of the session.
+    pub fn reveal_blocked(&mut self, ids: impl IntoIterator<Item = String>) {
+        self.revealed_blocked.extend(ids);
+    }
+
+    /// If message `id` in `channel` is hidden in a run of blocked messages,
+    /// show that run (to jump to it). Returns true if it was hidden.
+    pub fn reveal_blocked_run_of(&mut self, channel: &str, id: &str) -> bool {
+        let hidden = self
+            .timeline(channel)
+            .into_iter()
+            .find_map(|row| match row {
+                TimelineRow::Blocked { ids } if ids.iter().any(|i| i == id) => Some(ids),
+                _ => None,
+            });
+        match hidden {
+            Some(ids) => {
+                self.reveal_blocked(ids);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether the user blocked `user`. Not whether `user` blocked them
+    /// (`BlockedOther`), which hides nothing.
+    pub fn is_blocked(&self, user: &str) -> bool {
+        self.users
+            .get(user)
+            .is_some_and(|u| u.relationship == crate::api::models::RelationshipStatus::Blocked)
+    }
+
     /// A user's own avatar, or their generated default.
     pub fn user_avatar_url(&self, user_id: &str) -> String {
         self.users
@@ -2071,7 +2125,22 @@ impl ChatStore {
                                 at.saturating_sub(prev) / 60_000 < GROUP_WINDOW_MINUTES
                             })
                     });
-            let mut row = self.message_row(message, author.clone(), continuation);
+            previous = Some((&message.author, author.clone(), millis, system));
+            // From a blocked user and not clicked open: folded into the run.
+            if pending.is_none()
+                && !system
+                && self.is_blocked(&message.author)
+                && !self.revealed_blocked.contains(&message.id)
+            {
+                match rows.last_mut() {
+                    Some(TimelineRow::Blocked { ids }) => ids.push(message.id.clone()),
+                    _ => rows.push(TimelineRow::Blocked {
+                        ids: vec![message.id.clone()],
+                    }),
+                }
+                continue;
+            }
+            let mut row = self.message_row(message, author, continuation);
             row.can_pin = can_pin && pending.is_none() && !system;
             if let Some(pending) = pending {
                 row.key = pending.key.clone();
@@ -2080,7 +2149,6 @@ impl ChatStore {
                 row.attachments = pending.attachments.iter().map(PendingAttachment::view).collect();
             }
             rows.push(TimelineRow::Message(row));
-            previous = Some((&message.author, author, millis, system));
         }
         mark_group_ends(&mut rows);
         rows
@@ -3054,6 +3122,8 @@ fn row_key(row: &TimelineRow) -> &str {
         TimelineRow::StartOfChannel { .. } => "",
         TimelineRow::NewMessages => "new-messages",
         TimelineRow::Message(message) => &message.key,
+        // Its first message's: revealing it turns it into that message's row.
+        TimelineRow::Blocked { ids } => ids.first().map_or("", String::as_str),
     }
 }
 
@@ -3116,26 +3186,30 @@ fn has_flag(flags: u32, flag: MessageFlags) -> bool {
 
 /// `rows` with a "New messages" divider before the first message after
 /// `after` (the read position when the channel was opened) that isn't the
-/// user's own. The message after it starts a new group.
+/// user's own. The message after it starts a new group. A run of blocked
+/// messages counts as its first message: one that starts before `after` and
+/// ends after it puts the divider after the run.
 ///
 /// No divider if there's no such message, or if `after` is older than every
 /// loaded message and there's older history not loaded: the divider would
 /// sit above the oldest loaded message, which isn't where the user left off.
 pub fn with_unread_divider(mut rows: Vec<TimelineRow>, after: &str) -> Vec<TimelineRow> {
-    fn sent(row: &TimelineRow) -> Option<&MessageRow> {
+    /// A sent message's ID, and whether it's the user's own.
+    fn sent(row: &TimelineRow) -> Option<(&str, bool)> {
         match row {
-            TimelineRow::Message(m) if m.pending.is_none() => Some(m),
+            TimelineRow::Message(m) if m.pending.is_none() => Some((&m.id, m.mine)),
+            TimelineRow::Blocked { ids } => ids.first().map(|id| (id.as_str(), false)),
             _ => None,
         }
     }
     let whole_history = matches!(rows.first(), Some(TimelineRow::StartOfChannel { .. }));
-    let reaches_back = rows.iter().filter_map(sent).any(|m| m.id.as_str() <= after);
+    let reaches_back = rows.iter().filter_map(sent).any(|(id, _)| id <= after);
     if !whole_history && !reaches_back {
         return rows;
     }
     let Some(ix) = rows
         .iter()
-        .position(|row| sent(row).is_some_and(|m| !m.mine && m.id.as_str() > after))
+        .position(|row| sent(row).is_some_and(|(id, mine)| !mine && id > after))
     else {
         return rows;
     };

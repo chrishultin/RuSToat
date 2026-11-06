@@ -953,7 +953,7 @@ impl ChatView {
                     user.relationship
                 );
                 let id = user.id.clone();
-                let was = self.relationship_changed(*user).unwrap_or_default();
+                let was = self.relationship_changed(*user, cx).unwrap_or_default();
                 // Only this event can bring a request: the user's own
                 // actions never make anyone Incoming.
                 let window_active = window.is_window_active();
@@ -1213,6 +1213,10 @@ impl ChatView {
             RowAction::CopyId(id) => cx.write_to_clipboard(ClipboardItem::new_string(id)),
             RowAction::MarkUnread(id) => self.mark_unread(channel, &id, cx),
             RowAction::JumpTo(id) => self.jump_to_message(channel, id, window, cx),
+            RowAction::RevealBlocked(ids) => {
+                self.store.reveal_blocked(ids);
+                self.sync_pane(channel, cx);
+            }
         }
         cx.notify();
     }
@@ -1229,6 +1233,7 @@ impl ChatView {
     ) {
         if self.store.has_message(channel, &id) {
             self.jumps.remove(channel);
+            self.store.reveal_blocked_run_of(channel, &id);
             self.land_jump(channel, &id, cx);
             return;
         }
@@ -1251,6 +1256,7 @@ impl ChatView {
                     let error = match result {
                         Ok(Ok(page)) if page_has_message(&page, &id) => {
                             this.store.set_window(&channel, page, &id, HISTORY_PAGE);
+                            this.store.reveal_blocked_run_of(&channel, &id);
                             // Pages fetched for the old rows would leave a gap here.
                             this.loading_older.remove(&channel);
                             this.loading_newer.remove(&channel);
@@ -2532,7 +2538,7 @@ impl ChatView {
                 let error: SharedString = match result {
                     Ok(Ok(person)) => {
                         log::info!("{action:?} {user}: now {:?}", person.relationship);
-                        this.relationship_changed(person);
+                        this.relationship_changed(person, cx);
                         return;
                     }
                     Ok(Err(err)) if err.relationship_already_done() => {
@@ -2609,9 +2615,19 @@ impl ChatView {
     fn relationship_changed(
         &mut self,
         person: crate::api::models::User,
+        cx: &mut Context<Self>,
     ) -> Option<crate::api::models::RelationshipStatus> {
+        use crate::api::models::RelationshipStatus;
+        let blocked = person.relationship == RelationshipStatus::Blocked;
         let was = self.store.apply_relationship(person);
         self.forget_member_lists();
+        // Their messages fold away, or come back.
+        if blocked != (was == Some(RelationshipStatus::Blocked)) {
+            let loaded: Vec<String> = self.panes.keys().cloned().collect();
+            for channel in loaded {
+                self.sync_pane(&channel, cx);
+            }
+        }
         was
     }
 
@@ -2682,7 +2698,7 @@ impl ChatView {
                             person.relationship
                         );
                         let state = crate::friends::request_sent(&person);
-                        this.relationship_changed(person);
+                        this.relationship_changed(person, cx);
                         this.add_friend_input
                             .update(cx, |input, cx| input.set_value("", window, cx));
                         state
@@ -5436,6 +5452,8 @@ enum RowAction {
     /// Scroll to a message (a reply's original), loading the messages around
     /// it first if it isn't loaded.
     JumpTo(String),
+    /// Show a run of blocked users' messages (by ID).
+    RevealBlocked(Vec<String>),
     /// Reply to a message (from the hover toolbar or the right-click menu).
     Reply(ReplyTarget),
     /// Quote a message (by ID) in the message box.
@@ -5598,7 +5616,39 @@ fn render_row(
         TimelineRow::Message(message) => {
             render_message_row(message, colors, on_action, people, pickers, false)
         }
+        TimelineRow::Blocked { ids } => render_blocked_row(ids, colors, on_action),
     }
+}
+
+/// "N blocked messages": a run of messages from blocked users, which shows
+/// them when clicked.
+fn render_blocked_row(ids: &[String], colors: RowColors, on_action: &OnRowAction) -> AnyElement {
+    let label = match ids.len() {
+        1 => "1 blocked message".to_string(),
+        n => format!("{n} blocked messages"),
+    };
+    let (on_action, ids) = (on_action.clone(), ids.to_vec());
+    h_flex()
+        .w_full()
+        .justify_center()
+        .px_4()
+        .py_1p5()
+        .child(
+            h_flex()
+                .id(SharedString::from(format!("blocked-{}", ids[0])))
+                .gap_1p5()
+                .items_center()
+                .cursor_pointer()
+                .text_xs()
+                .text_color(colors.system)
+                .hover(|this| this.underline())
+                .child(Icon::new(IconName::UserX).xsmall())
+                .child(label)
+                .on_click(move |_, window, cx| {
+                    on_action(RowAction::RevealBlocked(ids.clone()), window, cx)
+                }),
+        )
+        .into_any_element()
 }
 
 /// A search result: a compact message row that jumps to the message when
