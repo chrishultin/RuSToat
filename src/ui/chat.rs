@@ -58,6 +58,7 @@ use crate::store::{
     ReplyPreview, ReplyState, RowOp, ServerEntry, TimelineRow, diff_rows, display_name,
     fold_sections, with_unread_divider,
 };
+use crate::time::format_duration_short;
 use crate::typing::{OutgoingTyping, TypingSignal, TypingState, typing_label};
 use crate::ui::composer::{Composer, ComposerEvent, file_icon};
 use crate::ui::emoji_picker::emoji_grid;
@@ -1495,8 +1496,9 @@ impl ChatView {
         });
     }
 
-    /// The "Ada is typing…" line above the message box. Always there, empty
-    /// when nobody's typing, so the list above doesn't move.
+    /// The "Ada is typing…" line above the message box, with the channel's
+    /// slowmode at its right end. Always there, empty when nobody's typing,
+    /// so the list above doesn't move.
     fn render_typing_line(&self, channel: &str, cx: &mut Context<Self>) -> Div {
         let names: Vec<String> = self
             .typing
@@ -1504,14 +1506,45 @@ impl ChatView {
             .into_iter()
             .map(|user| self.store.name_in(channel, user))
             .collect();
-        div()
+        h_flex()
             .h(px(TYPING_LINE_HEIGHT))
             .flex_none()
             .px_5()
+            .gap_2()
             .text_xs()
             .text_color(cx.theme().muted_foreground)
-            .truncate()
-            .children(typing_label(&names))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .children(typing_label(&names)),
+            )
+            .children(self.render_slowmode_badge(channel))
+    }
+
+    /// `channel`'s slowmode, if it has one: "Slowmode 30s", or "Slowmode
+    /// (exempt)" for those who may bypass it.
+    fn render_slowmode_badge(&self, channel: &str) -> Option<AnyElement> {
+        let secs = self.store.slowmode(channel)?;
+        let duration = format_duration_short(secs);
+        let label = if self.store.can_bypass_slowmode(channel) {
+            "Slowmode (exempt)".to_string()
+        } else {
+            format!("Slowmode {duration}")
+        };
+        let tooltip: SharedString =
+            format!("Members can send one message every {duration}.").into();
+        Some(
+            h_flex()
+                .id("slowmode")
+                .flex_none()
+                .gap_1()
+                .child(Icon::new(IconName::Clock).xsmall())
+                .child(label)
+                .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                .into_any_element(),
+        )
     }
 
     /// Answer the message box's `query` with suggestions from what's known

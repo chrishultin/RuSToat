@@ -2318,6 +2318,12 @@ impl ChatStore {
         crate::permissions::can_pin(self, &self.me, channel)
     }
 
+    /// Whether the user is exempt from `channel`'s slowmode
+    /// (see [`crate::permissions::can_bypass_slowmode`]).
+    pub fn can_bypass_slowmode(&self, channel: &str) -> bool {
+        crate::permissions::can_bypass_slowmode(self, &self.me, channel)
+    }
+
     /// Whether the user may mention roles in `channel`.
     pub fn can_mention_roles(&self, channel: &str) -> bool {
         crate::permissions::can_mention_roles(self, &self.me, channel)
@@ -2907,6 +2913,18 @@ impl ChatStore {
 
     pub fn channel(&self, id: &str) -> Option<&Channel> {
         self.channels.get(id)
+    }
+
+    /// `channel`'s slowmode, in seconds: how long members must wait between
+    /// messages. Only server text channels have one; `None` when it's off.
+    pub fn slowmode(&self, channel: &str) -> Option<u64> {
+        match self.channel(channel)? {
+            Channel::TextChannel {
+                slowmode: Some(secs),
+                ..
+            } if *secs > 0 => Some(*secs),
+            _ => None,
+        }
     }
 
     /// Every channel the client knows, in no order.

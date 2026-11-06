@@ -47,3 +47,42 @@ Starting rustfmt `Diff in` counts (`rustfmt --edition 2024 --check <file>`): `sr
 
 ### Manual Validation
 Pending (batched to the end). Also check scrolling with ~300 results (plan risk: the result list isn't virtualized).
+
+## Chunk 2: Show a channel's slowmode
+
+### Changes Made
+- `src/permissions.rs`: `can_bypass_slowmode(store, user, channel)`: a server channel and `BypassSlowmode` (owners have it through `GrantAllSafe`). Manage Messages doesn't count.
+- `src/store.rs`:
+  - `slowmode(channel) -> Option<u64>`: `Some(secs)` only for a `TextChannel` with `slowmode > 0`.
+  - `can_bypass_slowmode(channel)`, the logged-in user's wrapper beside `can_pin`.
+- `src/time.rs`:
+  - `format_duration_short(secs)`: "5s", "10m", "1m 30s", "1h 30m", "6h". Hours leave out the seconds.
+  - `format_countdown(secs)`: "0:24", "12:05", "1:00:00".
+  - Unit tests for both, including 0, 59, 60, 3600 and 21600.
+- `src/assets.rs`: `Clock` added to the bundled extra icons (gpui-kit has the SVG but doesn't bundle it by default), plus a test that it loads.
+- `src/ui/chat.rs`:
+  - `render_typing_line` is an `h_flex`: the typing text on the left (`flex_1`, `min_w_0`, truncating), and `render_slowmode_badge` on the right (`flex_none`).
+  - The badge is a clock icon with "Slowmode {duration}" or "Slowmode (exempt)". Its tooltip is "Members can send one message every {duration}.". There is no badge without slowmode.
+  - Live changes: `ChannelUpdate` handling falls through to the `cx.notify()` at the end of `on_connection_event`, so the badge updates without a reload. The same applies to role and member updates, since the badge reads permissions each render.
+- `tests/permissions.rs`: `bypassing_slowmode_takes_its_own_permission` covers:
+  - the owner bypasses
+  - a role granting it bypasses
+  - a channel override denying it wins over the role
+  - a plain member doesn't bypass, checked directly and through the store wrapper
+  - `ManageMessages` alone doesn't bypass
+
+  `nobody_bypasses_slowmode_outside_a_server` covers DMs, groups and saved notes.
+- `tests/store_slowmode.rs` (new): `slowmode()` for a channel with 30, 0 or none set, and for a group, a DM, saved notes and an unknown channel. Also after a `ChannelUpdate` that sets it, one that sets it to 0, `clear: [Slowmode]`, and a parsed live `ChannelUpdate` frame with `"clear": ["Slowmode"]`.
+
+### Divergences
+- Minor: the formatting helpers went in `src/time.rs`, as the plan's first option. Chunk 3's cooldown logic hasn't been placed yet.
+- Minor: `format_duration_short` also gives "1m 30s" for durations under an hour with leftover seconds. The plan listed only whole units and "1h 30m".
+- The permission recomputation per render (plan risk) is left uncached. It is one `channel_permissions` call per render of the open channel.
+
+### Verification Performed
+- `cargo test --test store_slowmode --test permissions`: 4 + 24 passed.
+- `cargo test`: 697 passed, 0 failed (5 ignored). `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt `Diff in` counts are unchanged: `src/permissions.rs` 0, `src/store.rs` 15, `src/time.rs` 0, `src/assets.rs` 0, `src/ui/chat.rs` 17 (identical diff to HEAD), `tests/permissions.rs` 0. The new `tests/store_slowmode.rs` is formatted and has 0.
+
+### Manual Validation
+Pending (batched to the end). This includes checking that the badge fits the 16 px typing line and doesn't push the typing text off when both show.

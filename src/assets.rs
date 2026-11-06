@@ -12,6 +12,7 @@ gpui_kit::assets::icon_assets!(
     [
         AtSign,
         Bookmark,
+        Clock,
         CornerUpRight,
         Download,
         FaceSlightlySmiling,
@@ -120,6 +121,13 @@ mod tests {
             let path = icon.path();
             assert!(AppAssets.load(&path).unwrap().is_some(), "{path} missing");
         }
+    }
+
+    /// The slowmode badge by the message box.
+    #[test]
+    fn slowmode_icon_loads() {
+        let path = IconName::Clock.path();
+        assert!(AppAssets.load(&path).unwrap().is_some(), "{path} missing");
     }
 
     /// The settings window's sidebar icons.

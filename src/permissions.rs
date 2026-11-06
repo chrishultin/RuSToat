@@ -68,6 +68,17 @@ pub fn can_pin(store: &ChatStore, user: &str, channel: &str) -> bool {
     }
 }
 
+/// Whether `user` is exempt from `channel`'s slowmode: those with Bypass
+/// Slowmode, which a server's owner has. Manage Messages isn't enough.
+/// Slowmode only exists in server channels.
+pub fn can_bypass_slowmode(store: &ChatStore, user: &str, channel: &str) -> bool {
+    in_server(store, channel)
+        && has(
+            channel_permissions(store, user, channel),
+            ChannelPermission::BypassSlowmode,
+        )
+}
+
 /// Whether `user` may mention roles in `channel`: only in server channels,
 /// with Mention Roles.
 pub fn can_mention_roles(store: &ChatStore, user: &str, channel: &str) -> bool {

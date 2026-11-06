@@ -7,7 +7,8 @@ use revolt_permissions::{
 use serde_json::{Value, json};
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::permissions::{
-    can_mention_everyone, can_mention_roles, can_pin, can_view, channel_permissions, has,
+    can_bypass_slowmode, can_mention_everyone, can_mention_roles, can_pin, can_view,
+    channel_permissions, has,
 };
 use stoat_gpui::store::ChatStore;
 
@@ -415,5 +416,62 @@ fn nobody_mentions_roles_or_everyone_outside_a_server() {
     for channel in ["dm-friend", "grp", "saved"] {
         assert!(!can_mention_roles(&store, "u-me", channel), "{channel}");
         assert!(!can_mention_everyone(&store, "u-me", channel), "{channel}");
+    }
+}
+
+const BYPASS_SLOWMODE: u64 = ChannelPermission::BypassSlowmode as u64;
+
+#[test]
+fn bypassing_slowmode_takes_its_own_permission() {
+    let mut server = server_json();
+    server["roles"]["regular"] = json!({
+        "_id": "regular", "name": "Regular", "rank": 0,
+        "permissions": { "a": BYPASS_SLOWMODE, "d": 0 }
+    });
+    let channels = json!([
+        { "channel_type": "TextChannel", "_id": "ch-open", "server": "srv", "name": "open", "slowmode": 30 },
+        {
+            "channel_type": "TextChannel", "_id": "ch-strict", "server": "srv", "name": "strict", "slowmode": 30,
+            "role_permissions": { "regular": { "a": 0, "d": BYPASS_SLOWMODE } }
+        }
+    ]);
+    let ready = json!({
+        "type": "Ready",
+        "users": [
+            user("u-me", json!({})), user("u-owner", json!({})),
+            user("u-regular", json!({})), user("u-mod", json!({}))
+        ],
+        "servers": [server],
+        "channels": channels,
+        "members": [
+            member("u-me", &[], json!({})),
+            member("u-owner", &[], json!({})),
+            member("u-regular", &["regular"], json!({})),
+            member("u-mod", &["mod"], json!({})),
+        ],
+    });
+    let Some(ServerEvent::Ready(ready)) = parse_frame(&ready.to_string()).pop() else {
+        panic!("ready");
+    };
+    let mut store = ChatStore::new("u-me");
+    store.apply_ready(*ready);
+
+    // The owner has every permission, so is exempt everywhere.
+    assert!(can_bypass_slowmode(&store, "u-owner", "ch-open"));
+    assert!(can_bypass_slowmode(&store, "u-owner", "ch-strict"));
+    // A role can grant it, and a channel override take it away.
+    assert!(can_bypass_slowmode(&store, "u-regular", "ch-open"));
+    assert!(!can_bypass_slowmode(&store, "u-regular", "ch-strict"));
+    // A plain member waits, and so does one who may only manage messages.
+    assert!(!can_bypass_slowmode(&store, "u-me", "ch-open"));
+    assert!(!store.can_bypass_slowmode("ch-open"));
+    assert!(!can_bypass_slowmode(&store, "u-mod", "ch-open"));
+}
+
+#[test]
+fn nobody_bypasses_slowmode_outside_a_server() {
+    let store = conversations();
+    for channel in ["dm-friend", "grp-mine", "ch-saved"] {
+        assert!(!can_bypass_slowmode(&store, "u-me", channel), "{channel}");
     }
 }

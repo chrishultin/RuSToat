@@ -154,10 +154,59 @@ pub fn local_from_seconds(seconds: i64) -> Option<DateTime<Local>> {
     Local.timestamp_opt(seconds, 0).single()
 }
 
+/// A length of time in its largest one or two units, for a slowmode: "5s",
+/// "10m", "1m 30s", "1h 30m", "6h". Hours leave out the seconds.
+pub fn format_duration_short(secs: u64) -> String {
+    let (hours, minutes, seconds) = (secs / 3600, secs % 3600 / 60, secs % 60);
+    match (hours, minutes, seconds) {
+        (0, 0, s) => format!("{s}s"),
+        (0, m, 0) => format!("{m}m"),
+        (0, m, s) => format!("{m}m {s}s"),
+        (h, 0, _) => format!("{h}h"),
+        (h, m, _) => format!("{h}h {m}m"),
+    }
+}
+
+/// Time left as a clock: "0:24", "12:05", or with hours "1:00:00".
+pub fn format_countdown(secs: u64) -> String {
+    let (hours, minutes, seconds) = (secs / 3600, secs % 3600 / 60, secs % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::{FixedOffset, NaiveDate};
+
+    #[test]
+    fn short_durations() {
+        assert_eq!(format_duration_short(0), "0s");
+        assert_eq!(format_duration_short(5), "5s");
+        assert_eq!(format_duration_short(59), "59s");
+        assert_eq!(format_duration_short(60), "1m");
+        assert_eq!(format_duration_short(90), "1m 30s");
+        assert_eq!(format_duration_short(600), "10m");
+        assert_eq!(format_duration_short(3600), "1h");
+        assert_eq!(format_duration_short(5400), "1h 30m");
+        assert_eq!(format_duration_short(5401), "1h 30m");
+        assert_eq!(format_duration_short(21600), "6h");
+    }
+
+    #[test]
+    fn countdowns() {
+        assert_eq!(format_countdown(0), "0:00");
+        assert_eq!(format_countdown(24), "0:24");
+        assert_eq!(format_countdown(59), "0:59");
+        assert_eq!(format_countdown(60), "1:00");
+        assert_eq!(format_countdown(725), "12:05");
+        assert_eq!(format_countdown(3599), "59:59");
+        assert_eq!(format_countdown(3600), "1:00:00");
+        assert_eq!(format_countdown(21600), "6:00:00");
+    }
 
     #[test]
     fn decodes_the_ulid_readme_example() {
