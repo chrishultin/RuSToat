@@ -70,3 +70,43 @@ The look-ahead found nothing to change in the remaining chunks. Chunk 2 can add 
 
 ### Manual Validation
 Deferred to the batched checks at the end (see the header).
+
+## Chunk 2: Inline row actions
+
+### Changes Made
+- `src/friends.rs`: `RowAction { Message, Relationship(RelationshipAction) }` and `row_actions(store, user)`. It builds on `profile`'s rules instead of restating them:
+  - a Friend gets `Message` when `can_message` holds, which is always true for friends, bots included
+  - Incoming and Outgoing get `friend_buttons` (Accept and Reject, or Cancel)
+  - Blocked gets `Unblock`
+  - everyone else (None, BlockedOther, the user, unknown IDs) gets nothing
+- `src/ui/friends.rs`:
+  - `RowButtons { actions, pending, opening }`. `render_friends_page` takes `buttons: impl Fn(&str) -> RowButtons`, and each person row carries its own.
+  - Buttons at the row's right edge, each small:
+    - Accept: primary, UserCheck icon, "Accept"
+    - Reject: outline UserX icon, "Reject" tooltip
+    - Cancel: outline, "Cancel"
+    - Unblock: outline, "Unblock"
+    - Message: ghost MessageCircle icon, "Message" tooltip, loading and disabled while its DM is being opened
+  - Relationship buttons are disabled while `relationship_pending` holds the person. Every click calls `cx.stop_propagation()` first, so the row doesn't also open the card. Shift is passed through.
+- `src/ui/chat.rs`:
+  - `People::act(user, action, shift, window, cx)` calls `message_user` or `set_relationship`. Remove friend and Block keep their confirmation, but neither is a row button.
+  - `render_friends` builds each row's `RowButtons` from `row_actions`, `relationship_pending` and `dm_opening`.
+- `tests/friends.rs`, 2 new tests:
+  - `row_actions` for Friend, Incoming, Outgoing and Blocked, and nothing for None, BlockedOther, the user or an unknown ID
+  - a bot friend gets Message
+
+### Divergences
+Minor:
+- **`row_actions` takes a user ID, not a `FriendRow`.** It reads the relationship from the store, as `friend_buttons` does.
+- **`render_friends_page` has 8 parameters**, so it carries `#[allow(clippy::too_many_arguments)]`.
+
+The look-ahead found nothing to change in the remaining chunks.
+
+### Verification Performed
+- `cargo test --test friends`: 9 passed.
+- `cargo test`: 560 passed, 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt: the new files are clean, and `src/ui/chat.rs` is still at 16 hunks (baseline 18).
+
+### Manual Validation
+Deferred to the batched checks at the end. This chunk's check needs a second account.

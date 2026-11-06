@@ -3,7 +3,10 @@
 use serde_json::{Value, json};
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::api::models::{RelationshipStatus, User};
-use stoat_gpui::friends::{FriendLists, FriendsTab, friend_lists, incoming_count};
+use stoat_gpui::friends::{
+    FriendLists, FriendsTab, RowAction, friend_lists, incoming_count, row_actions,
+};
+use stoat_gpui::profile::RelationshipAction;
 use stoat_gpui::store::{ChatStore, PresenceKind};
 
 fn user(id: &str, relationship: &str, extra: Value) -> Value {
@@ -184,4 +187,47 @@ fn the_ready_fixture_lists_its_friends() {
     assert_eq!(ids(&lists.online), ["u-ada"]);
     assert!(lists.incoming.is_empty() && lists.outgoing.is_empty() && lists.blocked.is_empty());
     assert_eq!(incoming_count(&store), 0);
+}
+
+#[test]
+fn each_row_gets_the_buttons_for_its_relationship() {
+    use RelationshipAction::*;
+    let store = store_with(vec![
+        user("u-friend", "Friend", json!({ "online": false })),
+        user("u-in", "Incoming", json!({})),
+        user("u-out", "Outgoing", json!({})),
+        user("u-blocked", "Blocked", json!({})),
+        user("u-none", "None", json!({})),
+        user("u-blocker", "BlockedOther", json!({})),
+    ]);
+    assert_eq!(row_actions(&store, "u-friend"), [RowAction::Message]);
+    assert_eq!(
+        row_actions(&store, "u-in"),
+        [
+            RowAction::Relationship(AcceptFriend),
+            RowAction::Relationship(RejectFriend)
+        ]
+    );
+    assert_eq!(
+        row_actions(&store, "u-out"),
+        [RowAction::Relationship(CancelFriend)]
+    );
+    assert_eq!(
+        row_actions(&store, "u-blocked"),
+        [RowAction::Relationship(Unblock)]
+    );
+    // Not on the page, so no buttons (Add friend stays on the card).
+    for id in ["u-none", "u-blocker", "u-me", "u-unknown"] {
+        assert!(row_actions(&store, id).is_empty(), "{id}");
+    }
+}
+
+#[test]
+fn a_bot_friend_can_be_messaged() {
+    let store = store_with(vec![user(
+        "u-bot",
+        "Friend",
+        json!({ "bot": { "owner": "u-someone" } }),
+    )]);
+    assert_eq!(row_actions(&store, "u-bot"), [RowAction::Message]);
 }

@@ -7,6 +7,7 @@
 //! needs a fetch of its own.
 
 use crate::api::models::{RelationshipStatus, User};
+use crate::profile::{RelationshipAction, can_message, friend_buttons};
 use crate::store::{ChatStore, PresenceKind, display_name, presence_kind};
 
 /// The Friends page's ID in Home's selection, where channels' IDs go
@@ -118,6 +119,34 @@ pub fn friend_lists(store: &ChatStore) -> FriendLists {
         list.sort_by_cached_key(|row| (row.name.to_lowercase(), row.user_id.clone()));
     }
     lists
+}
+
+/// A button on a person's row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowAction {
+    /// Open the DM with them.
+    Message,
+    Relationship(RelationshipAction),
+}
+
+/// The buttons on `user`'s row: Message for friends (bots too, who can only
+/// be friends through a bot invite), Accept and Reject for a request to the
+/// user, Cancel for the user's own, and Unblock for someone blocked. The
+/// same rules as the profile card's ([`friend_buttons`], [`can_message`]).
+/// Remove friend and Block stay in the person's menu.
+pub fn row_actions(store: &ChatStore, user: &str) -> Vec<RowAction> {
+    let Some(person) = store.user(user) else {
+        return Vec::new();
+    };
+    match person.relationship {
+        RelationshipStatus::Friend if can_message(store, user) => vec![RowAction::Message],
+        RelationshipStatus::Incoming | RelationshipStatus::Outgoing => friend_buttons(store, user)
+            .into_iter()
+            .map(RowAction::Relationship)
+            .collect(),
+        RelationshipStatus::Blocked => vec![RowAction::Relationship(RelationshipAction::Unblock)],
+        _ => Vec::new(),
+    }
 }
 
 /// How many friend requests are waiting for the user.

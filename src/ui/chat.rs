@@ -53,7 +53,7 @@ use crate::store::{
 use crate::typing::{OutgoingTyping, TypingSignal, TypingState, typing_label};
 use crate::ui::composer::{Composer, ComposerEvent, file_icon};
 use crate::ui::emoji_picker::emoji_grid;
-use crate::ui::friends::render_friends_page;
+use crate::ui::friends::{RowButtons, render_friends_page};
 use crate::ui::math::MathPlugin;
 use crate::ui::profile_card::{CardBio, CardContent, OnLink, render_profile_card};
 
@@ -4119,6 +4119,11 @@ impl ChatView {
         };
         let lists = crate::friends::friend_lists(&self.store);
         let incoming = lists.incoming.len();
+        let buttons = |user: &str| RowButtons {
+            actions: crate::friends::row_actions(&self.store, user),
+            pending: self.relationship_pending.contains(user),
+            opening: self.dm_opening.as_deref() == Some(user),
+        };
         let view = cx.entity().downgrade();
         let on_tab = move |tab, _: &mut Window, cx: &mut App| {
             view.update(cx, |this, cx| {
@@ -4132,6 +4137,7 @@ impl ChatView {
             self.friends_tab,
             incoming,
             colors,
+            buttons,
             on_tab,
             self.people(None, cx),
             cx,
@@ -4985,6 +4991,26 @@ impl People {
         let position = window.mouse_position();
         self.view
             .update(cx, |this, cx| this.open_card(user, position, window, cx))
+            .ok();
+    }
+
+    /// A Friends page row's button: message `user`, or change how the user
+    /// relates to them (`shift` skips the confirmation).
+    pub(crate) fn act(
+        &self,
+        user: String,
+        action: crate::friends::RowAction,
+        shift: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.view
+            .update(cx, |this, cx| match action {
+                crate::friends::RowAction::Message => this.message_user(user, window, cx),
+                crate::friends::RowAction::Relationship(action) => {
+                    this.set_relationship(user, action, shift, window, cx)
+                }
+            })
             .ok();
     }
 
