@@ -345,3 +345,20 @@ Done in the bundled debug build (`scripts/run-bundled.sh`) against stoat.chat, w
 - `dock badge: 1` was set for the pending request, then the user accepted it from the row. One `PUT /users/{id}/friend`, both accounts' `UserRelationship` events read Friend, and the badge went to 0.
 - `cargo test`: 575 passed. Clippy is clean, and both files are rustfmt-clean.
 - The user confirmed the Dock icon badges work now.
+
+## Manual Validation, second account (2026-11-06)
+
+Two accounts signed in to the same bundled build: the main account and spedi-test.
+
+- **Checked in the app and the log:**
+  - a new incoming request gave a toast, with RuSToat in front
+  - the Dock badge counted it, after the badge-permission fix
+  - Accept and Reject from the rows: one request each, both accounts updated live, and the badges cleared
+- **Accepted on the user's word, not run in this build** (no matching requests or events in its log):
+  - Remove friend and Block with confirmation, and Unblock (milestone 7)
+  - sending a request from the Add friend dialog, and its "already sent" and "no one called" messages
+  - Cancel from an Outgoing row
+  - a toast click opening Friends → Pending
+  - a background banner, its click, and its dismissal
+  - Busy silencing notices
+- **Milestone 7's other batched checks** (live role edits, the profile card from every place, Message, the right-click menu): the record doesn't show them done either. They're still outstanding unless they were done elsewhere.
