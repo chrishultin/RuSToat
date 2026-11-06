@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use crate::api::models::{Embed, Image, ImageSize, Special, Text, WebsiteMetadata};
+use crate::api::models::{Embed, Image, ImageSize, Special, Text, Video, WebsiteMetadata};
 use crate::attachment::{AttachmentView, FALLBACK_IMAGE_SIZE, fit_into};
 use crate::markdown::Names;
 use crate::media::MediaUrls;
@@ -29,6 +29,9 @@ pub enum EmbedView {
     /// Just a video link. There's no in-app playback, so it's a card that
     /// opens it in the browser.
     Video { url: String },
+    /// A Gifbox GIF that only exists as video: its still (proxied), with a
+    /// "GIF" badge. Clicking it opens `link`, the GIF's page.
+    GifPoster { image: EmbedImage, link: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,7 +93,8 @@ impl EmbedView {
                 EmbedImage::new(image, media, EMBED_IMAGE_WIDTH, EMBED_IMAGE_HEIGHT)
                     .map(EmbedView::Image)
             }
-            Embed::Video(video) => link(&video.url).map(|url| EmbedView::Video { url }),
+            Embed::Video(video) => gif_poster(video, media)
+                .or_else(|| link(&video.url).map(|url| EmbedView::Video { url })),
             Embed::Text(text) => text_embed(text, media, names, revealed, key),
             Embed::None => None,
         }
@@ -112,6 +116,36 @@ impl EmbedImage {
             original: (image.width, image.height),
         })
     }
+}
+
+/// The ID in a Gifbox GIF's page URL (`https://gifbox.me/view/{id}`), if
+/// that's what `url` is. Only that exact host: not lookalikes.
+pub fn gifbox_id(url: &str) -> Option<&str> {
+    let rest = url.strip_prefix("https://gifbox.me/view/")?;
+    let id = rest.split(['?', '#']).next()?.trim_end_matches('/');
+    let valid = !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    valid.then_some(id)
+}
+
+/// A video embed of a Gifbox GIF with no GIF version (Stoat's embed service
+/// makes one an image when there is): its still instead, at the video's
+/// size. `None` for other videos, or with no proxy to load the still.
+fn gif_poster(video: &Video, media: &MediaUrls) -> Option<EmbedView> {
+    let id = gifbox_id(&video.url)?;
+    let poster = Image {
+        url: format!("https://media.gifbox.me/media/post/{id}/poster"),
+        width: video.width,
+        height: video.height,
+        size: ImageSize::Large,
+    };
+    let image = EmbedImage::new(&poster, media, EMBED_IMAGE_WIDTH, EMBED_IMAGE_HEIGHT)?;
+    Some(EmbedView::GifPoster {
+        image,
+        link: video.url.clone(),
+    })
 }
 
 fn website(site: &WebsiteMetadata, media: &MediaUrls) -> Option<EmbedView> {
@@ -226,4 +260,31 @@ fn link(url: &str) -> Option<String> {
     let url = url.trim();
     let lower = url.to_ascii_lowercase();
     (lower.starts_with("https://") || lower.starts_with("http://")).then(|| url.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gifbox_id;
+
+    #[test]
+    fn gifbox_ids_come_from_gifbox_pages_only() {
+        assert_eq!(
+            gifbox_id("https://gifbox.me/view/smGy30kWfDtNbJyWRnq8a"),
+            Some("smGy30kWfDtNbJyWRnq8a")
+        );
+        assert_eq!(gifbox_id("https://gifbox.me/view/a-b_c/"), Some("a-b_c"));
+        assert_eq!(gifbox_id("https://gifbox.me/view/abc?x=1"), Some("abc"));
+        for url in [
+            "https://gifbox.me.evil.com/view/abc",
+            "https://notgifbox.me/view/abc",
+            "https://gifbox.me@evil.com/view/abc",
+            "http://gifbox.me/view/abc",
+            "https://gifbox.me/view/",
+            "https://gifbox.me/view/../../x",
+            "https://gifbox.me/upload",
+            "https://media.gifbox.me/media/post/abc/mp4",
+        ] {
+            assert_eq!(gifbox_id(url), None, "{url}");
+        }
+    }
 }

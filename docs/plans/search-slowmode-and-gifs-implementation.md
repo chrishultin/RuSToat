@@ -237,3 +237,32 @@ Pending (batched to the end). The plan's risks to check by hand:
 - memory after hovering ~30 tiles (if it grows without bound, give the picker its own `ImageCache`)
 - whether the JPEG-bytes-as-`image/webp` poster draws (if not, use the proxied poster)
 - the popover's size and placement
+
+## Chunk 5: Gifbox video GIFs in chat
+
+### Changes Made
+- `src/embed.rs`:
+  - `EmbedView::GifPoster { image: EmbedImage, link: String }`.
+  - `pub fn gifbox_id(url) -> Option<&str>`:
+    - matches only `https://gifbox.me/view/{id}`
+    - the ID is ASCII letters, digits, `_` and `-`
+    - a trailing `/`, query or fragment is ignored
+  - The `Embed::Video` arm tries `gif_poster` first:
+    - for a Gifbox page it builds an `EmbedImage` of `https://media.gifbox.me/media/post/{id}/poster` through `media.external` (the proxy), sized from the video's width and height with the usual 400×300 cap, and links to the page
+    - other videos, or no proxy, fall back to `EmbedView::Video` as before
+  - A unit test checks `gifbox_id`, including lookalike hosts, `http`, `user@host`, an empty ID, `..` and media URLs.
+- `src/ui/chat.rs`: `render_embed` draws `GifPoster` with `inline_image`, so it gets the same loading and "Couldn't load image" fallback. It has a small black "GIF" badge at the bottom left, and a click sends `RowAction::OpenLink(page)`, which goes through `open_external` and the safety prompt.
+- `tests/store_embeds.rs`:
+  - `a_video_only_gifbox_gif_shows_its_still_badged`: a proxied poster at 400×225 from 640×360, linked to the page. Without a proxy it's still a `Video`.
+  - `other_videos_and_gifbox_images_are_unchanged`: other hosts and lookalikes stay `Video`, and a Gifbox `Image` embed is drawn as before.
+
+### Divergences
+- Minor: the variant carries the page URL beside the image (`GifPoster { image, link }`), because `EmbedImage.url` is the proxied poster and the click needs the page.
+- Minor: only the `Embed::Video` arm is changed, as planned. A `Website` embed with `special: GIF` and only a video still falls back to `Video`.
+
+### Verification Performed
+- `cargo test`: 722 passed, 0 failed (5 ignored). `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt `Diff in` counts are unchanged: `src/embed.rs` 0, `tests/store_embeds.rs` 0, `src/ui/chat.rs` 17.
+
+### Manual Validation
+Pending (batched to the end).

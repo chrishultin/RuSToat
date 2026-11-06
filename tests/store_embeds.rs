@@ -234,6 +234,61 @@ fn video_links_are_cards_but_only_for_web_urls() {
 }
 
 #[test]
+fn a_video_only_gifbox_gif_shows_its_still_badged() {
+    let page = "https://gifbox.me/view/smGy30kWfDtNbJyWRnq8a";
+    assert_eq!(
+        view(json!({ "type": "Video", "url": page, "width": 640, "height": 360 })),
+        Some(EmbedView::GifPoster {
+            image: EmbedImage {
+                url: proxied("https://media.gifbox.me/media/post/smGy30kWfDtNbJyWRnq8a/poster"),
+                // Capped like other embed images.
+                width: 400,
+                height: 225,
+                original: (640, 360),
+            },
+            link: page.into(),
+        })
+    );
+    // Without a proxy to load the still through, it's a video link as before.
+    let no_proxy = MediaUrls::new("https://api.example", Some(CDN.into()), None);
+    assert_eq!(
+        view_with(
+            json!({ "type": "Video", "url": page, "width": 640, "height": 360 }),
+            &no_proxy
+        ),
+        Some(EmbedView::Video { url: page.into() })
+    );
+}
+
+#[test]
+fn other_videos_and_gifbox_images_are_unchanged() {
+    // Other hosts, including lookalikes, stay video links.
+    for url in [
+        "https://v.example/view/abc",
+        "https://gifbox.me.evil.com/view/abc",
+        "https://notgifbox.me/view/abc",
+        "https://media.gifbox.me/media/post/abc/mp4",
+    ] {
+        assert_eq!(
+            view(json!({ "type": "Video", "url": url, "width": 1, "height": 1 })),
+            Some(EmbedView::Video { url: url.into() }),
+            "{url}"
+        );
+    }
+    // A Gifbox GIF that has a GIF version is an image, drawn as before.
+    let page = "https://gifbox.me/view/cXQwxRj5VVmb4q_qmUAg6";
+    assert_eq!(
+        view(json!({ "type": "Image", "url": page, "width": 498, "height": 280, "size": "Large" })),
+        Some(EmbedView::Image(EmbedImage {
+            url: proxied(page),
+            width: 400,
+            height: 225,
+            original: (498, 280),
+        }))
+    );
+}
+
+#[test]
 fn bot_embeds_render_markdown_and_their_media() {
     let card = card(json!({
         "type": "Text",

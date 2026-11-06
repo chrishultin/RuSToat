@@ -7677,6 +7677,28 @@ fn render_embed(
                 .child(Icon::new(IconName::ExternalLink).text_color(colors.muted))
                 .into_any_element()
         }
+        EmbedView::GifPoster { image, link } => {
+            let (open, on_action) = (link.clone(), on_action.clone());
+            inline_image(id, &image.url, (image.width, image.height), None, colors)
+                .cursor_pointer()
+                .on_click(move |_, window, cx| {
+                    on_action(RowAction::OpenLink(open.clone()), window, cx)
+                })
+                .child(
+                    div()
+                        .absolute()
+                        .left_2()
+                        .bottom_2()
+                        .px_1()
+                        .rounded_sm()
+                        .bg(black().opacity(0.6))
+                        .text_color(white())
+                        .text_xs()
+                        .font_weight(FontWeight::BOLD)
+                        .child("GIF"),
+                )
+                .into_any_element()
+        }
         EmbedView::Card(card) => render_embed_card(id, card, colors, on_action, people),
     }
 }
