@@ -143,7 +143,10 @@ impl MarkdownPlugin for MarkupPlugin {
             InternalLink::Everyone | InternalLink::Online => {
                 Some(mention(node.to_string(), Mention::Everyone))
             }
-            InternalLink::User(_) | InternalLink::Channel(_) => None,
+            // Drawn as ordinary links.
+            InternalLink::User(_) | InternalLink::Channel(_) | InternalLink::External { .. } => {
+                None
+            }
         }
     }
 

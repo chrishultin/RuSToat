@@ -2177,7 +2177,9 @@ impl ChatView {
             // Only a link that shows its own address can be trusted.
             origin: origin(&url).filter(|_| check == LinkCheck::Plain),
             url,
+            check,
             trust: false,
+            understood: false,
         });
         let view = cx.entity().downgrade();
         window.open_alert_dialog(cx, move |alert, _, cx| {
@@ -2194,28 +2196,69 @@ impl ChatView {
                     window.close_dialog(cx);
                 }
             };
-            let tick = {
+            // A checkbox's change, to the prompt.
+            let tick = |set: fn(&mut LinkPrompt, bool)| {
                 let view = view.clone();
                 move |ticked: &bool, _: &mut Window, cx: &mut App| {
                     let ticked = *ticked;
                     view.update(cx, |this, cx| {
                         if let Some(prompt) = &mut this.link_prompt {
-                            prompt.trust = ticked;
+                            set(prompt, ticked);
                         }
                         cx.notify();
                     })
                     .ok();
                 }
             };
+            let theme = cx.theme();
+            let ready = prompt.ready();
             alert
                 .title("External links can be dangerous!")
                 .description(format!("Are you sure you want to go to {}?", prompt.url))
+                .map(|alert| match &prompt.check {
+                    LinkCheck::Plain => alert,
+                    LinkCheck::Text(text) => {
+                        alert.child(div().text_sm().child(format!("You clicked on \"{text}\"")))
+                    }
+                    LinkCheck::Mismatch(text) => alert
+                        .child(
+                            v_flex()
+                                .gap_2()
+                                .text_sm()
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(theme.danger)
+                                        .child(
+                                            "Be careful! This is not the same as the link \
+                                             that was displayed:",
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_md()
+                                        .border_1()
+                                        .border_color(theme.border)
+                                        .bg(theme.secondary)
+                                        .line_clamp(3)
+                                        .child(text.clone()),
+                                ),
+                        )
+                        .child(
+                            Checkbox::new("link-understood")
+                                .label("I understand the risk")
+                                .checked(prompt.understood)
+                                .on_click(tick(|prompt, ticked| prompt.understood = ticked)),
+                        ),
+                })
                 .when_some(prompt.origin.clone(), |alert, origin| {
                     alert.child(
                         Checkbox::new("link-trust")
                             .label(format!("Don't ask me again for {origin}"))
                             .checked(prompt.trust)
-                            .on_click(tick),
+                            .on_click(tick(|prompt, ticked| prompt.trust = ticked)),
                     )
                 })
                 .footer(
@@ -2231,6 +2274,7 @@ impl ChatView {
                             Button::new("link-continue")
                                 .primary()
                                 .label("Continue")
+                                .disabled(!ready)
                                 .on_click({
                                     let go = go.clone();
                                     move |_, window, cx| go(window, cx)
@@ -2238,7 +2282,9 @@ impl ChatView {
                         ),
                 )
                 .on_ok(move |_, window, cx| {
-                    go(window, cx);
+                    if ready {
+                        go(window, cx);
+                    }
                     false
                 })
         });
@@ -2247,7 +2293,7 @@ impl ChatView {
     /// The link dialog's Continue: open its link, and trust its site from
     /// now on if the user ticked "Don't ask me again".
     fn follow_link_prompt(&mut self, cx: &mut Context<Self>) {
-        let Some(prompt) = self.link_prompt.take() else {
+        let Some(prompt) = self.link_prompt.take_if(|prompt| prompt.ready()) else {
             return;
         };
         if prompt.trust && self.safety.trust(&prompt.url) {
@@ -5564,10 +5610,22 @@ struct RowColors {
 #[derive(Clone)]
 struct LinkPrompt {
     url: String,
+    /// What the link's text said, so how hard to warn.
+    check: LinkCheck,
     /// What "Don't ask me again" would trust. `None`: it isn't offered.
     origin: Option<String>,
     /// "Don't ask me again" is ticked.
     trust: bool,
+    /// "I understand the risk" is ticked (only asked for a
+    /// [`LinkCheck::Mismatch`]).
+    understood: bool,
+}
+
+impl LinkPrompt {
+    /// Whether Continue may open the link.
+    fn ready(&self) -> bool {
+        self.understood || !matches!(self.check, LinkCheck::Mismatch(_))
+    }
 }
 
 /// Something a message row asks the view to do.
@@ -5919,6 +5977,10 @@ impl People {
         let people = self.clone();
         Arc::new(move |url, window, cx| match parse_internal_link(url) {
             Some(InternalLink::User(user)) => people.open_card(user, window, cx),
+            // Its text wasn't its address: the warning says what it was.
+            Some(InternalLink::External { url, text }) => {
+                people.open_link(url, Some(text), window, cx)
+            }
             // Channel links don't go anywhere yet; `ui::markup` draws the
             // rest, so they aren't links.
             Some(

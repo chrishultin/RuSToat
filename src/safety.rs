@@ -135,27 +135,94 @@ pub enum LinkCheck {
     Plain,
     /// The text is something else (`[the docs](…)`).
     Text(String),
+    /// The text is a different web address or domain
+    /// (`[google.com](https://example.com)`).
+    Mismatch(String),
 }
 
-/// How hard to warn before opening `url`, whose text (if it had any other
-/// than the address) was `text`.
+/// How hard to warn before opening `url`, whose text was `text` (`None`:
+/// it showed its address).
 pub fn classify(url: &str, text: Option<&str>) -> LinkCheck {
-    match text {
-        Some(text) if normalise(text) != normalise(url) => LinkCheck::Text(text.to_string()),
-        _ => LinkCheck::Plain,
+    let Some(text) = text.filter(|text| !shows_address(url, text)) else {
+        return LinkCheck::Plain;
+    };
+    let destination = Url::parse(url).ok();
+    let destination = destination.as_ref().and_then(Url::host_str);
+    match text_host(text) {
+        Some(host) if Some(host.as_str()) != destination => LinkCheck::Mismatch(text.to_string()),
+        _ => LinkCheck::Text(text.to_string()),
     }
 }
 
-/// An address as it's compared with a link's text: trimmed, with a scheme,
-/// and without a trailing `/`.
-fn normalise(address: &str) -> String {
-    let address = address.trim();
-    let address = if address.contains("://") || address.starts_with("mailto:") {
-        address.to_string()
+/// Whether a link's `text` is its `url`: the same once percent-escapes are
+/// decoded, without a trailing `/`, and ignoring case. Text without a scheme
+/// is compared with the URL's after its scheme (`www.example.com` is
+/// `http://www.example.com`, as GFM links it).
+pub fn shows_address(url: &str, text: &str) -> bool {
+    let (url, text) = (percent_decode(url), percent_decode(text.trim()));
+    let (url, text) = (url.trim_end_matches('/'), text.trim_end_matches('/'));
+    let url = if has_scheme(text) {
+        url
     } else {
-        format!("https://{address}")
+        ["https://", "http://", "mailto:"]
+            .iter()
+            .find_map(|scheme| strip_prefix_ignore_case(url, scheme))
+            .unwrap_or(url)
     };
-    address.trim_end_matches('/').to_string()
+    url.eq_ignore_ascii_case(text)
+}
+
+/// The host a link's text names, if it reads as a web address: a URL, or a
+/// host with a dot and no spaces (`example.com/docs`). Not an email address.
+fn text_host(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() || text.contains(char::is_whitespace) {
+        return None;
+    }
+    let url = if has_scheme(text) {
+        Url::parse(text).ok()?
+    } else {
+        if text.contains('@') {
+            return None;
+        }
+        Url::parse(&format!("https://{text}")).ok()?
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = url.host_str()?;
+    host.contains('.').then(|| host.to_string())
+}
+
+fn has_scheme(text: &str) -> bool {
+    text.contains("://") || strip_prefix_ignore_case(text, "mailto:").is_some()
+}
+
+fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = text.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &text[prefix.len()..])
+}
+
+/// `%XX` escapes decoded (invalid UTF-8 replaced), anything else as is.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        if bytes[i] == b'%'
+            && let Some(hi) = bytes.get(i + 1).copied().and_then(hex)
+            && let Some(lo) = bytes.get(i + 2).copied().and_then(hex)
+        {
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[cfg(test)]
@@ -242,16 +309,60 @@ mod tests {
     }
 
     #[test]
-    fn plain_without_other_text() {
+    fn text_that_is_the_address_is_plain() {
+        let plain = |url, text| classify(url, Some(text)) == LinkCheck::Plain;
         assert_eq!(classify("https://example.com", None), LinkCheck::Plain);
-        assert_eq!(
-            classify("https://example.com/", Some("example.com")),
-            LinkCheck::Plain
+        assert!(plain("https://example.com/", "https://example.com"));
+        assert!(plain("https://example.com", "example.com/"), "no scheme");
+        assert!(
+            plain("http://www.example.com", "www.example.com"),
+            "GFM's www. links"
         );
+        assert!(plain("https://www.example.com", "www.example.com"));
+        assert!(plain(
+            "https://example.com/caf%C3%A9",
+            "https://example.com/café"
+        ));
+        assert!(plain("https://Example.com", "https://example.COM"));
+        assert!(plain("mailto:a@example.com", "a@example.com"));
+    }
+
+    #[test]
+    fn other_words_are_text() {
         assert_eq!(
             classify("https://example.com", Some("the docs")),
             LinkCheck::Text("the docs".into())
         );
+        assert_eq!(
+            classify("https://example.com", Some("docs")),
+            LinkCheck::Text("docs".into()),
+            "no dot: not a host"
+        );
+        // An email address isn't a web address.
+        assert_eq!(
+            classify("https://example.com", Some("someone@other.com")),
+            LinkCheck::Text("someone@other.com".into())
+        );
+        // The same site, another page.
+        assert_eq!(
+            classify("https://example.com/b", Some("example.com/a")),
+            LinkCheck::Text("example.com/a".into())
+        );
+    }
+
+    #[test]
+    fn another_address_is_a_mismatch() {
+        let mismatch =
+            |url, text: &str| classify(url, Some(text)) == LinkCheck::Mismatch(text.to_string());
+        assert!(mismatch("https://example.com", "google.com"));
+        assert!(mismatch("https://example.com", "https://google.com/search"));
+        assert!(
+            mismatch("https://example.com", "www.example.com"),
+            "another host"
+        );
+        assert!(mismatch("https://example.com.evil.io", "example.com"));
+        assert!(mismatch("mailto:a@evil.io", "example.com"));
+        assert!(mismatch("https://example.com", "http://google.com"));
     }
 
     #[test]

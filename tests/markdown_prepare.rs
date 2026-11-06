@@ -82,7 +82,8 @@ fn autolinks_are_kept() {
 
 #[test]
 fn ordinary_markdown_passes_through() {
-    let text = "**bold** _it_ [link](https://example.com)\n\n> quote\n\n- item";
+    // A link whose text is its address (see below for one whose isn't).
+    let text = "**bold** _it_ [example.com](https://example.com)\n\n> quote\n\n- item";
     assert_eq!(md(text), text);
 }
 
@@ -384,7 +385,7 @@ fn review_bot_messages_keep_their_lines_quotes_and_math() {
         \n\
         🟡 `index.ts:10` a finding  \n\
         _full review · $0.05 · 17s_  \n\
-        # 📖 [view the full review](https://example.com/review)"
+        # 📖 [view the full review](stoat:link?url=https%3A%2F%2Fexample.com%2Freview&text=view+the+full+review)"
     );
     assert_eq!(
         shape(&parse(&prepared)),
@@ -562,4 +563,154 @@ fn role_mentions_are_plain_names_in_plain_text() {
     assert_eq!(snippet("**hey** <%r-plain>", &Fixture, 80), "hey @Plain");
     // Inside a spoiler, flattened like a person.
     assert_eq!(prepare_with("||<%r-mods>||", &Fixture, |_| true), "`@Mods`");
+}
+
+/// The `stoat:link` a guarded link to `url` with `text` points at.
+fn guarded(url: &str, text: &str) -> String {
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("url", url)
+        .append_pair("text", text)
+        .finish();
+    format!("stoat:link?{query}")
+}
+
+#[test]
+fn links_whose_text_is_not_their_address_are_guarded() {
+    let target = guarded("https://a.example/x", "docs");
+    assert_eq!(
+        md("see [docs](https://a.example/x)!"),
+        format!("see [docs]({target})!")
+    );
+    assert_eq!(
+        links(&parse(&md("see [docs](https://a.example/x)!"))),
+        vec![("docs".to_string(), target)]
+    );
+    // Formatting in the text is kept; the warning gets it as plain text.
+    assert_eq!(
+        links(&parse(&md("[**big** docs](https://a.example/x \"title\")"))),
+        vec![(
+            "big docs".to_string(),
+            guarded("https://a.example/x", "big docs")
+        )]
+    );
+    assert_eq!(
+        md("[**big** docs](https://a.example/x)"),
+        format!(
+            "[**big** docs]({})",
+            guarded("https://a.example/x", "big docs")
+        )
+    );
+}
+
+#[test]
+fn links_that_show_their_address_are_left_alone() {
+    for content in [
+        "<https://a.example/x>",
+        "go to https://a.example/x now",
+        "www.a.example",
+        "[https://a.example/x](https://a.example/x)",
+        "[a.example](https://a.example/)",
+        "mail a@a.example",
+    ] {
+        assert_eq!(md(content), prepare_with(content, &Fixture, |_| false));
+        assert!(
+            links(&parse(&md(content)))
+                .iter()
+                .all(|(_, url)| !url.starts_with("stoat:")),
+            "{content}"
+        );
+    }
+    assert_eq!(
+        md("[a.example](https://a.example/)"),
+        "[a.example](https://a.example/)"
+    );
+}
+
+#[test]
+fn reference_links_are_guarded() {
+    let target = guarded("https://a.example/x", "the docs");
+    for content in [
+        "read [the docs][1]\n\n[1]: https://a.example/x",
+        "read [the docs][]\n\n[the  DOCS]: https://a.example/x",
+        "read [the docs]\n\n[the docs]: https://a.example/x",
+    ] {
+        assert_eq!(
+            links(&parse(&md(content))),
+            vec![("the docs".to_string(), target.clone())],
+            "{content}"
+        );
+    }
+}
+
+#[test]
+fn links_in_code_and_internal_links_are_untouched() {
+    assert_eq!(
+        md("`[docs](https://a.example)`"),
+        "`[docs](https://a.example)`"
+    );
+    assert_eq!(
+        md("```\n[docs](https://a.example)\n```"),
+        "```\n[docs](https://a.example)\n```"
+    );
+    assert_eq!(md("[docs](ftp://a.example)"), "[docs](ftp://a.example)");
+    assert_eq!(
+        md("![pic](https://a.example/p.png)"),
+        "![pic](https://a.example/p.png)"
+    );
+}
+
+#[test]
+fn a_typed_guard_gets_its_real_text() {
+    // Claiming the text was the address doesn't hide what it really says.
+    let forged = format!(
+        "[google.com]({})",
+        guarded("https://evil.example", "https://evil.example")
+    );
+    assert_eq!(
+        links(&parse(&md(&forged))),
+        vec![(
+            "google.com".to_string(),
+            guarded("https://evil.example", "google.com")
+        )]
+    );
+}
+
+#[test]
+fn guarded_urls_round_trip() {
+    use stoat_gpui::markdown::{InternalLink, parse_internal_link};
+    for url in [
+        "https://a.example/x?q=1&r=two+words#frag",
+        "https://a.example/café/(paren)",
+        "https://a.example/%20already%2Fescaped",
+        "mailto:someone@a.example?subject=hi",
+    ] {
+        let content = format!("é [the *text*]({url}) after");
+        let found = links(&parse(&md(&content)));
+        let [(text, target)] = &found[..] else {
+            panic!("{content}: {found:?}");
+        };
+        assert_eq!(text, "the text");
+        assert_eq!(
+            parse_internal_link(target),
+            Some(InternalLink::External {
+                url: url.to_string(),
+                text: "the text".into()
+            }),
+            "{content}"
+        );
+    }
+}
+
+#[test]
+fn malformed_guarded_links_are_not_links() {
+    use stoat_gpui::markdown::parse_internal_link;
+    for url in [
+        "stoat:link?text=docs",
+        "stoat:link?url=https%3A%2F%2Fa.example",
+        "stoat:link?url=javascript%3Aalert(1)&text=x",
+        "stoat:link?url=stoat%3Auser%2Fu-ada&text=x",
+        "stoat:link",
+    ] {
+        assert_eq!(parse_internal_link(url), None, "{url}");
+    }
 }

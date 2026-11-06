@@ -30,6 +30,9 @@
 //! - Every line break is kept (Stoat uses `remark-breaks`; CommonMark, and so
 //!   `TextView`, joins lines into one paragraph): two trailing spaces make it
 //!   a hard break.
+//! - A link whose text isn't its address (`[docs](https://…)`) →
+//!   `[docs](stoat:link?url=…&text=…)`, so the warning shown before it opens
+//!   knows what the link said (see [`guard_links`]).
 //! - A block quote ends at its last `>` line. Stoat inserts a blank line there,
 //!   so the next line isn't pulled into the quote (CommonMark's "lazy
 //!   continuation").
@@ -107,6 +110,110 @@ pub fn prepare_with(content: &str, names: &impl Names, revealed: impl Fn(usize) 
             }
         }
         offset += segment.as_str().len();
+    }
+    // Only Markdown's own link syntax can give a link other text.
+    if content.contains("](") || content.contains("]:") {
+        guard_links(&out)
+    } else {
+        out
+    }
+}
+
+/// `prepared` with each external link whose text isn't its address (see
+/// [`crate::safety::shows_address`]) pointing at
+/// `stoat:link?url=…&text=…` instead, with the same text. Inline and
+/// reference links alike; autolinks and bare URLs show their address, so
+/// they're left alone. A typed `stoat:link` is checked against its real
+/// text in the same way, so its `text` can't be forged.
+pub fn guard_links(prepared: &str) -> String {
+    use markdown::mdast::Node;
+    use std::collections::HashMap;
+    use std::ops::Range;
+
+    /// Each link to rewrite: its source span and what replaces it.
+    fn visit(
+        node: &Node,
+        source: &str,
+        definitions: &HashMap<String, &str>,
+        edits: &mut Vec<(Range<usize>, String)>,
+    ) {
+        let url = match node {
+            Node::Link(link) => Some(link.url.as_str()),
+            Node::LinkReference(link) => definitions.get(&label(&link.identifier)).copied(),
+            _ => None,
+        };
+        if let Some(url) = url {
+            if let Some(edit) = guard(node, url, source) {
+                edits.push(edit);
+            }
+            // Links can't hold links.
+            return;
+        }
+        for child in node.children().into_iter().flatten() {
+            visit(child, source, definitions, edits);
+        }
+    }
+
+    /// The rewrite of link `node` to `url`, if it needs one.
+    fn guard(node: &Node, url: &str, source: &str) -> Option<(Range<usize>, String)> {
+        let (url, typed) = match parse_internal_link(url) {
+            Some(InternalLink::External { url, .. }) => (url, true),
+            _ if is_external_link(url) => (url.to_string(), false),
+            _ => return None,
+        };
+        let text = node.to_string();
+        if !typed && crate::safety::shows_address(&url, &text) {
+            return None;
+        }
+        let span = node.position()?.start.offset..node.position()?.end.offset;
+        let children = node.children()?;
+        let first = children.first()?.position()?.start.offset;
+        let last = children.last()?.position()?.end.offset;
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("url", &url)
+            .append_pair("text", &text)
+            .finish();
+        let replacement = format!("[{}]({INTERNAL_SCHEME}link?{query})", &source[first..last]);
+        Some((span, replacement))
+    }
+
+    /// Reference definitions, by [`label`].
+    fn collect<'a>(node: &'a Node, definitions: &mut HashMap<String, &'a str>) {
+        if let Node::Definition(definition) = node {
+            // The first of several with one label wins.
+            definitions
+                .entry(label(&definition.identifier))
+                .or_insert(definition.url.as_str());
+        }
+        for child in node.children().into_iter().flatten() {
+            collect(child, definitions);
+        }
+    }
+
+    /// A reference label as references match it: case and runs of
+    /// whitespace don't matter.
+    fn label(identifier: &str) -> String {
+        identifier
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    }
+
+    let mut options = markdown::ParseOptions::gfm();
+    options.constructs.math_text = true;
+    options.constructs.math_flow = true;
+    let Ok(tree) = markdown::to_mdast(prepared, &options) else {
+        return prepared.to_string();
+    };
+    let mut definitions = HashMap::new();
+    collect(&tree, &mut definitions);
+    let mut edits = Vec::new();
+    visit(&tree, prepared, &definitions, &mut edits);
+    // From the last to the first, so earlier spans stay where they were.
+    let mut out = prepared.to_string();
+    for (span, replacement) in edits.into_iter().rev() {
+        out.replace_range(span, &replacement);
     }
     out
 }
@@ -221,12 +328,27 @@ pub enum InternalLink {
         word: usize,
         words: usize,
     },
+    /// `stoat:link?url=…&text=…` (form-urlencoded): an external link whose
+    /// text wasn't its address (see [`guard_links`]).
+    External { url: String, text: String },
 }
 
 /// What a `stoat:` link (a mention, a timestamp) points at. `None` for
 /// external links and anything malformed.
 pub fn parse_internal_link(url: &str) -> Option<InternalLink> {
     let rest = url.strip_prefix(INTERNAL_SCHEME)?;
+    if let Some(query) = rest.strip_prefix("link?") {
+        let (mut url, mut text) = (None, None);
+        for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+            match &*key {
+                "url" => url = Some(value.into_owned()),
+                "text" => text = Some(value.into_owned()),
+                _ => {}
+            }
+        }
+        let url = url.filter(|url| is_external_link(url))?;
+        return Some(InternalLink::External { url, text: text? });
+    }
     match rest {
         "everyone" => return Some(InternalLink::Everyone),
         "online" => return Some(InternalLink::Online),

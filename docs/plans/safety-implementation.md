@@ -72,3 +72,44 @@ Pending (batched to the end).
 
 ### Manual Validation
 Pending (batched to the end).
+
+## Chunk 3: Warn harder when a link's text is something else
+
+### Changes Made
+- `Cargo.toml`: `markdown = "1"` moved from `[dev-dependencies]` to `[dependencies]` (same version, already in the tree through gpui-base). `Cargo.lock` is unchanged.
+- `src/markdown.rs`:
+  - `prepare_with` ends with `guard_links(&out)` when the original content has `](` or `]:`.
+  - `guard_links(prepared)` parses with GFM plus math, as `TextView` does. It collects reference definitions recursively, keyed by a case- and whitespace-folded label, and walks `Link` and `LinkReference` nodes.
+  - Each external link whose text (`node.to_string()`) doesn't `safety::shows_address` its URL is rewritten to `[children source](stoat:link?url=…&text=…)` (form-urlencoded). The rewrites run from last to first.
+  - A typed `stoat:link?…` is always rewritten with its real text, so its `text` can't be forged.
+  - `InternalLink::External { url, text }` in `parse_internal_link`. It needs `url` (which must pass `is_external_link`) and `text`.
+  - The module docs gain a line for the new rewrite.
+- `src/safety.rs`:
+  - `LinkCheck::Mismatch`.
+  - `classify` returns `Plain` when the text shows the address, `Mismatch` when `text_host` gives a host that differs from the destination's, and `Text` otherwise.
+  - New `pub fn shows_address(url, text)`: percent-decoded, no trailing `/`, case-insensitive. Text without a scheme is compared with the URL after its scheme.
+  - `text_host`: a URL, or a dotted host with no whitespace, and not an email address.
+  - The tests cover all three levels and the edge cases.
+- `src/ui/markup.rs`: `InternalLink::External` is drawn as an ordinary link (`None`).
+- `src/ui/chat.rs`:
+  - `People::link_handler` sends `InternalLink::External` to `open_link(url, Some(text))`.
+  - `LinkPrompt` regains `check` and gains `understood` and `ready()`.
+  - The dialog adds `You clicked on "{text}"` for `Text`. For `Mismatch` it adds a "Be careful! This is not the same as the link that was displayed:" block in the danger colour, the text in a box, and an "I understand the risk" checkbox.
+  - Continue is `.disabled(!ready)`, and `on_ok`/`follow_link_prompt` check `ready()` too. The trust checkbox appears only for `Plain` (unchanged).
+- `tests/markdown_prepare.rs`:
+  - New tests: inline guarding (including formatting and a title), links that show their address left alone (autolink, bare URL, `www.`, email, text equal to the URL), the three reference-link forms, code, images and non-web schemes untouched, a forged typed `stoat:link`, a URL round trip (`?`, `&`, `+`, `#`, `é`, parens, existing `%` escapes, mailto, with a non-ASCII character before the link), and malformed `stoat:link` URLs.
+  - Two existing expectations updated: `ordinary_markdown_passes_through` now uses `[example.com](https://example.com)`, and the review-bot test expects its "view the full review" link guarded.
+
+### Divergences
+- Minor: the plan has `guard_links` compare the text with the URL "normalised as in assumption 2" (missing scheme, trailing `/`). That alone would guard GFM's `www.` autolinks (`http://`) and non-ASCII bare URLs (percent-encoded). So `shows_address` also decodes percent-escapes, ignores case, and compares scheme-less text with the URL after its scheme, whichever scheme it is.
+- Minor: reference links are `LinkReference` nodes in mdast, not `Link`, so their URLs come from the `Definition`s.
+- Minor: added handling for typed `stoat:link?…` URLs. Without it, someone could forge `text` to skip the warning.
+- Minor: an email address as link text counts as `Text`, not `Mismatch`.
+
+### Verification Performed
+- `cargo test --test markdown_prepare`: 37 passed. `cargo test --lib safety`: all passed.
+- `cargo test`: 676 passed, 0 failed. `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt: `src/ui/chat.rs` 17 and `src/markdown.rs` 1 (both the same diff as HEAD). `src/safety.rs`, `src/ui/markup.rs` and `tests/markdown_prepare.rs` had none at HEAD, so they were formatted fully and have 0.
+
+### Manual Validation
+Pending (batched to the end).
