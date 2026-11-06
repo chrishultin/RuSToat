@@ -17,6 +17,7 @@ pub mod emoji;
 pub mod friends;
 pub mod http;
 pub mod links;
+pub mod login_item;
 pub mod markdown;
 pub mod math;
 pub mod nav;

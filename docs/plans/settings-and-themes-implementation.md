@@ -97,3 +97,59 @@ Run with `scripts/run-bundled.sh`. The user checked the palettes and appearances
 
 ### Manual Validation
 Run with `scripts/run-bundled.sh`, two accounts signed in. The log shows the red button hiding the window ("main window hidden; still running") with no errors. The user reported that the keep-running behaviour looks good. The log doesn't show a real close with the switch off ("main window closed" never appears), so the "switch off restores the old close" check wasn't exercised in this run.
+
+## Chunk 4: Start at login
+
+### Changes Made
+- `Cargo.toml`: `objc2-service-management = "0.3"` (macOS only), default features off, with `std`, `objc2`, `objc2-foundation` and `SMAppService`.
+- `src/login_item.rs` (new): `LoginItem` (`On`, `Off`, `NeedsApproval`, `Unavailable(Unavailable)`), where `Unavailable` is `NotBundled`, `OldMacOs` or `UnknownStatus`, each with a `note()` for the greyed-out switch. On macOS:
+  - `from_status(SMAppServiceStatus)` is the pure mapping;
+  - `status()`, `set(on)` (register / unregister, with the `NSError`'s localized description as the error) and `open_system_settings()` all check the bundle identifier (`banners::bundle_identifier`) and `objc2::available!(macos = 13.0)` first.
+  - Other platforms get stubs that report `NotBundled`.
+  - Two unit tests: every status maps (plus an unknown raw value), and outside the bundle `status()` is `NotBundled` and `set` fails.
+- `src/ui/settings.rs`: the App page gains "Open RuSToat at login". It reads `login_item::status()` on every render (nothing in `prefs.json`), with a note that changes with the state. While it waits for approval, an extra row has an "Open System Settings" button. It's disabled with the reason when unavailable, and a failed `set` shows an error toast in the front window (deferred). The App page also re-adds `default_value(true)` to the Keep running switch.
+- `src/lib.rs`: the new module.
+
+### Divergences
+- Minor: `SMAppServiceStatus::NotFound` maps to `Off`, not `Unavailable`. macOS reports it for an app that has never been registered, and registering it works.
+- Minor: `Unavailable` carries a reason (`NotBundled`, `OldMacOs`, `UnknownStatus`), so the note can say why. The bundle's `LSMinimumSystemVersion` is 11.0, so macOS 11–12 get a greyed-out switch instead of a crash.
+
+### Verification Performed
+- `cargo test --lib login_item`: 2 passed.
+- `cargo test`: 610 passed, 0 failed, 5 ignored (all pre-existing).
+- `cargo clippy --all-targets`: no warnings.
+- New files formatted; `src/ui/chat.rs` drift unchanged at 17.
+
+### Manual Validation
+None. The user waived the login-item checks (System Settings › Login Items both ways, a login launch, and the greyed-out switch under `cargo run`). The greyed-out state outside the bundle is covered by the unit test.
+
+## Summary
+
+_Completed: 2026-11-06_
+
+### Chunks Completed
+1. Settings window with Keyboard Shortcuts (36004f5)
+2. Themes (4e25fec)
+3. Keep running when the window closes (1b8d2b0)
+4. Start at login (this commit)
+
+### Divergences
+- Chunk 1: the Lucide `Keyboard` icon was added to `src/assets.rs`; each shortcut direction is its own row; Esc shows as ⎋. Closing Settings logs a harmless GPUI "window not found" error.
+- Chunk 2: `Palette` and `Appearance` live in `src/prefs.rs`; the Settings window also follows macOS's appearance; no vendored theme needed edits, because gpui-component derives missing colours from each palette's own.
+- Chunk 3: no change to the approach. Known limitation: with the main window hidden and Settings open, clicking the Dock icon doesn't show the main window, and ⌘1–⌘9 pressed in Settings switches the account without showing it.
+- Chunk 4: `NotFound` counts as off; `Unavailable` carries a reason.
+
+### Definition of Done
+- [x] ⌘, and Stoat › Settings… open a single settings window with a sidebar of Appearance, App and Keyboard Shortcuts. (Manually confirmed.)
+- [x] The Keyboard Shortcuts page lists every shortcut, with keys read from the keymap; `tests/shortcuts.rs` fails if a listed shortcut isn't bound.
+- [~] Eight palettes × System / Light / Dark apply app-wide at once (manually confirmed); `tests/themes.rs` covers every palette loading. Persistence across relaunch is unit-tested only; the user waived the relaunch check.
+- [~] Skin tone and member-list preferences go through `AppPrefs` and the unchanged `PrefsFile`; not re-checked across a relaunch (waived).
+- [~] Keep running: hiding on close confirmed by the user and the log. The switch-off path (real close, badge cleared) wasn't exercised.
+- [~] "Open RuSToat at login": implemented, and the greyed-out case outside the bundle is unit-tested; the System Settings checks were waived.
+- [x] `cargo test` (610 passed) and `cargo clippy --all-targets` pass with no new warnings.
+- [x] Every chunk's manual check is recorded here, including the ones waived.
+
+### Remaining Manual Steps
+- Optional: relaunch to confirm the palette, appearance, skin tone and member list are kept, with no flash of Default.
+- Optional: with Keep running off, close the window and check that the badge clears and the Dock icon opens a fresh window.
+- Optional: in the bundle, check that the login-item switch matches System Settings › Login Items both ways.

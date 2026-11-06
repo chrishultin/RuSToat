@@ -4,13 +4,16 @@
 //! section is one more function in the list the view is created with.
 
 use gpui_kit::assets::IconName;
+use gpui_kit::component::button::Button;
 use gpui_kit::component::kbd::Kbd;
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::setting::{
     SettingField, SettingGroup, SettingItem, SettingPage, Settings,
 };
-use gpui_kit::component::{ActiveTheme, h_flex};
+use gpui_kit::component::{ActiveTheme, Sizable, WindowExt, h_flex};
 use gpui_kit::*;
 
+use crate::login_item::{self, LoginItem};
 use crate::shortcuts::{self, Group, Keys, Shortcut};
 use crate::themes::{self, Appearance, Palette};
 use crate::ui::AppRoot;
@@ -123,19 +126,77 @@ fn appearance_page(_: &SettingsView, _: &mut App) -> SettingPage {
 
 /// App: how RuSToat runs.
 fn app_page(_: &SettingsView, _: &mut App) -> SettingPage {
+    // macOS holds this one, so it's read afresh each time the page renders
+    // (including when the window comes forward, after System Settings).
+    let login = login_item::status();
+    let login_note = match login {
+        LoginItem::On | LoginItem::Off => "Starts RuSToat when you log in to your Mac.",
+        LoginItem::NeedsApproval => "Approve RuSToat in System Settings › Login Items.",
+        LoginItem::Unavailable(reason) => reason.note(),
+    };
+    let approve = (login == LoginItem::NeedsApproval).then(|| {
+        SettingItem::new(
+            "Login Items",
+            SettingField::render(|_, _, _| {
+                Button::new("open-login-items")
+                    .label("Open System Settings")
+                    .outline()
+                    .small()
+                    .on_click(|_, _, _| login_item::open_system_settings())
+            }),
+        )
+    });
     SettingPage::new("App").icon(IconName::Settings).group(
-        SettingGroup::new().item(
-            SettingItem::new(
-                "Keep running when the window is closed",
-                SettingField::switch(
-                    |cx| AppPrefs::get(cx).keep_running,
-                    |on, cx| AppPrefs::update(cx, |prefs| prefs.keep_running = on),
+        SettingGroup::new()
+            .item(
+                SettingItem::new(
+                    "Keep running when the window is closed",
+                    SettingField::switch(
+                        |cx| AppPrefs::get(cx).keep_running,
+                        |on, cx| AppPrefs::update(cx, |prefs| prefs.keep_running = on),
+                    )
+                    .default_value(true),
                 )
-                .default_value(true),
+                .description("Stay connected and keep notifying. Quit with ⌘Q."),
             )
-            .description("Stay connected and keep notifying. Quit with ⌘Q."),
-        ),
+            .item(
+                SettingItem::new(
+                    "Open RuSToat at login",
+                    SettingField::switch(
+                        |_| {
+                            matches!(
+                                login_item::status(),
+                                LoginItem::On | LoginItem::NeedsApproval
+                            )
+                        },
+                        |on, cx| {
+                            if let Err(err) = login_item::set(on) {
+                                log::warn!("login item: {err:#}");
+                                show_error(format!("Couldn't change the login item: {err}"), cx);
+                            }
+                            cx.refresh_windows();
+                        },
+                    ),
+                )
+                .description(login_note)
+                .disabled(matches!(login, LoginItem::Unavailable(_))),
+            )
+            .items(approve),
     )
+}
+
+/// Show `message` as an error toast in the window in front. Deferred: a
+/// setting's change handler runs while GPUI is updating that window.
+fn show_error(message: String, cx: &mut App) {
+    cx.defer(move |cx| {
+        if let Some(window) = cx.active_window() {
+            window
+                .update(cx, |_, window, cx| {
+                    window.push_notification(Notification::error(message), cx)
+                })
+                .ok();
+        }
+    });
 }
 
 /// Keyboard Shortcuts: every shortcut, with its keys read from the keymap.
