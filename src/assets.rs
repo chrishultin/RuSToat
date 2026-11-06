@@ -114,7 +114,7 @@ mod tests {
     /// The settings window's sidebar icons.
     #[test]
     fn settings_icons_load() {
-        for icon in [IconName::Keyboard, IconName::Palette] {
+        for icon in [IconName::Keyboard, IconName::Palette, IconName::Settings] {
             let path = icon.path();
             assert!(AppAssets.load(&path).unwrap().is_some(), "{path} missing");
         }

@@ -7482,6 +7482,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "objc2-user-notifications",
+ "raw-window-handle",
  "reqwest 0.13.5",
  "resvg 0.46.0",
  "revolt-models",

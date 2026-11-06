@@ -1,6 +1,6 @@
 //! App-wide preferences, kept between launches: the default skin tone for
-//! emoji, whether the member list is open, and the colour palette and
-//! appearance. Like [`crate::places`], plain data with no GPUI, saved
+//! emoji, whether the member list is open, the colour palette and
+//! appearance, and whether closing the window keeps RuSToat running. Like [`crate::places`], plain data with no GPUI, saved
 //! as a small JSON file in the app's folder and read and written
 //! synchronously.
 
@@ -173,6 +173,9 @@ pub struct Prefs {
     pub member_list_open: bool,
     pub palette: Palette,
     pub appearance: Appearance,
+    /// Closing the main window hides it, so accounts stay connected and
+    /// notifications keep coming. Quitting is ⌘Q. On unless turned off.
+    pub keep_running: bool,
 }
 
 impl Default for Prefs {
@@ -182,6 +185,7 @@ impl Default for Prefs {
             member_list_open: true,
             palette: Palette::default(),
             appearance: Appearance::default(),
+            keep_running: true,
         }
     }
 }
@@ -261,6 +265,7 @@ mod tests {
             member_list_open: false,
             palette: Palette::MacosClassic,
             appearance: Appearance::Dark,
+            keep_running: false,
         };
         file.save(&prefs).unwrap();
         assert_eq!(file.load(), prefs);
@@ -316,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_from_before_themes_gets_the_default_palette_following_the_system() {
+    fn a_file_from_before_milestone_13_gets_its_defaults() {
         let dir = temp_dir("themes");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("prefs.json");
@@ -324,12 +329,15 @@ mod tests {
         let old = PrefsFile::at(&path).load();
         assert_eq!(old.palette, Palette::Default);
         assert_eq!(old.appearance, Appearance::System);
+        assert!(old.keep_running);
         assert_eq!(old.skin_tone, Tone::Medium);
         assert!(!old.member_list_open);
         std::fs::write(&path, br#"{"palette":"Gruvbox","appearance":"Light"}"#).unwrap();
         let new = PrefsFile::at(&path).load();
         assert_eq!(new.palette, Palette::Gruvbox);
         assert_eq!(new.appearance, Appearance::Light);
+        std::fs::write(&path, br#"{"keep_running":false}"#).unwrap();
+        assert!(!PrefsFile::at(&path).load().keep_running);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

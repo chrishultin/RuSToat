@@ -93,16 +93,10 @@ fn main() {
     let app = gpui_kit::application()
         .with_assets(stoat_gpui::assets::AppAssets)
         .with_http_client(stoat_gpui::http::ReqwestHttpClient::new());
-    // Clicking the Dock icon while no window is showing. A minimized window
-    // comes back on its own; a closed one is opened again.
-    app.on_reopen(|cx| {
-        if !MainWindow::is_open(cx) {
-            log::info!("Dock clicked with no window; opening one");
-            if let Err(err) = MainWindow::open(cx) {
-                log::error!("couldn't open the main window: {err:#}");
-            }
-        }
-    });
+    // Clicking the Dock icon while no window is showing: show the hidden
+    // window again, or open a new one if it was closed. A minimized window
+    // comes back on its own.
+    app.on_reopen(MainWindow::show);
     app.run(|cx| {
         gpui_kit::init(cx);
         // The saved palette before any window opens, so there's no flash of
@@ -148,14 +142,19 @@ fn main() {
         // accounts and offers the + for another.
         cx.on_action(|_: &AddAccount, cx| {
             if MainWindow::is_open(cx) {
-                MainWindow::update(cx, |root, window, cx| root.add_account(window, cx));
+                MainWindow::update(cx, |root, window, cx| {
+                    window.activate_window();
+                    root.add_account(window, cx);
+                });
+                cx.activate(true);
             } else if let Err(err) = MainWindow::open(cx) {
                 log::error!("couldn't open the main window: {err:#}");
             }
         });
-        // Closing the window drops every account's connection with it, so
-        // nothing keeps the Dock badge up to date: clear it rather than leave
-        // a stale count. Reopening the window counts again.
+        // Really closing the window (with Keep running off) drops every
+        // account's connection with it, so nothing keeps the Dock badge up to
+        // date: clear it rather than leave a stale count. Reopening the
+        // window counts again. A hidden window never gets here.
         cx.on_window_closed(|cx, id| {
             if MainWindow::window_id(cx) == Some(id) {
                 log::info!("main window closed");
@@ -211,6 +210,18 @@ impl MainWindow {
         let this = cx.global::<Self>();
         let (store, accounts) = (this.store.clone(), this.accounts.clone());
         let (window, root) = gpui_kit::open_window(options, cx, |window, cx| {
+            // With Keep running on, the close button hides the window, and
+            // every account stays connected on its tasks. ⌘Q still quits.
+            window.on_window_should_close(cx, |window, cx| {
+                if !AppPrefs::get(cx).keep_running {
+                    return true;
+                }
+                log::info!("main window hidden; still running");
+                if !stoat_gpui::window_hide::hide(window) {
+                    cx.hide();
+                }
+                false
+            });
             cx.new(|cx| ui::AppRoot::new(store, accounts, window, cx))
         })?;
         cx.global_mut::<Self>().current = Some((window, root.downgrade()));
@@ -222,6 +233,20 @@ impl MainWindow {
         .detach();
         cx.activate(true);
         Ok(())
+    }
+
+    /// Bring the main window forward: show it if it's hidden, or open it if
+    /// it was closed.
+    fn show(cx: &mut App) {
+        if MainWindow::is_open(cx) {
+            MainWindow::update(cx, |_, window, _| window.activate_window());
+            cx.activate(true);
+        } else {
+            log::info!("no main window; opening one");
+            if let Err(err) = MainWindow::open(cx) {
+                log::error!("couldn't open the main window: {err:#}");
+            }
+        }
     }
 
     /// Rebuild the menu bar if the accounts it lists have changed.

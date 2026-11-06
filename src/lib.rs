@@ -35,3 +35,4 @@ pub mod themes;
 pub mod time;
 pub mod typing;
 pub mod ui;
+pub mod window_hide;

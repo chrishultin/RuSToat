@@ -68,3 +68,32 @@ Run with `scripts/run-bundled.sh` (two accounts signed in). The user confirmed:
 
 ### Manual Validation
 Run with `scripts/run-bundled.sh`. The user checked the palettes and appearances in Settings and reported it looks good. The relaunch checks (palette and appearance kept with no flash of Default; skin tone and member list remembered) were waived by the user; persistence is covered only by the `prefs.rs` unit tests and the unchanged `PrefsFile` save path.
+
+## Chunk 3: Keep running when the window closes
+
+### Changes Made
+- `src/prefs.rs`: `Prefs.keep_running: bool`, default `true` (through `Default` and the struct's `#[serde(default)]`). The pre-milestone-13 file test (renamed `a_file_from_before_milestone_13_gets_its_defaults`) checks it loads `true` and that `false` round-trips.
+- `src/window_hide.rs` (new): `hide(window) -> bool`. On macOS it takes the window's `raw_window_handle` (`HasWindowHandle::window_handle`, called through the trait because GPUI's `Window` has its own `window_handle()`), casts the AppKit handle's `ns_view` to `NSView`, gets its `NSWindow` and calls `orderOut:`. Returns `false` (with a warning) if any step fails; elsewhere it always returns `false`.
+- `Cargo.toml`: `objc2-app-kit` gains the `NSView` and `NSWindow` features; new `raw-window-handle = "0.6"` (already in the tree via GPUI), both macOS-only.
+- `src/main.rs`:
+  - `MainWindow::open` registers `window.on_window_should_close`: with `keep_running` on it hides the window (falling back to `cx.hide()` if `window_hide::hide` fails), logs "main window hidden; still running", and returns `false`; off, it returns `true` and the window closes as before.
+  - New `MainWindow::show`: activates the window (`activate_window`, which is `makeKeyAndOrderFront:`) and the app if it's open (hidden or not), otherwise opens a new one. `app.on_reopen` is now `MainWindow::show`.
+  - Add Account… activates the window before showing the login screen.
+  - The `on_window_closed` comment notes it only runs for a real close.
+- `src/ui/settings.rs`: `app_page` (between Appearance and Keyboard Shortcuts, `Settings` icon) with the "Keep running when the window is closed" switch and its description, default `true`.
+- `src/lib.rs`: the new module. `src/assets.rs`: `settings_icons_load` also checks `Settings`.
+
+### Divergences
+- None to the approach: `orderOut:` through the raw handle works, so the `cx.hide()` fallback (assumption 5) isn't used in practice.
+- Known limitation, not addressed: macOS sends `applicationShouldHandleReopen` (GPUI's `on_reopen`) only when the app has no visible windows. With the main window hidden and Settings open, clicking the Dock icon doesn't show the main window (Add Account… or a banner still do). Likewise ⌘1–⌘9 pressed in Settings while the main window is hidden switches the account without showing it.
+- Risk checks: GPUI's macOS key-status callback is spawned, not run inline, so `orderOut:` inside `windowShouldClose:` doesn't re-enter the window. A hidden window resigns key, so `is_window_active()` is false and nothing is marked read.
+- The open question about banner clicks reopening a *closed* window is left as it was: with Keep running on (the default) the window is only hidden, so the click already brings it back.
+
+### Verification Performed
+- `cargo build`: clean.
+- `cargo test`: 608 passed, 0 failed.
+- `cargo clippy --all-targets`: no warnings.
+- `rustfmt --check` drift 0 in `src/main.rs`, `src/prefs.rs`, `src/assets.rs`; new file formatted.
+
+### Manual Validation
+Run with `scripts/run-bundled.sh`, two accounts signed in. The log shows the red button hiding the window ("main window hidden; still running") with no errors. The user reported that the keep-running behaviour looks good. The log doesn't show a real close with the switch off ("main window closed" never appears), so the "switch off restores the old close" check wasn't exercised in this run.

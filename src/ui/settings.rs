@@ -51,7 +51,7 @@ impl SettingsView {
 
     /// The app's own sections, in sidebar order.
     pub fn app_pages() -> Vec<PageFn> {
-        vec![appearance_page, shortcuts_page]
+        vec![appearance_page, app_page, shortcuts_page]
     }
 
     /// The main window's content, if it's still open.
@@ -119,6 +119,23 @@ fn appearance_page(_: &SettingsView, _: &mut App) -> SettingPage {
                     .description("Light or dark, or System to follow macOS."),
                 ),
         )
+}
+
+/// App: how RuSToat runs.
+fn app_page(_: &SettingsView, _: &mut App) -> SettingPage {
+    SettingPage::new("App").icon(IconName::Settings).group(
+        SettingGroup::new().item(
+            SettingItem::new(
+                "Keep running when the window is closed",
+                SettingField::switch(
+                    |cx| AppPrefs::get(cx).keep_running,
+                    |on, cx| AppPrefs::update(cx, |prefs| prefs.keep_running = on),
+                )
+                .default_value(true),
+            )
+            .description("Stay connected and keep notifying. Quit with ⌘Q."),
+        ),
+    )
 }
 
 /// Keyboard Shortcuts: every shortcut, with its keys read from the keymap.
