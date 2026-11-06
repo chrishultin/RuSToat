@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use reqwest::{Client, Method};
 use revolt_models::v0::{
-    AllMemberResponse, BulkMessageResponse, DataEditMessage, DataLogin, DataMessageSearch,
+    AllMemberResponse, BulkMessageResponse, Channel, DataEditMessage, DataLogin, DataMessageSearch,
     DataMessageSend, MFAResponse, Member, Message, MessageSort, OptionsQueryMessages, ReplyIntent,
     ResponseLogin, User, UserProfile,
 };
@@ -539,6 +539,16 @@ impl StoatClient {
     /// it's `MissingPermission`.
     pub async fn fetch_profile(&self, id: &str) -> Result<UserProfile, ApiError> {
         self.send(Method::GET, &format!("/users/{id}/profile"), None::<&()>)
+            .await
+    }
+
+    /// `GET /users/{id}/dm`: the user's DM with `id`, created (open) if there
+    /// isn't one yet. An existing one comes back as it is, even if closed.
+    /// Needs Send Message on them: they're a friend, or one of the two is a
+    /// bot sharing a server or group; otherwise it's `MissingPermission`.
+    /// For the user themselves, it's their Saved Notes.
+    pub async fn open_dm(&self, id: &str) -> Result<Channel, ApiError> {
+        self.send(Method::GET, &format!("/users/{id}/dm"), None::<&()>)
             .await
     }
 

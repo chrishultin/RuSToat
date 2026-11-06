@@ -21,7 +21,9 @@ use gpui_kit::component::popover::Popover;
 use gpui_kit::component::skeleton::Skeleton;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme, Icon, Selectable, Sizable, WindowExt, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme, Disableable, Icon, Selectable, Sizable, WindowExt, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
@@ -207,6 +209,8 @@ pub struct ChatView {
     /// Profiles fetched this session, by user ID, shown while the card
     /// fetches them again. `None`: Stoat won't show this one.
     profiles: HashMap<String, Option<UserProfile>>,
+    /// The person whose DM is being asked for ("Message" on their card).
+    dm_opening: Option<String>,
     /// The message whose reaction picker is open.
     picker_for: Option<String>,
     /// Reaction changes waiting on the server, as (message, emoji). Another
@@ -454,6 +458,7 @@ impl ChatView {
             card: None,
             card_focus: cx.focus_handle(),
             profiles: HashMap::new(),
+            dm_opening: None,
             picker_for: None,
             reacting: HashSet::new(),
             reply_fetches: HashSet::new(),
@@ -648,6 +653,13 @@ impl ChatView {
                 // may pin in it.
                 self.forget_member_lists();
                 self.sync_pane(&id, cx);
+                // A hidden channel, or a DM closed elsewhere, can't stay open.
+                let selected = self.selected.len();
+                self.drop_stale_selection();
+                if self.selected.len() != selected {
+                    self.remember_places();
+                    self.ensure_current_loaded(cx);
+                }
             }
             ConnectionEvent::Event(ServerEvent::ChannelStartTyping { channel, user }) => {
                 self.typing.start(&channel, &user, std::time::Instant::now());
@@ -2252,6 +2264,88 @@ impl ChatView {
         cx.notify();
     }
 
+    /// "Message" on `user`'s card: open the DM with them. One that's known
+    /// opens here (reopened if it was closed). Otherwise Stoat is asked for
+    /// it, which creates it if it's allowed (see [`crate::profile::can_message`]).
+    fn message_user(&mut self, user: String, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(dm) = crate::profile::dm_with(&self.store, &user) {
+            self.store.activate_dm(&dm);
+            self.close_card(true, window, cx);
+            self.open_channel(&dm, cx);
+            return;
+        }
+        if self.dm_opening.is_some() {
+            return;
+        }
+        self.dm_opening = Some(user.clone());
+        cx.notify();
+        let request = spawn_io({
+            let (client, user) = (self.client.clone(), user.clone());
+            async move { client.open_dm(&user).await }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.dm_opening = None;
+                cx.notify();
+                let error: SharedString = match result {
+                    Ok(Ok(channel)) => {
+                        let id = crate::store::channel_id(&channel).to_string();
+                        log::info!("opened DM {id} with {user}");
+                        // Its `ChannelCreate` may come too; adding is idempotent.
+                        this.store.add_channel(channel);
+                        this.store.activate_dm(&id);
+                        this.close_card(true, window, cx);
+                        this.open_channel(&id, cx);
+                        return;
+                    }
+                    Ok(Err(err))
+                        if matches!(
+                            err.error_type(),
+                            Some(revolt_result::ErrorType::MissingPermission { .. })
+                        ) =>
+                    {
+                        CANNOT_MESSAGE_TEXT.into()
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't open a DM with {user}: {err:?}");
+                        err.to_string().into()
+                    }
+                    Err(err) => {
+                        log::warn!("DM task failed: {err:?}");
+                        "Couldn't open the conversation.".into()
+                    }
+                };
+                window.push_notification(Notification::error(error), cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The buttons on `user`'s card: Message, if they can be messaged.
+    fn card_actions(&self, user: &str, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut actions = Vec::new();
+        if crate::profile::can_message(&self.store, user) {
+            let opening = self.dm_opening.as_deref() == Some(user);
+            let target = user.to_string();
+            actions.push(
+                Button::new("card-message")
+                    .primary()
+                    .small()
+                    .icon(IconName::MessageCircle)
+                    .label("Message")
+                    .loading(opening)
+                    .disabled(opening)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.message_user(target.clone(), window, cx)
+                    }))
+                    .into_any_element(),
+            );
+        }
+        actions
+    }
+
     /// What clicking a link in Markdown does: a person (a mention, or a name
     /// in a system message) opens their card, and web links open in the
     /// browser.
@@ -2325,7 +2419,8 @@ impl ChatView {
             banner_url,
             bio,
         };
-        let element = render_profile_card(&content, Vec::new(), on_link, cx)
+        let actions = self.card_actions(&open.user, cx);
+        let element = render_profile_card(&content, actions, on_link, cx)
             .id("profile-card")
             .track_focus(&self.card_focus)
             .occlude()
@@ -4892,6 +4987,9 @@ fn reply_target(message: &MessageRow) -> ReplyTarget {
         mention: !message.mine,
     }
 }
+
+/// Shown when Stoat won't open a DM with someone (they aren't a friend).
+const CANNOT_MESSAGE_TEXT: &str = "You can only message friends and bots.";
 
 /// Shown when replying to a sixth message at once.
 const TOO_MANY_REPLIES_TEXT: &str = "You can reply to up to 5 messages at once.";

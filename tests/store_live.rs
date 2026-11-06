@@ -750,3 +750,43 @@ fn system_messages_link_their_people_and_escape_the_rest() {
         "Ada L. added [evil](https://x.y)"
     );
 }
+
+// --- DMs opened from a profile card -----------------------------------------
+
+#[test]
+fn a_dm_opened_from_a_card_isnt_doubled_by_its_channel_create() {
+    let mut store = store_with_page(50);
+    let before = store.home_channels().len();
+    let dm: stoat_gpui::api::models::Channel = serde_json::from_value(serde_json::json!({
+        "channel_type": "DirectMessage", "_id": "dm-new", "active": true, "recipients": ["u-me", "u-bob"]
+    }))
+    .unwrap();
+    // `GET /users/{id}/dm`, then the `ChannelCreate` Stoat sends as well.
+    store.add_channel(dm.clone());
+    store.add_channel(dm);
+    let home = store.home_channels();
+    assert_eq!(home.len(), before + 1);
+    assert_eq!(home.iter().filter(|c| c.id == "dm-new").count(), 1);
+}
+
+#[test]
+fn a_closed_dm_reopened_here_shows_in_home_until_closed_again() {
+    let mut store = store_with_page(50);
+    let in_home = |store: &ChatStore| store.home_channels().iter().any(|c| c.id == "dm-closed");
+    assert!(!in_home(&store));
+    assert!(!store.shows_channel("dm-closed"));
+
+    assert!(store.activate_dm("dm-closed"));
+    assert!(in_home(&store));
+    assert!(store.shows_channel("dm-closed"));
+    // Already open: nothing to do. Not a DM: nothing either.
+    assert!(!store.activate_dm("dm-closed"));
+    assert!(!store.activate_dm("ch-general"));
+
+    // Another client closes it.
+    let data: stoat_gpui::api::models::PartialChannel =
+        serde_json::from_value(serde_json::json!({ "active": false })).unwrap();
+    store.apply_channel_update("dm-closed", data, &[]);
+    assert!(!in_home(&store));
+    assert!(!store.shows_channel("dm-closed"));
+}

@@ -217,3 +217,45 @@ Deferred to the end of the milestone (manual checks are batched).
 
 ### Manual Validation
 Deferred to the end of the milestone (manual checks are batched).
+
+## Chunk 5: "Message": open a DM
+
+### Changes Made
+- `src/profile.rs`:
+  - `dm_with(store, user) -> Option<String>`: the `DirectMessage` whose recipients are the user and `user`, open or closed. Never for yourself.
+  - `can_message(store, user) -> bool`: not yourself, and a `Friend`, a bot, or someone `dm_with` finds (Assumption 1).
+- `src/store.rs`:
+  - New `channels()`, an iterator over every known channel, for `dm_with`.
+  - New `activate_dm(channel) -> bool`, which sets `active = true` locally on a closed DM, as stoat.js does.
+  - `shows_channel` now returns false for closed DMs, matching what `home_channels` lists.
+- `src/api/client.rs`: `open_dm(user) -> Channel` (`GET /users/{id}/dm`).
+- `src/ui/chat.rs`:
+  - New `dm_opening: Option<String>`, the user whose DM is being requested.
+  - `message_user(user)`:
+    - With a known DM: `activate_dm`, close the card (focus returns to the composer), then `open_channel`, which moves to Home. The side panel resets through the existing `sync_side_panel`.
+    - Otherwise it asks Stoat once (a repeat click while waiting does nothing). On success it does `add_channel` (idempotent, since it's a map insert), `activate_dm`, closes the card and opens the DM.
+    - Errors become toasts. A 403 `MissingPermission` gets "You can only message friends and bots." (`CANNOT_MESSAGE_TEXT`). Other API errors get their own message, and a failed task gets "Couldn't open the conversation."
+  - New `card_actions(user)` builds the card's actions row: a primary "Message" button (MessageCircle icon), shown when `can_message`, loading and disabled while its request is in flight.
+  - `ChannelUpdate` now also runs `drop_stale_selection` and, if a selection was dropped, `remember_places` and `ensure_current_loaded`. A DM closed by another client, or a channel hidden by an override, then can't stay selected. This was the plan's risk for locally activated DMs.
+- Tests:
+  - `tests/profile.rs`: the fixture gains a plain member, a blocked member and a closed DM. New tests:
+    - `can_message` is true for a friend without a DM, a bot, and non-friends with an open or a closed DM.
+    - It's false for yourself, a plain server member, a blocked user without a DM, and an unknown user.
+    - `dm_with` finds open and closed DMs, and not yourself.
+  - `tests/api_users.rs`: `open_dm`'s path and token with a `DirectMessage`, a `SavedMessages` for yourself, and a 403 `MissingPermission { permission: "SendMessage" }`.
+  - `tests/store_live.rs`:
+    - The DM from `open_dm` plus its `ChannelCreate` gives exactly one Home entry.
+    - `activate_dm` shows a closed DM in Home (and is a no-op when it's already open or not a DM), and a later `ChannelUpdate { active: false }` hides it again.
+
+### Divergences
+- **`shows_channel` hides closed DMs, and `ChannelUpdate` drops stale selections.** The plan only asked to check that the selection doesn't stay on a hidden DM. Without these, a locally reopened DM closed by another client would have stayed open while missing from the Home list. As a side effect, a channel hidden by a live channel-override edit now also leaves the selection.
+- **Look-ahead:** chunk 6's menu "Message" item reuses `message_user` and `can_message`. Chunk 7 adds its friend button to `card_actions`. No plan change is needed.
+
+### Verification Performed
+- `cargo test --test profile --test api_users --test store_live`: 12 + 8 + 31 passed.
+- `cargo test` (full): 538 passed, 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- `rustfmt --check` hunk counts are at their `HEAD` values in every touched file, and the new files are clean.
+
+### Manual Validation
+Deferred to the end of the milestone (manual checks are batched).

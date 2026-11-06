@@ -5,7 +5,7 @@ use revolt_permissions::DEFAULT_PERMISSION_SERVER;
 use serde_json::{Value, json};
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::api::models::RelationshipStatus;
-use stoat_gpui::profile::{CardRole, profile_card};
+use stoat_gpui::profile::{CardRole, can_message, dm_with, profile_card};
 use stoat_gpui::store::{ChatStore, PresenceKind};
 
 /// 2026-01-01T00:00:00Z as a ULID prefix, so "account created" is known.
@@ -54,7 +54,10 @@ fn store() -> ChatStore {
                 "status": { "text": "  counting  ", "presence": "Busy" }
             })),
             user("u-bob", json!({ "online": false, "relationship": "Friend" })),
-            user("u-bot", json!({ "bot": { "owner": "u-me" }, "status": { "text": "   " } }))
+            user("u-bot", json!({ "bot": { "owner": "u-me" }, "status": { "text": "   " } })),
+            user("u-plain", json!({})),
+            user("u-blocked", json!({ "relationship": "Blocked" })),
+            user("u-closed", json!({}))
         ],
         "servers": [{
             "_id": "srv", "owner": "u-me", "name": "Test Server", "channels": ["ch"],
@@ -69,6 +72,8 @@ fn store() -> ChatStore {
         "channels": [
             { "channel_type": "TextChannel", "_id": "ch", "server": "srv", "name": "general" },
             { "channel_type": "DirectMessage", "_id": "dm", "active": true, "recipients": ["u-me", ADA] },
+            // Never messaged, so closed.
+            { "channel_type": "DirectMessage", "_id": "dm-closed", "active": false, "recipients": ["u-closed", "u-me"] },
             {
                 "channel_type": "Group", "_id": "grp", "name": "Group", "owner": "u-me",
                 "recipients": ["u-me", ADA, "u-bob"]
@@ -79,7 +84,9 @@ fn store() -> ChatStore {
             member(ADA, &["plain", "admin", "fancy", "deleted-role"], json!({
                 "nickname": "Countess", "pronouns": "they/them"
             })),
-            member("u-bob", &[], json!({ "nickname": "   " }))
+            member("u-bob", &[], json!({ "nickname": "   " })),
+            member("u-plain", &[], json!({})),
+            member("u-blocked", &[], json!({}))
         ]
     });
     let Some(ServerEvent::Ready(ready)) = parse_frame(&ready.to_string()).pop() else {
@@ -181,4 +188,35 @@ fn the_users_own_card_says_so() {
 #[test]
 fn an_unknown_user_has_no_card() {
     assert_eq!(profile_card(&store(), "u-nobody", Some("ch")), None);
+}
+
+#[test]
+fn message_is_offered_for_friends_bots_and_existing_dms() {
+    let store = store();
+    // Bob is a friend, with no DM yet.
+    assert!(can_message(&store, "u-bob"));
+    assert!(can_message(&store, "u-bot"));
+    // Not friends, but there's a DM (open, or closed).
+    assert!(can_message(&store, ADA));
+    assert!(can_message(&store, "u-closed"));
+}
+
+#[test]
+fn message_isnt_offered_for_yourself_strangers_or_the_blocked() {
+    let store = store();
+    assert!(!can_message(&store, "u-me"));
+    // Sharing a server isn't enough: Stoat refuses a DM with a non-friend.
+    assert!(!can_message(&store, "u-plain"));
+    assert!(!can_message(&store, "u-blocked"));
+    assert!(!can_message(&store, "u-nobody"));
+}
+
+#[test]
+fn the_dm_with_someone_is_found_open_or_closed() {
+    let store = store();
+    assert_eq!(dm_with(&store, ADA).as_deref(), Some("dm"));
+    assert_eq!(dm_with(&store, "u-closed").as_deref(), Some("dm-closed"));
+    assert_eq!(dm_with(&store, "u-bob"), None);
+    // Not Saved Notes, nor a group.
+    assert_eq!(dm_with(&store, "u-me"), None);
 }

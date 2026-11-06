@@ -2679,6 +2679,25 @@ impl ChatStore {
         self.channels.get(id)
     }
 
+    /// Every channel the client knows, in no order.
+    pub fn channels(&self) -> impl Iterator<Item = &Channel> {
+        self.channels.values()
+    }
+
+    /// Reopen a closed DM here (`active = true`), as stoat.js does when
+    /// someone is messaged from their profile, so it shows in Home. Stoat
+    /// itself only marks it open once a message is sent. Returns true if it
+    /// was closed.
+    pub fn activate_dm(&mut self, channel: &str) -> bool {
+        match self.channels.get_mut(channel) {
+            Some(Channel::DirectMessage { active, .. }) if !*active => {
+                *active = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Servers for the rail, in the user's order.
     pub fn servers(&self) -> Vec<ServerEntry> {
         self.server_order
@@ -2708,13 +2727,15 @@ impl ChatStore {
     /// Whether the channel list shows `channel`. Server channels the user
     /// can't view (a role edit since `Ready` hid them) aren't shown, except
     /// while the user's own membership of the server isn't known yet (just
-    /// after joining it), when there's nothing to work it out from.
+    /// after joining it), when there's nothing to work it out from. Closed
+    /// DMs aren't shown in Home either.
     pub fn shows_channel(&self, channel: &str) -> bool {
         match self.channels.get(channel) {
             Some(Channel::TextChannel { server, .. }) => {
                 self.member(server, &self.me).is_none()
                     || crate::permissions::can_view(self, &self.me, channel)
             }
+            Some(Channel::DirectMessage { active, .. }) => *active,
             Some(_) => true,
             None => false,
         }

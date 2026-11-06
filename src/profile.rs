@@ -4,7 +4,7 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 
-use crate::api::models::RelationshipStatus;
+use crate::api::models::{Channel, RelationshipStatus};
 use crate::store::{ChatStore, PresenceKind, display_name, presence_kind, solid_colour};
 
 /// A person, as their profile card shows them.
@@ -116,6 +116,35 @@ pub fn profile_card(store: &ChatStore, user: &str, channel: Option<&str>) -> Opt
         relationship: person.relationship.clone(),
         is_me: user == store.me(),
     })
+}
+
+/// The user's DM with `user`, open or closed, if there is one.
+pub fn dm_with(store: &ChatStore, user: &str) -> Option<String> {
+    let me = store.me();
+    if user == me {
+        return None;
+    }
+    store.channels().find_map(|channel| match channel {
+        Channel::DirectMessage { id, recipients, .. }
+            if recipients.iter().any(|r| r == me) && recipients.iter().any(|r| r == user) =>
+        {
+            Some(id.clone())
+        }
+        _ => None,
+    })
+}
+
+/// Whether the card offers "Message": for friends and bots (whom Stoat
+/// lets anyone open a DM with), and for anyone the user already has a DM
+/// with. Never for the user themselves.
+pub fn can_message(store: &ChatStore, user: &str) -> bool {
+    if user == store.me() {
+        return false;
+    }
+    let friend_or_bot = store.user(user).is_some_and(|person| {
+        person.relationship == RelationshipStatus::Friend || person.bot.is_some()
+    });
+    friend_or_bot || dm_with(store, user).is_some()
 }
 
 /// A Stoat timestamp as a date. The placeholder a membership gets when an

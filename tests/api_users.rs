@@ -2,6 +2,7 @@
 
 use revolt_result::ErrorType;
 use serde_json::json;
+use stoat_gpui::api::models::Channel;
 use stoat_gpui::api::{ApiError, StoatClient};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -113,6 +114,61 @@ async fn a_profile_without_a_connection_is_missing_permission() {
         .unwrap_err();
     assert!(
         matches!(err.error_type(), Some(ErrorType::MissingPermission { permission }) if permission == "ViewProfile"),
+        "got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn opening_a_dm_gets_the_channel() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/users/u-bob/dm"))
+        .and(header("x-session-token", "tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "channel_type": "DirectMessage", "_id": "dm-new", "active": true,
+            "recipients": ["u-me", "u-bob"]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let channel = client(&server).open_dm("u-bob").await.unwrap();
+    assert!(matches!(
+        channel,
+        Channel::DirectMessage { ref id, active: true, ref recipients, .. }
+            if id == "dm-new" && recipients.len() == 2
+    ));
+}
+
+#[tokio::test]
+async fn opening_a_dm_with_yourself_is_saved_notes() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/users/u-me/dm"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "channel_type": "SavedMessages", "_id": "ch-saved", "user": "u-me"
+        })))
+        .mount(&server)
+        .await;
+
+    let channel = client(&server).open_dm("u-me").await.unwrap();
+    assert!(matches!(channel, Channel::SavedMessages { ref id, .. } if id == "ch-saved"));
+}
+
+#[tokio::test]
+async fn a_dm_with_a_non_friend_is_missing_send_message() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/users/u-stranger/dm"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "type": "MissingPermission", "permission": "SendMessage", "location": "x"
+        })))
+        .mount(&server)
+        .await;
+
+    let err = client(&server).open_dm("u-stranger").await.unwrap_err();
+    assert!(
+        matches!(err.error_type(), Some(ErrorType::MissingPermission { permission }) if permission == "SendMessage"),
         "got {err:?}"
     );
 }
