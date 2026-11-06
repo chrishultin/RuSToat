@@ -7,8 +7,8 @@ use revolt_permissions::{
 use serde_json::{Value, json};
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::permissions::{
-    can_bypass_slowmode, can_mention_everyone, can_mention_roles, can_pin, can_view,
-    channel_permissions, has,
+    can_bypass_slowmode, can_mention_everyone, can_mention_roles, can_pin, can_send_embeds,
+    can_view, channel_permissions, has,
 };
 use stoat_gpui::store::ChatStore;
 
@@ -474,4 +474,36 @@ fn nobody_bypasses_slowmode_outside_a_server() {
     for channel in ["dm-friend", "grp-mine", "ch-saved"] {
         assert!(!can_bypass_slowmode(&store, "u-me", channel), "{channel}");
     }
+}
+
+const EMBEDS: u64 = ChannelPermission::SendEmbeds as u64;
+
+#[test]
+fn sending_embeds_follows_its_permission() {
+    let channels = json!([
+        { "channel_type": "TextChannel", "_id": "ch-open", "server": "srv", "name": "open" },
+        {
+            "channel_type": "TextChannel", "_id": "ch-plain-text", "server": "srv", "name": "plain-text",
+            "default_permissions": { "a": 0, "d": EMBEDS }
+        }
+    ]);
+    let store = store_with(
+        channels,
+        vec![user("u-owner", json!({}))],
+        vec![
+            member("u-me", &[], json!({})),
+            member("u-owner", &[], json!({})),
+        ],
+    );
+    // Members may by default, unless the channel takes it away.
+    assert!(can_send_embeds(&store, "u-me", "ch-open"));
+    assert!(store.can_send_embeds("ch-open"));
+    assert!(!can_send_embeds(&store, "u-me", "ch-plain-text"));
+    assert!(!store.can_send_embeds("ch-plain-text"));
+    // The owner always may.
+    assert!(can_send_embeds(&store, "u-owner", "ch-plain-text"));
+    // In a DM with a friend, and the user's saved notes.
+    let store = conversations();
+    assert!(can_send_embeds(&store, "u-me", "dm-friend"));
+    assert!(can_send_embeds(&store, "u-me", "ch-saved"));
 }

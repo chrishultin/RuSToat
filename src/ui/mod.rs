@@ -5,6 +5,7 @@ pub mod chat;
 pub mod composer;
 pub mod emoji_picker;
 pub mod friends;
+pub mod gif_picker;
 pub mod login;
 pub mod markup;
 pub mod math;

@@ -99,6 +99,14 @@ pub fn can_mention_everyone(store: &ChatStore, user: &str, channel: &str) -> boo
         )
 }
 
+/// Whether `user` may send embeds in `channel` (which a GIF is).
+pub fn can_send_embeds(store: &ChatStore, user: &str, channel: &str) -> bool {
+    has(
+        channel_permissions(store, user, channel),
+        ChannelPermission::SendEmbeds,
+    )
+}
+
 fn in_server(store: &ChatStore, channel: &str) -> bool {
     matches!(store.channel(channel), Some(Channel::TextChannel { .. }))
 }

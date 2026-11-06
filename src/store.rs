@@ -2357,6 +2357,11 @@ impl ChatStore {
         crate::permissions::can_bypass_slowmode(self, &self.me, channel)
     }
 
+    /// Whether the user may send embeds (a GIF) in `channel`.
+    pub fn can_send_embeds(&self, channel: &str) -> bool {
+        crate::permissions::can_send_embeds(self, &self.me, channel)
+    }
+
     /// Whether the user may mention roles in `channel`.
     pub fn can_mention_roles(&self, channel: &str) -> bool {
         crate::permissions::can_mention_roles(self, &self.me, channel)

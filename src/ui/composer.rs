@@ -18,6 +18,7 @@ use gpui_kit::component::{ActiveTheme, Disableable, Icon, Sizable, WindowExt, h_
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
+use crate::api::gifbox::GifboxClient;
 use crate::api::models::ReplyIntent;
 use crate::attachment::FileKind;
 use crate::complete::{
@@ -27,6 +28,7 @@ use crate::emoji::{CustomEmoji, EmojiChoice, RecentEmoji};
 use crate::media::MediaUrls;
 use crate::prefs::Tone;
 use crate::ui::emoji_picker::{EmojiBrowser, OnBrowsePick, OnTone};
+use crate::ui::gif_picker::{GifBrowser, GifCache, OnGifPick};
 use crate::draft::{
     AttachmentLimits, Draft, DraftAttachment, Drafts, EditStash, MAX_MESSAGE_CHARS, ReplyTarget,
     SendCheck, TooManyReplies, append_quote, can_send, char_count, check_send, quote,
@@ -54,6 +56,14 @@ pub enum ComposerEvent {
     /// The emoji button was clicked: answer with
     /// [`Composer::open_emoji_picker`] and the channel's custom emoji.
     OpenEmojiPicker,
+    /// The GIF button was clicked: answer with [`Composer::open_gif_picker`].
+    OpenGifPicker,
+    /// A GIF was picked: send its page `url` at once in the composer's
+    /// channel, replying to `replies`. The text in the box stays.
+    SendGif {
+        url: String,
+        replies: Vec<ReplyIntent>,
+    },
     /// A typed closing `:` finished `:code:` (at `range`), and `code` isn't a
     /// Unicode shortcode. If the channel has a custom emoji named exactly
     /// `code`, answer with [`Composer::replace_with_custom_emoji`].
@@ -114,6 +124,11 @@ pub struct Composer {
     media: MediaUrls,
     /// The emoji picker, while it's open.
     emoji_picker: Option<Entity<EmojiBrowser>>,
+    /// The GIF picker, while it's open. Only one picker is open at a time.
+    gif_picker: Option<Entity<GifBrowser>>,
+    /// Whether the GIF button shows (an official-instance account that may
+    /// send embeds here).
+    gifs_available: bool,
     recent_emoji: RecentEmoji,
     /// The default skin tone, for every emoji inserted (picker, `:`
     /// suggestions, closing colon).
@@ -190,6 +205,8 @@ impl Composer {
             last_cursor: 0,
             media: MediaUrls::default(),
             emoji_picker: None,
+            gif_picker: None,
+            gifs_available: false,
             recent_emoji: RecentEmoji::default(),
             skin_tone: Tone::default(),
             _subscriptions: subscriptions,
@@ -403,6 +420,7 @@ impl Composer {
             .ok();
         });
         let (recent, tone) = (self.recent_emoji.clone(), self.skin_tone);
+        self.gif_picker = None;
         self.emoji_picker = Some(cx.new(|cx| {
             EmojiBrowser::new(recent, custom, tone, on_pick, on_tone, window, cx)
         }));
@@ -423,6 +441,62 @@ impl Composer {
             self.focus(window, cx);
             cx.notify();
         }
+    }
+
+    /// Show the GIF button, or hide it (closing the picker).
+    pub fn set_gifs_available(&mut self, available: bool, cx: &mut Context<Self>) {
+        if self.gifs_available == available {
+            return;
+        }
+        self.gifs_available = available;
+        if !available {
+            self.gif_picker = None;
+        }
+        cx.notify();
+    }
+
+    /// Open the GIF picker, searching Gifbox with `client` (`cache` keeps
+    /// its categories and trending GIFs between openings).
+    pub fn open_gif_picker(
+        &mut self,
+        client: GifboxClient,
+        cache: Rc<std::cell::RefCell<GifCache>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let this = cx.entity().downgrade();
+        let on_pick: OnGifPick = Rc::new(move |url, window, cx| {
+            this.update(cx, |this, cx| this.pick_gif(url, window, cx))
+                .ok();
+        });
+        self.emoji_picker = None;
+        self.gif_picker = Some(cx.new(|cx| GifBrowser::new(client, cache, on_pick, window, cx)));
+        cx.notify();
+    }
+
+    fn close_gif_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.gif_picker.take().is_some() {
+            self.focus(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// Send a picked GIF at once, as the reply being written if there is
+    /// one, and close the picker. What's typed stays. During a slowmode
+    /// cooldown it isn't sent: the hint says why.
+    fn pick_gif(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(left) = &self.send_block {
+            self.hint = Some(format!("{SLOWMODE_HINT}{left}").into());
+        } else {
+            let replies = self.draft.reply_intents();
+            self.draft.replies.clear();
+            cx.emit(ComposerEvent::SendGif {
+                url: url.to_string(),
+                replies,
+            });
+        }
+        self.close_gif_picker(window, cx);
+        cx.notify();
     }
 
     /// Put a picked emoji at the cursor: a Unicode one as text, a custom one
@@ -573,9 +647,10 @@ impl Composer {
         self.completion.as_ref().map(|c| &c.query)
     }
 
-    /// Whether the emoji picker is open (it has Esc and the arrow keys).
-    pub fn emoji_picker_open(&self) -> bool {
-        self.emoji_picker.is_some()
+    /// Whether the emoji or GIF picker is open (it has Esc and the arrow
+    /// keys).
+    pub fn picker_open(&self) -> bool {
+        self.emoji_picker.is_some() || self.gif_picker.is_some()
     }
 
     /// The list is open (there's something to pick, or it's loading).
@@ -829,6 +904,10 @@ impl Composer {
     /// Esc in the message box: stop editing, or else stop replying. (In
     /// the emoji picker, it only closes the picker.)
     fn on_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.gif_picker.is_some() {
+            self.close_gif_picker(window, cx);
+            return;
+        }
         if self.emoji_picker.is_some() {
             self.close_emoji_picker(window, cx);
             return;
@@ -848,8 +927,8 @@ impl Composer {
     /// (not already editing): edit the last message. Otherwise Up moves the
     /// cursor as usual.
     fn on_move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
-        // Keys in the emoji picker's search field pass through here too.
-        if self.emoji_picker.is_some() {
+        // Keys in the pickers' search fields pass through here too.
+        if self.picker_open() {
             return;
         }
         if self.completing() {
@@ -1276,6 +1355,31 @@ impl Render for Composer {
                 )
                 .content(move |_, _, _| div().children(picker.clone()))
         };
+        let gif = self.gifs_available.then(|| {
+            let this = cx.entity().downgrade();
+            let picker = self.gif_picker.clone();
+            Popover::new("gif-picker")
+                .anchor(Anchor::BottomRight)
+                .open(self.gif_picker.is_some())
+                .on_open_change(move |open, window, cx| {
+                    this.update(cx, |this, cx| {
+                        if *open {
+                            cx.emit(ComposerEvent::OpenGifPicker);
+                        } else {
+                            this.close_gif_picker(window, cx);
+                        }
+                    })
+                    .ok();
+                })
+                .trigger(
+                    Button::new("gif-button")
+                        .ghost()
+                        .label("GIF")
+                        .tooltip("GIFs")
+                        .disabled(editing),
+                )
+                .content(move |_, _, _| div().children(picker.clone()))
+        });
         let attach = Button::new("attach")
             .ghost()
             .icon(IconName::Paperclip)
@@ -1341,6 +1445,7 @@ impl Render for Composer {
                                 }),
                         ),
                     )
+                    .children(gif)
                     .child(emoji)
                     .child(send)
                     .children(suggestions),

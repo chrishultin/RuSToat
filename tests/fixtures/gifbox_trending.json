@@ -1,0 +1,67 @@
+{
+  "results": [
+    {
+      "id": "cXQwxRj5VVmb4q_qmUAg6",
+      "url": "https://gifbox.me/view/cXQwxRj5VVmb4q_qmUAg6",
+      "title": "",
+      "media_formats": {
+        "preview": {
+          "url": "https://media.gifbox.me/media/post/cXQwxRj5VVmb4q_qmUAg6/poster",
+          "dims": [498, 280],
+          "size": 21894
+        },
+        "gif": {
+          "url": "https://media.gifbox.me/media/post/cXQwxRj5VVmb4q_qmUAg6/gif_high",
+          "dims": [498, 280],
+          "size": 2411180
+        },
+        "mediumgif": {
+          "url": "https://media.gifbox.me/media/post/cXQwxRj5VVmb4q_qmUAg6/gif_high",
+          "dims": [498, 280],
+          "size": 2411180
+        },
+        "mp4": {
+          "url": "https://media.gifbox.me/media/post/cXQwxRj5VVmb4q_qmUAg6/mp4",
+          "dims": [498, 280],
+          "duration": 3.2,
+          "size": 301822
+        },
+        "webm": {
+          "url": "https://media.gifbox.me/media/post/cXQwxRj5VVmb4q_qmUAg6/webm",
+          "dims": [498, 280],
+          "size": 198433
+        }
+      },
+      "created": 1762300000
+    },
+    {
+      "id": "smGy30kWfDtNbJyWRnq8a",
+      "url": "https://gifbox.me/view/smGy30kWfDtNbJyWRnq8a",
+      "media_formats": {
+        "preview": {
+          "url": "https://media.gifbox.me/media/post/smGy30kWfDtNbJyWRnq8a/poster",
+          "dims": [640, 360],
+          "size": 17402
+        },
+        "mp4": {
+          "url": "https://media.gifbox.me/media/post/smGy30kWfDtNbJyWRnq8a/mp4",
+          "dims": [640, 360],
+          "duration": 4.0,
+          "size": 512004
+        },
+        "webm": {
+          "url": "https://media.gifbox.me/media/post/smGy30kWfDtNbJyWRnq8a/webm",
+          "dims": [640, 360],
+          "size": 402113
+        }
+      }
+    },
+    {
+      "id": "noPreviewHere",
+      "url": "https://gifbox.me/view/noPreviewHere",
+      "media_formats": {}
+    },
+    { "id": "broken" }
+  ],
+  "next": "eyJvZmZzZXQiOjUwfQ"
+}

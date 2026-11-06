@@ -8,6 +8,7 @@
 pub mod client;
 pub mod error;
 pub mod events;
+pub mod gifbox;
 pub mod instance;
 
 pub use client::{

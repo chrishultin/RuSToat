@@ -1,5 +1,6 @@
 //! The signed-in UI: server rail, channel list, and the selected channel.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -31,6 +32,7 @@ use gpui_kit::*;
 use crate::api::ApiError;
 use crate::api::StoatClient;
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
+use crate::api::gifbox::GifboxClient;
 use crate::api::models::{
     BulkMessageResponse, FieldsMessage, MessageSort, ReplyIntent, UserProfile,
 };
@@ -63,6 +65,7 @@ use crate::typing::{OutgoingTyping, TypingSignal, TypingState, typing_label};
 use crate::ui::composer::{Composer, ComposerEvent, file_icon};
 use crate::ui::emoji_picker::emoji_grid;
 use crate::ui::friends::{RowButtons, render_add_friend, render_friends_page};
+use crate::ui::gif_picker::GifCache;
 use crate::ui::markup::{MarkupPlugin, RevealSpoiler, code_block_actions};
 use crate::ui::math::MathPlugin;
 use crate::ui::profile_card::{CardBio, CardContent, OnLink, render_profile_card};
@@ -240,6 +243,13 @@ enum MoreState {
     Failed(SearchCursor, SharedString),
 }
 
+/// An account's Gifbox client, and what the GIF picker keeps between
+/// openings.
+struct Gifs {
+    client: GifboxClient,
+    cache: Rc<RefCell<GifCache>>,
+}
+
 pub struct ChatView {
     client: StoatClient,
     store: ChatStore,
@@ -391,6 +401,9 @@ pub struct ChatView {
     /// Others typing, and when to tell Stoat the user is.
     typing: TypingState,
     outgoing_typing: OutgoingTyping,
+    /// Gifbox for the GIF picker: only for accounts on the official
+    /// instance (see [`GifboxClient::for_account`]).
+    gifs: Option<Gifs>,
     /// Wakes up when a typist lapses or the user goes idle.
     typing_tick: Option<Task<()>>,
     /// Wakes up as each second of the open channel's slowmode cooldown runs
@@ -445,6 +458,13 @@ impl ChatView {
             async move { client.root_config().await }
         });
         let api = client.base_url().to_string();
+        let gifs = client
+            .token()
+            .and_then(|token| GifboxClient::for_account(&api, token))
+            .map(|client| Gifs {
+                client,
+                cache: Rc::default(),
+            });
         let root = cx.spawn({
             let api = api.clone();
             async move |this, cx| match root.await {
@@ -592,6 +612,28 @@ impl ChatView {
                         composer.open_emoji_picker(custom, window, cx)
                     });
                 }
+                ComposerEvent::OpenGifPicker => {
+                    let Some(gifs) = &this.gifs else {
+                        return;
+                    };
+                    let (client, cache) = (gifs.client.clone(), gifs.cache.clone());
+                    composer.update(cx, |composer, cx| {
+                        composer.open_gif_picker(client, cache, window, cx)
+                    });
+                }
+                ComposerEvent::SendGif { url, replies } => {
+                    let Some(channel) = composer.read(cx).channel().map(str::to_string) else {
+                        return;
+                    };
+                    this.send_message(
+                        channel,
+                        url.clone(),
+                        replies.clone(),
+                        Vec::new(),
+                        window,
+                        cx,
+                    );
+                }
                 ComposerEvent::ClosedShortcode { range, code } => {
                     let Some(channel) = composer.read(cx).channel().map(str::to_string) else {
                         return;
@@ -683,6 +725,7 @@ impl ChatView {
             _search_input: search_events,
             typing,
             outgoing_typing: OutgoingTyping::default(),
+            gifs,
             typing_tick: None,
             slowmode_tick: None,
             _relative_tick: relative_tick,
@@ -2716,6 +2759,13 @@ impl ChatView {
     /// focus it when the channel changes.
     fn sync_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_send_block(cx);
+        // The GIF button: Gifbox, and leave to send embeds here.
+        let gifs = self.gifs.is_some()
+            && self
+                .current_channel()
+                .is_some_and(|channel| self.store.can_send_embeds(&channel.id));
+        self.composer
+            .update(cx, |composer, cx| composer.set_gifs_available(gifs, cx));
         let channel = self.current_channel();
         let id = channel.as_ref().map(|c| c.id.as_str());
         if self.composer.read(cx).channel() == id {
@@ -4360,9 +4410,9 @@ impl ChatView {
     }
 
     /// Whether a shortcut should leave the keys alone: the image viewer or
-    /// the emoji picker is open, and they're its keys.
+    /// the emoji or GIF picker is open, and they're its keys.
     fn shortcuts_blocked(&self, cx: &App) -> bool {
-        self.viewer.is_some() || self.composer.read(cx).emoji_picker_open()
+        self.viewer.is_some() || self.composer.read(cx).picker_open()
     }
 
     /// ⌥↑/⌥↓ (and with ⇧, `unread_only`): open the channel `step` places

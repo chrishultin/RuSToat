@@ -147,3 +147,93 @@ Pending (batched to the end). This includes checking that the badge fits the 16 
 
 ### Manual Validation
 Pending (batched to the end).
+
+## Chunk 4: Gifbox client and GIF picker
+
+### Changes Made
+- `src/api/gifbox.rs` (new, `pub mod gifbox` in `src/api/mod.rs`):
+  - `GIFBOX_URL`, `GIF_LIMIT = 50` and locale `en_US`.
+  - `GifboxClient`: its own `reqwest::Client` (30 s timeout, the `StoatClient` user agent), sending `x-session-token`.
+    - `for_account(api_url, token)` returns `Some` only for `DEFAULT_API_URL`, ignoring a trailing slash.
+    - `categories()`, `trending(limit)` and `search(query, limit)`. Query strings are built with `serde_urlencoded`, because reqwest 0.13's `.query()` needs a feature the crate doesn't enable.
+  - Types: `GifCategory { title, image }`; `GifResult { id, url, media_formats }`; `GifMedia { url, dimensions }`, where `dimensions` also accepts `dims`; `GifPage { results, next }`.
+  - Lenient parsing:
+    - results and categories that don't parse are skipped
+    - a media format that doesn't parse is dropped
+    - a result with no formats is kept
+    - a non-array categories response gives none, as for-web does
+    - `next` may be a string or a number
+  - Helpers:
+    - `still()` (`preview`), `animated()` (`gif`, else `mediumgif`) and `size()`
+    - `category_poster`, which uses the `url` crate to replace the last segment with `poster` and drop the query
+  - 5 unit tests, including that a self-hosted or lookalike API URL gets no client.
+- `src/ui/gif_picker.rs` (new): `GifBrowser`.
+  - Search field: focused on open and cleanable. Its text is trimmed and lower-cased, then debounced 250 ms through a replaceable `Task`. Enter skips the wait.
+  - A back button shows while a query is shown.
+  - Categories page: a 2-column grid with a "Trending" tile first, then poster tiles with the title over a dark scrim.
+  - Clicking a category puts its title in the field and searches it. A change event for text the picker set itself is ignored, by comparing with `typed`.
+  - Results: a 2-column grid of 120 px tiles. Each shows the still, swapped for the animated GIF while hovered (`hovered: Option<usize>`), or the GIF's ID when there's no still.
+  - States for loading, "No GIFs found" and errors with Retry. A 429 says "Too many searches, try again in a moment."
+  - Stale answers are dropped by `seq`.
+  - `GifCache` (categories and trending) is shared per account, so reopening the picker doesn't refetch.
+  - The picker is 400 px wide, and its body is 340 px tall and scrolls.
+- `src/ui/composer.rs`:
+  - New events `ComposerEvent::OpenGifPicker` and `SendGif { url, replies }`.
+  - New state: `gif_picker` and `gifs_available`.
+  - `set_gifs_available`; `open_gif_picker(client, cache)`, which closes the emoji picker; `close_gif_picker`.
+  - `pick_gif`:
+    - takes the reply intents, emits `SendGif` and closes the picker
+    - leaves the text alone
+    - during a slowmode cooldown, sets the "Slowmode: wait" hint instead of sending
+  - A "GIF" ghost button in a `Popover`, before the emoji button. It is shown only when available and disabled while editing.
+  - Opening the emoji picker closes the GIF picker.
+  - Esc closes the GIF picker first.
+  - `emoji_picker_open()` became `picker_open()`, covering both pickers, for Up in the box and `ChatView::shortcuts_blocked`.
+- `src/ui/chat.rs`:
+  - `Gifs { client, cache }` per `ChatView` (per account), built in `new` only through `GifboxClient::for_account`.
+  - `OpenGifPicker` opens it.
+  - `SendGif` calls the existing `send_message(channel, url, replies, vec![], …)`, so a GIF goes through the pending, retry and slowmode paths like any message.
+  - `sync_composer` sets `gifs_available` on every render (when there's a client and `can_send_embeds`), so permission changes apply live.
+- `src/permissions.rs` and `src/store.rs`: `can_send_embeds`.
+- `tests/api_gifbox.rs` (new, wiremock): 6 tests.
+  - categories send the token and locale, parse the list and skip a bad item
+  - non-list categories give none
+  - trending sends `limit` and parses the fixture
+  - search sends `limit` and escapes `&`/spaces (`cats+%26+dogs`)
+  - a 401 `NotAuthenticated` is `Unauthorized`
+  - a 429 is `RateLimited`
+- `tests/fixtures/gifbox_trending.json` (new).
+- `tests/permissions.rs`: `sending_embeds_follows_its_permission`.
+
+### Divergences
+- Fixture: the plan says to copy `tests/fixtures/gifbox_trending.json` from the 2026-11-06 probe, but that output wasn't available in this session. The fixture follows the shape the plan records:
+  - `id`, `url` and `media_formats`
+  - `preview` posters
+  - `gif`/`mediumgif` at `gif_high`
+  - a video-only result
+  - `next`
+
+  It also adds a result with no formats and one missing its `url`. The `dims` key for dimensions is a guess from Tenor's format; `dimensions` is accepted too. **Worth replacing with a real response.**
+- Minor: a 401 `NotAuthenticated` from Gifbox becomes `ApiError::Unauthorized`, not `ApiError::Api` (`from_response` already maps it). The picker shows it as "Couldn't load GIFs." and doesn't log the account out.
+- Minor: the cache lives in a shared `Rc<RefCell<GifCache>>` held by `ChatView`, not in the browser entity. The browser is recreated on each open, as the emoji picker is, so an entity cache wouldn't survive a reopen.
+- Minor: the GIF button is disabled while editing a message (as the attach button is).
+- Minor: picking a category puts its title in the search field, and Trending leaves the field empty with the back button showing. for-web puts "trending" in the field.
+- for-web today previews with `tinywebm`, and doesn't send `limit`. The plan's stills plus hover-GIF approach was kept, since GPUI can't draw WebM.
+- `GifResult::size()` is tested but not used by the picker: tiles are a fixed 120 px and the image is `ObjectFit::Contain`.
+
+### Verification Performed
+- `cargo test`: 719 passed, 0 failed (5 ignored). This includes 5 `gifbox` unit tests, 6 `tests/api_gifbox.rs` tests and 1 new permissions test.
+- `cargo clippy --all-targets -- -D warnings`: clean, after folding the Enter check into a match guard.
+- rustfmt `Diff in` counts are unchanged:
+  - `src/ui/chat.rs` 17
+  - `src/ui/composer.rs` 14 (the `gif_picker` import sits inside its already-drifted import hunk)
+  - `src/store.rs` 15
+  - `src/permissions.rs` 0
+  - `tests/permissions.rs` 0
+  - new `src/api/gifbox.rs`, `src/ui/gif_picker.rs` and `tests/api_gifbox.rs` are formatted, with 0
+
+### Manual Validation
+Pending (batched to the end). The plan's risks to check by hand:
+- memory after hovering ~30 tiles (if it grows without bound, give the picker its own `ImageCache`)
+- whether the JPEG-bytes-as-`image/webp` poster draws (if not, use the proxied poster)
+- the popover's size and placement
