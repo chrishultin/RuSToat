@@ -8,7 +8,7 @@ use gpui_kit::component::{ActiveTheme, Theme, WindowExt, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
-use crate::accounts::{self, AccountList, AccountsFile};
+use crate::accounts::{self, AccountEntry, AccountList, AccountsFile};
 use crate::api::StoatClient;
 use crate::notify;
 use crate::prefs::{Prefs, PrefsFile, Tone};
@@ -289,6 +289,41 @@ impl AppRoot {
             self.save_accounts();
         }
         cx.notify();
+    }
+
+    /// Put the `index`th account in the switcher (counting from 0) on screen:
+    /// ⌘1 to ⌘9. Past the last account, nothing happens. A signed-out
+    /// account is shown too, as clicking it does.
+    pub fn show_account_at(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(id) = self.accounts.accounts.get(index).map(|e| e.id.clone()) {
+            self.show_account(&id, cx);
+        }
+    }
+
+    /// Every account's name, in the switcher's order (for the Accounts menu).
+    pub fn account_names(&self, cx: &App) -> Vec<String> {
+        self.accounts
+            .accounts
+            .iter()
+            .map(|entry| self.account_name(entry, cx).0)
+            .collect()
+    }
+
+    /// An account's name and avatar as the switcher shows them: from its
+    /// chat once that has loaded, else the name saved with it (or its
+    /// instance's host) and no avatar.
+    fn account_name(&self, entry: &AccountEntry, cx: &App) -> (String, Option<String>) {
+        let view = self.chat_view(&entry.id).map(|view| view.read(cx));
+        match view.and_then(ChatView::me_summary) {
+            Some((name, avatar)) => (name, Some(avatar)),
+            None => (
+                entry
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| host_of(&entry.instance)),
+                None,
+            ),
+        }
     }
 
     /// Show the login screen for another account (the only screen when there
@@ -708,12 +743,8 @@ impl AppRoot {
             .map(|entry| {
                 let host = host_of(&entry.instance);
                 let view = self.chat_view(&entry.id).map(|view| view.read(cx));
-                let summary = view.and_then(ChatView::me_summary);
                 let (unread, mentions) = view.map(ChatView::account_summary).unwrap_or_default();
-                let (name, avatar) = match summary {
-                    Some((name, avatar)) => (name, Some(avatar)),
-                    None => (entry.name.clone().unwrap_or_else(|| host.clone()), None),
-                };
+                let (name, avatar) = self.account_name(entry, cx);
                 let status = match self.states.get(&entry.id) {
                     Some(AccountState::Chat { .. }) => AccountStatus::SignedIn,
                     Some(AccountState::Offline { .. }) => AccountStatus::Offline,

@@ -159,3 +159,70 @@ The user folded a category (its channels hid except the open one), had a mention
 
 ### Manual Validation
 The user went through ⌥↑/↓, ⌥⇧↑/↓, ⌘⌥↑/↓, Esc (scrolled up, and in the message box while editing, replying and autocompleting) and ⇧Esc, and confirmed they all work.
+
+## Chunk 6: Switch accounts with ⌘1–⌘9
+
+### Changes Made
+- `src/ui/app_root.rs`:
+  - `show_account_at(index)`: shows the nth account in the switcher; past the end it does nothing.
+  - `account_names()`: every account's name in the switcher's order.
+  - `account_name(entry)`, factored out of `render_switcher`, gives the name and avatar the switcher shows.
+- `src/main.rs`:
+  - Nine unit actions, `SwitchAccount1`–`SwitchAccount9`, bound to ⌘1–⌘9 with no context, and handled at the app level like Log Out and Add Account.
+  - `set_menus(accounts)` builds the menu bar with a new **Accounts** menu listing each account by name. macOS shows each item's ⌘-digit shortcut from the keymap. The menu is greyed out when there are none.
+  - `MainWindow` observes the `AppRoot` and rebuilds the menus only when the names change (`menu_accounts`, `sync_menus`). It clears them when the window closes.
+  - `MainWindow::update_root` updates the `AppRoot` entity without its window. The switch handlers use it.
+
+### Divergences
+- **Minor:** nine unit actions instead of `SwitchAccount(usize)`, as the plan allowed. The `Action` derive for an action with a field emits `gpui::` paths, which don't resolve through the gpui_kit facade.
+- **Minor:** the actions live in `main.rs` with the other app-level actions, not in `app_root.rs`. `AppRoot` only gained `show_account_at`.
+- **Minor:** the Accounts menu lists the accounts by name, kept current by observing `AppRoot`.
+- **Bug found in manual testing, fixed:** ⌘1/⌘2 did nothing at first. A key binding's action is dispatched while GPUI is updating the window, and `MainWindow::update` → `window.update` refuses a window already on the update stack (silently, through `.ok()`). The menu items didn't have this problem, because menu actions arrive from outside the window. The fix was `MainWindow::update_root`, which updates the `AppRoot` entity directly; switching accounts doesn't need the `Window`.
+
+### Verification Performed
+- `cargo build`; `cargo test`: 598 passed, 0 failed, 5 ignored. `cargo clippy --all-targets`: no warnings.
+- `src/main.rs` and `src/ui/app_root.rs` are rustfmt-clean.
+
+### Manual Validation
+Run from the signed bundle (`scripts/run-bundled.sh`). After the fix, the user confirmed: ⌘1 and ⌘2 switch between their two accounts, ⌘3 does nothing, and the Accounts menu lists them.
+
+Also from this chunk: earlier manual checks launched `target/debug/stoat-gpui` directly, which skips the signing in `scripts/cargo-runner.sh`, so the Keychain asked after every rebuild. Running through `scripts/run-bundled.sh` (or `cargo run`) signs with the Apple Development identity under a fixed identifier, so "Always Allow" sticks.
+
+## Summary
+
+_Completed: 2026-11-06_
+
+### Chunks Completed
+1. Copy link and IDs: message link and ID; channel, category and server IDs (0f01797).
+2. "New messages" divider where you left off (cc50b22).
+3. Mark as unread, held until you leave the channel; Stoat accepts the backwards ack (113d1b7).
+4. Collapsible categories, remembered per account (d462fb1).
+5. Keyboard shortcuts in a channel: ⌥↑/↓, ⌥⇧↑/↓, ⌘⌥↑/↓, Esc, ⇧Esc (af6c532).
+6. ⌘1–⌘9 to switch accounts, plus an Accounts menu (this commit).
+
+Before chunk 1, pre-existing uncommitted work (window reopening from the Dock) was committed separately as 9520c37.
+
+### Divergences
+- Chunk 1: "Copy channel ID" is on DM and group rows too. The link format was checked: no `/app` prefix.
+- Chunk 2: the marker is one `Option<(channel, Option<after>)>`, not a map. The divider uses `MessageRow.mine`, not a `me` argument. It shows above the first message when the whole history is loaded. It's only recorded if the channel is unread when opened.
+- Chunk 3: a shared `post_ack` helper; hiding the account also releases the hold.
+- Chunk 4: the folding filter is a pure `fold_sections` in `store.rs`. The places tests are unit tests in `src/places.rs`.
+- Chunk 5: ⌥↑/↓ work in the message box too, because the input doesn't bind them, so the Open Question's fallback wasn't needed. ⌥⇧↑/↓ and ⌘⌥↑/↓ override the input's multi-cursor bindings inside the chat view. The walkers wrap round. Friends counts as Home's first row. The walker lives in `src/nav.rs`.
+- Chunk 6: nine unit actions in `main.rs`, and an Accounts menu by name. A dispatch bug, where a key action couldn't re-enter the window, was found in manual testing and fixed.
+- Formatting: `chat.rs`, `store.rs`, `client.rs`, `composer.rs` and a few test files already differ from rustfmt's output. Only lines this work added were formatted, and the drift counts are unchanged.
+- The plan was amended once (chunk 3's description, after chunk 2).
+
+### Definition of Done
+- [x] The message menu has "Copy message link" (only when the instance sends `app`) and "Copy message ID". Channel rows, category headers and server icons have "Copy … ID".
+- [x] A copied message link opens that message in Stoat's web client (user-checked).
+- [x] Opening a channel with unread messages from others shows the divider before the first of them. Leaving the channel or sending a message removes it.
+- [x] "Mark as unread" makes the channel unread here and in the web client, and RuSToat doesn't mark it read again until you leave it.
+- [x] Category headers fold and unfold. The state survives a relaunch, and channels with mentions still show.
+- [x] ⌥↑/↓, ⌥⇧↑/↓, ⌘⌥↑/↓, Esc, ⇧Esc and ⌘1–9 work as in assumption 4. Esc still cancels edits, replies and autocomplete.
+- [x] `cargo test` (598 passed, 5 ignored) and `cargo clippy --all-targets` pass, with no new warnings.
+- [x] Every chunk's manual check is recorded in this file.
+
+### Remaining Manual Steps
+None required. Every plan-level manual test (1–5) was covered by the per-chunk checks. Optional:
+- Unsent-message case in chunk 2: confirm sending a reply clears the divider.
+- Remaining Open Question: should the shortcuts be listed somewhere, such as a Help menu or milestone 13's settings window?
