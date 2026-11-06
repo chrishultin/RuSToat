@@ -327,3 +327,86 @@ fn account_summary_is_clear_when_everything_is_read() {
 fn an_empty_store_has_nothing_to_show() {
     assert_eq!(ChatStore::new("u-me").account_summary(), (false, 0));
 }
+
+// --- friend requests -----------------------------------------------------
+
+/// `user` now relates to the user as `relationship` (a `UserRelationship`).
+fn relate(store: &mut ChatStore, user: &str, relationship: &str) {
+    let frame = serde_json::json!({
+        "type": "UserRelationship", "id": "u-me",
+        "user": {
+            "_id": user, "username": user, "discriminator": "0001",
+            "relationship": relationship, "online": true
+        }
+    });
+    let Some(ServerEvent::UserRelationship { user }) = parse_frame(&frame.to_string()).pop() else {
+        panic!("UserRelationship");
+    };
+    store.apply_relationship(*user);
+}
+
+/// Everything read, so only friend requests count.
+fn read_store() -> ChatStore {
+    let mut store = store();
+    store.apply_ack("dm-ada", DM_ADA_LAST);
+    store.apply_ack("dm-bob", "01JC0000000000000000000007");
+    store.apply_ack("grp-weekend", "01JC0000000000000000000006");
+    store
+}
+
+fn requests_entry(store: &ChatStore) -> Option<usize> {
+    store
+        .attention_breakdown()
+        .into_iter()
+        .find(|(label, _)| label == "Friend requests")
+        .map(|(_, n)| n)
+}
+
+#[test]
+fn each_friend_request_counts_as_a_mention_without_a_dot() {
+    let mut store = read_store();
+    assert_eq!(store.attention_count(), 0, "fixture check");
+
+    relate(&mut store, "u-carol", "Incoming");
+    assert_eq!(store.home_summary(), (false, 1));
+    assert_eq!(store.account_summary(), (false, 1));
+    assert_eq!(store.attention_count(), 1);
+    assert_eq!(requests_entry(&store), Some(1));
+
+    relate(&mut store, "u-dave", "Incoming");
+    assert_eq!(store.home_summary(), (false, 2));
+    assert_eq!(store.account_summary(), (false, 2));
+    assert_eq!(store.attention_count(), 2);
+    assert_eq!(requests_entry(&store), Some(2));
+
+    // Accepted, then rejected: the counts fall back.
+    relate(&mut store, "u-carol", "Friend");
+    assert_eq!(store.home_summary(), (false, 1));
+    assert_eq!(store.attention_count(), 1);
+    relate(&mut store, "u-dave", "None");
+    assert_eq!(store.home_summary(), (false, 0));
+    assert_eq!(store.account_summary(), (false, 0));
+    assert_eq!(store.attention_count(), 0);
+    assert_eq!(requests_entry(&store), None);
+}
+
+#[test]
+fn outgoing_requests_and_friends_add_nothing() {
+    let mut store = read_store();
+    relate(&mut store, "u-carol", "Outgoing");
+    relate(&mut store, "u-dave", "Friend");
+    relate(&mut store, "u-erin", "Blocked");
+    assert_eq!(store.home_summary(), (false, 0));
+    assert_eq!(store.account_summary(), (false, 0));
+    assert_eq!(store.attention_count(), 0);
+    assert_eq!(requests_entry(&store), None);
+}
+
+#[test]
+fn friend_requests_add_to_unread_mentions() {
+    // dm-ada's one mention, plus a request.
+    let mut store = store();
+    relate(&mut store, "u-carol", "Incoming");
+    assert_eq!(store.home_summary(), (true, 2));
+    assert_eq!(store.account_summary(), (true, 2));
+}

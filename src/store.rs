@@ -1357,14 +1357,16 @@ impl ChatStore {
     }
 
     /// The Dock badge count: unread mentions everywhere, plus each unread DM
-    /// or group whose level is "all" (once, even if it also has mentions).
-    /// Muted channels don't count.
+    /// or group whose level is "all" (once, even if it also has mentions),
+    /// plus each friend request waiting for the user. Muted channels don't
+    /// count.
     pub fn attention_count(&self) -> usize {
         self.attention_breakdown().iter().map(|(_, n)| n).sum()
     }
 
     /// What [`Self::attention_count`] is made of: (channel label, count) for
-    /// every channel that contributes. For debugging the Dock badge.
+    /// every channel that contributes, and "Friend requests" if there are
+    /// any. For debugging the Dock badge.
     pub fn attention_breakdown(&self) -> Vec<(String, usize)> {
         let mut parts: Vec<(String, usize)> = self
             .channels
@@ -1397,6 +1399,10 @@ impl ChatStore {
                 )
             })
             .collect();
+        let requests = crate::friends::incoming_count(self);
+        if requests > 0 {
+            parts.push(("Friend requests".into(), requests));
+        }
         parts.sort();
         parts
     }
@@ -1423,11 +1429,13 @@ impl ChatStore {
         }
     }
 
-    /// Unread state for the Home button: open DMs and groups.
+    /// Unread state for the Home button: open DMs and groups. Each friend
+    /// request waiting for the user counts as a mention (with no unread dot).
     pub fn home_summary(&self) -> (bool, usize) {
+        let requests = crate::friends::incoming_count(self);
         self.home_channels()
             .iter()
-            .fold((false, 0), |(unread, mentions), c| {
+            .fold((false, requests), |(unread, mentions), c| {
                 (unread || c.unread, mentions + c.mentions)
             })
     }

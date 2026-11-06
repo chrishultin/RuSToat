@@ -165,3 +165,32 @@ The look-ahead found nothing to change in the remaining chunks.
 
 ### Manual Validation
 Deferred to the batched checks at the end.
+
+## Chunk 4: Badges for incoming requests
+
+### Changes Made
+- `src/store.rs`:
+  - `home_summary()` starts its mention count at `friends::incoming_count(self)`, so each waiting request is one mention with no unread dot. `account_summary()` builds on `home_summary()`, so it follows.
+  - `attention_breakdown()` adds a "Friend requests" entry with the count when there are any. `attention_count()` sums the breakdown, so the Dock badge follows.
+- `tests/store_unreads.rs`, 3 new tests, using the `Ready` fixture and `UserRelationship` events:
+  - With everything read, `home_summary`, `account_summary` and `attention_count` each rise by one per incoming request, with no unread dot, and the breakdown entry shows. Accepting one and rejecting the other brings them back to zero and removes the entry.
+  - Outgoing requests, friends and blocks add nothing.
+  - Requests add to unread mentions: dm-ada's one mention plus one request gives 2.
+- No UI change. The Friends row and the Pending tab already show `incoming_count` from chunks 1 and 2.
+
+### Divergences
+None. I checked that the counts update live:
+- The `UserRelationship` handler ends in `cx.notify()`, and so does `set_relationship`'s answer.
+- `AppRoot` observes each view and calls `sync_outside` on every notify (`app_root.rs:426`), which re-sums the Dock badge across accounts.
+- The rail, the switcher, the Friends row and the Pending tab are all computed at render.
+
+The look-ahead found nothing to change in chunk 5.
+
+### Verification Performed
+- `cargo test --test friends --test store_unreads`: 12 + 19 passed.
+- `cargo test`: 568 passed, 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt: `src/store.rs` stayed at 15 hunks, and `tests/store_unreads.rs` is clean, as it was at the baseline.
+
+### Manual Validation
+Deferred to the batched checks at the end.
