@@ -76,7 +76,8 @@ The web client has no Accept or Reject buttons on its rows (only in the menu). T
    Clicking the rest of a row opens the profile card; right-clicking opens the person menu. Remove friend and Block stay in the menu, with milestone 7's confirmation. Buttons are disabled while that person's request is pending (`relationship_pending`).
 5. **"Online" follows the member list's presence rule** (`presence_kind != Offline`), so invisible friends count as offline. The web client uses `user.online` only. Matching this client's member list matters more than matching the web client.
 6. **Sorting:** each list is sorted by display name, case-insensitively, then by ID, as the web client does. The presence dot shows for friends only, as on the web.
-7. **Add friend** (the user's answer to question 4a) is a text field plus "Send request" at the top of the page, on every tab. It's inline, not a dialog, because there are no other dialogs to match and it's quicker.
+7. **Add friend** (the user's answer to question 4a) is an "Add friend" button in the page header, on every tab. It opens a dialog with a `username#1234` field, Close and "Send request", as the web client does. *(Amended during manual testing: this was first a field always visible at the top of the page. The user asked for a dialog instead.)*
+   - The dialog opens empty with the field focused, and stays open after a request goes out, so another can follow.
    - It checks the shape first: a non-empty name, `#`, and four digits. The field shows what went wrong under it.
    - Server errors also show there, in plain words: NotFound → "There's no one called {name}."; InvalidProperty → the shape hint; IsBot → "Bots can't be friends."; plus milestone 7's relationship messages.
    - When it succeeds, the field clears, "Friend request sent to {name}." shows under it, and the person appears under Pending → Outgoing.

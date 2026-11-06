@@ -390,6 +390,8 @@ impl ChatView {
                         && this.add_friend_state != Some(AddFriendState::Sending) =>
                 {
                     this.add_friend_state = None;
+                    // The dialog showing it is drawn by the window's root.
+                    window.refresh();
                     cx.notify();
                 }
                 _ => {}
@@ -2469,9 +2471,42 @@ impl ChatView {
         was
     }
 
-    /// Send a friend request to whoever is typed in the Friends page's
-    /// field (`username#1234`). How it went shows under the field; once it's
-    /// sent, the field clears and they're under Pending → Outgoing.
+    /// The Friends page's "Add friend": a dialog with a `username#1234`
+    /// field, empty each time it opens. It stays open after a request goes
+    /// out, saying so, so another can follow.
+    fn open_add_friend(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_friend_state = None;
+        self.add_friend_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        let view = cx.entity().downgrade();
+        let input = self.add_friend_input.clone();
+        let first_build = std::cell::Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first_build.replace(false) {
+                let focus = input.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
+            }
+            let state = view
+                .upgrade()
+                .and_then(|view| view.read(cx).add_friend_state.clone());
+            let send = {
+                let view = view.clone();
+                move |window: &mut Window, cx: &mut App| {
+                    view.update(cx, |this, cx| this.send_friend_request(window, cx))
+                        .ok();
+                }
+            };
+            let close = |window: &mut Window, cx: &mut App| window.close_dialog(cx);
+            dialog
+                .title("Add friend")
+                .w(px(ADD_FRIEND_DIALOG_WIDTH))
+                .child(render_add_friend(&input, state.as_ref(), send, close, cx))
+        });
+    }
+
+    /// Send a friend request to whoever is typed in the add-friend dialog
+    /// (`username#1234`). How it went shows under the field; once it's sent,
+    /// the field clears and they're under Pending → Outgoing.
     fn send_friend_request(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.add_friend_state == Some(AddFriendState::Sending) {
             return;
@@ -2481,11 +2516,13 @@ impl ChatView {
             Ok(username) => username.to_string(),
             Err(hint) => {
                 self.add_friend_state = Some(AddFriendState::Error(hint.into()));
+                window.refresh();
                 cx.notify();
                 return;
             }
         };
         self.add_friend_state = Some(AddFriendState::Sending);
+        window.refresh();
         cx.notify();
         let request = spawn_io({
             let (client, username) = (self.client.clone(), username.clone());
@@ -2515,6 +2552,7 @@ impl ChatView {
                         AddFriendState::Error("Couldn't reach Stoat. Try again.".into())
                     }
                 });
+                window.refresh();
                 cx.notify();
             })
             .ok();
@@ -4272,15 +4310,10 @@ impl ChatView {
         };
         let lists = crate::friends::friend_lists(&self.store);
         let view = cx.entity().downgrade();
-        let add_friend = render_add_friend(
-            &self.add_friend_input,
-            self.add_friend_state.as_ref(),
-            move |window, cx| {
-                view.update(cx, |this, cx| this.send_friend_request(window, cx))
-                    .ok();
-            },
-            cx,
-        );
+        let on_add_friend = move |window: &mut Window, cx: &mut App| {
+            view.update(cx, |this, cx| this.open_add_friend(window, cx))
+                .ok();
+        };
         let buttons = |user: &str| RowButtons {
             actions: crate::friends::row_actions(&self.store, user),
             pending: self.relationship_pending.contains(user),
@@ -4297,7 +4330,7 @@ impl ChatView {
         render_friends_page(
             &lists,
             self.friends_tab,
-            add_friend,
+            on_add_friend,
             colors,
             buttons,
             on_tab,
@@ -4688,6 +4721,9 @@ impl ChatView {
             .into_any_element()
     }
 }
+
+/// Width of the add-friend dialog.
+const ADD_FRIEND_DIALOG_WIDTH: f32 = 420.;
 
 /// Width of the right-hand panel.
 const MEMBER_PANEL_WIDTH: f32 = 240.;

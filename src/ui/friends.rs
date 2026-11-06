@@ -72,14 +72,14 @@ fn page_rows(
     rows
 }
 
-/// The Friends page. `add_friend` goes above the tabs (see
-/// [`render_add_friend`]), `buttons` gives each person's row buttons, and
-/// `on_tab` is called with the tab clicked.
+/// The Friends page. `on_add_friend` is called by the header's "Add
+/// friend" button (see [`render_add_friend`]), `buttons` gives each
+/// person's row buttons, and `on_tab` is called with the tab clicked.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_friends_page(
     lists: &FriendLists,
     tab: FriendsTab,
-    add_friend: AnyElement,
+    on_add_friend: impl Fn(&mut Window, &mut App) + 'static,
     colors: MemberColors,
     buttons: impl Fn(&str) -> RowButtons,
     on_tab: impl Fn(FriendsTab, &mut Window, &mut App) + 'static,
@@ -97,7 +97,15 @@ pub(crate) fn render_friends_page(
         .border_color(theme.border)
         .font_weight(FontWeight::SEMIBOLD)
         .child(Icon::new(IconName::Users).text_color(theme.muted_foreground))
-        .child("Friends");
+        .child(div().flex_1().child("Friends"))
+        .child(
+            Button::new("add-friend")
+                .primary()
+                .small()
+                .icon(IconName::UserPlus)
+                .label("Add friend")
+                .on_click(move |_, window, cx| on_add_friend(window, cx)),
+        );
     let tabs = TabBar::new("friends-tabs")
         .underline()
         .selected_index(FriendsTab::ALL.iter().position(|t| *t == tab).unwrap_or(0))
@@ -120,7 +128,6 @@ pub(crate) fn render_friends_page(
         .min_w_0()
         .h_full()
         .child(header)
-        .child(add_friend)
         .child(div().px_4().flex_none().child(tabs))
         .child(
             div().flex_1().min_h_0().px_2().child(
@@ -281,12 +288,14 @@ fn row_button(user: &str, action: RowAction, state: &RowButtons, people: &People
         .into_any_element()
 }
 
-/// The add-friend field and its "Send request" button, with what happened
-/// to the last request under them. Enter sends too.
+/// The add-friend dialog's body: the `username#1234` field, with what
+/// happened to the last request under it, and Cancel and "Send request".
+/// Enter in the field sends too.
 pub(crate) fn render_add_friend(
     input: &Entity<InputState>,
     state: Option<&AddFriendState>,
     on_send: impl Fn(&mut Window, &mut App) + 'static,
+    on_cancel: impl Fn(&mut Window, &mut App) + 'static,
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme();
@@ -298,39 +307,39 @@ pub(crate) fn render_add_friend(
         Some(AddFriendState::Sending) | None => None,
     };
     v_flex()
-        .flex_none()
-        .px_4()
-        .pt_3()
-        .pb_1()
-        .gap_1()
+        .gap_3()
         .child(
             div()
-                .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
+                .text_sm()
                 .text_color(theme.muted_foreground)
-                .child("ADD FRIEND"),
+                .child("You'll need their username and its four-digit tag."),
+        )
+        .child(
+            v_flex()
+                .gap_1()
+                .child(Input::new(input).disabled(sending))
+                .children(
+                    note.map(|(text, colour)| div().text_xs().text_color(colour).child(text)),
+                ),
         )
         .child(
             h_flex()
                 .gap_2()
+                .justify_end()
                 .child(
-                    div()
-                        .w(px(ADD_FRIEND_WIDTH))
-                        .child(Input::new(input).small().disabled(sending)),
+                    Button::new("cancel-friend-request")
+                        .outline()
+                        .label("Close")
+                        .on_click(move |_, window, cx| on_cancel(window, cx)),
                 )
                 .child(
                     Button::new("send-friend-request")
                         .primary()
-                        .small()
                         .label("Send request")
                         .loading(sending)
                         .disabled(sending)
                         .on_click(move |_, window, cx| on_send(window, cx)),
                 ),
         )
-        .children(note.map(|(text, colour)| div().text_xs().text_color(colour).child(text)))
         .into_any_element()
 }
-
-/// Width of the add-friend field.
-const ADD_FRIEND_WIDTH: f32 = 320.;

@@ -292,3 +292,25 @@ Every chunk's manual check and the plan's Manual Tests 1–6, plus milestone 7's
 **Fix:** the seven are added to `ExtraIcons`. A new unit test, `assets::tests::people_icons_load`, loads every icon the menu, card and page use.
 
 **Verification:** I cross-checked every `IconName::` in `src` against the default list plus `ExtraIcons`, and none is missing now. `cargo test`: 575 passed. `cargo clippy --all-targets -- -D warnings`: clean. `src/assets.rs` is rustfmt-clean.
+
+## Change after the summary: Add friend in a dialog
+
+**Asked for during manual testing:** the user wanted the add-friend field out of the page, in a dialog. Assumption 7 in the plan is amended to match.
+
+### Changes Made
+- `src/ui/friends.rs`:
+  - The page header has a primary "Add friend" button (UserPlus icon) at its right. `render_friends_page` takes `on_add_friend` instead of the `add_friend` element.
+  - `render_add_friend(input, state, on_send, on_cancel, cx)` is now the dialog's body:
+    - the hint "You'll need their username and its four-digit tag."
+    - the field, with the request's state under it, coloured as before
+    - Close and "Send request" (primary, with a spinner and disabled while sending)
+- `src/ui/chat.rs`:
+  - New `open_add_friend(window, cx)`. It clears the state and the field, then opens a 420 px dialog titled "Add friend". The builder focuses the field on its first build only, and reads `add_friend_state` from the view on every build.
+  - `send_friend_request` and the field's `Change` handler call `window.refresh()` when the state changes, so the dialog, which the window's root draws, redraws too.
+  - After a success the dialog stays open: the field clears and "Friend request sent to …" shows under it. Close, Esc or a click outside closes the dialog, which keeps it from ever being closed from code (and so closing some other dialog by mistake).
+  - The add-friend logic is otherwise unchanged: `check_username`, `request_sent`, `request_refused`, and Enter to send.
+
+### Verification Performed
+- `cargo test`: 575 passed. `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt: `src/ui/friends.rs` is clean, and `src/ui/chat.rs` is still at 16 hunks (baseline 18).
+- The look in the app is to be checked by hand.
