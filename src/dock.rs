@@ -1,7 +1,9 @@
 //! The Dock icon's badge: how many things need the user's attention.
 //!
 //! AppKit's `NSDockTile` badge works for a plain `cargo run` binary too (no
-//! app bundle needed), unlike system notifications.
+//! app bundle needed), unlike system notifications. In the app bundle,
+//! macOS shows it only if notification badges are allowed, which
+//! [`crate::banners::request_permission`] asks for.
 
 /// The badge text for `count`: nothing at 0, "99+" past 99.
 pub fn badge_label(count: usize) -> Option<String> {

@@ -314,3 +314,34 @@ Every chunk's manual check and the plan's Manual Tests 1–6, plus milestone 7's
 - `cargo test`: 575 passed. `cargo clippy --all-targets -- -D warnings`: clean.
 - rustfmt: `src/ui/friends.rs` is clean, and `src/ui/chat.rs` is still at 16 hunks (baseline 18).
 - The look in the app is to be checked by hand.
+
+## Manual Validation (batched, 2026-11-05)
+
+Done in the bundled debug build (`scripts/run-bundled.sh`) against stoat.chat, with one account.
+
+- **Icons:** the Reject button first showed no icon and no text. That was the missing-icons bug, fixed in `59b79a8` (see above).
+- **Reject from a row:** done by the user and confirmed. The log shows one `DELETE /users/{id}/friend`, the answer "now None", the Dock badge going from 1 to 0 and the `UserRelationship` event following.
+- **Add friend dialog** (`0a4b1e4`): the user approved how it looks and works. No request was sent from it, so the request path is still untested by hand.
+- **Lists:** the user confirmed the tabs match the web app.
+- **Accepted on the user's word, not shown:**
+  - live presence on Online
+  - the composer and member panel hiding and coming back, with the draft kept
+  - the row card and menu
+  - Message from a row
+  - Unblock
+  - Friends reopening after a relaunch
+- **Not done yet (they need a second account):** the second-account checks from chunks 2, 3 and 5, the badges rising and falling for a new request, toasts and banners, and milestone 7's batched checks.
+
+## Fix during manual testing: no Dock badge in the bundled app
+
+**Found:** with a second account (both signed in to the same RuSToat), a friend request fired its toast, and the log showed `dock badge: 1` with "+1 Friend requests". The Dock icon had no badge, and System Settings → Notifications → RuSToat had no "Badge application icon" switch.
+
+**Cause (older than this milestone):** `banners::request_permission` asked for `Alert | Sound` only. A bundled app registered with the notification center gets its `NSDockTile` badge shown only if badges are authorized, so no Dock badge ever showed in the bundled app, unread mentions included. Plain `cargo run` builds aren't registered, so they weren't affected.
+
+**Fix:** `src/banners.rs` now asks for `Alert | Sound | Badge`, with a doc comment saying why. `src/dock.rs`'s module doc says the same.
+
+**Verification:**
+- After a relaunch, macOS answered "banners: allowed".
+- `dock badge: 1` was set for the pending request, then the user accepted it from the row. One `PUT /users/{id}/friend`, both accounts' `UserRelationship` events read Friend, and the badge went to 0.
+- `cargo test`: 575 passed. Clippy is clean, and both files are rustfmt-clean.
+- The user confirmed the Dock icon badges work now.

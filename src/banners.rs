@@ -36,8 +36,14 @@ fn read_bundle_identifier() -> Option<String> {
     None
 }
 
-/// Ask macOS for permission to show banners. The first time, macOS prompts
-/// the user; after that it answers from their saved choice without asking.
+/// Ask macOS for permission to show banners and badge the Dock icon. The
+/// first time, macOS prompts the user; after that it answers from their
+/// saved choice without asking.
+///
+/// The badge has to be asked for too: once a bundled app is registered with
+/// the notification center, macOS only shows its Dock badge
+/// ([`crate::dock::set_badge`]) if badges are allowed, and without asking
+/// there's no "Badge application icon" switch in System Settings at all.
 /// The answer is logged and remembered for [`available`]. Does nothing when
 /// not bundled, where the notification center isn't usable at all.
 ///
@@ -77,7 +83,9 @@ pub fn request_permission() {
     log::debug!("banners: bundled as {id}; asking for permission");
     UNUserNotificationCenter::currentNotificationCenter()
         .requestAuthorizationWithOptions_completionHandler(
-            UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
+            UNAuthorizationOptions::Alert
+                | UNAuthorizationOptions::Sound
+                | UNAuthorizationOptions::Badge,
             &completion,
         );
 }
