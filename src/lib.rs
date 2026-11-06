@@ -28,6 +28,7 @@ pub mod places;
 pub mod prefs;
 pub mod profile;
 pub mod runtime;
+pub mod safety;
 pub mod search;
 pub mod session;
 pub mod shortcuts;

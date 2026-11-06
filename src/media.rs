@@ -39,6 +39,14 @@ impl MediaUrls {
         )
     }
 
+    /// The API, file server and proxy bases that are known, for telling
+    /// Stoat's own links from others (see [`crate::safety::is_own_instance`]).
+    pub fn bases(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.api.as_str())
+            .chain(self.files.as_deref())
+            .chain(self.proxy.as_deref())
+    }
+
     pub fn file_server(&self) -> Option<&str> {
         self.files.as_deref()
     }

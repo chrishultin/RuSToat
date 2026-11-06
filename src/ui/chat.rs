@@ -9,6 +9,7 @@ use futures::StreamExt;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::bubble::{Bubble, BubbleContent, BubbleReactions, BubbleVariant};
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::message::{
@@ -46,6 +47,7 @@ use crate::notify::{self, Delivery, Notice, Viewing};
 use crate::places::{Place, Places, PlacesFile};
 use crate::profile::{RelationshipAction, UserMenuItem};
 use crate::runtime::spawn_io;
+use crate::safety::{LinkCheck, SafetyFile, SafetySettings, classify, is_own_instance, origin};
 use crate::search::{MAX_QUERY_CHARS, PINS_LIMIT, QueryCheck, RESULT_LIMIT, check_query};
 use crate::store::{
     ChannelEntry, ChannelKind, ChannelSection, ChatStore, MemberList, MemberListRow, MessageRow,
@@ -234,6 +236,13 @@ pub struct ChatView {
     /// there's nowhere to keep them), and what was last written there.
     places_file: Option<PlacesFile>,
     saved_places: Places,
+    /// Where `safety` is kept between launches (`None` if there's nowhere).
+    safety_file: Option<SafetyFile>,
+    /// Trusted sites and mature-channel confirmations, for this account.
+    safety: SafetySettings,
+    /// The external link the open "External links can be dangerous!" dialog
+    /// asks about.
+    link_prompt: Option<LinkPrompt>,
     /// File server base URL for icons, from `GET /`. `None` until loaded.
     /// Where images come from. Only the API base is known until `GET /` loads.
     media: MediaUrls,
@@ -470,6 +479,11 @@ impl ChatView {
             .as_ref()
             .map(PlacesFile::load)
             .unwrap_or_default();
+        let safety_file = SafetyFile::for_account(&api, &me);
+        let safety = safety_file
+            .as_ref()
+            .map(SafetyFile::load)
+            .unwrap_or_default();
         let typing = TypingState::new(me.clone());
         let mut store = ChatStore::new(me);
         store.set_media(media.clone());
@@ -584,6 +598,9 @@ impl ChatView {
             collapsed: saved_places.collapsed.clone(),
             places_file,
             saved_places,
+            safety_file,
+            safety,
+            link_prompt: None,
             media,
             web_app: None,
             unread_marker: None,
@@ -1217,6 +1234,7 @@ impl ChatView {
                 self.store.reveal_blocked(ids);
                 self.sync_pane(channel, cx);
             }
+            RowAction::OpenLink(url) => self.open_external(url, None, window, cx),
         }
         cx.notify();
     }
@@ -2138,6 +2156,115 @@ impl ChatView {
 
     /// Ask before deleting: a dialog showing the message, with Cancel and
     /// Delete (Enter confirms, Esc cancels).
+    /// Open an external link (`http`, `https` or `mailto`) whose text, if
+    /// it said something other than the address, was `text`. Links to the
+    /// user's own instance and to trusted sites open at once; anything else
+    /// asks first.
+    fn open_external(
+        &mut self,
+        url: String,
+        text: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let own = self.media.bases().chain(self.web_app.as_deref());
+        if is_own_instance(&url, own) || self.safety.trusts(&url) {
+            cx.open_url(&url);
+            return;
+        }
+        let check = classify(&url, text.as_deref());
+        self.link_prompt = Some(LinkPrompt {
+            // Only a link that shows its own address can be trusted.
+            origin: origin(&url).filter(|_| check == LinkCheck::Plain),
+            url,
+            trust: false,
+        });
+        let view = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let Some(prompt) = view
+                .upgrade()
+                .and_then(|view| view.read(cx).link_prompt.clone())
+            else {
+                return alert;
+            };
+            let go = {
+                let view = view.clone();
+                move |window: &mut Window, cx: &mut App| {
+                    view.update(cx, |this, cx| this.follow_link_prompt(cx)).ok();
+                    window.close_dialog(cx);
+                }
+            };
+            let tick = {
+                let view = view.clone();
+                move |ticked: &bool, _: &mut Window, cx: &mut App| {
+                    let ticked = *ticked;
+                    view.update(cx, |this, cx| {
+                        if let Some(prompt) = &mut this.link_prompt {
+                            prompt.trust = ticked;
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            };
+            alert
+                .title("External links can be dangerous!")
+                .description(format!("Are you sure you want to go to {}?", prompt.url))
+                .when_some(prompt.origin.clone(), |alert, origin| {
+                    alert.child(
+                        Checkbox::new("link-trust")
+                            .label(format!("Don't ask me again for {origin}"))
+                            .checked(prompt.trust)
+                            .on_click(tick),
+                    )
+                })
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("link-cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("link-continue")
+                                .primary()
+                                .label("Continue")
+                                .on_click({
+                                    let go = go.clone();
+                                    move |_, window, cx| go(window, cx)
+                                }),
+                        ),
+                )
+                .on_ok(move |_, window, cx| {
+                    go(window, cx);
+                    false
+                })
+        });
+    }
+
+    /// The link dialog's Continue: open its link, and trust its site from
+    /// now on if the user ticked "Don't ask me again".
+    fn follow_link_prompt(&mut self, cx: &mut Context<Self>) {
+        let Some(prompt) = self.link_prompt.take() else {
+            return;
+        };
+        if prompt.trust && self.safety.trust(&prompt.url) {
+            self.save_safety();
+        }
+        cx.open_url(&prompt.url);
+    }
+
+    /// Save trusted sites and mature-channel confirmations for next launch.
+    fn save_safety(&self) {
+        if let Some(file) = &self.safety_file
+            && let Err(err) = file.save(&self.safety)
+        {
+            log::warn!("couldn't save safety settings: {err:#}");
+        }
+    }
+
     fn confirm_delete(
         &mut self,
         channel: String,
@@ -5433,6 +5560,16 @@ struct RowColors {
     highlight: Hsla,
 }
 
+/// What the "External links can be dangerous!" dialog asks about.
+#[derive(Clone)]
+struct LinkPrompt {
+    url: String,
+    /// What "Don't ask me again" would trust. `None`: it isn't offered.
+    origin: Option<String>,
+    /// "Don't ask me again" is ticked.
+    trust: bool,
+}
+
 /// Something a message row asks the view to do.
 #[derive(Clone)]
 enum RowAction {
@@ -5454,6 +5591,9 @@ enum RowAction {
     JumpTo(String),
     /// Show a run of blocked users' messages (by ID).
     RevealBlocked(Vec<String>),
+    /// Open an external link from an embed, asking first unless its site
+    /// is trusted.
+    OpenLink(String),
     /// Reply to a message (from the hover toolbar or the right-click menu).
     Reply(ReplyTarget),
     /// Quote a message (by ID) in the message box.
@@ -5791,10 +5931,23 @@ impl People {
             ) => {}
             None => {
                 if is_external_link(url) {
-                    cx.open_url(url);
+                    people.open_link(url.to_string(), None, window, cx);
                 }
             }
         })
+    }
+
+    /// Open an external link, asking first (see [`ChatView::open_external`]).
+    pub(crate) fn open_link(
+        &self,
+        url: String,
+        text: Option<String>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.view
+            .update(cx, |this, cx| this.open_external(url, text, window, cx))
+            .ok();
     }
 
     /// `user`'s menu (see [`crate::profile::user_menu`]), worked out when it
@@ -5986,7 +6139,7 @@ fn render_message_row(
                         )
                         .children(message.embeds.iter().enumerate().map(|(ix, embed)| {
                             let id = SharedString::from(format!("embed-{}-{ix}", message.id));
-                            render_embed(id, embed, colors, on_action)
+                            render_embed(id, embed, colors, on_action, people)
                         })),
                 )
             })
@@ -7000,6 +7153,7 @@ fn render_embed(
     embed: &EmbedView,
     colors: RowColors,
     on_action: &OnRowAction,
+    people: &People,
 ) -> AnyElement {
     match embed {
         EmbedView::Image(image) => {
@@ -7010,13 +7164,16 @@ fn render_embed(
             let shown = url
                 .trim_start_matches("https://")
                 .trim_start_matches("http://");
+            let on_action = on_action.clone();
             file_card(id, IconName::FileVideoCamera, shown, "Video", colors)
                 .cursor_pointer()
-                .on_click(move |_, _, cx| cx.open_url(&open))
+                .on_click(move |_, window, cx| {
+                    on_action(RowAction::OpenLink(open.clone()), window, cx)
+                })
                 .child(Icon::new(IconName::ExternalLink).text_color(colors.muted))
                 .into_any_element()
         }
-        EmbedView::Card(card) => render_embed_card(id, card, colors, on_action),
+        EmbedView::Card(card) => render_embed_card(id, card, colors, on_action, people),
     }
 }
 
@@ -7027,6 +7184,7 @@ fn render_embed_card(
     card: &EmbedCard,
     colors: RowColors,
     on_action: &OnRowAction,
+    people: &People,
 ) -> AnyElement {
     let bar = card
         .colour
@@ -7064,11 +7222,15 @@ fn render_embed_card(
             .font_weight(FontWeight::SEMIBOLD)
             .child(title);
         let text = match card.link.clone() {
-            Some(link) => text
-                .text_color(colors.link)
-                .cursor_pointer()
-                .hover(|style| style.underline())
-                .on_click(move |_, _, cx| cx.open_url(&link)),
+            Some(link) => {
+                let on_action = on_action.clone();
+                text.text_color(colors.link)
+                    .cursor_pointer()
+                    .hover(|style| style.underline())
+                    .on_click(move |_, window, cx| {
+                        on_action(RowAction::OpenLink(link.clone()), window, cx)
+                    })
+            }
             None => text,
         };
         h_flex()
@@ -7104,10 +7266,9 @@ fn render_embed_card(
                     .code_block_actions(code_block_actions)
                     .text_sm()
                     .selectable(true)
-                    .on_link_click(|url, _, _, cx| {
-                        if is_external_link(url) {
-                            cx.open_url(url);
-                        }
+                    .on_link_click({
+                        let on_link = people.link_handler();
+                        move |url, _, window, cx| on_link(url, window, cx)
                     })
                     .into_any_element()
             }
@@ -7128,7 +7289,10 @@ fn render_embed_card(
         match (card.playable, card.link.clone()) {
             // A video's picture: a play badge, and a click opens the video.
             (true, Some(link)) => picture
-                .on_click(move |_, _, cx| cx.open_url(&link))
+                .on_click({
+                    let on_action = on_action.clone();
+                    move |_, window, cx| on_action(RowAction::OpenLink(link.clone()), window, cx)
+                })
                 .child(
                     div()
                         .absolute()
