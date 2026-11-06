@@ -3,7 +3,7 @@ use std::time::Duration;
 use reqwest::{Client, Method};
 use revolt_models::v0::{
     AllMemberResponse, BulkMessageResponse, Channel, DataEditMessage, DataLogin, DataMessageSearch,
-    DataMessageSend, DataSendFriendRequest, MFAResponse, Member, Message, MessageSort,
+    DataMessageSend, DataSendFriendRequest, Emoji, MFAResponse, Member, Message, MessageSort,
     OptionsQueryMessages, ReplyIntent, ResponseLogin, User, UserProfile,
 };
 use serde::de::DeserializeOwned;
@@ -584,6 +584,13 @@ impl StoatClient {
     /// `DELETE /users/{id}/block`: unblock them.
     pub async fn unblock_user(&self, id: &str) -> Result<User, ApiError> {
         self.send(Method::DELETE, &format!("/users/{id}/block"), None::<&()>)
+            .await
+    }
+
+    /// `GET /custom/emoji/{id}`: one custom emoji, from any server (one the
+    /// user isn't in, seen in a reaction or message, so it can be named).
+    pub async fn fetch_emoji(&self, id: &str) -> Result<Emoji, ApiError> {
+        self.send(Method::GET, &format!("/custom/emoji/{id}"), None::<&()>)
             .await
     }
 

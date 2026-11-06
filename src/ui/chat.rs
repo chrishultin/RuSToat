@@ -63,6 +63,9 @@ pub const HISTORY_PAGE: usize = 50;
 /// Most reply originals fetched at once.
 const REPLY_FETCHES: usize = 4;
 
+/// Most other servers' emoji fetched at once.
+const EMOJI_FETCHES: usize = 4;
+
 /// How long a message stays highlighted after a jump lands on it.
 const HIGHLIGHT_FOR: Duration = Duration::from_secs(2);
 
@@ -233,6 +236,10 @@ pub struct ChatView {
     reacting: HashSet<(String, String)>,
     /// Reply originals being fetched, by message ID (each once).
     reply_fetches: HashSet<String>,
+    /// Other servers' emoji asked for this session, by ID (each once, even
+    /// if it failed), and how many are still loading.
+    emoji_fetches: HashSet<String>,
+    emoji_loading: usize,
     /// Servers whose full member list was asked for (once per session, for
     /// `@`), and those still loading.
     member_fetches: HashSet<String>,
@@ -506,6 +513,8 @@ impl ChatView {
             picker_for: None,
             reacting: HashSet::new(),
             reply_fetches: HashSet::new(),
+            emoji_fetches: HashSet::new(),
+            emoji_loading: 0,
             member_fetches: HashSet::new(),
             members_loading: HashSet::new(),
             online_fetches: HashSet::new(),
@@ -1218,6 +1227,7 @@ impl ChatView {
             }
         });
         self.fetch_reply_sources(channel, cx);
+        self.fetch_missing_emojis(channel, cx);
     }
 
     /// Send `content` and `attachments` in `channel`: shown at once as
@@ -3246,6 +3256,7 @@ impl ChatView {
                 }
             });
             self.fetch_reply_sources(channel, cx);
+        self.fetch_missing_emojis(channel, cx);
             return;
         }
 
@@ -3265,6 +3276,7 @@ impl ChatView {
             },
         );
         self.fetch_reply_sources(channel, cx);
+        self.fetch_missing_emojis(channel, cx);
     }
 
     /// Fetch originals that `channel`'s replies need, a few at a time. Each
@@ -3311,6 +3323,51 @@ impl ChatView {
                             log::warn!("reply source task failed: {err:?}");
                             this.store.reply_source_unavailable(&id);
                         }
+                    }
+                    this.sync_pane(&channel, cx);
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
+    /// Fetch custom emoji that `channel`'s messages use but that aren't the
+    /// user's servers', so reactions and text can name them, a few at a time.
+    /// Each result re-syncs the channel, which starts the next ones.
+    fn fetch_missing_emojis(&mut self, channel: &str, cx: &mut Context<Self>) {
+        for id in self.store.missing_emojis(channel) {
+            if self.emoji_loading >= EMOJI_FETCHES {
+                break;
+            }
+            if !self.emoji_fetches.insert(id.clone()) {
+                continue;
+            }
+            self.emoji_loading += 1;
+            let request = spawn_io({
+                let (client, id) = (self.client.clone(), id.clone());
+                async move { client.fetch_emoji(&id).await }
+            });
+            let channel = channel.to_string();
+            cx.spawn(async move |this, cx| {
+                let result = request.await;
+                if let Ok(Err(ApiError::RateLimited { retry_after_ms })) = &result {
+                    let wait = Duration::from_millis(retry_after_ms.unwrap_or(2_000));
+                    log::debug!("emoji {id}: rate limited, waiting {wait:?}");
+                    cx.background_executor().timer(wait).await;
+                }
+                this.update(cx, |this, cx| {
+                    this.emoji_loading -= 1;
+                    match result {
+                        Ok(Ok(emoji)) => this.store.add_other_emoji(emoji),
+                        // Tried again below, now the wait is over.
+                        Ok(Err(ApiError::RateLimited { .. })) => {
+                            this.emoji_fetches.remove(&id);
+                        }
+                        // Left as `:emoji:`.
+                        Ok(Err(err)) => log::warn!("couldn't load emoji {id}: {err:?}"),
+                        Err(err) => log::warn!("emoji task failed: {err:?}"),
                     }
                     this.sync_pane(&channel, cx);
                     cx.notify();

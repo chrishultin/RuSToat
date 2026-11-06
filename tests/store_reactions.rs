@@ -411,3 +411,39 @@ fn a_full_message_only_offers_its_existing_reactions() {
     assert!(!choices.full);
     assert_eq!(choices.emoji.len(), usual.len());
 }
+
+#[test]
+fn another_servers_emoji_is_missing_until_fetched_then_named_but_not_offered() {
+    const WAVE: &str = "01BX5ZZKBKACTAV9WEVGEMMVRZ";
+    let mut store = store_with(json!({}));
+    store.set_history(
+        CH,
+        serde_json::from_value(json!([
+            { "_id": MSG, "channel": CH, "author": "u-ada", "content": "hi",
+              "reactions": { PARTY: ["u-bob"], "👍": ["u-bob"] } },
+            { "_id": "01M6GDKW80BBBBBBBBBBBBBBBB", "channel": CH, "author": "u-ada",
+              "content": format!(":{WAVE}: and :{PARTY}: at 12:30:45"),
+              "reactions": { PARTY: ["u-ada"] } },
+        ]))
+        .unwrap(),
+        50,
+    );
+    // Reactions and text alike, each once; Unicode and times aren't emoji.
+    assert_eq!(store.missing_emojis(CH), vec![s(PARTY), s(WAVE)]);
+
+    store.add_other_emoji(
+        serde_json::from_value(json!({
+            "_id": PARTY, "parent": { "type": "Server", "id": "srv-elsewhere" },
+            "creator_id": "u-zed", "name": "party"
+        }))
+        .unwrap(),
+    );
+    assert_eq!(store.missing_emojis(CH), vec![s(WAVE)]);
+    let ReactionEmoji::Custom { name, .. } = &chips(&store)[0].emoji else {
+        panic!("custom");
+    };
+    assert_eq!(name, ":party:");
+    // It's named, but not the user's to use.
+    assert!(!store.reaction_choices(CH).iter().any(|c| c.key == PARTY));
+    assert!(store.custom_emoji_for(CH).is_empty());
+}
