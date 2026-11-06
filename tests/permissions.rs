@@ -6,7 +6,9 @@ use revolt_permissions::{
 };
 use serde_json::{Value, json};
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
-use stoat_gpui::permissions::{can_pin, can_view, channel_permissions, has};
+use stoat_gpui::permissions::{
+    can_mention_everyone, can_mention_roles, can_pin, can_view, channel_permissions, has,
+};
 use stoat_gpui::store::ChatStore;
 
 const VIEW: u64 = ChannelPermission::ViewChannel as u64;
@@ -352,4 +354,66 @@ fn the_store_asks_about_the_logged_in_user() {
     // `u-me` is a plain member of the server channels.
     let store = server_store();
     assert!(!store.can_pin("ch-open"));
+}
+
+const MENTION_ROLES: u64 = ChannelPermission::MentionRoles as u64;
+const MENTION_EVERYONE: u64 = ChannelPermission::MentionEveryone as u64;
+
+#[test]
+fn mentioning_roles_and_everyone_takes_their_permissions() {
+    let mut server = server_json();
+    server["roles"]["herald"] = json!({
+        "_id": "herald", "name": "Herald", "rank": 0,
+        "permissions": { "a": MENTION_ROLES | MENTION_EVERYONE, "d": 0 }
+    });
+    let channels = json!([
+        { "channel_type": "TextChannel", "_id": "ch-open", "server": "srv", "name": "open" },
+        {
+            "channel_type": "TextChannel", "_id": "ch-quiet", "server": "srv", "name": "quiet",
+            "role_permissions": { "herald": { "a": 0, "d": MENTION_ROLES | MENTION_EVERYONE } }
+        }
+    ]);
+    let ready = json!({
+        "type": "Ready",
+        "users": [user("u-me", json!({})), user("u-owner", json!({})), user("u-herald", json!({}))],
+        "servers": [server],
+        "channels": channels,
+        "members": [
+            member("u-me", &[], json!({})),
+            member("u-owner", &[], json!({})),
+            member("u-herald", &["herald"], json!({})),
+        ],
+    });
+    let Some(ServerEvent::Ready(ready)) = parse_frame(&ready.to_string()).pop() else {
+        panic!("ready");
+    };
+    let mut store = ChatStore::new("u-me");
+    store.apply_ready(*ready);
+
+    // A plain member hasn't the bits by default.
+    assert!(!can_mention_roles(&store, "u-me", "ch-open"));
+    assert!(!can_mention_everyone(&store, "u-me", "ch-open"));
+    assert!(!store.can_mention_roles("ch-open"));
+    // A role can grant them, and a channel override take them away.
+    assert!(can_mention_roles(&store, "u-herald", "ch-open"));
+    assert!(can_mention_everyone(&store, "u-herald", "ch-open"));
+    assert!(!can_mention_roles(&store, "u-herald", "ch-quiet"));
+    assert!(!can_mention_everyone(&store, "u-herald", "ch-quiet"));
+    // The owner may, everywhere.
+    for channel in ["ch-open", "ch-quiet"] {
+        assert!(can_mention_roles(&store, "u-owner", channel), "{channel}");
+        assert!(
+            can_mention_everyone(&store, "u-owner", channel),
+            "{channel}"
+        );
+    }
+}
+
+#[test]
+fn nobody_mentions_roles_or_everyone_outside_a_server() {
+    let store = conversations();
+    for channel in ["dm-friend", "grp", "saved"] {
+        assert!(!can_mention_roles(&store, "u-me", channel), "{channel}");
+        assert!(!can_mention_everyone(&store, "u-me", channel), "{channel}");
+    }
 }

@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::api::models::BulkMessageResponse;
 use stoat_gpui::complete::{
-    Candidate, Insertion, MAX_SUGGESTIONS, Query, QueryKind, Suggestion, TokenRef,
-    completion_query, mention_spans, rank_people,
+    Candidate, Insertion, MAX_SUGGESTIONS, Query, QueryKind, RoleCandidate, Suggestion, TokenRef,
+    completion_query, mention_spans, rank_mentions, rank_people,
 };
 use stoat_gpui::store::ChatStore;
 
@@ -182,6 +182,104 @@ fn mention_spans_find_people_channels_and_custom_emoji() {
     }
 }
 
+const MODS: &str = "01M6GF0000EEEEEEEEEEEEEEEE";
+
+#[test]
+fn mention_spans_find_roles() {
+    let text = format!("ping <%{MODS}> and <@{ADA}>");
+    let spans = mention_spans(&text);
+    assert_eq!(
+        spans.iter().map(|(_, t)| t.clone()).collect::<Vec<_>>(),
+        vec![TokenRef::Role(MODS.into()), TokenRef::User(ADA.into())]
+    );
+    assert_eq!(&text[spans[0].0.clone()], format!("<%{MODS}>"));
+    assert!(mention_spans("<%mods>").is_empty());
+}
+
+#[test]
+fn a_role_suggestion_inserts_a_role_chip() {
+    let role = RoleCandidate {
+        id: MODS.into(),
+        name: "Mods".into(),
+        colour: Some("#ff8800".into()),
+    };
+    let suggestion = Suggestion::role(&role);
+    assert_eq!(suggestion.title, "Mods");
+    let Insertion::Token { token, label } = suggestion.insert else {
+        panic!("not a chip");
+    };
+    assert_eq!(label, "@Mods");
+    assert_eq!(token.wire_text(), format!("<%{MODS}>"));
+    assert_eq!(token.token_id(), format!("role:{MODS}"));
+    assert_eq!(TokenRef::from_token_id(&token.token_id()), Some(token));
+}
+
+#[test]
+fn everyone_and_online_insert_plain_text() {
+    assert_eq!(
+        Suggestion::everyone().insert,
+        Insertion::Text("@everyone".into())
+    );
+    assert_eq!(
+        Suggestion::online().insert,
+        Insertion::Text("@online".into())
+    );
+    assert_eq!(Suggestion::everyone().title, "@everyone");
+}
+
+#[test]
+fn people_roles_and_specials_rank_together() {
+    let role = |id: &str, name: &str| RoleCandidate {
+        id: id.into(),
+        name: name.into(),
+        colour: None,
+    };
+    let people = [
+        person("u-eve", "Eve", "eve", false),
+        person("u-old", "Oldie", "oldie", false),
+    ];
+    let roles = [role("r-ev", "Events"), role("r-on", "Online Mods")];
+    let keys = |query: &str, everyone: bool| -> Vec<String> {
+        rank_mentions(query, &people, &roles, everyone)
+            .into_iter()
+            .map(|s| s.key)
+            .collect()
+    };
+    // Equal matches: people, then roles, then the specials.
+    assert_eq!(
+        keys("ev", true),
+        vec!["user:u-eve", "role:r-ev", "everyone"]
+    );
+    // A better match wins whatever it is ("everyone" only contains "on").
+    assert_eq!(keys("on", true), vec!["role:r-on", "online", "everyone"]);
+    assert_eq!(
+        keys("o", true),
+        vec!["user:u-old", "role:r-on", "online", "everyone"]
+    );
+    // Without permission, no specials.
+    assert_eq!(keys("ev", false), vec!["user:u-eve", "role:r-ev"]);
+    // An empty query shows a mix, people first.
+    assert_eq!(
+        keys("", true),
+        vec![
+            "user:u-eve",
+            "user:u-old",
+            "role:r-ev",
+            "role:r-on",
+            "everyone",
+            "online"
+        ]
+    );
+    // Still capped.
+    let many: Vec<Candidate> = (0..10)
+        .map(|n| person(&format!("u{n}"), &format!("Eve {n}"), "e", false))
+        .collect();
+    assert_eq!(
+        rank_mentions("e", &many, &roles, true).len(),
+        MAX_SUGGESTIONS
+    );
+}
+
 #[test]
 fn mention_spans_ignore_things_that_arent_ids() {
     assert!(mention_spans("<@notanid> <@ada> :smile: <#general>").is_empty());
@@ -200,6 +298,11 @@ fn mention_spans_ignore_things_that_arent_ids() {
 /// The Ready fixture, plus `u-cy` (a member of `srv-alpha` with a
 /// nickname) and `u-dee` (a user, not a member).
 fn store() -> ChatStore {
+    store_with(|_| {})
+}
+
+/// [`store`], with `edit` made to the Ready event first.
+fn store_with(edit: impl FnOnce(&mut Value)) -> ChatStore {
     let path = format!("{}/tests/fixtures/ready.json", env!("CARGO_MANIFEST_DIR"));
     let mut ready: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     for (id, name) in [("u-cy", "cy"), ("u-dee", "dee")] {
@@ -212,6 +315,7 @@ fn store() -> ChatStore {
         "_id": { "server": "srv-alpha", "user": "u-cy" },
         "joined_at": "2026-01-01T00:00:00.000Z", "nickname": "Cyclone"
     }));
+    edit(&mut ready);
     let ServerEvent::Ready(ready) = parse_frame(&ready.to_string()).remove(0) else {
         panic!("not Ready");
     };
@@ -285,6 +389,74 @@ fn chip_labels_name_people_channels_and_emoji() {
     assert_eq!(
         store.token_label("dm-ada", &TokenRef::Channel("ch-general".into())),
         "#general"
+    );
+}
+
+/// [`store`] with three roles in Alpha Team: Mods (gold), Admins (red,
+/// the highest) and Plain (no colour).
+fn store_with_roles() -> ChatStore {
+    store_with(|ready| {
+        let server = ready["servers"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|s| s["_id"] == "srv-alpha")
+            .unwrap();
+        let role = |id: &str, name: &str, rank: i64, colour: Option<&str>| {
+            let mut role = json!({
+                "_id": id, "name": name, "rank": rank, "permissions": { "a": 0, "d": 0 }
+            });
+            if let Some(colour) = colour {
+                role["colour"] = json!(colour);
+            }
+            role
+        };
+        server["roles"] = json!({
+            "r-mods": role("r-mods", "Mods", 1, Some("gold")),
+            "r-admins": role("r-admins", "Admins", 0, Some("#FF0000")),
+            "r-plain": role("r-plain", "Plain", 2, None),
+        });
+    })
+}
+
+#[test]
+fn roles_are_suggested_by_rank_only_in_their_server() {
+    let store = store_with_roles();
+    let roles = store.role_candidates("ch-general");
+    assert_eq!(
+        roles,
+        vec![
+            RoleCandidate {
+                id: "r-admins".into(),
+                name: "Admins".into(),
+                colour: Some("#ff0000".into())
+            },
+            RoleCandidate {
+                id: "r-mods".into(),
+                name: "Mods".into(),
+                colour: Some("#ffd700".into())
+            },
+            RoleCandidate {
+                id: "r-plain".into(),
+                name: "Plain".into(),
+                colour: None
+            },
+        ]
+    );
+    assert!(store.role_candidates("ch-beta").is_empty());
+    assert!(store.role_candidates("dm-ada").is_empty());
+}
+
+#[test]
+fn chip_labels_name_roles() {
+    let store = store_with_roles();
+    assert_eq!(
+        store.token_label("ch-general", &TokenRef::Role("r-mods".into())),
+        "@Mods"
+    );
+    assert_eq!(
+        store.token_label("ch-general", &TokenRef::Role("r-gone".into())),
+        "@Unknown role"
     );
 }
 

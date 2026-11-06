@@ -68,6 +68,30 @@ pub fn can_pin(store: &ChatStore, user: &str, channel: &str) -> bool {
     }
 }
 
+/// Whether `user` may mention roles in `channel`: only in server channels,
+/// with Mention Roles.
+pub fn can_mention_roles(store: &ChatStore, user: &str, channel: &str) -> bool {
+    in_server(store, channel)
+        && has(
+            channel_permissions(store, user, channel),
+            ChannelPermission::MentionRoles,
+        )
+}
+
+/// Whether `user` may mention `@everyone` and `@online` in `channel`: only
+/// in server channels, with Mention Everyone.
+pub fn can_mention_everyone(store: &ChatStore, user: &str, channel: &str) -> bool {
+    in_server(store, channel)
+        && has(
+            channel_permissions(store, user, channel),
+            ChannelPermission::MentionEveryone,
+        )
+}
+
+fn in_server(store: &ChatStore, channel: &str) -> bool {
+    matches!(store.channel(channel), Some(Channel::TextChannel { .. }))
+}
+
 /// The store, asked the questions `revolt-permissions` has about `user`
 /// in `channel`.
 struct StoreQuery<'a> {

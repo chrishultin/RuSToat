@@ -12,7 +12,7 @@ use crate::api::models::{
     Presence, ReplyIntent, Role, Server, SystemMessage, User,
 };
 use crate::attachment::AttachmentView;
-use crate::complete::{Candidate, TokenRef};
+use crate::complete::{Candidate, RoleCandidate, TokenRef};
 use crate::emoji::CustomEmoji;
 use crate::draft::DraftAttachment;
 use crate::embed::EmbedView;
@@ -2250,6 +2250,16 @@ impl ChatStore {
         crate::permissions::can_pin(self, &self.me, channel)
     }
 
+    /// Whether the user may mention roles in `channel`.
+    pub fn can_mention_roles(&self, channel: &str) -> bool {
+        crate::permissions::can_mention_roles(self, &self.me, channel)
+    }
+
+    /// Whether the user may mention `@everyone` and `@online` in `channel`.
+    pub fn can_mention_everyone(&self, channel: &str) -> bool {
+        crate::permissions::can_mention_everyone(self, &self.me, channel)
+    }
+
     /// Whether the right-hand panel can list `channel`'s people: server
     /// channels and groups, not DMs or Saved Notes.
     pub fn has_member_list(&self, channel: &str) -> bool {
@@ -2736,6 +2746,24 @@ impl ChatStore {
             .collect()
     }
 
+    /// The roles of `channel`'s server, highest-ranked first, as `@`
+    /// suggests them. None outside a server.
+    pub fn role_candidates(&self, channel: &str) -> Vec<RoleCandidate> {
+        let Some(server) = self.server_of(channel).and_then(|id| self.servers.get(id)) else {
+            return Vec::new();
+        };
+        let mut roles: Vec<_> = server.roles.iter().collect();
+        roles.sort_by(|(a_id, a), (b_id, b)| a.rank.cmp(&b.rank).then(a_id.cmp(b_id)));
+        roles
+            .into_iter()
+            .map(|(id, role)| RoleCandidate {
+                id: id.clone(),
+                name: role.name.clone(),
+                colour: role.colour.as_deref().and_then(solid_colour),
+            })
+            .collect()
+    }
+
     /// `user` as `@` suggests them in `channel`. `None` if they aren't known.
     fn candidate(&self, channel: &str, user: &str, recent: bool) -> Option<Candidate> {
         let known = self.users.get(user)?;
@@ -2758,6 +2786,10 @@ impl ChatStore {
             TokenRef::User(id) => match self.users.get(id) {
                 Some(_) => format!("@{}", self.name_in(channel, id)),
                 None => "@Unknown user".into(),
+            },
+            TokenRef::Role(id) => match crate::markdown::Names::role(self, id) {
+                Some((name, _)) => format!("@{name}"),
+                None => "@Unknown role".into(),
             },
             TokenRef::Channel(id) => match self.channel_entry(id) {
                 Some(entry) => format!("#{}", entry.name),

@@ -1040,6 +1040,7 @@ pub fn file_icon(kind: FileKind) -> IconName {
 fn unknown_label(token: &TokenRef) -> String {
     match token {
         TokenRef::User(_) => "@Unknown user".into(),
+        TokenRef::Role(_) => "@Unknown role".into(),
         TokenRef::Channel(_) => "#unknown-channel".into(),
         TokenRef::Emoji(_) => ":emoji:".into(),
     }

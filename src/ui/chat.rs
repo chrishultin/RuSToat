@@ -34,7 +34,7 @@ use crate::api::models::{
     BulkMessageResponse, FieldsMessage, MessageSort, ReplyIntent, UserProfile,
 };
 use crate::attachment::{AttachmentView, fit_into};
-use crate::complete::{Query, QueryKind, Suggestion, TokenRef, rank, rank_people};
+use crate::complete::{Query, QueryKind, Suggestion, TokenRef, rank, rank_mentions};
 use crate::draft::{AttachmentLimits, DraftAttachment, ReplyTarget};
 use crate::embed::{Description, EmbedCard, EmbedImage, EmbedView};
 use crate::friends::{AddFriendState, FRIENDS, FriendsTab};
@@ -1475,10 +1475,19 @@ impl ChatView {
                         self.members_loading.contains(&server)
                     };
                 }
-                rank_people(&query.query, &self.store.mention_candidates(channel))
-                    .iter()
-                    .map(Suggestion::person)
-                    .collect()
+                // Roles, `@everyone` and `@online` only where the user may
+                // mention them (never outside a server).
+                let roles = if self.store.can_mention_roles(channel) {
+                    self.store.role_candidates(channel)
+                } else {
+                    Vec::new()
+                };
+                rank_mentions(
+                    &query.query,
+                    &self.store.mention_candidates(channel),
+                    &roles,
+                    self.store.can_mention_everyone(channel),
+                )
             }
             QueryKind::Channel => {
                 let channels = self.store.channel_candidates(channel);

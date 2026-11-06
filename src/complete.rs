@@ -13,7 +13,7 @@ pub const MIN_EMOJI_QUERY: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum QueryKind {
-    /// `@`: people.
+    /// `@`: people, and in a server roles, `@everyone` and `@online`.
     Mention,
     /// `#`: channels.
     Channel,
@@ -187,6 +187,68 @@ pub fn rank_people(query: &str, people: &[Candidate]) -> Vec<Candidate> {
     )
 }
 
+/// A server role that can be mentioned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoleCandidate {
+    pub id: String,
+    pub name: String,
+    /// Its colour as `#rrggbb`, if it has a solid one.
+    pub colour: Option<String>,
+}
+
+/// Who `@` can suggest. `people`, `roles` and (with `everyone`) `@everyone`
+/// and `@online`, ranked together on their names (see [`rank`]): on equal
+/// matches people come first, then roles, then the two specials.
+pub fn rank_mentions(
+    query: &str,
+    people: &[Candidate],
+    roles: &[RoleCandidate],
+    everyone: bool,
+) -> Vec<Suggestion> {
+    #[derive(Clone)]
+    enum Mentionable<'a> {
+        Person(&'a Candidate),
+        Role(&'a RoleCandidate),
+        Special(Suggestion, &'static str),
+    }
+    let specials = [
+        (Suggestion::everyone(), "everyone"),
+        (Suggestion::online(), "online"),
+    ];
+    let items: Vec<Mentionable> = people
+        .iter()
+        .map(Mentionable::Person)
+        .chain(roles.iter().map(Mentionable::Role))
+        .chain(
+            specials
+                .into_iter()
+                .filter(|_| everyone)
+                .map(|(suggestion, name)| Mentionable::Special(suggestion, name)),
+        )
+        .collect();
+    rank(
+        query,
+        &items,
+        |item| match item {
+            Mentionable::Person(p) => {
+                let mut names = vec![p.name.as_str(), p.username.as_str()];
+                names.extend(p.display_name.as_deref());
+                names
+            }
+            Mentionable::Role(role) => vec![role.name.as_str()],
+            Mentionable::Special(_, name) => vec![*name],
+        },
+        |item| matches!(item, Mentionable::Person(p) if p.recent),
+    )
+    .into_iter()
+    .map(|item| match item {
+        Mentionable::Person(person) => Suggestion::person(person),
+        Mentionable::Role(role) => Suggestion::role(role),
+        Mentionable::Special(suggestion, _) => suggestion,
+    })
+    .collect()
+}
+
 /// 0: `name` starts with `query`; 1: one of its words does; 2: it contains
 /// it. `query` is lowercase.
 fn match_tier(query: &str, name: &str) -> Option<u8> {
@@ -205,11 +267,13 @@ fn match_tier(query: &str, name: &str) -> Option<u8> {
     }
 }
 
-/// A user, channel or custom emoji referred to in a message's text.
+/// A user, role, channel or custom emoji referred to in a message's text.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TokenRef {
     /// `<@ID>`
     User(String),
+    /// `<%ID>`
+    Role(String),
     /// `<#ID>`
     Channel(String),
     /// `:ID:`
@@ -221,6 +285,7 @@ impl TokenRef {
     pub fn wire_text(&self) -> String {
         match self {
             TokenRef::User(id) => format!("<@{id}>"),
+            TokenRef::Role(id) => format!("<%{id}>"),
             TokenRef::Channel(id) => format!("<#{id}>"),
             TokenRef::Emoji(id) => format!(":{id}:"),
         }
@@ -230,6 +295,7 @@ impl TokenRef {
     pub fn token_id(&self) -> String {
         match self {
             TokenRef::User(id) => format!("user:{id}"),
+            TokenRef::Role(id) => format!("role:{id}"),
             TokenRef::Channel(id) => format!("channel:{id}"),
             TokenRef::Emoji(id) => format!("emoji:{id}"),
         }
@@ -241,6 +307,7 @@ impl TokenRef {
         let id = id.to_string();
         match kind {
             "user" => Some(TokenRef::User(id)),
+            "role" => Some(TokenRef::Role(id)),
             "channel" => Some(TokenRef::Channel(id)),
             "emoji" => Some(TokenRef::Emoji(id)),
             _ => None,
@@ -248,7 +315,8 @@ impl TokenRef {
     }
 }
 
-/// The mentions, channel links and custom emoji in `text`, in order, as
+/// The mentions (of people and roles), channel links and custom emoji in
+/// `text`, in order, as
 /// byte ranges of their wire text. Only real IDs (ULIDs) count.
 pub fn mention_spans(text: &str) -> Vec<(Range<usize>, TokenRef)> {
     let bytes = text.as_bytes();
@@ -256,14 +324,14 @@ pub fn mention_spans(text: &str) -> Vec<(Range<usize>, TokenRef)> {
     let mut ix = 0;
     while ix < bytes.len() {
         let found = match bytes[ix] {
-            b'<' if matches!(bytes.get(ix + 1), Some(b'@' | b'#')) => {
+            b'<' if matches!(bytes.get(ix + 1), Some(b'@' | b'%' | b'#')) => {
                 ulid_at(text, ix + 2)
                     .filter(|_| bytes.get(ix + 2 + ULID_LEN) == Some(&b'>'))
                     .map(|id| {
-                        let token = if bytes[ix + 1] == b'@' {
-                            TokenRef::User(id)
-                        } else {
-                            TokenRef::Channel(id)
+                        let token = match bytes[ix + 1] {
+                            b'@' => TokenRef::User(id),
+                            b'%' => TokenRef::Role(id),
+                            _ => TokenRef::Channel(id),
                         };
                         (ix..ix + 3 + ULID_LEN, token)
                     })
@@ -300,7 +368,7 @@ fn ulid_at(text: &str, start: usize) -> Option<String> {
 pub enum Insertion {
     /// An atomic chip: `text` is sent, `label` is shown.
     Token { token: TokenRef, label: String },
-    /// Plain text (a Unicode emoji).
+    /// Plain text (a Unicode emoji, `@everyone`).
     Text(String),
 }
 
@@ -332,6 +400,42 @@ impl Suggestion {
                 token: TokenRef::User(person.id.clone()),
                 label: format!("@{}", person.name),
             },
+        }
+    }
+
+    /// A role's `@name`, sent as `<%id>`.
+    pub fn role(role: &RoleCandidate) -> Self {
+        Suggestion {
+            key: format!("role:{}", role.id),
+            title: role.name.clone(),
+            detail: Some("Role".into()),
+            image: None,
+            glyph: Some("@".into()),
+            insert: Insertion::Token {
+                token: TokenRef::Role(role.id.clone()),
+                label: format!("@{}", role.name),
+            },
+        }
+    }
+
+    /// `@everyone`, sent as typed.
+    pub fn everyone() -> Self {
+        Self::special("everyone", "Everyone in the channel")
+    }
+
+    /// `@online`, sent as typed.
+    pub fn online() -> Self {
+        Self::special("online", "Everyone online in the channel")
+    }
+
+    fn special(name: &str, detail: &str) -> Self {
+        Suggestion {
+            key: name.to_string(),
+            title: format!("@{name}"),
+            detail: Some(detail.to_string()),
+            image: None,
+            glyph: Some("@".into()),
+            insert: Insertion::Text(format!("@{name}")),
         }
     }
 

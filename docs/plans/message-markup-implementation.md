@@ -183,3 +183,41 @@ Deferred to the end (see the plan's chunk 4 manual check).
 
 ### Manual Validation
 Deferred to the end (see the plan's chunk 5 manual check).
+
+## Chunk 6: Offer roles, `@everyone` and `@online` in autocomplete
+
+### Changes Made
+- `src/complete.rs`:
+  - `TokenRef::Role(id)`: wire text `<%ID>`, token ID `role:ID`, and `from_token_id` reads it back. `mention_spans` finds `<%ULID>`.
+  - `RoleCandidate { id, name, colour }`.
+  - `Suggestion::role` inserts a chip labelled `@Name` (detail "Role", glyph `@`). `Suggestion::everyone()` and `Suggestion::online()` insert `Insertion::Text("@everyone" / "@online")`.
+  - `rank_mentions(query, people, roles, everyone)`: one `rank` over people, then roles, then (when `everyone`) the two specials. Ties go in that order, and recent people come first within a tier. It's capped at `MAX_SUGGESTIONS`.
+- `src/permissions.rs`: `can_mention_roles` (`MentionRoles`) and `can_mention_everyone` (`MentionEveryone`). Both are false outside server channels.
+- `src/store.rs`:
+  - `can_mention_roles(channel)` and `can_mention_everyone(channel)` wrappers.
+  - `role_candidates(channel)`: the server's roles by rank (ties by ID), with solid colours as `#rrggbb`. Empty outside a server.
+  - `token_label` gains a `Role` arm: `@Name`, or `@Unknown role`.
+- `src/ui/composer.rs`: `unknown_label` gains a `Role` arm (`@Unknown role`).
+- `src/ui/chat.rs`: `suggest()`'s `@` branch calls `rank_mentions`, with roles only when `can_mention_roles` and the specials only when `can_mention_everyone`.
+- Tests:
+  - `tests/complete.rs`:
+    - `mention_spans` finds roles
+    - role suggestion chip and token round trip
+    - the specials insert text
+    - mixed ranking (ties, better matches, no specials without permission, an empty query, the cap)
+    - `role_candidates` order and colours, and empty outside the server
+    - `token_label` for roles
+  - `tests/permissions.rs`: a plain member lacks both bits; a role grants them; a channel override denies them; the owner has them everywhere; none in DMs, groups or Saved Notes.
+
+### Divergences
+- **`unknown_label` and `token_label` say `@Unknown role`, not `@unknown-role`,** to match the existing `@Unknown user`.
+- **"Without the default role" needed no filtering.** Stoat has no default-role entry in `server.roles`; its default permissions live on the server.
+- **Role chips aren't tinted with the role colour.** The plan made that optional.
+
+### Verification Performed
+- `cargo test`: 650 passed (8 new), 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- Formatted `permissions.rs` and `tests/permissions.rs` (clean at HEAD). New code in `tests/complete.rs` was hand-formatted to rustfmt's output, so that file keeps its 7 diffs from HEAD. Drift unchanged: `complete.rs` 1, `store.rs` 15, `composer.rs` 14, `chat.rs` 17.
+
+### Manual Validation
+Deferred to the end (see the plan's chunk 6 manual check).
