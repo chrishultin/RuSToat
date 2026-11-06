@@ -150,8 +150,33 @@ fn html_attr(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// The scheme of the links this module makes for mentions. Clicking one does nothing (yet).
+/// The scheme of the links this module makes for mentions (and the store
+/// makes for people in system messages). See [`parse_internal_link`].
 pub const INTERNAL_SCHEME: &str = "stoat:";
+
+/// What an internal `stoat:` link points at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InternalLink {
+    /// `stoat:user/{id}`: a person (a mention).
+    User(String),
+    /// `stoat:channel/{id}`: a channel.
+    Channel(String),
+}
+
+/// The person or channel a clicked `stoat:` link points at. `None` for
+/// external links and anything malformed.
+pub fn parse_internal_link(url: &str) -> Option<InternalLink> {
+    let rest = url.strip_prefix(INTERNAL_SCHEME)?;
+    let (kind, id) = rest.split_once('/')?;
+    if id.is_empty() || id.contains(['/', '?', '#']) {
+        return None;
+    }
+    match kind {
+        "user" => Some(InternalLink::User(id.to_string())),
+        "channel" => Some(InternalLink::Channel(id.to_string())),
+        _ => None,
+    }
+}
 
 /// Whether a clicked link should open in the browser.
 pub fn is_external_link(url: &str) -> bool {
@@ -652,6 +677,27 @@ mod tests {
         assert_eq!(code_span("plain"), "`plain`");
         assert_eq!(code_span("a`b"), "``a`b``");
         assert_eq!(code_span("`tick"), "`` `tick ``");
+    }
+
+    #[test]
+    fn internal_links_parse_to_people_and_channels() {
+        assert_eq!(
+            parse_internal_link("stoat:user/01ABC"),
+            Some(InternalLink::User("01ABC".into()))
+        );
+        assert_eq!(
+            parse_internal_link("stoat:channel/ch-random"),
+            Some(InternalLink::Channel("ch-random".into()))
+        );
+        for url in [
+            "https://stoat.chat/user/01ABC",
+            "stoat:user/",
+            "stoat:user",
+            "stoat:server/s",
+            "stoat:user/a/b",
+        ] {
+            assert_eq!(parse_internal_link(url), None, "{url}");
+        }
     }
 
     #[test]

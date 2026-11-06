@@ -84,7 +84,11 @@ fn mentions_and_system_messages_use_names() {
         )
     );
     assert!(rows[3].system);
-    assert_eq!(rows[3].body.as_deref(), Some("Carol joined"));
+    // A system message's people are links to their cards.
+    assert_eq!(
+        rows[3].body.as_deref(),
+        Some("[Carol](stoat:user/u-carol) joined")
+    );
 }
 
 #[test]

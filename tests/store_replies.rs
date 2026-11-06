@@ -56,6 +56,7 @@ fn a_reply_to_a_loaded_message_previews_it() {
     assert_eq!(preview.state, ReplyState::Loaded);
     assert_eq!(preview.id, A);
     assert_eq!(preview.author, "ada");
+    assert_eq!(preview.author_id.as_deref(), Some("u-ada"));
     assert_eq!(preview.snippet, "Big news");
     assert!(!preview.mentions_author);
     assert!(store.missing_reply_sources(CH).is_empty());
@@ -241,4 +242,21 @@ fn a_live_edit_of_a_cached_original_updates_its_preview() {
     let data = serde_json::from_value(json!({ "content": "fixed" })).unwrap();
     assert!(store.apply_update(CH, OLD, data, &[]));
     assert_eq!(previews(&store, B)[0].snippet, "fixed");
+}
+
+#[test]
+fn only_loaded_originals_by_people_have_an_author_to_open() {
+    let store = store_with(json!([
+        { "_id": A, "channel": CH, "author": "01JCWEBHOOK000000000000000", "content": "hook",
+          "webhook": { "name": "GitHub" } },
+        { "_id": B, "channel": CH, "author": "u-me", "content": "re", "replies": [A, OLD] },
+    ]));
+    let previews = previews(&store, B);
+    assert_eq!(previews[0].state, ReplyState::Loaded);
+    assert_eq!(previews[0].author_id, None);
+    assert_eq!(previews[1].state, ReplyState::Loading);
+    assert_eq!(previews[1].author_id, None);
+    // The reply row's own author is set.
+    let row = rows(&store).into_iter().find(|r| r.id == B).unwrap();
+    assert_eq!(row.author_id.as_deref(), Some("u-me"));
 }

@@ -215,6 +215,7 @@ fn row(id: &str, body: &str) -> TimelineRow {
         key: id.into(),
         render_key: stoat_gpui::store::render_key(id, Some(body)),
         author: "a".into(),
+        author_id: Some("u-a".into()),
         avatar: None,
         time: String::new(),
         body: Some(body.into()),
@@ -665,4 +666,87 @@ mod members_and_users {
         // Removing it again does nothing.
         assert!(store.remove_server("srv-alpha").is_empty());
     }
+}
+
+// --- profile card targets --------------------------------------------------
+
+#[test]
+fn rows_carry_the_real_author_for_their_profile_card() {
+    let store = store_with_page(50);
+    let author = |id: &str| row_of(&store, "ch-general", id).author_id;
+    assert_eq!(
+        author("01M6GDKW80AAAAAAAAAAAAAAAA").as_deref(),
+        Some("u-ada")
+    );
+    // A masquerade (a bridge posting as someone) opens the real author.
+    assert_eq!(
+        author("01M6GETAQ0FFFFFFFFFFFFFFFF").as_deref(),
+        Some("u-bot")
+    );
+    // Webhooks and system messages aren't people.
+    assert_eq!(author("01M6GEW5A0GGGGGGGGGGGGGGGG"), None);
+    assert_eq!(author("01M6GDV6M0DDDDDDDDDDDDDDDD"), None);
+}
+
+#[test]
+fn a_new_message_leaves_the_other_rows_untouched() {
+    // `author_id` is fixed for a row, so adding a message is one append and
+    // nothing else is remeasured.
+    let mut store = store_with_page(50);
+    let old = store.timeline("ch-general");
+    store.apply_message(message(
+        "01M6GF00000000000000000000",
+        "ch-general",
+        "u-bob",
+        "later",
+    ));
+    let new = store.timeline("ch-general");
+    assert_eq!(diff_rows(&old, &new), [RowOp::Append(1)]);
+}
+
+#[test]
+fn system_messages_link_their_people_and_escape_the_rest() {
+    let mut store = store_with_page(50);
+    let page: BulkMessageResponse = serde_json::from_value(serde_json::json!({
+        "messages": [
+            {
+                "_id": "01M6GF00000000000000000001", "channel": "ch-general", "author": "00000000000000000000000000",
+                "system": { "type": "user_added", "id": "u-weird", "by": "u-ada" }
+            },
+            {
+                "_id": "01M6GF00000000000000000002", "channel": "ch-general", "author": "00000000000000000000000000",
+                "system": { "type": "channel_renamed", "name": "*new* [name]", "by": "u-nobody" }
+            }
+        ],
+        "users": [
+            { "_id": "u-weird", "username": "w", "display_name": "[evil](https://x.y)", "discriminator": "0001", "relationship": "None", "online": false }
+        ]
+    }))
+    .unwrap();
+    store.append_page("ch-general", page, 50);
+    let body = |id: &str| row_of(&store, "ch-general", id).body.unwrap();
+    assert_eq!(
+        body("01M6GF00000000000000000001"),
+        r"[Ada L\.](stoat:user/u-ada) added [\[evil\]\(https\:\/\/x\.y\)](stoat:user/u-weird)"
+    );
+    // Unknown people aren't links; the new name is escaped.
+    assert_eq!(
+        body("01M6GF00000000000000000002"),
+        r"Someone renamed the channel to \*new\* \[name\]"
+    );
+    // Notifications and snippets keep the plain form.
+    let Some(system) = store
+        .history("ch-general")
+        .unwrap()
+        .messages
+        .iter()
+        .find(|m| m.id == "01M6GF00000000000000000001")
+        .and_then(|m| m.system.clone())
+    else {
+        panic!("system message");
+    };
+    assert_eq!(
+        store.system_text(&system),
+        "Ada L. added [evil](https://x.y)"
+    );
 }

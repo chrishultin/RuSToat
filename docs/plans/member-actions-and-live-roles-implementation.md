@@ -167,3 +167,53 @@ Deferred to the end of the milestone (manual checks are batched).
 
 ### Manual Validation
 Deferred to the end of the milestone (manual checks are batched).
+
+## Chunk 4: Open the card from messages, replies, system messages and mentions
+
+### Changes Made
+- `src/store.rs`:
+  - `MessageRow.author_id: Option<String>`: the real `message.author`, including under a masquerade. It's `None` for system messages and webhooks, through a new `person_id(message)`.
+  - `ReplyPreview.author_id: Option<String>`: the same, only when the original is `Loaded`.
+  - `system_text` and a new `system_markdown` share a free `describe_system(system, name, text)`:
+    - In the plain form, names are plain and other text passes through. This is still used by notifications and reply snippets.
+    - In the Markdown form, each known person is `[escaped name](stoat:user/{id})`, an unknown one is plain "Someone", and any other text (a new channel name, a `Text` system message, the fallback description) is escaped with `markdown::escape`.
+  - System rows' `body` is now the Markdown form.
+- `src/markdown.rs`:
+  - `InternalLink::{User, Channel}` and `parse_internal_link(url)`, beside `INTERNAL_SCHEME`. It rejects external URLs, empty or nested IDs, and unknown kinds.
+  - A unit test.
+- `src/ui/chat.rs`:
+  - `RowAction::OpenCard { user }`, which `on_row_action` turns into `open_card` at `window.mouse_position()`.
+  - New `person_target(id, user, on_action, child)` wraps an author's name or avatar in a clickable element. It opens the card and calls `stop_propagation`, so a preview row's jump and a reply line's jump don't fire as well. Without a person, it's a plain wrapper.
+  - In `render_message_row`, the avatar slot and the header name use it. The name underlines on hover. This applies to timeline rows and to search and pins previews alike.
+  - In `render_reply_preview`, the avatar and name are one `person_target`, and the rest of the line still jumps.
+  - New `ChatView::link_handler(cx) -> OnLink`, `Send + Sync` through a `WeakEntity`:
+    - `stoat:user/{id}` opens that card at the mouse.
+    - `stoat:channel/…` does nothing yet.
+    - External links open in the browser.
+    - It's threaded through `render_row`, `render_preview_row`, `render_system_row` and `render_message_row`, and also used for the card's bio.
+  - `render_system_row` draws its body through `TextView::markdown` (keyed by the row's `render_key`, `text_xs`), inside the same italic, system-coloured wrapper as before.
+- Tests:
+  - `tests/store_live.rs` has 3 new tests:
+    - `author_id` for a normal author, a masqueraded one (the real author), a webhook and a system message (both `None`).
+    - Adding a live message is one `Append` with no other row changes.
+    - The system-message Markdown links and escapes names (one display name contains Markdown and a URL), an unknown person is unlinked, a renamed channel's name is escaped, and `system_text` stays plain.
+  - The `diff_rows` helper `row()` sets `author_id`.
+  - `tests/store_replies.rs`: a loaded preview's `author_id`, plus a new test where a webhook original and a loading original have no author ID and the reply row has one.
+  - `tests/store_history.rs`: the system row's body is now `[Carol](stoat:user/u-carol) joined`.
+
+### Divergences
+- **`author_id` is `None` for system messages and webhooks, not for pending rows.** The plan said `None` for pending rows "that have no real author yet". In practice a pending row's author is always the user (`pending_as_message`), so it gets `Some(me)`, and the value stays the same when the pending row is confirmed. Webhooks and system messages are what really have no person behind them.
+- **Embed descriptions keep external-only link handling.** The plan's "every `on_link_click`" named message bodies, the bio and system rows. Those three use `link_handler`.
+- **Clicking a mention in a search or pins result** opens the card and may also jump to the result, since the row's own click isn't stopped by `TextView`. Both are harmless; this needs a look in the manual check.
+- **Look-ahead:** chunk 6 adds context menus to the same `person_target` elements. Putting the menu on that wrapper keeps the nested-menu risk to one place. No plan change is needed.
+
+### Verification Performed
+- `cargo test --test store_replies --test store_live --test store_history`: 12 + 29 + 28 passed.
+- `cargo test --lib markdown`: 5 passed.
+- `cargo test` (full): 530 passed, 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- `rustfmt --check` hunk counts are at their `HEAD` values in every touched file.
+- Whether system rows look the same through `TextView` (size, colour, italics, no paragraph spacing) can only be checked by eye. That's part of the batched manual check.
+
+### Manual Validation
+Deferred to the end of the milestone (manual checks are batched).

@@ -86,13 +86,18 @@ pub struct MessageRow {
     /// Otherwise the ID.
     pub key: String,
     pub author: String,
+    /// Whose profile card the author's name and avatar open: the real
+    /// author, even under a masquerade. `None` for system messages and
+    /// webhooks, which aren't people.
+    pub author_id: Option<String>,
     /// Author avatar URL. `None` for system messages, or when there's no
     /// image to show (the UI draws the author's initial instead).
     pub avatar: Option<String>,
     /// "Today at 14:05" etc.
     pub time: String,
-    /// Markdown (see [`crate::markdown::prepare`]). For system messages, a
-    /// plain-text description instead.
+    /// Markdown (see [`crate::markdown::prepare`]). For system messages, the
+    /// description with each person's name a `stoat:user/` link (see
+    /// [`ChatStore::system_markdown`]).
     pub body: Option<String>,
     /// Changes whenever what's drawn for `body` changes (an edit, a renamed
     /// mention), so the Markdown view's cached parse is replaced. The view
@@ -145,6 +150,9 @@ pub struct ReplyPreview {
     /// The original's author, as [`ChatStore::author_name`] names them.
     /// Empty unless `state` is `Loaded`.
     pub author: String,
+    /// Whose card the author opens: `None` unless `Loaded`, and for
+    /// webhooks and system messages.
+    pub author_id: Option<String>,
     pub avatar: Option<String>,
     /// One line of the original as plain text (see [`crate::markdown::snippet`]).
     pub snippet: String,
@@ -947,6 +955,7 @@ impl ChatStore {
             Ok(original) => ReplyPreview {
                 id: id.to_string(),
                 author: self.author_name(original),
+                author_id: person_id(original),
                 avatar: self.avatar_url(original),
                 snippet: self.snippet(original),
                 mentions_author: reply
@@ -958,6 +967,7 @@ impl ChatStore {
             Err(state) => ReplyPreview {
                 id: id.to_string(),
                 author: String::new(),
+                author_id: None,
                 avatar: None,
                 snippet: String::new(),
                 mentions_author: false,
@@ -1894,32 +1904,19 @@ impl ChatStore {
     /// Variants this client doesn't describe use the backend's own wording.
     pub fn system_text(&self, system: &SystemMessage) -> String {
         let name = |id: &str| self.user_name(id).unwrap_or_else(|| "Someone".into());
-        match system {
-            SystemMessage::Text { content } => content.clone(),
-            SystemMessage::UserAdded { id, by } => format!("{} added {}", name(by), name(id)),
-            SystemMessage::UserRemove { id, by } => format!("{} removed {}", name(by), name(id)),
-            SystemMessage::UserJoined { id } => format!("{} joined", name(id)),
-            SystemMessage::UserLeft { id } => format!("{} left", name(id)),
-            SystemMessage::UserKicked { id } => format!("{} was kicked", name(id)),
-            SystemMessage::UserBanned { id } => format!("{} was banned", name(id)),
-            SystemMessage::ChannelRenamed { name: new, by } => {
-                format!("{} renamed the channel to {new}", name(by))
-            }
-            SystemMessage::ChannelDescriptionChanged { by } => {
-                format!("{} changed the channel description", name(by))
-            }
-            SystemMessage::ChannelIconChanged { by } => {
-                format!("{} changed the channel icon", name(by))
-            }
-            SystemMessage::ChannelOwnershipChanged { from, to } => {
-                format!("{} gave ownership to {}", name(from), name(to))
-            }
-            SystemMessage::MessagePinned { by, .. } => format!("{} pinned a message", name(by)),
-            SystemMessage::MessageUnpinned { by, .. } => {
-                format!("{} unpinned a message", name(by))
-            }
-            other => String::from(other.clone()),
-        }
+        describe_system(system, &name, &str::to_string)
+    }
+
+    /// [`Self::system_text`] as Markdown, for the system row: each known
+    /// person's name is a `stoat:user/{id}` link (it opens their card), and
+    /// everything else is escaped.
+    pub fn system_markdown(&self, system: &SystemMessage) -> String {
+        use crate::markdown::{INTERNAL_SCHEME, escape};
+        let name = |id: &str| match self.user_name(id) {
+            Some(name) => format!("[{}]({INTERNAL_SCHEME}user/{id})", escape(&name)),
+            None => "Someone".into(),
+        };
+        describe_system(system, &name, &escape)
     }
 
     /// Display rows for a loaded channel, oldest first. Empty if not loaded.
@@ -1997,7 +1994,7 @@ impl ChatStore {
         let system = message.system.is_some();
         let mine = message.author == self.me;
         let body = match &message.system {
-            Some(system) => Some(self.system_text(system)),
+            Some(system) => Some(self.system_markdown(system)),
             None => message
                 .content
                 .as_deref()
@@ -2012,6 +2009,7 @@ impl ChatStore {
             },
             render_key: render_key(&message.id, body.as_deref()),
             avatar: self.avatar_url(message),
+            author_id: person_id(message),
             author,
             time: crate::time::message_time_label(&message.id),
             body,
@@ -2997,6 +2995,47 @@ fn pending_as_message(pending: &PendingMessage, me: &str) -> Message {
 }
 
 /// Oldest first, no duplicates. ULIDs sort by time, so ID order is time order.
+/// A system message in words. `name` gives a person by ID, and `text` passes
+/// on anything else that came with the message (a channel name).
+fn describe_system(
+    system: &SystemMessage,
+    name: &dyn Fn(&str) -> String,
+    text: &dyn Fn(&str) -> String,
+) -> String {
+    match system {
+        SystemMessage::Text { content } => text(content),
+        SystemMessage::UserAdded { id, by } => format!("{} added {}", name(by), name(id)),
+        SystemMessage::UserRemove { id, by } => format!("{} removed {}", name(by), name(id)),
+        SystemMessage::UserJoined { id } => format!("{} joined", name(id)),
+        SystemMessage::UserLeft { id } => format!("{} left", name(id)),
+        SystemMessage::UserKicked { id } => format!("{} was kicked", name(id)),
+        SystemMessage::UserBanned { id } => format!("{} was banned", name(id)),
+        SystemMessage::ChannelRenamed { name: new, by } => {
+            format!("{} renamed the channel to {}", name(by), text(new))
+        }
+        SystemMessage::ChannelDescriptionChanged { by } => {
+            format!("{} changed the channel description", name(by))
+        }
+        SystemMessage::ChannelIconChanged { by } => {
+            format!("{} changed the channel icon", name(by))
+        }
+        SystemMessage::ChannelOwnershipChanged { from, to } => {
+            format!("{} gave ownership to {}", name(from), name(to))
+        }
+        SystemMessage::MessagePinned { by, .. } => format!("{} pinned a message", name(by)),
+        SystemMessage::MessageUnpinned { by, .. } => {
+            format!("{} unpinned a message", name(by))
+        }
+        other => text(&String::from(other.clone())),
+    }
+}
+
+/// Who a message's author is as a person (whose card they open): `None`
+/// for system messages and webhooks.
+fn person_id(message: &Message) -> Option<String> {
+    (message.system.is_none() && message.webhook.is_none()).then(|| message.author.clone())
+}
+
 fn sort_messages(messages: &mut Vec<Message>) {
     messages.sort_by(|a, b| a.id.cmp(&b.id));
     messages.dedup_by(|a, b| a.id == b.id);

@@ -35,7 +35,7 @@ use crate::attachment::{AttachmentView, fit_into};
 use crate::complete::{Query, QueryKind, Suggestion, TokenRef, rank, rank_people};
 use crate::draft::{AttachmentLimits, DraftAttachment, ReplyTarget};
 use crate::embed::{Description, EmbedCard, EmbedImage, EmbedView};
-use crate::markdown::{JUMBO_TEXT_PX, is_external_link};
+use crate::markdown::{InternalLink, JUMBO_TEXT_PX, is_external_link, parse_internal_link};
 use crate::media::MediaUrls;
 use crate::notify::{self, Delivery, Notice, Viewing};
 use crate::places::{Place, Places, PlacesFile};
@@ -951,6 +951,9 @@ impl ChatView {
             RowAction::ViewImage(image) => {
                 self.viewer = Some(image);
                 window.focus(&self.viewer_focus, cx);
+            }
+            RowAction::OpenCard { user } => {
+                self.open_card(user, window.mouse_position(), window, cx);
             }
             RowAction::ToggleReaction { message, emoji } => {
                 self.picker_for = None;
@@ -2249,6 +2252,27 @@ impl ChatView {
         cx.notify();
     }
 
+    /// What clicking a link in Markdown does: a person (a mention, or a name
+    /// in a system message) opens their card, and web links open in the
+    /// browser.
+    fn link_handler(cx: &Context<Self>) -> OnLink {
+        let view = cx.entity().downgrade();
+        Arc::new(move |url, window, cx| match parse_internal_link(url) {
+            Some(InternalLink::User(user)) => {
+                let position = window.mouse_position();
+                view.update(cx, |this, cx| this.open_card(user, position, window, cx))
+                    .ok();
+            }
+            // Channel links don't go anywhere yet.
+            Some(InternalLink::Channel(_)) => {}
+            None => {
+                if is_external_link(url) {
+                    cx.open_url(url);
+                }
+            }
+        })
+    }
+
     /// Close the profile card. `refocus`: give focus back to the message box
     /// (after Esc; a click elsewhere focuses what it clicked).
     fn close_card(&mut self, refocus: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -2295,11 +2319,7 @@ impl ChatView {
                     markdown,
                 }
             });
-        let on_link: OnLink = Arc::new(|url, _, cx| {
-            if is_external_link(url) {
-                cx.open_url(url);
-            }
-        });
+        let on_link = Self::link_handler(cx);
         let content = CardContent {
             card,
             banner_url,
@@ -3511,6 +3531,7 @@ impl ChatView {
                             })
                             .ok();
                         });
+                        let on_link = Self::link_handler(cx);
                         let older = if self.loading_older.contains_key(&channel.id) {
                             Some(
                                 div()
@@ -3608,7 +3629,9 @@ impl ChatView {
                                     SharedString::from(format!("messages-{}", channel.id)),
                                     pane.scroller.clone(),
                                     move |ix, _window, _cx| {
-                                        render_row(&rows[ix], colors, &on_action, &pickers)
+                                        render_row(
+                                            &rows[ix], colors, &on_action, &on_link, &pickers,
+                                        )
                                     },
                                 )
                                 // The scroller's default rows are spaced for whole
@@ -3878,6 +3901,7 @@ impl ChatView {
             choices: Rc::default(),
             open_for: None,
         };
+        let on_link = Self::link_handler(cx);
         v_flex()
             .flex_1()
             .min_h_0()
@@ -3897,10 +3921,9 @@ impl ChatView {
                     .min_h_0()
                     .overflow_y_scroll()
                     .pb_2()
-                    .children(
-                        rows.iter()
-                            .map(|row| render_preview_row(row, colors, &on_action, &pickers)),
-                    ),
+                    .children(rows.iter().map(|row| {
+                        render_preview_row(row, colors, &on_action, &on_link, &pickers)
+                    })),
             )
             .into_any_element()
     }
@@ -4360,6 +4383,9 @@ enum RowAction {
         pin: bool,
         confirmed: bool,
     },
+    /// Open a person's profile card where the mouse is (their name or
+    /// avatar was clicked).
+    OpenCard { user: String },
 }
 
 type OnRowAction = Rc<dyn Fn(RowAction, &mut Window, &mut App)>;
@@ -4449,6 +4475,7 @@ fn render_row(
     row: &TimelineRow,
     colors: RowColors,
     on_action: &OnRowAction,
+    on_link: &OnLink,
     pickers: &Pickers,
 ) -> AnyElement {
     match row {
@@ -4470,9 +4497,11 @@ fn render_row(
                     .child("There are no older messages."),
             )
             .into_any_element(),
-        TimelineRow::Message(message) if message.system => render_system_row(message, colors),
+        TimelineRow::Message(message) if message.system => {
+            render_system_row(message, colors, on_link)
+        }
         TimelineRow::Message(message) => {
-            render_message_row(message, colors, on_action, pickers, false)
+            render_message_row(message, colors, on_action, on_link, pickers, false)
         }
     }
 }
@@ -4483,17 +4512,20 @@ fn render_preview_row(
     row: &MessageRow,
     colors: RowColors,
     on_action: &OnRowAction,
+    on_link: &OnLink,
     pickers: &Pickers,
 ) -> AnyElement {
     if row.system {
-        render_system_row(row, colors)
+        render_system_row(row, colors, on_link)
     } else {
-        render_message_row(row, colors, on_action, pickers, true)
+        render_message_row(row, colors, on_action, on_link, pickers, true)
     }
 }
 
-fn render_system_row(message: &MessageRow, colors: RowColors) -> AnyElement {
-    // Centred between the two sides of the conversation.
+fn render_system_row(message: &MessageRow, colors: RowColors, on_link: &OnLink) -> AnyElement {
+    let on_link = on_link.clone();
+    // Centred between the two sides of the conversation. The people in it
+    // are links that open their cards.
     h_flex()
         .w_full()
         .justify_center()
@@ -4503,11 +4535,41 @@ fn render_system_row(message: &MessageRow, colors: RowColors) -> AnyElement {
         .text_xs()
         .text_color(colors.system)
         .child(
-            div()
-                .italic()
-                .child(message.body.clone().unwrap_or_default()),
+            div().italic().child(
+                TextView::markdown(
+                    SharedString::from(message.render_key.clone()),
+                    message.body.clone().unwrap_or_default(),
+                )
+                .text_xs()
+                .on_link_click(move |url, _, window, cx| on_link(url, window, cx)),
+            ),
         )
         .child(div().child(message.time.clone()))
+        .into_any_element()
+}
+
+/// `child` (an author's name or avatar), opening `user`'s profile card when
+/// clicked, and only that: the row's own click (a jump) doesn't happen too.
+/// Without a person (a webhook or system message), just `child`.
+fn person_target(
+    id: SharedString,
+    user: Option<&str>,
+    on_action: &OnRowAction,
+    child: impl IntoElement,
+) -> AnyElement {
+    let Some(user) = user else {
+        return div().flex_none().child(child).into_any_element();
+    };
+    let (on_action, user) = (on_action.clone(), user.to_string());
+    div()
+        .id(id)
+        .flex_none()
+        .cursor_pointer()
+        .on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            on_action(RowAction::OpenCard { user: user.clone() }, window, cx)
+        })
+        .child(child)
         .into_any_element()
 }
 
@@ -4531,9 +4593,11 @@ fn render_message_row(
     message: &MessageRow,
     colors: RowColors,
     on_action: &OnRowAction,
+    on_link: &OnLink,
     pickers: &Pickers,
     preview: bool,
 ) -> AnyElement {
+    let author_id = message.author_id.as_deref();
     let first = !message.continuation;
     let last = message.group_end;
     // In a preview the whole row is the click (to jump), so the pictures in
@@ -4589,11 +4653,9 @@ fn render_message_row(
                         })
                         // A click on a result jumps; it doesn't select.
                         .selectable(!preview)
-                        .on_link_click(|url, _, _, cx| {
-                            // Mentions are internal `stoat:` links: nothing to open yet.
-                            if is_external_link(url) {
-                                cx.open_url(url);
-                            }
+                        .on_link_click({
+                            let on_link = on_link.clone();
+                            move |url, _, window, cx| on_link(url, window, cx)
                         }),
                 )
             })
@@ -4654,13 +4716,18 @@ fn render_message_row(
     // The avatar sits beside the last bubble of a group; earlier ones keep
     // the empty slot so the bubbles line up.
     let avatar_slot = if last {
-        MessageAvatar::new().child(avatar(
-            format!("avatar-{}", message.id),
-            message.avatar.clone(),
-            &message.author,
-            AVATAR_SIZE,
-            colors.avatar_bg,
-            colors.avatar_fg,
+        MessageAvatar::new().child(person_target(
+            format!("avatar-target-{}", message.id).into(),
+            author_id,
+            on_action,
+            avatar(
+                format!("avatar-{}", message.id),
+                message.avatar.clone(),
+                &message.author,
+                AVATAR_SIZE,
+                colors.avatar_bg,
+                colors.avatar_fg,
+            ),
         ))
     } else {
         MessageAvatar::new()
@@ -4673,7 +4740,15 @@ fn render_message_row(
             message.author.clone()
         };
         MessageHeader::new()
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(name))
+            .child(person_target(
+                format!("author-{}", message.id).into(),
+                author_id,
+                on_action,
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .when(author_id.is_some(), |el| el.hover(|el| el.underline()))
+                    .child(name),
+            ))
             .child(div().text_color(colors.muted).child(message.time.clone()))
     });
 
@@ -4861,22 +4936,31 @@ fn render_reply_preview(
             } else {
                 reply.author.clone()
             };
+            // The author (avatar and name) opens their card; the rest jumps.
+            let author_id = reply.author_id.as_deref();
             line.cursor_pointer()
                 .on_click(jump)
-                .child(avatar(
-                    format!("{id}-avatar"),
-                    reply.avatar.clone(),
-                    &reply.author,
-                    REPLY_AVATAR_SIZE,
-                    colors.avatar_bg,
-                    colors.avatar_fg,
+                .child(person_target(
+                    format!("{id}-author").into(),
+                    author_id,
+                    on_action,
+                    h_flex()
+                        .gap_1()
+                        .child(avatar(
+                            format!("{id}-avatar"),
+                            reply.avatar.clone(),
+                            &reply.author,
+                            REPLY_AVATAR_SIZE,
+                            colors.avatar_bg,
+                            colors.avatar_fg,
+                        ))
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .when(author_id.is_some(), |el| el.hover(|el| el.underline()))
+                                .child(name),
+                        ),
                 ))
-                .child(
-                    div()
-                        .flex_none()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(name),
-                )
                 .child(div().min_w_0().truncate().child(reply.snippet.clone()))
         }
         ReplyState::Loading => line.child(div().italic().child("Loading…")),
