@@ -2,8 +2,8 @@
 //! and the per-server / Home summaries the sidebar shows.
 
 use stoat_gpui::api::events::{Ready, ServerEvent, parse_frame};
-use stoat_gpui::api::models::{ChannelUnread, Message};
-use stoat_gpui::store::ChatStore;
+use stoat_gpui::api::models::{BulkMessageResponse, ChannelUnread, Message};
+use stoat_gpui::store::{ChatStore, TimelineRow, with_unread_divider};
 
 // From tests/fixtures/ready.json: #general's last message, and two DMs'.
 const GENERAL_LAST: &str = "01JC0000000000000000000009";
@@ -409,4 +409,114 @@ fn friend_requests_add_to_unread_mentions() {
     relate(&mut store, "u-carol", "Incoming");
     assert_eq!(store.home_summary(), (true, 2));
     assert_eq!(store.account_summary(), (true, 2));
+}
+
+// The "New messages" divider.
+
+const M1: &str = "01JD0000000000000000000001";
+const M2: &str = "01JD0000000000000000000002";
+const M3: &str = "01JD0000000000000000000003";
+const M4: &str = "01JD0000000000000000000004";
+
+/// `#general` with `authors` as its loaded messages (M1, M2, ...), all
+/// within a minute so same-author runs group. `whole` = there's nothing
+/// older (a start-of-channel row).
+fn general_with(authors: &[&str], whole: bool) -> ChatStore {
+    let mut store = store();
+    let messages = [M1, M2, M3, M4]
+        .iter()
+        .zip(authors)
+        .map(|(id, author)| message("ch-general", author, serde_json::json!({ "_id": id })))
+        .collect::<Vec<_>>();
+    let limit = if whole {
+        messages.len() + 1
+    } else {
+        messages.len()
+    };
+    store.set_history(
+        "ch-general",
+        BulkMessageResponse::JustMessages(messages),
+        limit,
+    );
+    store
+}
+
+/// Each row as `"new"`, `"start"` or its message ID, with `+` after a
+/// continuation (no header).
+fn shape(rows: &[TimelineRow]) -> Vec<String> {
+    rows.iter()
+        .map(|row| match row {
+            TimelineRow::StartOfChannel { .. } => "start".to_string(),
+            TimelineRow::NewMessages => "new".to_string(),
+            TimelineRow::Message(m) if m.continuation => format!("{}+", &m.id[22..]),
+            TimelineRow::Message(m) => m.id[22..].to_string(),
+        })
+        .collect()
+}
+
+fn divided(store: &ChatStore, after: &str) -> Vec<String> {
+    shape(&with_unread_divider(store.timeline("ch-general"), after))
+}
+
+#[test]
+fn the_read_position_is_recorded() {
+    let store = store();
+    assert_eq!(store.read_position("ch-general"), Some(GENERAL_LAST));
+    assert_eq!(store.read_position("dm-bob"), None, "only Ada's position");
+}
+
+#[test]
+fn the_divider_sits_before_the_first_unread_message() {
+    let store = general_with(&["u-ada", "u-ada", "u-ada", "u-bob"], false);
+    assert_eq!(
+        shape(&store.timeline("ch-general")),
+        ["0001", "0002+", "0003+", "0004"]
+    );
+    // The message after the divider gets its header back.
+    assert_eq!(
+        divided(&store, M2),
+        ["0001", "0002+", "new", "0003", "0004"]
+    );
+    let rows = with_unread_divider(store.timeline("ch-general"), M2);
+    let TimelineRow::Message(before) = &rows[1] else {
+        panic!("message row");
+    };
+    assert!(before.group_end, "the group ends at the divider");
+}
+
+#[test]
+fn no_divider_when_everything_is_read() {
+    let store = general_with(&["u-ada", "u-bob", "u-ada", "u-bob"], false);
+    assert_eq!(divided(&store, M4), ["0001", "0002", "0003", "0004"]);
+}
+
+#[test]
+fn the_users_own_unread_messages_get_no_divider() {
+    let store = general_with(&["u-ada", "u-bob", "u-me", "u-me"], false);
+    assert_eq!(divided(&store, M2), ["0001", "0002", "0003", "0004+"]);
+    // Others' messages after the user's own: the divider goes before theirs.
+    let store = general_with(&["u-ada", "u-me", "u-bob", "u-bob"], false);
+    assert_eq!(
+        divided(&store, M1),
+        ["0001", "0002", "new", "0003", "0004+"]
+    );
+}
+
+#[test]
+fn no_divider_when_the_read_position_is_older_than_the_loaded_history() {
+    let store = general_with(&["u-ada", "u-bob", "u-ada", "u-bob"], false);
+    let older = "01JC0000000000000000000001";
+    assert_eq!(divided(&store, older), ["0001", "0002", "0003", "0004"]);
+    // Unless that's the whole history: then everything is new.
+    let store = general_with(&["u-ada", "u-bob", "u-ada", "u-bob"], true);
+    assert_eq!(
+        divided(&store, older),
+        ["start", "new", "0001", "0002", "0003", "0004"]
+    );
+}
+
+#[test]
+fn no_divider_when_the_read_position_is_newer_than_the_loaded_history() {
+    let store = general_with(&["u-ada", "u-bob", "u-ada", "u-bob"], false);
+    assert_eq!(divided(&store, NEWER), ["0001", "0002", "0003", "0004"]);
 }

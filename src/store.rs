@@ -75,6 +75,8 @@ pub enum TimelineRow {
     StartOfChannel {
         name: String,
     },
+    /// "New messages": where the user left off (see [`with_unread_divider`]).
+    NewMessages,
     Message(MessageRow),
 }
 
@@ -1223,6 +1225,11 @@ impl ChatStore {
         let discarded = pending.remove(ix);
         self.release_files([discarded.clone()]);
         Some(discarded)
+    }
+
+    /// The newest message the user has read in `channel`, if any.
+    pub fn read_position(&self, channel: &str) -> Option<&str> {
+        self.read_states.get(channel)?.last_id.as_deref()
     }
 
     /// The channel has been read up to `message_id` (here, or by another of
@@ -2951,6 +2958,7 @@ pub enum RowOp {
 fn row_key(row: &TimelineRow) -> &str {
     match row {
         TimelineRow::StartOfChannel { .. } => "",
+        TimelineRow::NewMessages => "new-messages",
         TimelineRow::Message(message) => &message.key,
     }
 }
@@ -3010,6 +3018,39 @@ pub fn diff_rows(old: &[TimelineRow], new: &[TimelineRow]) -> Vec<RowOp> {
 /// positions (the backend tests `flags & (1 << flag)`), not masks.
 fn has_flag(flags: u32, flag: MessageFlags) -> bool {
     flags & (1 << flag as u32) != 0
+}
+
+/// `rows` with a "New messages" divider before the first message after
+/// `after` (the read position when the channel was opened) that isn't the
+/// user's own. The message after it starts a new group.
+///
+/// No divider if there's no such message, or if `after` is older than every
+/// loaded message and there's older history not loaded: the divider would
+/// sit above the oldest loaded message, which isn't where the user left off.
+pub fn with_unread_divider(mut rows: Vec<TimelineRow>, after: &str) -> Vec<TimelineRow> {
+    fn sent(row: &TimelineRow) -> Option<&MessageRow> {
+        match row {
+            TimelineRow::Message(m) if m.pending.is_none() => Some(m),
+            _ => None,
+        }
+    }
+    let whole_history = matches!(rows.first(), Some(TimelineRow::StartOfChannel { .. }));
+    let reaches_back = rows.iter().filter_map(sent).any(|m| m.id.as_str() <= after);
+    if !whole_history && !reaches_back {
+        return rows;
+    }
+    let Some(ix) = rows
+        .iter()
+        .position(|row| sent(row).is_some_and(|m| !m.mine && m.id.as_str() > after))
+    else {
+        return rows;
+    };
+    if let TimelineRow::Message(first) = &mut rows[ix] {
+        first.continuation = false;
+    }
+    rows.insert(ix, TimelineRow::NewMessages);
+    mark_group_ends(&mut rows);
+    rows
 }
 
 /// A message row ends its group unless the next row continues it.

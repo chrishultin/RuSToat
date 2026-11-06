@@ -28,7 +28,7 @@ fn messages(rows: &[TimelineRow]) -> Vec<&MessageRow> {
     rows.iter()
         .filter_map(|row| match row {
             TimelineRow::Message(m) => Some(m),
-            TimelineRow::StartOfChannel { .. } => None,
+            _ => None,
         })
         .collect()
 }

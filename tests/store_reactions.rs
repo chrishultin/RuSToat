@@ -37,7 +37,7 @@ fn chips(store: &ChatStore) -> Vec<ReactionChip> {
         .into_iter()
         .find_map(|row| match row {
             TimelineRow::Message(m) => Some(m.reactions),
-            TimelineRow::StartOfChannel { .. } => None,
+            _ => None,
         })
         .unwrap()
 }
@@ -351,7 +351,7 @@ fn restricted_messages_limit_the_picker() {
         .into_iter()
         .filter_map(|row| match row {
             TimelineRow::Message(m) => Some(m),
-            TimelineRow::StartOfChannel { .. } => None,
+            _ => None,
         })
         .collect();
     let allowed: Vec<String> = rows[0]
@@ -386,7 +386,7 @@ fn a_full_message_only_offers_its_existing_reactions() {
         .into_iter()
         .find_map(|row| match row {
             TimelineRow::Message(m) => Some(m),
-            TimelineRow::StartOfChannel { .. } => None,
+            _ => None,
         })
         .unwrap();
     assert!(row.reactions_full());
@@ -404,7 +404,7 @@ fn a_full_message_only_offers_its_existing_reactions() {
         .into_iter()
         .find_map(|row| match row {
             TimelineRow::Message(m) => Some(m),
-            TimelineRow::StartOfChannel { .. } => None,
+            _ => None,
         })
         .unwrap();
     let choices = row.picker_choices(&usual);

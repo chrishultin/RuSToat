@@ -32,7 +32,7 @@ fn rows(store: &ChatStore) -> Vec<MessageRow> {
         .into_iter()
         .filter_map(|row| match row {
             TimelineRow::Message(m) => Some(m),
-            TimelineRow::StartOfChannel { .. } => None,
+            _ => None,
         })
         .collect()
 }

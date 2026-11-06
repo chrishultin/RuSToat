@@ -38,3 +38,36 @@ Formatting: `src/ui/chat.rs`, `src/store.rs` and `src/api/client.rs` already dif
 
 ### Manual Validation
 The user ran the app, copied message links (server channel and DM) and opened them in the browser, and copied message, channel, category and server IDs. They confirmed all of it looks right.
+
+## Chunk 2: The "New messages" divider
+
+### Changes Made
+- `src/store.rs`:
+  - `TimelineRow::NewMessages`, keyed `"new-messages"` in `row_key` so `diff_rows` inserts and removes it like any row.
+  - `ChatStore::read_position(channel)`: the read state's `last_id`.
+  - `with_unread_divider(rows, after)`: inserts the divider before the first sent (not pending) message newer than `after` that isn't `mine`. The message after it loses `continuation`, and `mark_group_ends` runs again so the group before it ends.
+- `src/ui/chat.rs`:
+  - `ChatView.unread_marker: Option<(channel, Option<after>)>`.
+  - `sync_unread_marker`, called first thing in `render`, before the deferred `maybe_ack_current`. When the open channel changes, it records the new channel's read position (only if `is_unread`), and re-syncs both panes so the divider appears in one and goes from the other. It waits for Ready and only runs for the account on screen.
+  - `ChatView::timeline(channel)` applies the divider; `sync_pane` and `reset_pane` use it instead of `store.timeline`.
+  - `clear_unread_divider`, called from `ack_sent`, drops the divider but keeps the channel recorded, so it isn't re-recorded on the next render.
+  - `set_active(false)` forgets the marker, so coming back to the account counts as opening the channel again.
+  - `render_row` draws the divider as a 1 px danger-coloured line with a bold "New" on the right.
+- `tests/store_unreads.rs`: `read_position`; divider placement (and the group ending at it), everything read, only the user's own unread messages, the user's own message before others', a read position older than the loaded history (and the whole-history exception), and one newer than it.
+- `tests/store_{attachments,embeds,history,pending,reactions,replies}.rs`: `match` arms on `TimelineRow::StartOfChannel { .. } => None` became `_ => None`, for the new variant.
+
+### Divergences
+- **Minor:** `unread_marker` is one `Option<(channel, Option<after>)>`, not the plan's `HashMap<String, String>`. Only the open channel has a divider, and keeping the channel after `ack_sent` clears the position is what stops the marker being recorded again on the next render.
+- **Minor:** `with_unread_divider` takes no `me`, because `MessageRow.mine` already says whose a message is.
+- **Minor:** when the read position is older than every loaded message but the whole history is loaded (a start-of-channel row), the divider goes above the first message. In that case it's accurate, not misleading.
+- **Minor:** the divider is only recorded if the channel is unread when opened. Otherwise messages arriving while you're in a read channel would get a divider.
+- **Plan amended (bookkeeping):** chunk 3's description now names `unread_marker` and `sync_unread_marker` as the things it hooks into.
+
+### Verification Performed
+- `cargo test --test store_unreads`: 25 passed (7 new).
+- `cargo test`: 587 passed, 0 failed, 5 ignored.
+- `cargo clippy --all-targets`: no warnings.
+- rustfmt drift in `chat.rs` and `store.rs` unchanged (17 and 15). `tests/store_unreads.rs` formatted whole. `tests/store_pending.rs` and `tests/store_replies.rs` have older drift and weren't reformatted.
+
+### Manual Validation
+The user had a second account post in a channel, opened it, and confirmed the divider sits above the first new message, stays while reading, and is gone after switching away and back.

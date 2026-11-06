@@ -260,7 +260,7 @@ fn attachments(rows: &[TimelineRow]) -> Vec<AttachmentView> {
     rows.iter()
         .find_map(|row| match row {
             TimelineRow::Message(m) => Some(m.attachments.clone()),
-            TimelineRow::StartOfChannel { .. } => None,
+            _ => None,
         })
         .unwrap()
 }

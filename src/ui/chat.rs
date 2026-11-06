@@ -49,6 +49,7 @@ use crate::store::{
     ChannelEntry, ChannelKind, ChannelSection, ChatStore, MemberList, MemberListRow, MessageRow,
     PendingAttachment, PendingMessage, PendingState, PickerEmoji, PresenceKind, ReactionEmoji,
     ReplyPreview, ReplyState, RowOp, ServerEntry, TimelineRow, diff_rows, display_name,
+    with_unread_divider,
 };
 use crate::typing::{OutgoingTyping, TypingSignal, TypingState, typing_label};
 use crate::ui::composer::{Composer, ComposerEvent, file_icon};
@@ -176,6 +177,12 @@ pub struct ChatView {
     /// The instance's web client, for message links (`app` from `GET /`).
     /// `None` until it loads, or if the instance doesn't say.
     web_app: Option<String>,
+    /// Where the user left off in the open channel: the channel, and its read
+    /// position when it was opened if it had unread messages then (the "New
+    /// messages" divider goes after it). Recorded before the open channel is
+    /// marked read, so the divider stays while the user reads. `None` until
+    /// a channel is opened, and again while this account is hidden.
+    unread_marker: Option<(String, Option<String>)>,
     panes: HashMap<String, Pane>,
     /// History requests in flight, by channel. Results always land in their
     /// own channel, so a slow one can't overwrite the channel being viewed.
@@ -492,6 +499,7 @@ impl ChatView {
             saved_places,
             media,
             web_app: None,
+            unread_marker: None,
             panes: HashMap::new(),
             loading: HashMap::new(),
             load_errors: HashMap::new(),
@@ -1226,7 +1234,7 @@ impl ChatView {
             return;
         };
         let at_present = history.at_present;
-        let rows = Rc::new(self.store.timeline(channel));
+        let rows = Rc::new(self.timeline(channel));
         let Some(pane) = self.panes.get_mut(channel) else {
             return;
         };
@@ -3096,6 +3104,10 @@ impl ChatView {
         self.active = active;
         if !active {
             self.pending_ack = None;
+            // Coming back counts as opening the channel again.
+            if let Some((channel, _)) = self.unread_marker.take() {
+                self.sync_pane(&channel, cx);
+            }
         }
         // Showing it again re-renders, which acks what's now on screen.
         cx.notify();
@@ -3231,12 +3243,60 @@ impl ChatView {
     /// Bring a loaded channel's rows up to date. Existing panes get the
     /// minimal scroller operations (`diff_rows`), so live messages keep the
     /// view at the bottom and older pages slide in above without a jump.
+    /// `channel`'s rows, with the "New messages" divider if it's the open
+    /// channel and had unread messages when opened.
+    fn timeline(&self, channel: &str) -> Vec<TimelineRow> {
+        let rows = self.store.timeline(channel);
+        match &self.unread_marker {
+            Some((c, Some(after))) if c == channel => with_unread_divider(rows, after),
+            _ => rows,
+        }
+    }
+
+    /// Record where the user left off when a channel is opened, and drop the
+    /// divider from the one they left. Runs on every render, before the
+    /// deferred [`Self::maybe_ack_current`] can mark the new channel read.
+    fn sync_unread_marker(&mut self, cx: &mut Context<Self>) {
+        // Read positions come with Ready; until then there's nothing to record.
+        if !self.has_ready || !self.active {
+            return;
+        }
+        let current = self.current_channel().map(|c| c.id);
+        let marked = self.unread_marker.as_ref().map(|(c, _)| c);
+        if marked == current.as_ref() {
+            return;
+        }
+        let left = self.unread_marker.take().map(|(c, _)| c);
+        if let Some(channel) = current {
+            let after = self
+                .store
+                .is_unread(&channel)
+                .then(|| self.store.read_position(&channel).map(str::to_string))
+                .flatten();
+            self.unread_marker = Some((channel.clone(), after));
+            self.sync_pane(&channel, cx);
+        }
+        if let Some(left) = left {
+            self.sync_pane(&left, cx);
+        }
+    }
+
+    /// Take the divider out of `channel` (the user sent a message there).
+    fn clear_unread_divider(&mut self, channel: &str, cx: &mut Context<Self>) {
+        if let Some((c, after)) = &mut self.unread_marker
+            && c == channel
+            && after.take().is_some()
+        {
+            self.sync_pane(channel, cx);
+        }
+    }
+
     fn sync_pane(&mut self, channel: &str, cx: &mut Context<Self>) {
         // Not loaded yet (a message sent while it loads): the load draws it.
         if self.store.history(channel).is_none() {
             return;
         }
-        let rows = Rc::new(self.store.timeline(channel));
+        let rows = Rc::new(self.timeline(channel));
         let at_present = self.store.is_at_present(channel);
         if let Some(pane) = self.panes.get_mut(channel) {
             let ops = diff_rows(&pane.rows, &rows);
@@ -3653,6 +3713,8 @@ impl ChatView {
     /// sent. Stoat doesn't do this itself, and the store already counts the
     /// user's own messages as read, so [`Self::maybe_ack_current`] never would.
     fn ack_sent(&mut self, channel: &str, message: &str, cx: &mut Context<Self>) {
+        // The user has replied, so a divider above their reply says nothing.
+        self.clear_unread_divider(channel, cx);
         // A pending ack for something older would move the read position back.
         if matches!(&self.pending_ack, Some((c, m, _)) if c == channel && m.as_str() < message) {
             self.pending_ack = None;
@@ -5189,6 +5251,20 @@ fn render_row(
                     .text_sm()
                     .text_color(colors.muted)
                     .child("There are no older messages."),
+            )
+            .into_any_element(),
+        TimelineRow::NewMessages => h_flex()
+            .px_4()
+            .pt_3()
+            .gap_2()
+            .items_center()
+            .child(div().flex_1().h(px(1.)).bg(colors.danger))
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(colors.danger)
+                    .child("New"),
             )
             .into_any_element(),
         TimelineRow::Message(message) if message.system => {
@@ -6909,6 +6985,7 @@ pub(crate) fn mention_badge(count: usize, cx: &App) -> Div {
 
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_unread_marker(cx);
         // After layout, check whether the open channel is scrolled to its top
         // (or too short to scroll) and has more history to load.
         if let Some(channel) = self.current_channel().map(|c| c.id) {

@@ -343,7 +343,7 @@ fn embeds(rows: &[TimelineRow]) -> Vec<EmbedView> {
     rows.iter()
         .find_map(|row| match row {
             TimelineRow::Message(m) => Some(m.embeds.clone()),
-            TimelineRow::StartOfChannel { .. } => None,
+            _ => None,
         })
         .unwrap()
 }

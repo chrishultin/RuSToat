@@ -79,7 +79,7 @@ Then `cargo test`.
 **Goal:** "Mark as unread" on a message makes the channel unread from that message, here and in other clients.
 **Files likely touched:**
 - `src/store.rs`: `ChatStore::set_read_position(channel, Option<&str>)`, which can move backwards, and `ChatStore::message_before(channel, id)`
-- `src/ui/chat.rs`: a new `RowAction::MarkUnread(id)` and its menu item; `ChatView.held_unread: Option<String>`, which makes `maybe_ack_current` skip that channel, and is cleared on leaving the channel and by `ack_sent`. It cancels any pending ack, sets the read position and the divider marker (from chunk 2) to the previous message, and sends the ack.
+- `src/ui/chat.rs`: a new `RowAction::MarkUnread(id)` and its menu item; `ChatView.held_unread: Option<String>`, which makes `maybe_ack_current` skip that channel, and is cleared on leaving the channel and by `ack_sent`. It cancels any pending ack, sets the read position and the divider marker (chunk 2's `ChatView.unread_marker`, the open channel and the position the divider goes after) to the previous message, and sends the ack. "Leaving the channel" can hook into chunk 2's `sync_unread_marker`, which already notices the open channel changing.
 - `tests/store_unreads.rs`; `tests/api_unreads.rs` if the ack request needs a new case
 **Depends on:** Chunk 2. Mark as unread also places the divider.
 **Risks:**
