@@ -221,3 +221,42 @@ Deferred to the end (see the plan's chunk 5 manual check).
 
 ### Manual Validation
 Deferred to the end (see the plan's chunk 6 manual check).
+
+## Summary
+
+_Completed: 2026-11-06 (code); manual checks pending_
+
+### Chunks Completed
+1. Copy button on code blocks (1b14a55)
+2. Quote a message into the message box (63524d1)
+3. `MarkupPlugin` and `<t:…>` timestamps (cd6b79c)
+4. Spoilers hidden until clicked (811d4f6)
+5. Role mentions, `@everyone` and `@online` drawn as pills (f9fd04a)
+6. Roles, `@everyone` and `@online` in autocomplete (543c4d5)
+
+### Divergences
+- **Chunk 1:** the copy button overlays the code's first line (no extra top padding). `CodeBlock` comes from `gpui_kit::base::text`.
+- **Chunk 2:** `Composer::append_quote(content, labels, …)` quotes for the caller.
+- **Chunk 3:** the relative-time check is `ChatView::open_channel_has_relative_times` plus `markdown::has_relative_time`, run by one looping 60-second task. Under 45 s reads "just now". Months are averaged. The system-message `TextView` also gets the plugin.
+- **Chunk 4:**
+  - The plugin takes a reveal callback rather than a `WeakEntity<ChatView>`.
+  - URLs are `stoat:spoiler/N/W/C`.
+  - A hidden spoiler wraps like one long word (it breaks between words only as a fallback).
+  - Spoilers in search and pin previews aren't clickable.
+  - Spoilers in bios and embeds stay hidden for good, as the plan says.
+- **Chunk 5:** behaviour change: `@online` no longer counts as a mention while you're Invisible (`is_mentioned` now uses `presence_kind`). `hex_colour` stayed in `ui/chat.rs`.
+- **Chunk 6:** unknown role chips say `@Unknown role`. Role chips aren't tinted.
+
+### Definition of Done
+- [x] Copy button on every fenced code block in messages, embeds and bios (plus system messages), with the language label. *Manual check pending.*
+- [x] "Quote" appends `> ` lines and a blank line with mention chips, and is absent for attachment-only and system messages. *Manual check pending.*
+- [x] `<t:N>` / `<t:N:X>` render in local time per assumption 1. Hover shows the full date, `R` is redrawn each minute, and malformed tags stay as typed. *Unit tested; manual check pending, including whether the minute redraw moves relative times on.*
+- [x] `||…||` renders as a bar that wraps. A click reveals the whole spoiler for the session. Banners and reply previews say `[spoiler]`. *Unit and store tested; manual check pending.*
+- [x] `<%role>` renders in its colour (muted if none). `@everyone`/`@online` render as pills, and unknown roles stay as typed. *Manual check pending.*
+- [x] Banners fire for role, everyone and online mentions that include you under Level::Mention (`tests/notify_rules.rs`).
+- [x] `@` suggests roles and the specials only in server channels with `MentionRoles` / `MentionEveryone`. A role suggestion sends `<%ID>`. *Manual check pending.*
+- [x] `cargo test` (650 passed) and `cargo clippy --all-targets -- -D warnings` pass. `src/ui/chat.rs` drift is still 17.
+- [ ] Every chunk's manual check recorded here. *Batched to the end at the user's request; not done yet.*
+
+### Remaining Manual Steps
+The plan's per-chunk manual checks and its Manual Tests section, which need the app, the web client and a second account. They're listed for the user at the end of the session. Record the results under each chunk's "Manual Validation".
