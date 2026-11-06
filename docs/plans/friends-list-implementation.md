@@ -282,3 +282,13 @@ All minor; none needed the user to decide:
 
 ### Remaining Manual Steps
 Every chunk's manual check and the plan's Manual Tests 1–6, plus milestone 7's batched checks, which were never done in the app (especially its friend and block flows). Chunks 2, 3 and 5 need a second account, and chunk 5's banners need the bundled app (`scripts/run-bundled.sh`).
+
+## Fix after the summary: blank person icons
+
+**Found in the first manual check.** The Friends page's Reject button showed no icon and no text.
+
+**Cause:** `gpui-kit-assets` embeds only its 101 default component icons. Any other icon has to be listed in `ExtraIcons` in `src/assets.rs`, or it renders blank. Milestone 7's person menu and profile card use seven icons that were never listed, and the Friends rows reuse them: `IdCard`, `MessageCircle`, `ShieldCheck`, `UserCheck`, `UserMinus`, `UserPlus` and `UserX`. So Reject (icon only) was empty, the Accept and Message buttons had no icons, and the menu items Add friend, Accept, Reject, Cancel, Remove friend, Unblock, Message and Copy user ID had none either.
+
+**Fix:** the seven are added to `ExtraIcons`. A new unit test, `assets::tests::people_icons_load`, loads every icon the menu, card and page use.
+
+**Verification:** I cross-checked every `IconName::` in `src` against the default list plus `ExtraIcons`, and none is missing now. `cargo test`: 575 passed. `cargo clippy --all-targets -- -D warnings`: clean. `src/assets.rs` is rustfmt-clean.

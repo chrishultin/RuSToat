@@ -20,14 +20,21 @@ gpui_kit::assets::icon_assets!(
         FileVideoCamera,
         Hash,
         House,
+        IdCard,
         Image,
+        MessageCircle,
         Paperclip,
         Pencil,
         Pin,
         PinOff,
         Reply,
         SendHorizontal,
+        ShieldCheck,
         Trash,
+        UserCheck,
+        UserMinus,
+        UserPlus,
+        UserX,
         Users,
         Volume2,
         WifiOff
@@ -71,5 +78,28 @@ mod tests {
         }
         // A default component icon (used by the button spinner).
         assert!(AppAssets.load("icons/loader.svg").unwrap().is_some());
+    }
+
+    /// Every icon the app draws, so none renders blank. The person menu,
+    /// profile card and Friends page use these.
+    #[test]
+    fn people_icons_load() {
+        for icon in [
+            IconName::Ban,
+            IconName::CircleUser,
+            IconName::Copy,
+            IconName::Ellipsis,
+            IconName::IdCard,
+            IconName::MessageCircle,
+            IconName::ShieldCheck,
+            IconName::UserCheck,
+            IconName::UserMinus,
+            IconName::UserPlus,
+            IconName::UserX,
+            IconName::Users,
+        ] {
+            let path = icon.path();
+            assert!(AppAssets.load(&path).unwrap().is_some(), "{path} missing");
+        }
     }
 }
