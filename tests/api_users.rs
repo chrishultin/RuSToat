@@ -4,7 +4,7 @@ use revolt_result::ErrorType;
 use serde_json::json;
 use stoat_gpui::api::models::Channel;
 use stoat_gpui::api::{ApiError, StoatClient};
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn client(server: &MockServer) -> StoatClient {
@@ -259,4 +259,61 @@ async fn relationship_refusals_decode() {
         err.error_type(),
         Some(ErrorType::TooManyPendingFriendRequests { max: 100 })
     ));
+}
+
+#[tokio::test]
+async fn a_friend_request_by_username_answers_with_the_user() {
+    use stoat_gpui::api::models::RelationshipStatus;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/users/friend"))
+        .and(header("x-session-token", "tok"))
+        .and(body_json(json!({ "username": "bob#0001" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(user_json("Outgoing")))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let bob = client(&server)
+        .send_friend_request("bob#0001")
+        .await
+        .unwrap();
+    assert_eq!(bob.id, "u-bob");
+    assert_eq!(bob.relationship, RelationshipStatus::Outgoing);
+}
+
+#[tokio::test]
+async fn friend_requests_by_username_can_be_refused() {
+    let server = MockServer::start().await;
+    for (username, status, error) in [
+        ("nobody#0000", 404, "NotFound"),
+        ("no-tag", 400, "InvalidProperty"),
+        ("robot#0001", 400, "IsBot"),
+    ] {
+        Mock::given(method("POST"))
+            .and(path("/users/friend"))
+            .and(body_json(json!({ "username": username })))
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .set_body_json(json!({ "type": error, "location": "x" })),
+            )
+            .mount(&server)
+            .await;
+    }
+    let client = client(&server);
+    let err = client.send_friend_request("nobody#0000").await.unwrap_err();
+    assert!(
+        matches!(err.error_type(), Some(ErrorType::NotFound)),
+        "{err:?}"
+    );
+    let err = client.send_friend_request("no-tag").await.unwrap_err();
+    assert!(
+        matches!(err.error_type(), Some(ErrorType::InvalidProperty)),
+        "{err:?}"
+    );
+    let err = client.send_friend_request("robot#0001").await.unwrap_err();
+    assert!(
+        matches!(err.error_type(), Some(ErrorType::IsBot)),
+        "{err:?}"
+    );
+    assert_eq!(err.to_string(), "Bots can't be friends.");
 }

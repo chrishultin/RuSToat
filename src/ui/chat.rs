@@ -37,7 +37,7 @@ use crate::attachment::{AttachmentView, fit_into};
 use crate::complete::{Query, QueryKind, Suggestion, TokenRef, rank, rank_people};
 use crate::draft::{AttachmentLimits, DraftAttachment, ReplyTarget};
 use crate::embed::{Description, EmbedCard, EmbedImage, EmbedView};
-use crate::friends::{FRIENDS, FriendsTab};
+use crate::friends::{AddFriendState, FRIENDS, FriendsTab};
 use crate::markdown::{InternalLink, JUMBO_TEXT_PX, is_external_link, parse_internal_link};
 use crate::media::MediaUrls;
 use crate::notify::{self, Delivery, Notice, Viewing};
@@ -53,7 +53,7 @@ use crate::store::{
 use crate::typing::{OutgoingTyping, TypingSignal, TypingState, typing_label};
 use crate::ui::composer::{Composer, ComposerEvent, file_icon};
 use crate::ui::emoji_picker::emoji_grid;
-use crate::ui::friends::{RowButtons, render_friends_page};
+use crate::ui::friends::{RowButtons, render_add_friend, render_friends_page};
 use crate::ui::math::MathPlugin;
 use crate::ui::profile_card::{CardBio, CardContent, OnLink, render_profile_card};
 
@@ -218,6 +218,11 @@ pub struct ChatView {
     relationship_pending: HashSet<String>,
     /// The Friends page's open tab (while Home's Friends row is picked).
     friends_tab: FriendsTab,
+    /// The Friends page's `username#1234` field. Enter sends the request.
+    add_friend_input: Entity<InputState>,
+    /// What happened to the last request sent from it, shown under it.
+    add_friend_state: Option<AddFriendState>,
+    _add_friend_input: Subscription,
     /// The message whose reaction picker is open.
     picker_for: Option<String>,
     /// Reaction changes waiting on the server, as (message, emoji). Another
@@ -366,6 +371,24 @@ impl ChatView {
                 }
             },
         );
+        let add_friend_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("username#1234"));
+        let add_friend_events = cx.subscribe_in(
+            &add_friend_input,
+            window,
+            |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.send_friend_request(window, cx),
+                // Editing what was sent forgets how it went.
+                InputEvent::Change
+                    if this.add_friend_state.is_some()
+                        && this.add_friend_state != Some(AddFriendState::Sending) =>
+                {
+                    this.add_friend_state = None;
+                    cx.notify();
+                }
+                _ => {}
+            },
+        );
         let composer_events = cx.subscribe_in(
             &composer,
             window,
@@ -468,6 +491,9 @@ impl ChatView {
             dm_opening: None,
             relationship_pending: HashSet::new(),
             friends_tab: FriendsTab::default(),
+            add_friend_input,
+            add_friend_state: None,
+            _add_friend_input: add_friend_events,
             picker_for: None,
             reacting: HashSet::new(),
             reply_fetches: HashSet::new(),
@@ -2412,6 +2438,59 @@ impl ChatView {
         self.forget_member_lists();
     }
 
+    /// Send a friend request to whoever is typed in the Friends page's
+    /// field (`username#1234`). How it went shows under the field; once it's
+    /// sent, the field clears and they're under Pending → Outgoing.
+    fn send_friend_request(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.add_friend_state == Some(AddFriendState::Sending) {
+            return;
+        }
+        let typed = self.add_friend_input.read(cx).value().to_string();
+        let username = match crate::friends::check_username(&typed) {
+            Ok(username) => username.to_string(),
+            Err(hint) => {
+                self.add_friend_state = Some(AddFriendState::Error(hint.into()));
+                cx.notify();
+                return;
+            }
+        };
+        self.add_friend_state = Some(AddFriendState::Sending);
+        cx.notify();
+        let request = spawn_io({
+            let (client, username) = (self.client.clone(), username.clone());
+            async move { client.send_friend_request(&username).await }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.add_friend_state = Some(match result {
+                    Ok(Ok(person)) => {
+                        log::info!(
+                            "friend request to {username}: now {:?}",
+                            person.relationship
+                        );
+                        let state = crate::friends::request_sent(&person);
+                        this.relationship_changed(person);
+                        this.add_friend_input
+                            .update(cx, |input, cx| input.set_value("", window, cx));
+                        state
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't send a friend request to {username}: {err:?}");
+                        crate::friends::request_refused(&username, &err)
+                    }
+                    Err(err) => {
+                        log::warn!("friend request task failed: {err:?}");
+                        AddFriendState::Error("Couldn't reach Stoat. Try again.".into())
+                    }
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// "Message" on `user`'s card: open the DM with them. One that's known
     /// opens here (reopened if it was closed). Otherwise Stoat is asked for
     /// it, which creates it if it's allowed (see [`crate::profile::can_message`]).
@@ -4118,7 +4197,16 @@ impl ChatView {
             busy: theme.danger,
         };
         let lists = crate::friends::friend_lists(&self.store);
-        let incoming = lists.incoming.len();
+        let view = cx.entity().downgrade();
+        let add_friend = render_add_friend(
+            &self.add_friend_input,
+            self.add_friend_state.as_ref(),
+            move |window, cx| {
+                view.update(cx, |this, cx| this.send_friend_request(window, cx))
+                    .ok();
+            },
+            cx,
+        );
         let buttons = |user: &str| RowButtons {
             actions: crate::friends::row_actions(&self.store, user),
             pending: self.relationship_pending.contains(user),
@@ -4135,7 +4223,7 @@ impl ChatView {
         render_friends_page(
             &lists,
             self.friends_tab,
-            incoming,
+            add_friend,
             colors,
             buttons,
             on_tab,

@@ -3,8 +3,8 @@ use std::time::Duration;
 use reqwest::{Client, Method};
 use revolt_models::v0::{
     AllMemberResponse, BulkMessageResponse, Channel, DataEditMessage, DataLogin, DataMessageSearch,
-    DataMessageSend, MFAResponse, Member, Message, MessageSort, OptionsQueryMessages, ReplyIntent,
-    ResponseLogin, User, UserProfile,
+    DataMessageSend, DataSendFriendRequest, MFAResponse, Member, Message, MessageSort,
+    OptionsQueryMessages, ReplyIntent, ResponseLogin, User, UserProfile,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -557,6 +557,15 @@ impl StoatClient {
     pub async fn add_friend(&self, id: &str) -> Result<User, ApiError> {
         self.send(Method::PUT, &format!("/users/{id}/friend"), None::<&()>)
             .await
+    }
+
+    /// `POST /users/friend`: send a friend request by `username#1234`.
+    /// Stoat answers with them, as they now relate to the user.
+    pub async fn send_friend_request(&self, username: &str) -> Result<User, ApiError> {
+        let body = DataSendFriendRequest {
+            username: username.to_string(),
+        };
+        self.send(Method::POST, "/users/friend", Some(&body)).await
     }
 
     /// `DELETE /users/{id}/friend`: reject or cancel a friend request, or

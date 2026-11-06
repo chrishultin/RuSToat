@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme, Disableable, Icon, Sizable, h_flex, v_flex};
@@ -13,7 +14,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::api::models::RelationshipStatus;
-use crate::friends::{FriendLists, FriendRow, FriendsTab, RowAction};
+use crate::friends::{AddFriendState, FriendLists, FriendRow, FriendsTab, RowAction};
 use crate::profile::RelationshipAction;
 use crate::ui::chat::{MemberColors, People, avatar, mention_badge};
 
@@ -71,14 +72,14 @@ fn page_rows(
     rows
 }
 
-/// The Friends page. `incoming` is the badge on the Pending tab, `buttons`
-/// gives each person's row buttons, and `on_tab` is called with the tab
-/// clicked.
+/// The Friends page. `add_friend` goes above the tabs (see
+/// [`render_add_friend`]), `buttons` gives each person's row buttons, and
+/// `on_tab` is called with the tab clicked.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_friends_page(
     lists: &FriendLists,
     tab: FriendsTab,
-    incoming: usize,
+    add_friend: AnyElement,
     colors: MemberColors,
     buttons: impl Fn(&str) -> RowButtons,
     on_tab: impl Fn(FriendsTab, &mut Window, &mut App) + 'static,
@@ -86,6 +87,7 @@ pub(crate) fn render_friends_page(
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme();
+    let incoming = lists.incoming.len();
     let header = h_flex()
         .h(px(48.))
         .flex_none()
@@ -118,6 +120,7 @@ pub(crate) fn render_friends_page(
         .min_w_0()
         .h_full()
         .child(header)
+        .child(add_friend)
         .child(div().px_4().flex_none().child(tabs))
         .child(
             div().flex_1().min_h_0().px_2().child(
@@ -277,3 +280,57 @@ fn row_button(user: &str, action: RowAction, state: &RowButtons, people: &People
         })
         .into_any_element()
 }
+
+/// The add-friend field and its "Send request" button, with what happened
+/// to the last request under them. Enter sends too.
+pub(crate) fn render_add_friend(
+    input: &Entity<InputState>,
+    state: Option<&AddFriendState>,
+    on_send: impl Fn(&mut Window, &mut App) + 'static,
+    cx: &App,
+) -> AnyElement {
+    let theme = cx.theme();
+    let sending = state == Some(&AddFriendState::Sending);
+    let note = match state {
+        Some(AddFriendState::Sent(text)) => Some((text.clone(), theme.success)),
+        Some(AddFriendState::Info(text)) => Some((text.clone(), theme.muted_foreground)),
+        Some(AddFriendState::Error(text)) => Some((text.clone(), theme.danger)),
+        Some(AddFriendState::Sending) | None => None,
+    };
+    v_flex()
+        .flex_none()
+        .px_4()
+        .pt_3()
+        .pb_1()
+        .gap_1()
+        .child(
+            div()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.muted_foreground)
+                .child("ADD FRIEND"),
+        )
+        .child(
+            h_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .w(px(ADD_FRIEND_WIDTH))
+                        .child(Input::new(input).small().disabled(sending)),
+                )
+                .child(
+                    Button::new("send-friend-request")
+                        .primary()
+                        .small()
+                        .label("Send request")
+                        .loading(sending)
+                        .disabled(sending)
+                        .on_click(move |_, window, cx| on_send(window, cx)),
+                ),
+        )
+        .children(note.map(|(text, colour)| div().text_xs().text_color(colour).child(text)))
+        .into_any_element()
+}
+
+/// Width of the add-friend field.
+const ADD_FRIEND_WIDTH: f32 = 320.;

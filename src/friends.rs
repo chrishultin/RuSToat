@@ -6,6 +6,9 @@
 //! [`ChatStore::apply_relationship`] keeps them current, so nothing here
 //! needs a fetch of its own.
 
+use revolt_result::ErrorType;
+
+use crate::api::ApiError;
 use crate::api::models::{RelationshipStatus, User};
 use crate::profile::{RelationshipAction, can_message, friend_buttons};
 use crate::store::{ChatStore, PresenceKind, display_name, presence_kind};
@@ -146,6 +149,62 @@ pub fn row_actions(store: &ChatStore, user: &str) -> Vec<RowAction> {
             .collect(),
         RelationshipStatus::Blocked => vec![RowAction::Relationship(RelationshipAction::Unblock)],
         _ => Vec::new(),
+    }
+}
+
+/// What the add-friend field says when what's typed isn't `name#1234`.
+pub const USERNAME_HINT: &str = "Enter a username and its four-digit tag, like ada#1234.";
+
+/// What's typed in the add-friend field, trimmed, if it has the shape Stoat
+/// needs: a name, `#`, and four digits. Else the hint to show. The name
+/// itself isn't checked (Stoat decides who exists), and it's split at the
+/// first `#`, as Stoat does.
+pub fn check_username(text: &str) -> Result<&str, &'static str> {
+    let text = text.trim();
+    let (name, tag) = text.split_once('#').ok_or(USERNAME_HINT)?;
+    let tag_ok = tag.len() == 4 && tag.bytes().all(|b| b.is_ascii_digit());
+    if name.trim().is_empty() || !tag_ok {
+        return Err(USERNAME_HINT);
+    }
+    Ok(text)
+}
+
+/// What the add-friend field says under it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AddFriendState {
+    /// The request is on its way.
+    Sending,
+    /// It went through.
+    Sent(String),
+    /// Nothing to do: they're already friends, or already asked.
+    Info(String),
+    Error(String),
+}
+
+/// The request to `user` went through. Stoat answers with them as they now
+/// relate: a friend, if they'd already asked the user (it accepts theirs).
+pub fn request_sent(user: &User) -> AddFriendState {
+    let name = format!("{}#{}", user.username, user.discriminator);
+    AddFriendState::Sent(match user.relationship {
+        RelationshipStatus::Friend => format!("You're now friends with {name}."),
+        _ => format!("Friend request sent to {name}."),
+    })
+}
+
+/// Why Stoat turned down a request to `username` (as typed), in words.
+pub fn request_refused(username: &str, err: &ApiError) -> AddFriendState {
+    match err.error_type() {
+        Some(ErrorType::NotFound) => {
+            AddFriendState::Error(format!("There's no one called {username}."))
+        }
+        Some(ErrorType::InvalidProperty) => AddFriendState::Error(USERNAME_HINT.into()),
+        Some(ErrorType::AlreadySentRequest) => {
+            AddFriendState::Info("You've already sent them a request.".into())
+        }
+        Some(ErrorType::AlreadyFriends) => AddFriendState::Info("You're already friends.".into()),
+        // Blocked, BlockedByOther, IsBot, TooManyPendingFriendRequests and
+        // the rest read well as they are.
+        _ => AddFriendState::Error(err.to_string()),
     }
 }
 

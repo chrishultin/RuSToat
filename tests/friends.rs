@@ -1,10 +1,12 @@
 //! The Friends page's lists (`friends::friend_lists`).
 
 use serde_json::{Value, json};
+use stoat_gpui::api::ApiError;
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::api::models::{RelationshipStatus, User};
 use stoat_gpui::friends::{
-    FriendLists, FriendsTab, RowAction, friend_lists, incoming_count, row_actions,
+    AddFriendState, FriendLists, FriendsTab, RowAction, USERNAME_HINT, check_username,
+    friend_lists, incoming_count, request_refused, request_sent, row_actions,
 };
 use stoat_gpui::profile::RelationshipAction;
 use stoat_gpui::store::{ChatStore, PresenceKind};
@@ -230,4 +232,92 @@ fn a_bot_friend_can_be_messaged() {
         json!({ "bot": { "owner": "u-someone" } }),
     )]);
     assert_eq!(row_actions(&store, "u-bot"), [RowAction::Message]);
+}
+
+#[test]
+fn usernames_need_a_name_and_a_four_digit_tag() {
+    assert_eq!(check_username("ada#0001"), Ok("ada#0001"));
+    // Trimmed; the name itself is left for Stoat to judge.
+    assert_eq!(
+        check_username("  Ada Lovelace#1234 "),
+        Ok("Ada Lovelace#1234")
+    );
+    assert_eq!(check_username("ada.l-_#9999"), Ok("ada.l-_#9999"));
+    for bad in [
+        "",
+        "   ",
+        "ada",
+        "ada#",
+        "ada#12",
+        "ada#12345",
+        "#1234",
+        "  #1234",
+        "ada#12a4",
+        "ada#１２３４",
+        "ada#12#4",
+    ] {
+        assert_eq!(check_username(bad), Err(USERNAME_HINT), "{bad:?}");
+    }
+}
+
+fn refusal(error: &str) -> ApiError {
+    let body = json!({ "type": error, "location": "x", "max": 100 }).to_string();
+    ApiError::from_response(reqwest::StatusCode::BAD_REQUEST, body.as_bytes())
+}
+
+#[test]
+fn refusals_read_well_and_some_are_only_information() {
+    let error = |text: &str| AddFriendState::Error(text.into());
+    let info = |text: &str| AddFriendState::Info(text.into());
+    assert_eq!(
+        request_refused("ghost#0000", &refusal("NotFound")),
+        error("There's no one called ghost#0000.")
+    );
+    assert_eq!(
+        request_refused("x", &refusal("InvalidProperty")),
+        error(USERNAME_HINT)
+    );
+    assert_eq!(
+        request_refused("x", &refusal("IsBot")),
+        error("Bots can't be friends.")
+    );
+    assert_eq!(
+        request_refused("x", &refusal("AlreadySentRequest")),
+        info("You've already sent them a request.")
+    );
+    assert_eq!(
+        request_refused("x", &refusal("AlreadyFriends")),
+        info("You're already friends.")
+    );
+    assert_eq!(
+        request_refused("x", &refusal("Blocked")),
+        error("You've blocked them. Unblock them first.")
+    );
+    assert_eq!(
+        request_refused("x", &refusal("BlockedByOther")),
+        error("They've blocked you.")
+    );
+    assert_eq!(
+        request_refused("x", &refusal("TooManyPendingFriendRequests")),
+        error("You have too many pending friend requests (at most 100).")
+    );
+}
+
+#[test]
+fn a_sent_request_says_who_it_went_to() {
+    let bob = |relationship: &str| {
+        relationship_event(json!({
+            "_id": "u-bob", "username": "bob", "discriminator": "0042",
+            "relationship": relationship, "online": true
+        }))
+    };
+    assert_eq!(
+        request_sent(&bob("Outgoing")),
+        AddFriendState::Sent("Friend request sent to bob#0042.".into())
+    );
+    // They'd already asked, so sending accepts theirs.
+    assert_eq!(
+        request_sent(&bob("Friend")),
+        AddFriendState::Sent("You're now friends with bob#0042.".into())
+    );
 }
