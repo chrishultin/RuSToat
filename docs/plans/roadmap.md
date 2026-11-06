@@ -57,7 +57,7 @@ Some milestones lay foundations that later ones reuse. When the earlier one's pl
 - A copy button on code blocks
 - Quote a message into the message box (from the message menu)
 
-### Milestone 11: Safety (M, small)
+### Milestone 11: Safety (M, small). Plan: [`safety.md`](safety.md)
 - Blocked users' messages collapsed to "N blocked messages", which you can click to show
 - A warning before opening a link whose text and address differ
 - An age gate on mature (NSFW) channels
