@@ -3,42 +3,9 @@ use std::sync::Arc;
 use gpui_kit::*;
 use stoat_gpui::accounts::{AccountsFile, FileAccounts, MemoryAccounts};
 use stoat_gpui::session::{MigratingStore, TokenStore};
+use stoat_gpui::ui::actions::*;
+use stoat_gpui::ui::settings::SettingsView;
 use stoat_gpui::{runtime, ui};
-
-actions!(stoat, [Quit, LogOut, AddAccount]);
-
-// ⌘1 to ⌘9: show the nth account in the switcher. Unit actions, since an
-// action with a field needs GPUI's derive under the crate name `gpui`.
-actions!(
-    stoat,
-    [
-        SwitchAccount1,
-        SwitchAccount2,
-        SwitchAccount3,
-        SwitchAccount4,
-        SwitchAccount5,
-        SwitchAccount6,
-        SwitchAccount7,
-        SwitchAccount8,
-        SwitchAccount9
-    ]
-);
-
-/// Each ⌘-digit's action, for the nth account (from 0).
-fn switch_account_action(index: usize) -> Option<Box<dyn Action>> {
-    Some(match index {
-        0 => Box::new(SwitchAccount1),
-        1 => Box::new(SwitchAccount2),
-        2 => Box::new(SwitchAccount3),
-        3 => Box::new(SwitchAccount4),
-        4 => Box::new(SwitchAccount5),
-        5 => Box::new(SwitchAccount6),
-        6 => Box::new(SwitchAccount7),
-        7 => Box::new(SwitchAccount8),
-        8 => Box::new(SwitchAccount9),
-        _ => return None,
-    })
-}
 
 /// Handle ⌘(index + 1): show that account, if the window is open.
 fn on_switch_account<A: Action>(index: usize, cx: &mut App) {
@@ -66,6 +33,8 @@ fn set_menus(accounts: &[String], cx: &mut App) {
             items: vec![
                 MenuItem::action("Add Account…", AddAccount),
                 MenuItem::action("Log Out", LogOut),
+                MenuItem::separator(),
+                MenuItem::action("Settings…", OpenSettings),
                 MenuItem::separator(),
                 MenuItem::action("Quit Stoat", Quit),
             ],
@@ -131,22 +100,11 @@ fn main() {
         // After gpui_kit's bindings, so the chat shortcuts win over theirs.
         ui::chat::init(cx);
 
+        cx.bind_keys(app_key_bindings());
         cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
-        // No shortcut for Log Out: ⇧⌘Q is macOS's own "Log Out <user>".
+        cx.on_action(|_: &OpenSettings, cx| SettingsWindow::open_or_focus(cx));
         set_menus(&[], cx);
 
-        cx.bind_keys([
-            KeyBinding::new("cmd-1", SwitchAccount1, None),
-            KeyBinding::new("cmd-2", SwitchAccount2, None),
-            KeyBinding::new("cmd-3", SwitchAccount3, None),
-            KeyBinding::new("cmd-4", SwitchAccount4, None),
-            KeyBinding::new("cmd-5", SwitchAccount5, None),
-            KeyBinding::new("cmd-6", SwitchAccount6, None),
-            KeyBinding::new("cmd-7", SwitchAccount7, None),
-            KeyBinding::new("cmd-8", SwitchAccount8, None),
-            KeyBinding::new("cmd-9", SwitchAccount9, None),
-        ]);
         on_switch_account::<SwitchAccount1>(0, cx);
         on_switch_account::<SwitchAccount2>(1, cx);
         on_switch_account::<SwitchAccount3>(2, cx);
@@ -185,6 +143,7 @@ fn main() {
         })
         .detach();
 
+        cx.set_global(SettingsWindow(None));
         cx.set_global(MainWindow {
             store,
             accounts,
@@ -292,5 +251,57 @@ impl MainWindow {
                 root.update(cx, |root, cx| f(root, window, cx))
             })
             .ok();
+    }
+}
+
+/// The settings window, while it's open. There's only ever one.
+struct SettingsWindow(Option<WindowHandle<gpui_kit::component::Root>>);
+
+impl Global for SettingsWindow {}
+
+impl SettingsWindow {
+    /// Open the settings window, or bring it forward if it's already open.
+    fn open_or_focus(cx: &mut App) {
+        // Deferred: from a key binding, GPUI is still updating the window
+        // the key was pressed in, which may be this one.
+        cx.defer(|cx| {
+            if let Some(window) = cx.global::<Self>().0
+                && window
+                    .update(cx, |_, window, _| window.activate_window())
+                    .is_ok()
+            {
+                return;
+            }
+            match Self::open(cx) {
+                Ok(window) => cx.global_mut::<Self>().0 = Some(window),
+                Err(err) => log::error!("couldn't open the settings window: {err:#}"),
+            }
+        });
+    }
+
+    fn open(cx: &mut App) -> anyhow::Result<WindowHandle<gpui_kit::component::Root>> {
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                None,
+                size(px(760.), px(560.)),
+                cx,
+            ))),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Settings".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let root = cx
+            .try_global::<MainWindow>()
+            .and_then(|main| Some(main.current.as_ref()?.1.clone()))
+            .unwrap_or_else(WeakEntity::new_invalid);
+        let (window, _) = gpui_kit::open_window(options, cx, |_, cx| {
+            cx.new(|_| SettingsView::new(root, SettingsView::app_pages()))
+        })?;
+        cx.activate(true);
+        window
+            .downcast()
+            .ok_or_else(|| anyhow::anyhow!("the settings window isn't a Root"))
     }
 }

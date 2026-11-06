@@ -29,6 +29,7 @@ pub mod profile;
 pub mod runtime;
 pub mod search;
 pub mod session;
+pub mod shortcuts;
 pub mod store;
 pub mod time;
 pub mod typing;

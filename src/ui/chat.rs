@@ -86,6 +86,11 @@ const KEY_CONTEXT: &str = "ChatView";
 /// Bind the chat shortcuts. Call after `gpui_kit::init`, so the message
 /// box's own bindings for the same keys (extra cursors) lose to these.
 pub fn init(cx: &mut App) {
+    cx.bind_keys(key_bindings());
+}
+
+/// The chat shortcuts, as [`init`] binds them.
+pub fn key_bindings() -> Vec<KeyBinding> {
     // Text fields bind these to extra cursors; a chat box has no use for
     // those, so in the chat view the keys move around instead.
     let moves = |context| {
@@ -96,9 +101,10 @@ pub fn init(cx: &mut App) {
             KeyBinding::new("cmd-alt-down", NextServer, Some(context)),
         ]
     };
-    cx.bind_keys(moves(KEY_CONTEXT));
-    cx.bind_keys(moves("ChatView > Input"));
-    cx.bind_keys([
+    let mut bindings = Vec::new();
+    bindings.extend(moves(KEY_CONTEXT));
+    bindings.extend(moves("ChatView > Input"));
+    bindings.extend([
         // Text fields don't use these, so they work in the message box too.
         KeyBinding::new("alt-up", PrevChannel, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-down", NextChannel, Some(KEY_CONTEXT)),
@@ -107,6 +113,7 @@ pub fn init(cx: &mut App) {
         // nothing there uses it, it reaches the view (`on_escape`).
         KeyBinding::new("escape", JumpToPresent, Some(KEY_CONTEXT)),
     ]);
+    bindings
 }
 
 /// How many messages to load when a channel is opened.

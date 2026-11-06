@@ -1,3 +1,4 @@
+pub mod actions;
 pub mod app_root;
 pub mod chat;
 pub mod composer;
@@ -6,6 +7,7 @@ pub mod friends;
 pub mod login;
 pub mod math;
 pub mod profile_card;
+pub mod settings;
 pub mod switcher;
 pub mod thumbhash;
 

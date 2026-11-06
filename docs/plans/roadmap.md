@@ -69,7 +69,7 @@ Some milestones lay foundations that later ones reuse. When the earlier one's pl
 
 ## B. You
 
-### Milestone 13: Settings window and themes (M)
+### Milestone 13: Settings window and themes (M). Plan: [`settings-and-themes.md`](settings-and-themes.md)
 - A settings window (⌘,) with sections in a sidebar. Later milestones add their own sections.
 - **Themes:** pick from a fixed set of colour palettes, each with a light and a dark variant, or follow the system. Built on gpui-component's theme registry.
 - **App behaviour:** start at login, and keep running in the background when the window closes, so notifications continue. Today closing the window disconnects every account.
