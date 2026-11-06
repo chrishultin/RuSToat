@@ -49,7 +49,7 @@ use crate::store::{
     ChannelEntry, ChannelKind, ChannelSection, ChatStore, MemberList, MemberListRow, MessageRow,
     PendingAttachment, PendingMessage, PendingState, PickerEmoji, PresenceKind, ReactionEmoji,
     ReplyPreview, ReplyState, RowOp, ServerEntry, TimelineRow, diff_rows, display_name,
-    with_unread_divider,
+    fold_sections, with_unread_divider,
 };
 use crate::typing::{OutgoingTyping, TypingSignal, TypingState, typing_label};
 use crate::ui::composer::{Composer, ComposerEvent, file_icon};
@@ -167,6 +167,8 @@ pub struct ChatView {
     place: Place,
     /// Last channel picked in each place, so switching servers comes back to it.
     selected: HashMap<Place, String>,
+    /// Category IDs folded away in the channel list (kept with `selected`).
+    collapsed: HashSet<String>,
     /// Where `place` and `selected` are kept between launches (`None` if
     /// there's nowhere to keep them), and what was last written there.
     places_file: Option<PlacesFile>,
@@ -498,6 +500,7 @@ impl ChatView {
             status: Status::Connecting { attempt: 1 },
             place: saved_places.place.clone(),
             selected: saved_places.selected.clone(),
+            collapsed: saved_places.collapsed.clone(),
             places_file,
             saved_places,
             media,
@@ -1033,6 +1036,8 @@ impl ChatView {
         self.selected.retain(|place, channel| {
             (*place == Place::Home && channel == FRIENDS) || self.store.shows_channel(channel)
         });
+        // Categories deleted while folded.
+        self.collapsed.retain(|id| self.store.has_category(id));
     }
 
     /// Image URLs are known: give them to the store and redraw anything loaded.
@@ -3166,6 +3171,7 @@ impl ChatView {
         let places = Places {
             place: self.place.clone(),
             selected: self.selected.clone(),
+            collapsed: self.collapsed.clone(),
         };
         if places == self.saved_places {
             return;
@@ -3813,6 +3819,22 @@ impl ChatView {
         }
     }
 
+    /// [`Self::sections`] as the channel list shows them, with folded
+    /// categories cut down (see [`fold_sections`]).
+    fn visible_sections(&self) -> Vec<ChannelSection> {
+        let current = self.current_channel().map(|c| c.id);
+        fold_sections(self.sections(), &self.collapsed, current.as_deref())
+    }
+
+    /// Fold category `id` away, or unfold it.
+    fn toggle_category(&mut self, id: String, cx: &mut Context<Self>) {
+        if !self.collapsed.remove(&id) {
+            self.collapsed.insert(id);
+        }
+        self.remember_places();
+        cx.notify();
+    }
+
     /// The picked channel for this place, or else its first channel.
     /// `None` on the Friends page, which isn't a channel.
     fn current_channel(&self) -> Option<ChannelEntry> {
@@ -3933,24 +3955,44 @@ impl ChatView {
                 .into(),
         };
         let current = self.current_channel().map(|c| c.id);
-        let sections = self.sections();
-        let empty = sections.iter().all(|section| section.channels.is_empty());
-        let muted = cx.theme().muted_foreground;
+        // Folded channels still count: a fully folded server isn't empty.
+        let empty = self
+            .sections()
+            .iter()
+            .all(|section| section.channels.is_empty());
+        let theme = cx.theme();
+        let (muted, hover_fg) = (theme.muted_foreground, theme.sidebar_foreground);
 
-        let rows: Vec<_> = sections
+        let rows: Vec<_> = self
+            .visible_sections()
             .into_iter()
             .map(|section| {
                 let header = section.title.map(|title| {
                     let id = section.id.clone().unwrap_or_default();
-                    div()
+                    let folded = self.collapsed.contains(&id);
+                    let chevron = if folded {
+                        IconName::ChevronRight
+                    } else {
+                        IconName::ChevronDown
+                    };
+                    let toggle = {
+                        let id = id.clone();
+                        cx.listener(move |this, _, _, cx| this.toggle_category(id.clone(), cx))
+                    };
+                    h_flex()
                         .id(SharedString::from(format!("category-{id}")))
-                        .px_2()
+                        .gap_1()
+                        .px_1()
                         .pt_3()
                         .pb_1()
+                        .cursor_pointer()
                         .text_xs()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(muted)
-                        .child(title.to_uppercase())
+                        .hover(move |style| style.text_color(hover_fg))
+                        .on_click(toggle)
+                        .child(Icon::new(chevron).xsmall())
+                        .child(div().truncate().child(title.to_uppercase()))
                         .context_menu(move |menu, _, _| {
                             menu.item(copy_id_item("Copy category ID", id.clone()))
                         })

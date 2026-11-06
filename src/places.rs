@@ -1,12 +1,12 @@
 //! Remembering where you were between launches: the open server (or Home),
-//! and the last channel picked in each.
+//! the last channel picked in each, and which categories are folded.
 //!
 //! Plain data with no GPUI. It's saved as JSON in Application Support, one
 //! entry per account (API URL and user ID), so another account or instance
 //! never gets IDs it can't open. The file is small and only written when the
 //! user picks something, so reads and writes are synchronous.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
@@ -55,11 +55,14 @@ pub enum Place {
     Server(String),
 }
 
-/// The open place and the last channel picked in each place.
+/// The open place, the last channel picked in each place, and the folded
+/// categories.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Places {
     pub place: Place,
     pub selected: HashMap<Place, String>,
+    /// Category IDs folded away in the channel list.
+    pub collapsed: HashSet<String>,
 }
 
 impl Default for Places {
@@ -67,6 +70,7 @@ impl Default for Places {
         Self {
             place: Place::Home,
             selected: HashMap::new(),
+            collapsed: HashSet::new(),
         }
     }
 }
@@ -83,6 +87,10 @@ struct Saved {
     /// Server ID → last channel picked in it.
     #[serde(default)]
     server_channels: HashMap<String, String>,
+    /// Folded category IDs, sorted so the file doesn't churn. Files from
+    /// before categories could fold have none.
+    #[serde(default)]
+    collapsed: BTreeSet<String>,
 }
 
 impl From<&Places> for Saved {
@@ -92,6 +100,7 @@ impl From<&Places> for Saved {
                 Place::Home => None,
                 Place::Server(id) => Some(id.clone()),
             },
+            collapsed: places.collapsed.iter().cloned().collect(),
             ..Default::default()
         };
         for (place, channel) in &places.selected {
@@ -119,6 +128,7 @@ impl From<Saved> for Places {
         Places {
             place: saved.server.map_or(Place::Home, Place::Server),
             selected,
+            collapsed: saved.collapsed.into_iter().collect(),
         }
     }
 }
@@ -209,6 +219,7 @@ mod tests {
                 (Place::Server("S1".into()), "C1".into()),
                 (Place::Server("S2".into()), "C2".into()),
             ]),
+            collapsed: HashSet::from(["CAT1".into(), "CAT2".into()]),
         }
     }
 
@@ -237,6 +248,7 @@ mod tests {
         let other = Places {
             place: Place::Home,
             selected: HashMap::from([(Place::Home, "DM9".into())]),
+            ..Places::default()
         };
         PlacesFile::at(&path, "https://a", "U1")
             .save(&sample())
@@ -250,6 +262,36 @@ mod tests {
         assert_eq!(
             PlacesFile::at(&path, "https://b", "U1").load(),
             Places::default()
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn files_from_before_folding_load_with_nothing_folded() {
+        let dir = temp_dir("no-collapsed");
+        let path = dir.join("places.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = r#"{"https://a U1": {"server": "S1", "server_channels": {"S1": "C1"}}}"#;
+        std::fs::write(&path, old).unwrap();
+        let places = PlacesFile::at(&path, "https://a", "U1").load();
+        assert_eq!(places.place, Place::Server("S1".into()));
+        assert_eq!(places.selected[&Place::Server("S1".into())], "C1");
+        assert!(places.collapsed.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn folded_categories_are_saved_sorted() {
+        let dir = temp_dir("collapsed-sorted");
+        let path = dir.join("places.json");
+        PlacesFile::at(&path, "https://a", "U1")
+            .save(&sample())
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            json["https://a U1"]["collapsed"],
+            serde_json::json!(["CAT1", "CAT2"])
         );
         std::fs::remove_dir_all(dir).unwrap();
     }

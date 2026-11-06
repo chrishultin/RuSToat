@@ -83,11 +83,14 @@ mod tests {
     }
 
     /// Every icon the app draws, so none renders blank. The person and
-    /// message menus, profile card and Friends page use these.
+    /// message menus, profile card, Friends page and category headings use
+    /// these.
     #[test]
     fn people_icons_load() {
         for icon in [
             IconName::Ban,
+            IconName::ChevronDown,
+            IconName::ChevronRight,
             IconName::CircleUser,
             IconName::Copy,
             IconName::Ellipsis,

@@ -3,7 +3,7 @@
 //! see, an empty category, a closed DM, an unknown DM partner, and a voice channel.
 
 use stoat_gpui::api::events::{Ready, ServerEvent, parse_frame};
-use stoat_gpui::store::{ChannelEntry, ChannelKind, ChatStore, ServerEntry};
+use stoat_gpui::store::{ChannelEntry, ChannelKind, ChatStore, ServerEntry, fold_sections};
 
 fn ready() -> Ready {
     let path = format!("{}/tests/fixtures/ready.json", env!("CARGO_MANIFEST_DIR"));
@@ -102,6 +102,65 @@ fn server_channels_are_grouped_uncategorized_first() {
             // "Archive" only references a missing channel, so it's omitted.
         ]
     );
+}
+
+#[test]
+fn folded_categories_keep_the_open_channel_and_mentions() {
+    let mut sections = store().server_channels("srv-alpha");
+    // A mention in #random, which the fixture has none of.
+    sections[1].channels[1].mentions = 1;
+    let shape =
+        |sections: &[stoat_gpui::store::ChannelSection]| -> Vec<(Option<String>, Vec<String>)> {
+            sections
+                .iter()
+                .map(|s| {
+                    (
+                        s.title.clone(),
+                        names(&s.channels).into_iter().map(String::from).collect(),
+                    )
+                })
+                .collect()
+        };
+    let folded = |ids: &[&str], open: Option<&str>| {
+        let collapsed = ids.iter().map(|id| id.to_string()).collect();
+        shape(&fold_sections(sections.clone(), &collapsed, open))
+    };
+    let s = |title: Option<&str>, names: &[&str]| {
+        (
+            title.map(String::from),
+            names.iter().map(|n| n.to_string()).collect::<Vec<_>>(),
+        )
+    };
+    // Nothing folded: everything shows.
+    assert_eq!(folded(&[], None), shape(&sections));
+    // Chat folded with #general open: #general (open) and #random (mention).
+    assert_eq!(
+        folded(&["cat-chat"], Some("ch-general")),
+        [
+            s(None, &["welcome"]),
+            s(Some("Chat"), &["general", "random"]),
+            s(Some("Voice"), &["hangout"])
+        ]
+    );
+    // Something else open: only the mention. Voice folded empties, but its
+    // heading stays to unfold it. Unknown IDs do nothing.
+    assert_eq!(
+        folded(&["cat-chat", "cat-voice", "cat-gone"], Some("ch-welcome")),
+        [
+            s(None, &["welcome"]),
+            s(Some("Chat"), &["random"]),
+            s(Some("Voice"), &[])
+        ]
+    );
+}
+
+#[test]
+fn categories_are_known_by_id() {
+    let store = store();
+    assert!(store.has_category("cat-chat"));
+    // Even one with no channels we can see.
+    assert!(store.has_category("cat-archive"));
+    assert!(!store.has_category("cat-deleted"));
 }
 
 #[test]

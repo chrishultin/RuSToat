@@ -53,6 +53,24 @@ pub struct ChannelSection {
     pub channels: Vec<ChannelEntry>,
 }
 
+/// `sections` as the channel list shows them: a folded category (its ID in
+/// `collapsed`) keeps only the `open` channel and channels with unread
+/// mentions, so a ping is never hidden. Its heading stays, to unfold it.
+pub fn fold_sections(
+    mut sections: Vec<ChannelSection>,
+    collapsed: &HashSet<String>,
+    open: Option<&str>,
+) -> Vec<ChannelSection> {
+    for section in &mut sections {
+        if section.id.as_ref().is_some_and(|id| collapsed.contains(id)) {
+            section
+                .channels
+                .retain(|c| Some(c.id.as_str()) == open || c.mentions > 0);
+        }
+    }
+    sections
+}
+
 /// A channel's loaded messages, oldest first.
 #[derive(Debug, Default)]
 pub struct History {
@@ -2871,6 +2889,17 @@ impl ChatStore {
             }
         }
         sections
+    }
+
+    /// Whether any server has a category with this ID.
+    pub fn has_category(&self, id: &str) -> bool {
+        self.servers.values().any(|server| {
+            server
+                .categories
+                .iter()
+                .flatten()
+                .any(|category| category.id == id)
+        })
     }
 
     /// Home: Saved Notes first, then open DMs and groups, most recent first.

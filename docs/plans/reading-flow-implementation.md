@@ -97,3 +97,33 @@ The user had a second account post in a channel, opened it, and confirmed the di
 
 ### Manual Validation
 The user marked a message unread and confirmed the following. The unread dot and the moved divider appear. The channel stays unread while open, and the web client shows it unread. It's read again after leaving and coming back. The app log shows Stoat accepted the backwards ack.
+
+## Chunk 4: Collapsible categories
+
+### Changes Made
+- `src/places.rs`: `Places.collapsed: HashSet<String>`. On disk it's `collapsed`, a sorted list (`BTreeSet`) so the file doesn't churn, with `#[serde(default)]`. The sample in the unit tests includes it. New tests check that a file without `collapsed` loads with nothing folded, and that folded IDs are saved sorted. The existing round-trip and per-account tests cover the rest.
+- `src/store.rs`:
+  - `fold_sections(sections, collapsed, open)` cuts a folded category down to the open channel and channels with `mentions > 0`. Its heading stays even when empty.
+  - `ChatStore::has_category(id)`.
+- `src/ui/chat.rs`:
+  - `ChatView.collapsed`, loaded from and saved with places (`remember_places`).
+  - `drop_stale_selection`, run on Ready, drops IDs that are no longer categories.
+  - `visible_sections()`, the folded list, is meant for chunk 5's walkers too.
+  - `toggle_category` toggles and saves.
+  - Headings are clickable rows with `ChevronDown`/`ChevronRight` and a hover colour, and keep the "Copy category ID" menu. The "Nothing here yet" check uses the unfolded sections.
+- `src/assets.rs`: the icon test covers `ChevronDown` and `ChevronRight`. Both are default component icons, so no embedding was needed.
+- `tests/store_ready.rs`: tests for `fold_sections` (nothing folded; open channel and mention kept; a folded category emptied keeps its heading; unknown IDs are ignored) and `has_category`.
+
+### Divergences
+- **Minor:** the folding filter is a pure `fold_sections` in `store.rs`, next to `ChannelSection`, so it can be tested and reused by chunk 5.
+- **Minor:** the plan said to look for existing places tests in `tests/`. They're unit tests inside `src/places.rs`, so the new ones went there.
+
+### Verification Performed
+- `cargo test --lib`: 104 passed, 1 ignored (2 new places tests).
+- `cargo test --test store_ready`: 10 passed (2 new).
+- `cargo test`: 593 passed, 0 failed, 5 ignored.
+- `cargo clippy --all-targets`: no warnings.
+- `src/places.rs` and `tests/store_ready.rs` were rustfmt-clean before, and were formatted whole. Drift in `chat.rs` and `store.rs` is unchanged (17 and 15).
+
+### Manual Validation
+The user folded a category (its channels hid except the open one), had a mention reappear in a folded category, and relaunched with the category still folded. All confirmed.
