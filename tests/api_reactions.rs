@@ -98,3 +98,20 @@ async fn a_refused_reaction_is_a_missing_permission_error() {
         "{err:?}"
     );
 }
+
+#[tokio::test]
+async fn an_emoji_is_fetched_by_id() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/custom/emoji/{PARTY}")))
+        .and(header("x-session-token", "tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "_id": PARTY, "parent": { "type": "Server", "id": "srv-elsewhere" },
+            "creator_id": "u-zed", "name": "party"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let emoji = client(&server).fetch_emoji(PARTY).await.unwrap();
+    assert_eq!(emoji.name, "party");
+}

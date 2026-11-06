@@ -462,6 +462,9 @@ pub struct ChatStore {
     media: MediaUrls,
     /// Custom emoji of the user's servers, by ID.
     emojis: HashMap<String, Emoji>,
+    /// Custom emoji of other servers, fetched by ID when a reaction or
+    /// message uses one, so they can be named. Not offered for use.
+    other_emojis: HashMap<String, Emoji>,
     /// Large images the user chose to load ("Show image"), by file ID.
     revealed_images: HashSet<String>,
     /// Read positions by channel ID.
@@ -1790,10 +1793,41 @@ impl ChatStore {
     /// A server emoji was deleted (`EmojiDelete`).
     pub fn remove_emoji(&mut self, id: &str) {
         self.emojis.remove(id);
+        self.other_emojis.remove(id);
     }
 
+    /// Another server's emoji, fetched by ID (see [`ChatStore::missing_emojis`]).
+    pub fn add_other_emoji(&mut self, emoji: Emoji) {
+        self.other_emojis.insert(emoji.id.clone(), emoji);
+    }
+
+    /// A custom emoji by ID: the user's servers', or one fetched from another.
     pub fn emoji(&self, id: &str) -> Option<&Emoji> {
-        self.emojis.get(id)
+        self.emojis.get(id).or_else(|| self.other_emojis.get(id))
+    }
+
+    /// Custom emoji that loaded messages in `channel` use, in reactions or
+    /// their text, but that the client doesn't know (another server's), each once.
+    pub fn missing_emojis(&self, channel: &str) -> Vec<String> {
+        let Some(history) = self.histories.get(channel) else {
+            return Vec::new();
+        };
+        let used = history.messages.iter().flat_map(|m| {
+            m.reactions
+                .iter()
+                .filter(|(key, users)| !users.is_empty() && crate::time::is_ulid(key))
+                .map(|(key, _)| key.as_str())
+                .chain(
+                    m.content
+                        .as_deref()
+                        .map(crate::markdown::custom_emoji_ids)
+                        .unwrap_or_default(),
+                )
+        });
+        let mut seen = HashSet::new();
+        used.filter(|id| self.emoji(id).is_none() && seen.insert(*id))
+            .map(str::to_string)
+            .collect()
     }
 
     pub fn set_media(&mut self, media: MediaUrls) {
@@ -2509,7 +2543,7 @@ impl ChatStore {
                 Some(entry) => format!("#{}", entry.name),
                 None => "#unknown-channel".into(),
             },
-            TokenRef::Emoji(id) => match self.emojis.get(id) {
+            TokenRef::Emoji(id) => match self.emoji(id) {
                 Some(emoji) => format!(":{}:", emoji.name),
                 None => ":emoji:".into(),
             },
@@ -2800,7 +2834,7 @@ impl crate::markdown::Names for ChatStore {
     }
 
     fn emoji_name(&self, id: &str) -> Option<String> {
-        self.emojis.get(id).map(|e| e.name.clone())
+        self.emoji(id).map(|e| e.name.clone())
     }
 
     fn emoji_url(&self, id: &str) -> Option<String> {

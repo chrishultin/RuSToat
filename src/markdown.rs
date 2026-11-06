@@ -129,6 +129,22 @@ fn custom_emoji_id(text: &str) -> Option<&str> {
     crate::time::is_ulid(id).then_some(id)
 }
 
+/// The IDs of the custom emoji (`:ULID:`) in `content`, in order.
+pub fn custom_emoji_ids(content: &str) -> Vec<&str> {
+    let mut ids = Vec::new();
+    let mut rest = content;
+    while let Some(at) = rest.find(':') {
+        rest = &rest[at..];
+        if let Some(id) = custom_emoji_id(rest) {
+            ids.push(id);
+            rest = &rest[CUSTOM_EMOJI_LEN..];
+        } else {
+            rest = &rest[1..];
+        }
+    }
+    ids
+}
+
 /// A sized `<img>` for a custom emoji, or `None` to leave `:ID:` as typed.
 fn emoji_img(id: &str, names: &impl Names, px: u32) -> Option<String> {
     let url = names.emoji_url(id)?;

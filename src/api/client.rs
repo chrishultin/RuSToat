@@ -3,7 +3,7 @@ use std::time::Duration;
 use reqwest::{Client, Method};
 use revolt_models::v0::{
     AllMemberResponse, BulkMessageResponse, DataEditMessage, DataLogin, DataMessageSearch,
-    DataMessageSend, MFAResponse, Message, MessageSort, OptionsQueryMessages, ReplyIntent,
+    DataMessageSend, Emoji, MFAResponse, Message, MessageSort, OptionsQueryMessages, ReplyIntent,
     ResponseLogin, User,
 };
 use serde::de::DeserializeOwned;
@@ -519,6 +519,13 @@ impl StoatClient {
     /// they can be mentioned).
     pub async fn fetch_user(&self, id: &str) -> Result<User, ApiError> {
         self.send(Method::GET, &format!("/users/{id}"), None::<&()>)
+            .await
+    }
+
+    /// `GET /custom/emoji/{id}`: one custom emoji, from any server (one the
+    /// user isn't in, seen in a reaction or message, so it can be named).
+    pub async fn fetch_emoji(&self, id: &str) -> Result<Emoji, ApiError> {
+        self.send(Method::GET, &format!("/custom/emoji/{id}"), None::<&()>)
             .await
     }
 
