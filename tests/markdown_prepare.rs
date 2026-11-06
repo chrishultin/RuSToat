@@ -22,6 +22,14 @@ impl Names for Fixture {
     fn emoji_url(&self, id: &str) -> Option<String> {
         Some(format!("https://cdn.example/emojis/{id}"))
     }
+    fn role(&self, id: &str) -> Option<(String, Option<String>)> {
+        match id {
+            "r-mods" => Some(("Mods".into(), Some("#FF8800".into()))),
+            "r-plain" => Some(("Plain".into(), None)),
+            "r-evil" => Some(("*](javascript:x)[*".into(), Some("#000000".into()))),
+            _ => None,
+        }
+    }
 }
 
 /// A known server emoji, and one from a server the user isn't in.
@@ -493,4 +501,65 @@ fn plain_text_never_gives_a_spoiler_away() {
     );
     // In code it isn't a spoiler.
     assert_eq!(plain_text("`||x||`", &Fixture), "`||x||`");
+}
+
+#[test]
+fn role_mentions_become_internal_links_with_their_colour() {
+    assert_eq!(
+        md("hey <%r-mods>, <%r-plain>"),
+        "hey [@Mods](stoat:role/r-mods/ff8800), [@Plain](stoat:role/r-plain)"
+    );
+    // Unknown roles stay as typed.
+    assert_eq!(md("<%r-nobody>"), r"\<%r-nobody>");
+    // Hostile names can't break out.
+    assert_eq!(
+        md("<%r-evil>"),
+        r"[@\*\]\(javascript\:x\)\[\*](stoat:role/r-evil/000000)"
+    );
+    assert_eq!(
+        links(&parse(&md("<%r-evil>"))),
+        vec![(
+            "@*](javascript:x)[*".to_string(),
+            "stoat:role/r-evil/000000".to_string()
+        )]
+    );
+    // In code, untouched.
+    assert_eq!(md("`<%r-mods>`"), "`<%r-mods>`");
+}
+
+#[test]
+fn everyone_and_online_become_internal_links() {
+    let everyone = "[@everyone](stoat:everyone)";
+    let online = "[@online](stoat:online)";
+    assert_eq!(md("@everyone look"), format!("{everyone} look"));
+    assert_eq!(md("look @online now"), format!("look {online} now"));
+    assert_eq!(md("look, @everyone"), format!("look, {everyone}"));
+    assert_eq!(md("(@online)!"), format!("({online})!"));
+    assert_eq!(md("hi\n@everyone"), format!("hi  \n{everyone}"));
+    // Part of a longer word: plain.
+    assert_eq!(md("foo@everyone.com"), "foo@everyone.com");
+    assert_eq!(md("@everyones"), "@everyones");
+    assert_eq!(md("@online_now"), "@online_now");
+    // In code and math, untouched.
+    assert_eq!(md("`@everyone`"), "`@everyone`");
+    assert_eq!(md("$$@online$$"), "$$@online$$");
+    assert_eq!(
+        links(&parse(&md("@everyone @online"))),
+        vec![
+            ("@everyone".to_string(), "stoat:everyone".to_string()),
+            ("@online".to_string(), "stoat:online".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn role_mentions_are_plain_names_in_plain_text() {
+    use stoat_gpui::markdown::{plain_text, snippet};
+    assert_eq!(
+        plain_text("<%r-mods> and <%r-nobody>, @everyone", &Fixture),
+        "@Mods and <%r-nobody>, @everyone"
+    );
+    assert_eq!(snippet("**hey** <%r-plain>", &Fixture, 80), "hey @Plain");
+    // Inside a spoiler, flattened like a person.
+    assert_eq!(prepare_with("||<%r-mods>||", &Fixture, |_| true), "`@Mods`");
 }

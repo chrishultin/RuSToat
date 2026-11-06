@@ -558,3 +558,64 @@ fn a_request_then_its_acceptance_through_the_store() {
     assert_eq!(store.home_summary().1, mentions);
     assert_eq!(store.attention_count(), attention);
 }
+
+/// The fixture store with the user holding `role-mods` in Alpha Team,
+/// whose channels default to mentions only.
+fn store_with_role() -> ChatStore {
+    let mut ready = ready();
+    ready.notifications = Some(NotificationSettings::parse("{}"));
+    let me = ready
+        .members
+        .iter_mut()
+        .find(|m| m.id.server == "srv-alpha" && m.id.user == "u-me")
+        .unwrap();
+    me.roles = vec!["role-mods".into()];
+    let mut store = ChatStore::new("u-me");
+    store.apply_ready(ready);
+    store
+}
+
+#[test]
+fn role_mentions_notify_only_with_the_role() {
+    let store = store_with_role();
+    let held = message(
+        "ch-general",
+        "u-ada",
+        serde_json::json!({ "role_mentions": ["role-mods"] }),
+    );
+    assert!(notify(&store, &held, AWAY).is_some());
+    let other = message(
+        "ch-general",
+        "u-ada",
+        serde_json::json!({ "role_mentions": ["role-admins"] }),
+    );
+    assert!(notify(&store, &other, AWAY).is_none());
+}
+
+#[test]
+fn everyone_notifies_under_mentions_only() {
+    // MessageFlags::MentionsEveryone = 2.
+    let everyone = message(
+        "ch-general",
+        "u-ada",
+        serde_json::json!({ "flags": 1 << 2 }),
+    );
+    assert!(notify(&default_store(), &everyone, AWAY).is_some());
+}
+
+#[test]
+fn online_notifies_only_while_we_appear_online() {
+    // MessageFlags::MentionsOnline = 3.
+    let online = message(
+        "ch-general",
+        "u-ada",
+        serde_json::json!({ "flags": 1 << 3 }),
+    );
+    assert!(notify(&store("{}", Some("Online")), &online, AWAY).is_some());
+    assert!(
+        notify(&default_store(), &online, AWAY).is_some(),
+        "online, no presence set"
+    );
+    // Invisible counts as offline, as in the member list.
+    assert!(notify(&store("{}", Some("Invisible")), &online, AWAY).is_none());
+}

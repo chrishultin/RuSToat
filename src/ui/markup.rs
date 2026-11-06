@@ -7,6 +7,8 @@
 //! - `<t:…>` timestamps, in local time (or relative, for `R`), with the
 //!   full date and time on hover.
 //! - Hidden spoilers: each word a bar, revealed (for the session) by a click.
+//! - Role mentions in the role's colour (with a dot of it), and `@everyone`
+//!   and `@online` in the theme's primary colour.
 //!
 //! Also the copy button on fenced code blocks ([`code_block_actions`]).
 
@@ -28,6 +30,7 @@ use gpui_kit::*;
 
 use crate::markdown::{InternalLink, parse_internal_link};
 use crate::time::{format_timestamp, local_from_seconds, timestamp_tooltip};
+use crate::ui::chat::hex_colour;
 
 const NAME: &str = "stoat-markup";
 
@@ -38,8 +41,24 @@ const PILL_TINT: f32 = 0.12;
 /// the bars on two lines don't touch.
 const SPOILER_LINE_HEIGHT: f32 = 1.3;
 
+/// The colour dot in a role mention, as in the member list.
+const ROLE_DOT: Pixels = px(10.);
+
+/// Who a mention drawn here is of.
+#[derive(Clone, Copy)]
+enum Mention {
+    /// A role, with its colour if it has a solid one.
+    Role(Option<Hsla>),
+    /// `@everyone` or `@online`.
+    Everyone,
+}
+
 /// What a claimed link stands for.
 enum Markup {
+    Mention {
+        label: String,
+        kind: Mention,
+    },
     Time {
         seconds: i64,
         style: Option<char>,
@@ -117,6 +136,13 @@ impl MarkdownPlugin for MarkupPlugin {
                     .markdown(copied),
                 )
             }
+            InternalLink::Role { colour, .. } => Some(mention(
+                node.to_string(),
+                Mention::Role(colour.as_deref().and_then(hex_colour)),
+            )),
+            InternalLink::Everyone | InternalLink::Online => {
+                Some(mention(node.to_string(), Mention::Everyone))
+            }
             InternalLink::User(_) | InternalLink::Channel(_) => None,
         }
     }
@@ -132,6 +158,9 @@ impl MarkdownPlugin for MarkupPlugin {
         let at = node.source_range().map_or(0, |range| range.start);
         match node.data::<Markup>()? {
             Markup::Time { seconds, style } => render_time(*seconds, *style, at, context, window),
+            Markup::Mention { label, kind } => {
+                Some(render_mention(label, *kind, context, window, cx))
+            }
             Markup::Spoiler {
                 index,
                 first,
@@ -148,6 +177,56 @@ impl MarkdownPlugin for MarkupPlugin {
             )),
         }
     }
+}
+
+/// A mention node, copied as its label (`@Name`), as user mentions are.
+fn mention(label: String, kind: Mention) -> MarkdownNode {
+    MarkdownNode::new(
+        NAME,
+        Markup::Mention {
+            label: label.clone(),
+            kind,
+        },
+    )
+    .text(label.clone())
+    .markdown(label)
+}
+
+/// A role, `@everyone` or `@online` mention as a pill in the surrounding
+/// text's font. A role has a dot of its colour; one without a colour is
+/// muted.
+fn render_mention(
+    label: &str,
+    kind: Mention,
+    context: &InlineRenderContext,
+    window: &mut Window,
+    cx: &App,
+) -> InlineElement {
+    let colour = match kind {
+        Mention::Role(colour) => colour.unwrap_or(cx.theme().muted_foreground),
+        Mention::Everyone => cx.theme().primary,
+    };
+    let font = context.text_style().font();
+    let (size, line_height) = (context.font_size(), context.line_height());
+    let text_system = window.text_system();
+    let baseline = text_system.baseline_offset(text_system.resolve_font(&font), size, line_height);
+    let pill = h_flex()
+        .flex_none()
+        .whitespace_nowrap()
+        .gap(size * 0.25)
+        .px(size * 0.3)
+        .rounded(size * 0.25)
+        .bg(colour.opacity(PILL_TINT))
+        .font(font)
+        .text_size(size)
+        .line_height(line_height)
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(colour)
+        .when(matches!(kind, Mention::Role(_)), |el| {
+            el.child(div().flex_none().size(ROLE_DOT).rounded_full().bg(colour))
+        })
+        .child(label.to_string());
+    InlineElement::new(pill).with_baseline(baseline)
 }
 
 /// A timestamp as a small pill in the surrounding text's font. Drawn

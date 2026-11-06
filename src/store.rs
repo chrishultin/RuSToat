@@ -1378,7 +1378,8 @@ impl ChatStore {
     }
 
     /// Whether a message mentions the user: directly, through one of their
-    /// roles in the server, with @everyone, or with @online while online.
+    /// roles in the server, with @everyone, or with @online while they
+    /// appear online (not invisible).
     pub fn is_mentioned(&self, message: &Message) -> bool {
         if message.author == self.me {
             return false;
@@ -1400,7 +1401,11 @@ impl ChatStore {
         if has_flag(message.flags, MessageFlags::MentionsEveryone) {
             return true;
         }
-        let online = self.users.get(&self.me).is_some_and(|u| u.online);
+        // Invisible counts as offline, as in the member list.
+        let online = self
+            .users
+            .get(&self.me)
+            .is_some_and(|u| presence_kind(u) != PresenceKind::Offline);
         online && has_flag(message.flags, MessageFlags::MentionsOnline)
     }
 
@@ -3146,6 +3151,17 @@ impl crate::markdown::Names for ChatStore {
 
     fn emoji_url(&self, id: &str) -> Option<String> {
         self.media.emoji(id)
+    }
+
+    fn role(&self, id: &str) -> Option<(String, Option<String>)> {
+        let role = self
+            .servers
+            .values()
+            .find_map(|server| server.roles.get(id))?;
+        Some((
+            role.name.clone(),
+            role.colour.as_deref().and_then(solid_colour),
+        ))
     }
 }
 

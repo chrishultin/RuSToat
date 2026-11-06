@@ -147,3 +147,39 @@ Deferred to the end (see the plan's chunk 3 manual check).
 
 ### Manual Validation
 Deferred to the end (see the plan's chunk 4 manual check).
+
+## Chunk 5: Draw role mentions, `@everyone` and `@online`
+
+### Changes Made
+- `src/markdown.rs`:
+  - `Names::role(id) -> Option<(name, Option<#rrggbb>)>`, which defaults to `None`.
+  - `angle_bracket` turns a known `<%ID>` into `[@escaped name](stoat:role/ID)`, plus `/rrggbb` (lower-cased, no `#`) when the role has a colour. Unknown roles stay as typed.
+  - `rewrite_text` turns `@everyone` / `@online` into `[@everyone](stoat:everyone)` / `[@online](stoat:online)` through `everyone_or_online(content, at)`. It requires that the previous character isn't alphanumeric and the next isn't alphanumeric or `_`, so `foo@everyone.com`, `@everyones` and `@online_now` stay plain. The fast-path `find` set gains `'@'`.
+  - `plain_mentions` turns `<%ID>` into `@Name`, which covers `plain_text`, `snippet` and spoilers.
+  - New `InternalLink::{Role { id, colour }, Everyone, Online}`. `parse_internal_link` handles the colourless and coloured forms and rejects a malformed colour.
+  - Module doc updated.
+  - Unit tests for parsing and word boundaries.
+- `src/store.rs`:
+  - `impl Names for ChatStore` gains `role`: the first server whose roles contain the ID, coloured through `solid_colour`.
+  - `is_mentioned` treats the user's own Invisible presence as offline for `@online` (`presence_kind(u) != Offline`). See Divergences.
+- `src/ui/markup.rs`: `MarkupPlugin` claims role, everyone and online links as `Markup::Mention { label, kind: Mention::Role(Option<Hsla>) | Mention::Everyone }`, and copies them as their `@Name` label.
+  - `render_mention` draws a pill: the colour at 12% as background, medium-weight text in the colour, and for roles a 10px dot of the colour.
+  - The colour is the role's (via `ui::chat::hex_colour`), or `muted_foreground` for a role with no solid colour. `@everyone` and `@online` use the theme's `primary`.
+- `src/ui/chat.rs`: the link handler ignores the new variants.
+- Tests:
+  - `tests/markdown_prepare.rs`: the fixture gains roles. New tests for known, colourless, unknown and hostile roles (with a parse check), roles in code, `@everyone`/`@online` in every position from the plan, and roles in `plain_text`, `snippet` and spoilers.
+  - `tests/store_roles.rs`: a role mention's prepared body follows a live rename and recolour, a CSS colour name becomes hex, and a gradient drops the colour.
+  - `tests/notify_rules.rs`: under the server default (mentions only), a held role notifies and a role you don't hold doesn't. `MentionsEveryone` notifies. `MentionsOnline` notifies while online and not while Invisible.
+
+### Divergences
+- **`hex_colour` stays in `ui/chat.rs`.** It's already `pub(crate)` and `profile_card.rs` imports it from there, so `markup.rs` does the same.
+- **Behaviour change: `@online` no longer counts as a mention while you're Invisible.** The plan said `is_mentioned` already handled `MentionsOnline` and only tests were needed. But it only checked `user.online`, so an Invisible user still counted `@online`, and the plan's "while invisible" banner test failed against it. I changed it to the project's existing rule (`presence_kind`: online and not Invisible, as the member list and friends list use). This affects unread mention counts as well as banners.
+- **Pill colours.** `@everyone`/`@online` use the theme's `primary`, which is what Markdown links use. It reads on both bubble variants: our own are `Tinted`, a light primary wash with foreground text.
+
+### Verification Performed
+- `cargo test`: 642 passed (9 new), 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- Formatted `markup.rs` and the touched test files (clean at HEAD). Drift unchanged: `markdown.rs` 1, `store.rs` 15, `chat.rs` 17.
+
+### Manual Validation
+Deferred to the end (see the plan's chunk 5 manual check).

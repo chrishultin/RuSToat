@@ -7,6 +7,10 @@
 //!
 //! - `<@user>` → `[@Name](stoat:user/ID)` and `<#channel>` → `[#name](stoat:channel/ID)`.
 //!   Names are escaped so a name like `*]evil[*` can't break the formatting.
+//! - `<%role>` → `[@Name](stoat:role/ID)`, or `stoat:role/ID/rrggbb` for a
+//!   solid colour, which `ui::markup` draws in that colour. `@everyone` and
+//!   `@online` (not part of a longer word) → `[@everyone](stoat:everyone)`
+//!   and `[@online](stoat:online)`. Unknown roles stay as typed.
 //! - `:ULID:` (custom emoji) → `<img src=… width=… height=…>`, generated here, so
 //!   it's the only HTML that reaches `TextView` (every typed `<` is escaped).
 //!   Markdown's own `![](…)` can't be sized and draws images at full size.
@@ -44,6 +48,11 @@ pub trait Names {
     }
     /// Where a custom emoji's image is. `None` leaves `:ID:` as typed.
     fn emoji_url(&self, _id: &str) -> Option<String> {
+        None
+    }
+    /// A role's name, and its colour as `#rrggbb` if it's a solid one.
+    /// Role IDs are unique across servers, so no server is needed.
+    fn role(&self, _id: &str) -> Option<(String, Option<String>)> {
         None
     }
 }
@@ -198,6 +207,13 @@ pub enum InternalLink {
     /// `stoat:time/{seconds}` or `stoat:time/{seconds}/{style}`: a
     /// `<t:…>` timestamp (see [`crate::time::format_timestamp`]).
     Time { seconds: i64, style: Option<char> },
+    /// `stoat:role/{id}` or `stoat:role/{id}/{rrggbb}`: a role mention, in
+    /// the role's colour when it has a solid one.
+    Role { id: String, colour: Option<String> },
+    /// `stoat:everyone`: an `@everyone` mention.
+    Everyone,
+    /// `stoat:online`: an `@online` mention.
+    Online,
     /// `stoat:spoiler/{index}/{word}/{words}`: word `word` of the `words`
     /// in hidden spoiler `index` (see [`prepare_with`]).
     Spoiler {
@@ -211,7 +227,25 @@ pub enum InternalLink {
 /// external links and anything malformed.
 pub fn parse_internal_link(url: &str) -> Option<InternalLink> {
     let rest = url.strip_prefix(INTERNAL_SCHEME)?;
+    match rest {
+        "everyone" => return Some(InternalLink::Everyone),
+        "online" => return Some(InternalLink::Online),
+        _ => {}
+    }
     let (kind, id) = rest.split_once('/')?;
+    if kind == "role" {
+        let (id, colour) = match id.split_once('/') {
+            Some((id, colour)) => {
+                let hex = colour.len() == 6 && colour.bytes().all(|b| b.is_ascii_hexdigit());
+                (id, Some(hex.then(|| format!("#{colour}"))?))
+            }
+            None => (id, None),
+        };
+        return (!id.is_empty() && !id.contains(['?', '#'])).then(|| InternalLink::Role {
+            id: id.to_string(),
+            colour,
+        });
+    }
     if kind == "time" {
         let (seconds, style) = match id.split_once('/') {
             Some((seconds, style)) => (seconds, Some(timestamp_style(style)?)),
@@ -560,15 +594,39 @@ fn rewrite_text(
             rest = &rest[consumed..];
             continue;
         }
+        let at = segment.offset + (text.len() - rest.len());
+        if let Some((mention, len)) = everyone_or_online(segment.content, at) {
+            out.push_str(mention);
+            rest = &rest[len..];
+            continue;
+        }
         // Skip at least one whole character: `rest` may start with a
         // multi-byte one (emoji, CJK), and slicing mid-character panics.
         let first = rest.chars().next().map_or(1, char::len_utf8);
         let next = rest[first..]
-            .find(['<', '|', ':', '\n'])
+            .find(['<', '|', ':', '@', '\n'])
             .map_or(rest.len(), |i| i + first);
         out.push_str(&rest[..next]);
         rest = &rest[next..];
     }
+}
+
+/// `@everyone` or `@online` at `at` in `content`, as a whole word (as the
+/// start of `foo@everyone.com` it isn't): its link, and its length.
+fn everyone_or_online(content: &str, at: usize) -> Option<(&'static str, usize)> {
+    let rest = &content[at..];
+    let (word, link) = [
+        ("@everyone", "[@everyone](stoat:everyone)"),
+        ("@online", "[@online](stoat:online)"),
+    ]
+    .into_iter()
+    .find(|(word, _)| rest.starts_with(word))?;
+    let before = content[..at].chars().next_back();
+    let after = rest[word.len()..].chars().next();
+    let joined = |c: Option<char>, underscore: bool| {
+        c.is_some_and(|c| c.is_alphanumeric() || (underscore && c == '_'))
+    };
+    (!joined(before, false) && !joined(after, true)).then_some((link, word.len()))
 }
 
 /// What the `\n` at `at` in `content` becomes. Stoat keeps every line break,
@@ -613,6 +671,20 @@ fn angle_bracket(text: &str, names: &impl Names) -> (String, usize) {
         {
             return (
                 format!("[#{}]({INTERNAL_SCHEME}channel/{id})", escape(&name)),
+                close + 1,
+            );
+        }
+        if let Some(id) = inner.strip_prefix('%')
+            && let Some((name, colour)) = names.role(id)
+        {
+            let colour = colour
+                .as_deref()
+                .and_then(|c| c.strip_prefix('#'))
+                .map_or(String::new(), |hex| {
+                    format!("/{}", hex.to_ascii_lowercase())
+                });
+            return (
+                format!("[@{}]({INTERNAL_SCHEME}role/{id}{colour})", escape(&name)),
                 close + 1,
             );
         }
@@ -761,6 +833,7 @@ fn plain_mentions(text: &str, names: &impl Names) -> String {
             let name = match (inner.strip_prefix('@'), inner.strip_prefix('#')) {
                 (Some(user), _) => format!("@{}", names.user_name(user)?),
                 (_, Some(channel)) => format!("#{}", names.channel_name(channel)?),
+                _ if inner.starts_with('%') => format!("@{}", names.role(&inner[1..])?.0),
                 _ => {
                     let (seconds, style) = timestamp(inner)?;
                     plain_timestamp(seconds, style)?
@@ -935,6 +1008,55 @@ mod tests {
                 style: Some('R')
             })
         );
+    }
+
+    #[test]
+    fn internal_links_parse_to_roles_and_everyone() {
+        assert_eq!(
+            parse_internal_link("stoat:role/01ROLE"),
+            Some(InternalLink::Role {
+                id: "01ROLE".into(),
+                colour: None
+            })
+        );
+        assert_eq!(
+            parse_internal_link("stoat:role/01ROLE/ff8800"),
+            Some(InternalLink::Role {
+                id: "01ROLE".into(),
+                colour: Some("#ff8800".into())
+            })
+        );
+        assert_eq!(
+            parse_internal_link("stoat:everyone"),
+            Some(InternalLink::Everyone)
+        );
+        assert_eq!(
+            parse_internal_link("stoat:online"),
+            Some(InternalLink::Online)
+        );
+        for url in [
+            "stoat:role/",
+            "stoat:role/01ROLE/ff88",
+            "stoat:role/01ROLE/gg8800",
+            "stoat:role/01ROLE/ff8800/x",
+            "stoat:everyone/x",
+            "stoat:Everyone",
+        ] {
+            assert_eq!(parse_internal_link(url), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn everyone_and_online_only_as_whole_words() {
+        let at = |content: &str, at: usize| everyone_or_online(content, at).map(|(link, _)| link);
+        assert_eq!(at("@everyone", 0), Some("[@everyone](stoat:everyone)"));
+        assert_eq!(at("hi @online!", 3), Some("[@online](stoat:online)"));
+        assert_eq!(at("(@everyone)", 1), Some("[@everyone](stoat:everyone)"));
+        assert_eq!(at("foo@everyone.com", 3), None);
+        assert_eq!(at("@everyones", 0), None);
+        assert_eq!(at("@online_now", 0), None);
+        assert_eq!(at("é@online", 2), None);
+        assert_eq!(at("@every", 0), None);
     }
 
     #[test]

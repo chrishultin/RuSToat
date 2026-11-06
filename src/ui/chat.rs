@@ -5720,10 +5720,15 @@ impl People {
         let people = self.clone();
         Arc::new(move |url, window, cx| match parse_internal_link(url) {
             Some(InternalLink::User(user)) => people.open_card(user, window, cx),
-            // Channel links don't go anywhere yet; `ui::markup` draws
-            // timestamps and spoilers, so they aren't links.
+            // Channel links don't go anywhere yet; `ui::markup` draws the
+            // rest, so they aren't links.
             Some(
-                InternalLink::Channel(_) | InternalLink::Time { .. } | InternalLink::Spoiler { .. },
+                InternalLink::Channel(_)
+                | InternalLink::Role { .. }
+                | InternalLink::Everyone
+                | InternalLink::Online
+                | InternalLink::Time { .. }
+                | InternalLink::Spoiler { .. },
             ) => {}
             None => {
                 if is_external_link(url) {

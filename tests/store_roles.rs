@@ -501,3 +501,53 @@ fn every_server_channel_in_ready_stays_visible() {
     // And the store used above.
     assert_eq!(channel_list(&store()), ["ch-open", "ch-test"]);
 }
+
+#[test]
+fn a_role_mention_follows_a_rename_and_recolour() {
+    use stoat_gpui::store::TimelineRow;
+    let mut store = store();
+    let page = serde_json::from_value(json!([
+        { "_id": "01M6GDKW80AAAAAAAAAAAAAAAA", "channel": "ch-open", "author": "u-ada",
+          "content": "ping <%mods> and <%plain>" },
+    ]))
+    .unwrap();
+    store.set_history("ch-open", page, 50);
+    let body = |store: &ChatStore| {
+        store
+            .timeline("ch-open")
+            .into_iter()
+            .find_map(|row| match row {
+                TimelineRow::Message(m) => m.body,
+                _ => None,
+            })
+            .unwrap()
+    };
+    // A CSS colour name becomes hex; a colourless role has none.
+    assert_eq!(
+        body(&store),
+        "ping [@Mods](stoat:role/mods/ffd700) and [@Plain](stoat:role/plain)"
+    );
+
+    apply(
+        &mut store,
+        role_update(
+            "mods",
+            json!({ "name": "Moderators", "colour": "#00FF00" }),
+            &[],
+        ),
+    );
+    assert_eq!(
+        body(&store),
+        "ping [@Moderators](stoat:role/mods/00ff00) and [@Plain](stoat:role/plain)"
+    );
+    // A gradient isn't a solid colour.
+    apply(
+        &mut store,
+        role_update(
+            "mods",
+            json!({ "colour": "linear-gradient(red, blue)" }),
+            &[],
+        ),
+    );
+    assert!(body(&store).starts_with("ping [@Moderators](stoat:role/mods) "));
+}
