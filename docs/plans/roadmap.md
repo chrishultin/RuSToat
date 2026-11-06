@@ -62,7 +62,7 @@ Some milestones lay foundations that later ones reuse. When the earlier one's pl
 - A warning before opening a link whose text and address differ
 - An age gate on mature (NSFW) channels
 
-### Milestone 12: Search, slowmode and GIFs (M)
+### Milestone 12: Search, slowmode and GIFs (M). Plan: [`search-slowmode-and-gifs.md`](search-slowmode-and-gifs.md)
 - Search sort (relevance, latest or oldest), and "Load more" past 50 results
 - Slowmode: show the channel's slowmode, and count down in the message box after you send
 - A GIF picker (the web client's GIF search)
