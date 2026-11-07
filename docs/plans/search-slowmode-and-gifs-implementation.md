@@ -266,3 +266,15 @@ Pending (batched to the end). The plan's risks to check by hand:
 
 ### Manual Validation
 Pending (batched to the end).
+
+## Fixes from manual testing
+
+### GIF picker: hovered GIFs didn't play, then flashed before playing
+- **Found:** hovering a result requested its `gif_high` file (in the log) but the tile never animated.
+- **Cause:** GPUI's `img` keeps its frame index in element state, so an `img` without an element id stays on frame 0 and never asks for animation frames. Chat's `inline_image` gives its `img` an id, which is why GIFs in chat already animate.
+- **Fix 1:** result images get `.id(("gif-image", ix))`.
+- **Found next:** the tile flashed to its dark background before the GIF played.
+- **Cause:** for its first 200 ms of loading (`LOADING_DELAY`), an `img` draws nothing, not even its `with_loading` element.
+- **Fix 2:** `render_results` asks `window.use_asset::<ImgResourceLoader>` for the hovered GIF's animation. This starts the load and redraws the picker when it lands. The tile shows the still until the animation is decoded, then switches straight to it. `with_loading` is no longer used.
+- **Files:** `src/ui/gif_picker.rs` (`render` passes `window` to `render_results`).
+- **Verified:** the user confirmed hovering now plays with no flash. `cargo test` passed 722, 0 failed. Clippy is clean, and `src/ui/gif_picker.rs` has 0 rustfmt drift.

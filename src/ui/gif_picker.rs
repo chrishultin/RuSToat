@@ -303,7 +303,7 @@ fn gif_error_text(err: &ApiError) -> SharedString {
 }
 
 impl Render for GifBrowser {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let header = h_flex()
@@ -339,7 +339,7 @@ impl Render for GifBrowser {
                 Load::Ready(results) if results.is_empty() => {
                     self.render_note("No GIFs found".into(), false, cx)
                 }
-                Load::Ready(results) => self.render_results(results.clone(), cx),
+                Load::Ready(results) => self.render_results(results.clone(), window, cx),
             },
         };
         v_flex().w(px(WIDTH)).gap_2().child(header).child(
@@ -445,17 +445,36 @@ impl GifBrowser {
     }
 
     /// A tile per GIF: its still, or its animation while hovered.
-    fn render_results(&self, results: Rc<Vec<GifResult>>, cx: &mut Context<Self>) -> AnyElement {
+    fn render_results(
+        &self,
+        results: Rc<Vec<GifResult>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // The hovered GIF's animation, once it's loaded and decoded. Asking
+        // starts the load, and the picker is drawn again when it's done;
+        // until then the still stays (an image that's still loading draws
+        // nothing, which would flash the tile's background).
+        let playing = self.hovered.and_then(|ix| {
+            let animated = results.get(ix)?.animated()?;
+            let uri = SharedUri::from(animated.url.clone());
+            match window.use_asset::<ImgResourceLoader>(&Resource::Uri(uri.clone()), cx) {
+                Some(Ok(_)) => Some((ix, uri)),
+                _ => None,
+            }
+        });
         let theme = cx.theme();
         let (muted_bg, muted) = (theme.muted, theme.muted_foreground);
         let tiles = results.iter().enumerate().map(|(ix, gif)| {
-            let hovered = self.hovered == Some(ix);
-            let shown = hovered
-                .then(|| gif.animated())
-                .flatten()
-                .or_else(|| gif.still());
+            let shown = match &playing {
+                Some((playing, uri)) if *playing == ix => Some(uri.clone()),
+                _ => gif.still().map(|media| SharedUri::from(media.url.clone())),
+            };
             let face = match shown {
-                Some(media) => img(SharedUri::from(media.url.clone()))
+                // The id gives the image somewhere to keep which frame it's
+                // on: without one, GPUI shows only the first.
+                Some(uri) => img(uri)
+                    .id(("gif-image", ix))
                     .size_full()
                     .object_fit(ObjectFit::Contain)
                     .into_any_element(),
