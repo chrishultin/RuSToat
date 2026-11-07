@@ -226,3 +226,7 @@ Each chunk's manual check in the plan, then the plan-level Manual Tests (two acc
 - **Tests:** `tests/store_live.rs` `going_invisible_shows_whichever_way_stoat_says_it` covers the answer (no presence, offline), the echo (Invisible), going back to Online from the echo alone, and that someone else's presence doesn't mark them online. `stoats_answer_sets_the_users_own_status_at_once` was updated for the new signature.
 - **Verification:** `cargo test` 759 passed; clippy clean; drift unchanged (`store.rs` 15, `chat.rs` 17).
 - **Known limit, left as is:** if someone else was invisible when another account connected, that account's copy of them stays offline when they go visible, until the next `Ready`. Stoat sends no `online: true` for that, and the web client has the same gap.
+
+## Manual validation result
+
+_2026-11-06_: The user ran the bundled build (`scripts/run-bundled.sh`) against `api.stoat.chat` with two accounts. They found Invisible not showing in RuSToat, which was fixed (above), and confirmed it after relaunching. They then signed off on the milestone ("looks good") without reporting each of the other checks individually. Item 1 of the plan's Definition of Done ("every chunk's manual check is recorded") is therefore met only as this overall sign-off.
