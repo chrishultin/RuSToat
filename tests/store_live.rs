@@ -898,14 +898,75 @@ fn the_users_own_status_follows_user_updates() {
 fn stoats_answer_sets_the_users_own_status_at_once() {
     use stoat_gpui::api::models::{Presence, UserStatus};
     let mut store = store_with_page(50);
-    store.set_my_status(Some(UserStatus {
-        text: Some("lunch".into()),
-        presence: Some(Presence::Invisible),
-    }));
+    store.set_my_status(
+        Some(UserStatus {
+            text: Some("lunch".into()),
+            presence: Some(Presence::Busy),
+        }),
+        true,
+    );
+    assert_eq!(store.my_status(), (Presence::Busy, Some("lunch".into())));
+    store.set_my_status(None, true);
+    assert_eq!(store.my_status(), (Presence::Online, None));
+}
+
+/// Stoat never sends Invisible in a user: its answer to the change (and
+/// `Ready`) leave the presence out and say `online: false`. Only the live
+/// echo carries it.
+#[test]
+fn going_invisible_shows_whichever_way_stoat_says_it() {
+    use stoat_gpui::api::models::{Presence, UserStatus};
+    let mut store = store_with_page(50);
+    let apply = |store: &mut ChatStore, frame: serde_json::Value| {
+        let Some(ServerEvent::UserUpdate { id, data, clear }) =
+            parse_frame(&frame.to_string()).pop()
+        else {
+            panic!("not a user update: {frame}");
+        };
+        store.apply_user_update(&id, *data, &clear);
+    };
+
+    // Stoat's answer: the text, no presence, and offline.
+    store.set_my_status(
+        Some(UserStatus {
+            text: Some("away".into()),
+            presence: None,
+        }),
+        false,
+    );
     assert_eq!(
         store.my_status(),
-        (Presence::Invisible, Some("lunch".into()))
+        (Presence::Invisible, Some("away".into()))
     );
-    store.set_my_status(None);
-    assert_eq!(store.my_status(), (Presence::Online, None));
+
+    // The echo after it says Invisible outright.
+    apply(
+        &mut store,
+        serde_json::json!({
+            "type": "UserUpdate", "id": "u-me",
+            "data": { "status": { "text": "away", "presence": "Invisible" } }, "clear": []
+        }),
+    );
+    assert_eq!(store.my_status().0, Presence::Invisible);
+
+    // Back to Online from another client: only the echo says so, with no
+    // `online`, and that's enough.
+    apply(
+        &mut store,
+        serde_json::json!({
+            "type": "UserUpdate", "id": "u-me",
+            "data": { "status": { "presence": "Online" } }, "clear": []
+        }),
+    );
+    assert_eq!(store.my_status().0, Presence::Online);
+
+    // Someone else's presence doesn't make them online.
+    apply(
+        &mut store,
+        serde_json::json!({
+            "type": "UserUpdate", "id": "u-bob",
+            "data": { "status": { "presence": "Online" } }, "clear": []
+        }),
+    );
+    assert!(!store.user("u-bob").unwrap().online);
 }

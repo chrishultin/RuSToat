@@ -3501,7 +3501,7 @@ impl ChatView {
                 this.status_saving = false;
                 match result {
                     Ok(Ok(me)) => {
-                        this.store.set_my_status(me.status);
+                        this.store.set_my_status(me.status, me.online);
                         // The member list and Friends page may show the user.
                         this.forget_member_lists();
                         if close_editor {

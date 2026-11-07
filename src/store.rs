@@ -1385,11 +1385,19 @@ impl ChatStore {
 
     /// The user's own presence (Online if unset) and custom status text
     /// (trimmed; `None` if unset or blank).
+    ///
+    /// Stoat keeps Invisible out of the users it sends, even the user's
+    /// own (`Ready`, and its answer to a change): it leaves the presence
+    /// out and says `online: false`. So the user is Invisible if their
+    /// presence says so (the live `UserUpdate` echo does), or if Stoat
+    /// says they're offline, as the web client's SDK reads it.
     pub fn my_status(&self) -> (Presence, Option<String>) {
-        let status = self.users.get(&self.me).and_then(|u| u.status.as_ref());
-        let presence = status
-            .and_then(|s| s.presence.clone())
-            .unwrap_or(Presence::Online);
+        let me = self.users.get(&self.me);
+        let status = me.and_then(|u| u.status.as_ref());
+        let presence = match status.and_then(|s| s.presence.clone()) {
+            _ if me.is_some_and(|u| !u.online) => Presence::Invisible,
+            presence => presence.unwrap_or(Presence::Online),
+        };
         let text = status
             .and_then(|s| s.text.as_deref())
             .map(str::trim)
@@ -1398,12 +1406,14 @@ impl ChatStore {
         (presence, text)
     }
 
-    /// The user's own status as Stoat answered a change to it, so the
-    /// panel needn't wait for the `UserUpdate` echo.
-    pub fn set_my_status(&mut self, status: Option<UserStatus>) {
+    /// The user's own status and `online` as Stoat answered a change to
+    /// them, so the panel needn't wait for the `UserUpdate` echo. Offline
+    /// is how the answer says Invisible (see [`Self::my_status`]).
+    pub fn set_my_status(&mut self, status: Option<UserStatus>, online: bool) {
         let me = self.me.clone();
         if let Some(user) = self.users.get_mut(&me) {
             user.status = status;
+            user.online = online;
         }
     }
 
@@ -2689,7 +2699,19 @@ impl ChatStore {
             )
         };
         let before = shown(user);
+        // The user's own echo with a presence other than Invisible: they're
+        // visible again (Stoat sends no `online: true` for that), even if
+        // they went visible from another client.
+        let visible_again = id == self.me
+            && data
+                .status
+                .as_ref()
+                .and_then(|status| status.presence.as_ref())
+                .is_some_and(|presence| *presence != Presence::Invisible);
         user.apply_options(data);
+        if visible_again {
+            user.online = true;
+        }
         for field in clear {
             match field {
                 FieldsUser::Avatar => user.avatar = None,

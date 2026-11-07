@@ -209,3 +209,20 @@ All are minor, and each is recorded under its chunk:
 
 ### Remaining Manual Steps
 Each chunk's manual check in the plan, then the plan-level Manual Tests (two accounts, web client sync both ways, relaunch persistence, light and dark themes). See the conversation's checklist.
+
+## Fixes during manual validation
+
+### Invisible didn't show in RuSToat
+- **Found:** picking Invisible was accepted by Stoat, but RuSToat's own panel and menu kept showing Online.
+- **Cause:**
+  - Stoat never sends Invisible in a user object, not even the user's own. `into_self`, `into_known` and the rest use `UserStatus::into(true)`, which drops an Invisible presence, and they set `online: false` instead. This is in `crates/core/database/src/util/bridge/v0.rs` in stoatchat/stoatchat.
+  - So the `PATCH /users/@me` answer, which `change_status` applied at once, had no presence, and `my_status` fell back to Online. A relaunch would have done the same, because `Ready` is built the same way.
+  - Only the live `UserUpdate` echo keeps it: `PartialUser` uses `into(false)`.
+  - The web client's SDK reads presence as `online ? (status.presence ?? "Online") : "Invisible"`.
+- **Fix:**
+  - `ChatStore::my_status` treats the user as Invisible if Stoat says they're offline. Their presence otherwise comes from the status, as before; an echo carrying Invisible already reads as Invisible.
+  - `set_my_status(status, online)` also applies `online` from Stoat's answer.
+  - `apply_user_update` sets the user's own `online` back to true when their echo carries a presence other than Invisible. Stoat sends no `online: true` for that, so going visible from another client would otherwise stay Invisible here.
+- **Tests:** `tests/store_live.rs` `going_invisible_shows_whichever_way_stoat_says_it` covers the answer (no presence, offline), the echo (Invisible), going back to Online from the echo alone, and that someone else's presence doesn't mark them online. `stoats_answer_sets_the_users_own_status_at_once` was updated for the new signature.
+- **Verification:** `cargo test` 759 passed; clippy clean; drift unchanged (`store.rs` 15, `chat.rs` 17).
+- **Known limit, left as is:** if someone else was invisible when another account connected, that account's copy of them stays offline when they go visible, until the next `Ready`. Stoat sends no `online: true` for that, and the web client has the same gap.
