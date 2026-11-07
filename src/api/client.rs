@@ -3,9 +3,9 @@ use std::time::Duration;
 use reqwest::{Client, Method};
 use revolt_models::v0::{
     AllMemberResponse, BulkMessageResponse, Channel, DataEditMessage, DataEditUser, DataLogin,
-    DataMessageSearch, DataMessageSend, DataSendFriendRequest, Emoji, FieldsUser, MFAResponse,
-    Member, Message, MessageSort, OptionsQueryMessages, Presence, ReplyIntent, ResponseLogin, User,
-    UserProfile, UserStatus,
+    DataMemberEdit, DataMessageSearch, DataMessageSend, DataSendFriendRequest, Emoji, FieldsUser,
+    MFAResponse, Member, Message, MessageSort, OptionsQueryMessages, Presence, ReplyIntent,
+    ResponseLogin, User, UserProfile, UserStatus,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -640,15 +640,23 @@ impl StoatClient {
     /// left out too. Stoat merges `status`, so setting a presence keeps the
     /// text.
     pub async fn edit_user(&self, edit: &DataEditUser) -> Result<User, ApiError> {
-        let mut body = without_nulls(serde_json::to_value(edit).expect("user edit serialises"));
-        if let Some(map) = body.as_object_mut()
-            && map
-                .get("remove")
-                .is_some_and(|r| r.as_array().is_some_and(Vec::is_empty))
-        {
-            map.remove("remove");
-        }
+        let body = edit_body(serde_json::to_value(edit).expect("user edit serialises"));
         self.send(Method::PATCH, "/users/@me", Some(&body)).await
+    }
+
+    /// `PATCH /servers/{server}/members/{user}`: change a membership, such
+    /// as the user's own nickname, avatar and pronouns on a server. Only
+    /// what's set is sent, as with [`Self::edit_user`]. Stoat answers with
+    /// the member, as changed.
+    pub async fn edit_member(
+        &self,
+        server: &str,
+        user: &str,
+        edit: &DataMemberEdit,
+    ) -> Result<Member, ApiError> {
+        let body = edit_body(serde_json::to_value(edit).expect("member edit serialises"));
+        let path = format!("/servers/{server}/members/{user}");
+        self.send(Method::PATCH, &path, Some(&body)).await
     }
 
     /// Set the user's presence (Online, Idle, Focus, Busy or Invisible).
@@ -854,6 +862,20 @@ fn edit_status(status: Option<UserStatus>) -> DataEditUser {
         flags: None,
         remove: Vec::new(),
     }
+}
+
+/// An edit's body: unset fields would go as `null`, so they're left out,
+/// and so is an empty `remove`.
+fn edit_body(edit: serde_json::Value) -> serde_json::Value {
+    let mut body = without_nulls(edit);
+    if let Some(map) = body.as_object_mut()
+        && map
+            .get("remove")
+            .is_some_and(|r| r.as_array().is_some_and(Vec::is_empty))
+    {
+        map.remove("remove");
+    }
+    body
 }
 
 /// `value` with every `null` object field removed, at any depth.

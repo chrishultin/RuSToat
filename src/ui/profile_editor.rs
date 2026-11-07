@@ -933,3 +933,110 @@ pub(crate) fn field(
         .children(problem.map(|problem| div().text_xs().text_color(theme.danger).child(problem)))
         .into_any_element()
 }
+
+/// The Profile page's "Server identities": the account's servers, each
+/// opening its identity dialog in the main window.
+pub fn render_server_identities(chat: &Entity<ChatView>, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let view = chat.read(cx);
+    let media = view.store().media();
+    let servers = view.store().servers();
+    if servers.is_empty() {
+        return div()
+            .text_sm()
+            .text_color(theme.muted_foreground)
+            .child("You aren't in any servers.")
+            .into_any_element();
+    }
+    v_flex()
+        .w_full()
+        .gap_1()
+        .children(servers.into_iter().map(|server| {
+            let icon = server_icon(&server, media, cx);
+            let (chat, id) = (chat.downgrade(), server.id.clone());
+            h_flex()
+                .id(SharedString::from(format!("identity-{}", server.id)))
+                .w_full()
+                .gap_3()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|el| el.bg(theme.secondary))
+                .child(icon)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_sm()
+                        .child(server.name),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("Edit identity…"),
+                )
+                .on_click(move |_, _, cx| {
+                    open_identity_in_main_window(chat.clone(), id.clone(), cx)
+                })
+        }))
+        .into_any_element()
+}
+
+/// A server's icon in the identities list, or its initials.
+fn server_icon(
+    server: &crate::store::ServerEntry,
+    media: &crate::media::MediaUrls,
+    cx: &App,
+) -> AnyElement {
+    const SIZE: f32 = 28.;
+    let theme = cx.theme();
+    let (bg, fg) = (theme.secondary, theme.secondary_foreground);
+    let initials = server.initials.clone();
+    let placeholder = move || {
+        div()
+            .size(px(SIZE))
+            .flex_none()
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(bg)
+            .text_color(fg)
+            .text_xs()
+            .child(initials.clone())
+            .into_any_element()
+    };
+    match server.icon.as_ref().and_then(|icon| media.file(icon)) {
+        Some(url) => img(SharedUri::from(url))
+            .id(SharedString::from(format!("identity-icon-{}", server.id)))
+            .size(px(SIZE))
+            .flex_none()
+            .rounded_full()
+            .object_fit(ObjectFit::Cover)
+            .with_fallback(placeholder)
+            .into_any_element(),
+        None => placeholder(),
+    }
+}
+
+/// Open `server`'s identity dialog in the account's own window (the main
+/// window), and bring it forward. Deferred: the click arrives while GPUI
+/// is updating the settings window.
+fn open_identity_in_main_window(chat: WeakEntity<ChatView>, server: String, cx: &mut App) {
+    cx.defer(move |cx| {
+        let Some(chat) = chat.upgrade() else {
+            return;
+        };
+        let handle = chat.read(cx).window_handle();
+        handle
+            .update(cx, |_, window, cx| {
+                window.activate_window();
+                chat.update(cx, |chat, cx| chat.open_identity_editor(server, window, cx));
+            })
+            .ok();
+        cx.activate(true);
+    });
+}

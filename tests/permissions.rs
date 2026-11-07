@@ -7,14 +7,17 @@ use revolt_permissions::{
 use serde_json::{Value, json};
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::permissions::{
-    can_bypass_slowmode, can_mention_everyone, can_mention_roles, can_pin, can_send_embeds,
-    can_view, channel_permissions, has,
+    can_bypass_slowmode, can_change_avatar, can_change_nickname, can_mention_everyone,
+    can_mention_roles, can_pin, can_send_embeds, can_view, channel_permissions, has,
+    server_permissions,
 };
 use stoat_gpui::store::ChatStore;
 
 const VIEW: u64 = ChannelPermission::ViewChannel as u64;
 const SEND: u64 = ChannelPermission::SendMessage as u64;
 const MANAGE: u64 = ChannelPermission::ManageMessages as u64;
+const NICKNAME: u64 = ChannelPermission::ChangeNickname as u64;
+const AVATAR: u64 = ChannelPermission::ChangeAvatar as u64;
 
 fn member(user: &str, roles: &[&str], extra: Value) -> Value {
     let mut member = json!({
@@ -41,8 +44,9 @@ fn user(id: &str, extra: Value) -> Value {
 }
 
 /// Roles, from the highest-ranked down: `mod` may manage messages, `staff`
-/// is a rank below, `muted` may not send, and `rookie` (the lowest) is
-/// denied what `mod` allows.
+/// is a rank below, `muted` may not send, `rookie` is denied what `mod`
+/// allows, and `anonymous` (the lowest) may not change their nickname or
+/// avatar.
 fn server_json() -> Value {
     json!({
         "_id": "srv", "owner": "u-owner", "name": "Test", "channels": ["ch-open", "ch-staff", "ch-no-rookies"],
@@ -52,7 +56,8 @@ fn server_json() -> Value {
             "mod": { "_id": "mod", "name": "Mod", "rank": 1, "permissions": { "a": MANAGE, "d": 0 } },
             "staff": { "_id": "staff", "name": "Staff", "rank": 2, "permissions": { "a": 0, "d": 0 } },
             "muted": { "_id": "muted", "name": "Muted", "rank": 3, "permissions": { "a": 0, "d": SEND } },
-            "rookie": { "_id": "rookie", "name": "Rookie", "rank": 4, "permissions": { "a": 0, "d": MANAGE } }
+            "rookie": { "_id": "rookie", "name": "Rookie", "rank": 4, "permissions": { "a": 0, "d": MANAGE } },
+            "anonymous": { "_id": "anonymous", "name": "Anonymous", "rank": 5, "permissions": { "a": 0, "d": NICKNAME | AVATAR } }
         }
     })
 }
@@ -102,6 +107,7 @@ fn server_store() -> ChatStore {
             user("u-timed", json!({})),
             user("u-lapsed", json!({})),
             user("u-stranger", json!({})),
+            user("u-anon", json!({})),
         ],
         vec![
             member("u-me", &[], json!({})),
@@ -111,6 +117,7 @@ fn server_store() -> ChatStore {
             member("u-staff", &["staff"], json!({})),
             member("u-muted", &["muted"], json!({})),
             member("u-rookie", &["mod", "rookie"], json!({})),
+            member("u-anon", &["anonymous"], json!({})),
             member(
                 "u-timed",
                 &[],
@@ -506,4 +513,46 @@ fn sending_embeds_follows_its_permission() {
     let store = conversations();
     assert!(can_send_embeds(&store, "u-me", "dm-friend"));
     assert!(can_send_embeds(&store, "u-me", "ch-saved"));
+}
+
+#[test]
+fn the_owner_can_change_their_nickname_and_avatar() {
+    let store = server_store();
+    assert_eq!(
+        server_permissions(&store, "u-owner", "srv"),
+        ChannelPermission::GrantAllSafe as u64
+    );
+    assert!(can_change_nickname(&store, "u-owner", "srv"));
+    assert!(can_change_avatar(&store, "u-owner", "srv"));
+}
+
+#[test]
+fn stoats_default_server_permissions_allow_a_nickname_and_avatar() {
+    let store = server_store();
+    assert_eq!(
+        server_permissions(&store, "u-plain", "srv"),
+        *DEFAULT_PERMISSION_SERVER
+    );
+    assert!(can_change_nickname(&store, "u-plain", "srv"));
+    assert!(can_change_avatar(&store, "u-plain", "srv"));
+}
+
+#[test]
+fn a_role_can_deny_a_nickname_and_avatar() {
+    let store = server_store();
+    assert!(!can_change_nickname(&store, "u-anon", "srv"));
+    assert!(!can_change_avatar(&store, "u-anon", "srv"));
+    // Other permissions stay.
+    assert!(has(
+        server_permissions(&store, "u-anon", "srv"),
+        ChannelPermission::SendMessage
+    ));
+}
+
+#[test]
+fn outside_a_server_there_is_nothing_to_change() {
+    let store = server_store();
+    assert_eq!(server_permissions(&store, "u-stranger", "srv"), 0);
+    assert!(!can_change_nickname(&store, "u-stranger", "srv"));
+    assert_eq!(server_permissions(&store, "u-plain", "srv-unknown"), 0);
 }

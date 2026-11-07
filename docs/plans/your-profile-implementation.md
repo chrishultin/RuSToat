@@ -68,3 +68,61 @@ Pending (batched for the end of the milestone):
 - Pick a GIF: it animates in the web client.
 - Set a banner: your card shows it centre-cropped. Remove both, and the defaults come back.
 - Pick a 10 MB file: the row says it's over the limit, and Save stays disabled.
+
+## Chunk 3: Per-server identity
+
+### Changes Made
+- `src/api/client.rs`: `edit_member(server, user, &DataMemberEdit) -> Result<Member, ApiError>` (`PATCH /servers/{server}/members/{user}`); the null- and empty-`remove`-stripping is now a shared `edit_body` helper used by `edit_user` too.
+- `src/permissions.rs`: `server_permissions(store, user, server)` with `calculate_server_permissions`, plus `can_change_nickname` and `can_change_avatar`. `StoreQuery.channel` became `Option<&Channel>` (`None` for server permissions; the channel answers fall back to `ChannelType::Unknown` / no overrides / not owned). `channel_permissions` passes `Some(channel)`, so its behaviour and tests are unchanged.
+- `src/profile_edit.rs`: `IdentityForm { nickname, avatar: ProfileImage, pronouns }` with `is_valid`, `has_changes` and `changes -> DataMemberEdit` (blanks in `remove`: `Nickname`, `Avatar`, `Pronouns`); `empty_member_edit()`; `identity_error_text` (MissingPermission says so; otherwise as `save_error_text` with "Couldn't change your identity on this server."), sharing a private `error_text(err, fallback)` with `save_error_text`. 4 more unit tests.
+- `src/store.rs`: `ChatStore::apply_member(Member)` for Stoat's answer.
+- `src/ui/identity_dialog.rs` (new): the `IdentityEditor` entity — server avatar row (preview falls back to the global avatar), Nickname (placeholder: global display name) and Pronouns (placeholder: global pronouns) with counters, "Leave a field empty to use your profile's…" note, Cancel/Save. Nickname and avatar are disabled without `ChangeNickname` / `ChangeAvatar`, each with "You can't change your … on this server." Save uploads a new avatar to `avatars`, then `edit_member`, then `ChatView::identity_saved` and closes; failures toast `identity_error_text`.
+- `src/ui/chat.rs`: "Edit identity…" after "Mark as read" in the server menu; `open_identity_editor(server, window, cx)` opens the dialog titled "Change identity on {server}" (nickname focused when it can be changed); `identity_saved(member, cx)` applies the member and re-syncs that server's panes, member lists and suggestions; `ChatView` keeps its `AnyWindowHandle` (`window_handle()`).
+- `src/ui/profile_editor.rs`: `render_server_identities(chat, cx)` — the account's servers (icon or initials, name, "Edit identity…"); a click opens the dialog in the account's own window (deferred, then `activate_window` and `cx.activate(true)`).
+- `src/ui/settings.rs`: the Profile page gains a "Server identities" group for the account on screen; search keywords extended.
+- `src/ui/mod.rs`: the new module.
+- Tests: `tests/api_members.rs` (new: exact bodies `{"nickname":"Ada"}` and `{"remove":["Avatar"]}`, the `Member` parses, a 403 `MissingPermission` is an `Api` error); `tests/permissions.rs` (owner, Stoat's defaults, a role denying both, non-members/unknown servers; a new `anonymous` role and `u-anon` member in the shared fixture, unused by the older tests); `tests/store_ready.rs` (`stoats_answer_to_an_identity_change_applies_at_once`).
+
+### Divergences
+- The Profile page opens the dialog through the account's `ChatView`, which now keeps its window handle, instead of `MainWindow::update` in `main.rs`: that's in the binary, out of reach of library code without a new action carrying the server ID (and actions with fields need GPUI's derive under the crate name `gpui`). Same outcome: deferred, the main window brought forward, the dialog opened there.
+- The returned `Member` parsed as-is (the risk about its shape didn't materialise), so it's applied directly with the new `apply_member`; the `ServerMemberUpdate` echo then changes nothing.
+- `identity_error_text` is a sibling of `save_error_text` so the fallback names the right thing; the plan only named the latter.
+
+### Verification Performed
+- `cargo test --lib profile_edit`: 25 passed.
+- Full suite `cargo test`: 799 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt drift: `src/ui/chat.rs` 17, `src/store.rs` 15, `src/api/client.rs` 3 (unchanged); `src/permissions.rs`, `src/ui/settings.rs`, `tests/permissions.rs`, `tests/store_ready.rs`, and the new files 0.
+
+### Manual Validation
+Pending (batched for the end of the milestone):
+- Right-click a server → Edit identity…: set a nickname and server avatar. Your messages there show them, other servers don't, and the web client agrees.
+- Clear the nickname: your display name comes back on that server.
+- On a server whose roles deny Change Nickname, the field is disabled with its note.
+- Settings → Profile → Server identities → a server opens the same dialog in the main window.
+
+## Summary
+
+_Completed: 2026-11-06 (code); manual checks pending_
+
+### Chunks Completed
+1. Profile page: display name, pronouns and bio (`77d8c7f`)
+2. Avatar and banner (`1ed8a3c`)
+3. Per-server identity (this commit)
+
+### Divergences
+- Chunk 1: bio field is a `TextareaState` (gpui-component 0.9's multi-line input); new `ChatStore::apply_own_user` keeps status/online, since the answer says offline for Invisible.
+- Chunk 2: `ProfileImage { None | Current(id) | New(path) }` instead of `ImageChange` (plan amended); `ImageLimits` in `profile_edit.rs`; a banner change forgets the card's cached profile rather than patching it; `save_error_text` covers file-server refusals and unreadable files.
+- Chunk 3: the dialog is opened in the main window through the `ChatView`'s own window handle, not `MainWindow::update`; `StoreQuery.channel` became optional; `identity_error_text` added.
+
+### Definition of Done
+- Settings → Profile (first, naming the account on screen) edits display name (2–32), pronouns (1–24), bio (≤2000), avatar and banner; Save sends one `PATCH /users/@me` with only changed fields and blanks as `remove`; Reset restores what was loaded — implemented and unit/API-tested; manual check pending.
+- Avatar and banner uploaded unchanged to `avatars` and `backgrounds` after the type and `GET /` size checks (4 MB / 6 MB defaults); centre-cropped previews (circle, 232:100) — implemented and tested; previews need the manual check.
+- "Edit profile…" in the status menu opens Settings on Profile — implemented; switching an already-open window's page is a manual check (Assumption 5).
+- "Edit identity…" and the Server identities list set or clear nickname, avatar and pronouns with `PATCH /servers/{s}/members/{you}`, disabled without the permissions — implemented and tested; manual check pending.
+- Changes show at once (panel, messages, card); other clients' changes show the next time the card opens (`UserUpdate` forgets the cached profile; the card fetches on open) — implemented; manual check pending.
+- Save errors say why; a rate limit says how long to wait — implemented and unit-tested.
+- `cargo test` and `cargo clippy --all-targets -- -D warnings` pass; no touched file's drift grew — met.
+- Every chunk's manual check recorded here — pending the walkthrough.
+
+### Remaining Manual Steps
+Every chunk's manual check above, plus the plan's Manual Tests 2–5 (two accounts never cross; bio/banner changed in the web client show on the card; rapid saves show the rate-limit wait and nothing half-saves; light and dark themes are readable).

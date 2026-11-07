@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use revolt_result::ErrorType;
 
-use crate::api::models::{DataEditUser, DataUserProfile, FieldsUser};
+use crate::api::models::{DataEditUser, DataMemberEdit, DataUserProfile, FieldsMember, FieldsUser};
 use crate::api::{ApiError, RootConfig};
 use crate::draft::decimal_size_label;
 
@@ -285,6 +285,66 @@ fn changed(
     (before != after).then(|| after.map(str::to_string))
 }
 
+/// The identity form for one server: as loaded from the user's membership,
+/// or as edited. A blank field falls back to the global profile.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IdentityForm {
+    pub nickname: String,
+    pub avatar: ProfileImage,
+    pub pronouns: String,
+}
+
+impl IdentityForm {
+    /// Whether every field follows Stoat's rules, so Save can send them.
+    pub fn is_valid(&self) -> bool {
+        check_nickname(&self.nickname).is_ok() && check_pronouns(&self.pronouns).is_ok()
+    }
+
+    /// Whether `edited` differs from `loaded`, counting a picked avatar
+    /// that isn't uploaded yet.
+    pub fn has_changes(loaded: &IdentityForm, edited: &IdentityForm) -> bool {
+        edited.avatar.new_file().is_some()
+            || IdentityForm::changes(loaded, edited) != empty_member_edit()
+    }
+
+    /// The `PATCH /servers/{server}/members/{user}` that turns `loaded`
+    /// into `edited`, as [`ProfileForm::changes`] does for the profile.
+    pub fn changes(loaded: &IdentityForm, edited: &IdentityForm) -> DataMemberEdit {
+        let mut edit = empty_member_edit();
+        match changed(check_nickname, &loaded.nickname, &edited.nickname) {
+            Some(Some(nickname)) => edit.nickname = Some(nickname),
+            Some(None) => edit.remove.push(FieldsMember::Nickname),
+            None => {}
+        }
+        match image_changed(&loaded.avatar, &edited.avatar) {
+            Some(Some(id)) => edit.avatar = Some(id),
+            Some(None) => edit.remove.push(FieldsMember::Avatar),
+            None => {}
+        }
+        match changed(check_pronouns, &loaded.pronouns, &edited.pronouns) {
+            Some(Some(pronouns)) => edit.pronouns = Some(pronouns),
+            Some(None) => edit.remove.push(FieldsMember::Pronouns),
+            None => {}
+        }
+        edit
+    }
+}
+
+/// A `DataMemberEdit` that changes nothing (it has no `Default`).
+pub fn empty_member_edit() -> DataMemberEdit {
+    DataMemberEdit {
+        nickname: None,
+        pronouns: None,
+        avatar: None,
+        roles: None,
+        timeout: None,
+        can_publish: None,
+        can_receive: None,
+        voice_channel: None,
+        remove: Vec::new(),
+    }
+}
+
 /// Whether `edit` would change anything.
 pub fn is_empty_edit(edit: &DataEditUser) -> bool {
     *edit == empty_edit()
@@ -306,6 +366,22 @@ pub fn empty_edit() -> DataEditUser {
 
 /// What a toast says when Stoat refuses a profile change.
 pub fn save_error_text(err: &ApiError) -> String {
+    error_text(err, "Couldn't save your profile.")
+}
+
+/// What a toast says when Stoat refuses a change to the user's identity on
+/// a server.
+pub fn identity_error_text(err: &ApiError) -> String {
+    match err.error_type() {
+        Some(ErrorType::MissingPermission { .. }) => {
+            "You don't have permission to change that on this server.".into()
+        }
+        _ => error_text(err, "Couldn't change your identity on this server."),
+    }
+}
+
+/// Why a change was refused, else `fallback`.
+fn error_text(err: &ApiError, fallback: &str) -> String {
     match err {
         ApiError::RateLimited {
             retry_after_ms: Some(ms),
@@ -325,16 +401,13 @@ pub fn save_error_text(err: &ApiError) -> String {
             ErrorType::FileTypeNotAllowed | ErrorType::ImageProcessingFailed => {
                 "Stoat couldn't use that image. Try a PNG or JPEG.".into()
             }
-            _ => SAVE_FAILED_TEXT.into(),
+            _ => fallback.into(),
         },
         // An image that couldn't be read for its upload.
         ApiError::File(_) => err.to_string(),
-        _ => SAVE_FAILED_TEXT.into(),
+        _ => fallback.into(),
     }
 }
-
-/// Shown when a save fails for any other reason.
-const SAVE_FAILED_TEXT: &str = "Couldn't save your profile.";
 
 /// The rule a `FailedValidation` broke, from the field Stoat names in it
 /// (`display_name: Validation error: length […]`).
@@ -636,6 +709,109 @@ mod tests {
         );
         let err = ApiError::File(std::io::Error::new(std::io::ErrorKind::NotFound, "gone"));
         assert_eq!(save_error_text(&err), "Couldn't read the file (gone).");
+    }
+
+    #[test]
+    fn nicknames_and_server_pronouns_follow_the_identity_rules() {
+        let loaded = IdentityForm {
+            nickname: "Ada".into(),
+            ..IdentityForm::default()
+        };
+        let edited = IdentityForm {
+            nickname: "a".repeat(33),
+            pronouns: "she/her".into(),
+            ..IdentityForm::default()
+        };
+        assert!(!edited.is_valid());
+        // The nickname that's too long is left out; the pronouns go.
+        let edit = IdentityForm::changes(&loaded, &edited);
+        assert_eq!(edit.nickname, None);
+        assert_eq!(edit.pronouns.as_deref(), Some("she/her"));
+        assert!(edit.remove.is_empty());
+    }
+
+    #[test]
+    fn identity_changes_send_only_what_changed() {
+        let loaded = IdentityForm {
+            nickname: "Ada".into(),
+            avatar: ProfileImage::Current("a".into()),
+            pronouns: "she/her".into(),
+        };
+        assert!(!IdentityForm::has_changes(&loaded, &loaded));
+        let edited = IdentityForm {
+            nickname: " Ada L. ".into(),
+            ..loaded.clone()
+        };
+        assert_eq!(
+            IdentityForm::changes(&loaded, &edited),
+            DataMemberEdit {
+                nickname: Some("Ada L.".into()),
+                ..empty_member_edit()
+            }
+        );
+        let uploaded = IdentityForm {
+            avatar: ProfileImage::Current("b".into()),
+            ..loaded.clone()
+        };
+        assert_eq!(
+            IdentityForm::changes(&loaded, &uploaded).avatar.as_deref(),
+            Some("b")
+        );
+        let picked = IdentityForm {
+            avatar: ProfileImage::New("me.png".into()),
+            ..loaded.clone()
+        };
+        assert!(IdentityForm::has_changes(&loaded, &picked));
+    }
+
+    #[test]
+    fn clearing_the_identity_falls_back_to_the_global_profile() {
+        let loaded = IdentityForm {
+            nickname: "Ada".into(),
+            avatar: ProfileImage::Current("a".into()),
+            pronouns: "she/her".into(),
+        };
+        let cleared = IdentityForm {
+            nickname: "  ".into(),
+            ..IdentityForm::default()
+        };
+        assert_eq!(
+            IdentityForm::changes(&loaded, &cleared).remove,
+            [
+                FieldsMember::Nickname,
+                FieldsMember::Avatar,
+                FieldsMember::Pronouns
+            ]
+        );
+    }
+
+    #[test]
+    fn identity_errors_say_why() {
+        let err = ApiError::Api(StoatError {
+            error_type: ErrorType::MissingPermission {
+                permission: "ChangeNickname".into(),
+            },
+            location: None,
+        });
+        assert_eq!(
+            identity_error_text(&err),
+            "You don't have permission to change that on this server."
+        );
+        let err = ApiError::RateLimited {
+            retry_after_ms: Some(1500),
+        };
+        assert_eq!(
+            identity_error_text(&err),
+            "Stoat is limiting changes. Try again in 2 s."
+        );
+        let err = ApiError::Unexpected {
+            status: 500,
+            detail: "oops".into(),
+        };
+        assert_eq!(
+            identity_error_text(&err),
+            "Couldn't change your identity on this server."
+        );
     }
 
     #[test]

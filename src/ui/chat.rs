@@ -69,6 +69,7 @@ use crate::ui::composer::{Composer, ComposerEvent, file_icon};
 use crate::ui::emoji_picker::emoji_grid;
 use crate::ui::friends::{RowButtons, render_add_friend, render_friends_page};
 use crate::ui::gif_picker::GifCache;
+use crate::ui::identity_dialog::{IDENTITY_DIALOG_WIDTH, IdentityEditor};
 use crate::ui::markup::{MarkupPlugin, RevealSpoiler, code_block_actions};
 use crate::ui::math::MathPlugin;
 use crate::ui::profile_card::{CardBio, CardContent, OnLink, render_profile_card};
@@ -407,6 +408,9 @@ pub struct ChatView {
     composer: Entity<Composer>,
     /// How big an avatar and profile banner may be (for the Profile page).
     image_limits: ImageLimits,
+    /// The window this view is in (the main window), so the settings
+    /// window can open the identity dialog here.
+    window: AnyWindowHandle,
     /// The default skin tone for emoji (`:` suggestions use it too).
     skin_tone: crate::prefs::Tone,
     _composer: Subscription,
@@ -723,6 +727,7 @@ impl ChatView {
             card_focus: cx.focus_handle(),
             profiles: HashMap::new(),
             image_limits: ImageLimits::default(),
+            window: window.window_handle(),
             dm_opening: None,
             relationship_pending: HashSet::new(),
             friends_tab: FriendsTab::default(),
@@ -3371,7 +3376,7 @@ impl ChatView {
         })
     }
 
-    /// A server's right-click menu: Mark as read; Mute Server (for how
+    /// A server's right-click menu: Mark as read; Edit identity…; Mute Server (for how
     /// long), or Unmute Server and until when it's muted; its Notifications
     /// level; Copy server ID.
     fn server_menu(&self, server: &str, cx: &Context<Self>) -> MenuBuilder {
@@ -3391,7 +3396,18 @@ impl ChatView {
                         .ok();
                 }
             };
-            let menu = menu.item(PopupMenuItem::new("Mark as read").on_click(mark_read));
+            let edit_identity = {
+                let (view, server) = (view.clone(), server.clone());
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    view.update(cx, |this, cx| {
+                        this.open_identity_editor(server.clone(), window, cx)
+                    })
+                    .ok();
+                }
+            };
+            let menu = menu
+                .item(PopupMenuItem::new("Mark as read").on_click(mark_read))
+                .item(PopupMenuItem::new("Edit identity…").on_click(edit_identity));
             let menu = match mute {
                 None => {
                     let mute: SetMute = {
@@ -4109,6 +4125,54 @@ impl ChatView {
     /// How big an avatar and profile banner may be.
     pub fn image_limits(&self) -> ImageLimits {
         self.image_limits
+    }
+
+    /// The window this view is in.
+    pub fn window_handle(&self) -> AnyWindowHandle {
+        self.window
+    }
+
+    /// "Change identity on {server}": the user's nickname, avatar and
+    /// pronouns there.
+    pub fn open_identity_editor(
+        &mut self,
+        server: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) = self.store.server(&server).map(|s| s.name.clone()) else {
+            return;
+        };
+        let focus = crate::permissions::can_change_nickname(&self.store, self.store.me(), &server);
+        let chat = cx.entity();
+        let editor = cx.new(|cx| IdentityEditor::new(chat, server, window, cx));
+        let title = SharedString::from(format!("Change identity on {name}"));
+        let first_build = std::cell::Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first_build.replace(false) && focus {
+                let input = editor.read(cx).nickname_input().read(cx).focus_handle(cx);
+                window.focus(&input, cx);
+            }
+            dialog
+                .title(title.clone())
+                .w(px(IDENTITY_DIALOG_WIDTH))
+                .child(editor.clone())
+        });
+    }
+
+    /// The identity dialog saved: show Stoat's answer on that server at
+    /// once (nickname and avatar on messages, pronouns on the card).
+    pub fn identity_saved(&mut self, member: crate::api::models::Member, cx: &mut Context<Self>) {
+        let (server, user) = (member.id.server.clone(), member.id.user.clone());
+        self.store.apply_member(member);
+        self.forget_member_lists();
+        for channel in self.store.channels_showing(&user) {
+            if self.store.channel_server(&channel) == Some(server.as_str()) {
+                self.sync_pane(&channel, cx);
+            }
+        }
+        self.refresh_suggestions(cx);
+        cx.notify();
     }
 
     /// A profile fetched elsewhere (the Profile page), kept for the card.

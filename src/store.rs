@@ -2662,6 +2662,14 @@ impl ChatStore {
             .insert((member.id.server.clone(), member.id.user.clone()), member);
     }
 
+    /// A membership as Stoat answered a change to it (the user's own
+    /// identity on a server), so nothing waits for the `ServerMemberUpdate`
+    /// echo.
+    pub fn apply_member(&mut self, member: Member) {
+        self.members
+            .insert((member.id.server.clone(), member.id.user.clone()), member);
+    }
+
     /// `user` left `server` (`ServerMemberLeave`). Returns true if it was the
     /// user themselves: then the whole server goes (see [`Self::remove_server`]).
     pub fn apply_member_leave(&mut self, server: &str, user: &str) -> bool {

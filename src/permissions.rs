@@ -1,4 +1,4 @@
-//! What a user may see and do in a channel, worked out by Stoat's own
+//! What a user may see and do in a channel or server, worked out by Stoat's own
 //! permission code (`revolt-permissions`, the same crate the backend runs)
 //! over what the [`ChatStore`] knows: the user, the server's default
 //! permissions and roles, the member's roles and timeout, and the channel's
@@ -14,7 +14,7 @@
 
 use revolt_permissions::{
     ChannelPermission, ChannelType, DEFAULT_PERMISSION_DIRECT_MESSAGE, Override, PermissionQuery,
-    RelationshipStatus, calculate_channel_permissions,
+    RelationshipStatus, calculate_channel_permissions, calculate_server_permissions,
 };
 
 use crate::api::models::{self, Channel, Member, Server, User};
@@ -32,12 +32,47 @@ pub fn channel_permissions(store: &ChatStore, user: &str, channel: &str) -> u64 
     let mut query = StoreQuery {
         store,
         user,
-        channel,
+        channel: Some(channel),
         server,
         member: server.and_then(|server| store.member(&server.id, user)),
         other: None,
     };
     futures::executor::block_on(calculate_channel_permissions(&mut query)).into_raw()
+}
+
+/// The permission bits `user` has across `server` (no channel's overrides),
+/// or none if it's unknown. Its owner has every one.
+pub fn server_permissions(store: &ChatStore, user: &str, server: &str) -> u64 {
+    let Some(server) = store.server(server) else {
+        return 0;
+    };
+    let mut query = StoreQuery {
+        store,
+        user,
+        channel: None,
+        server: Some(server),
+        member: store.member(&server.id, user),
+        other: None,
+    };
+    futures::executor::block_on(calculate_server_permissions(&mut query)).into_raw()
+}
+
+/// Whether `user` may change their own nickname on `server` (Change
+/// Nickname). Stoat checks the same when the change arrives.
+pub fn can_change_nickname(store: &ChatStore, user: &str, server: &str) -> bool {
+    has(
+        server_permissions(store, user, server),
+        ChannelPermission::ChangeNickname,
+    )
+}
+
+/// Whether `user` may change their own avatar on `server` (Change Avatar).
+/// Their pronouns there need no permission.
+pub fn can_change_avatar(store: &ChatStore, user: &str, server: &str) -> bool {
+    has(
+        server_permissions(store, user, server),
+        ChannelPermission::ChangeAvatar,
+    )
 }
 
 /// Whether `permissions` (from [`channel_permissions`]) include `permission`.
@@ -112,12 +147,13 @@ fn in_server(store: &ChatStore, channel: &str) -> bool {
 }
 
 /// The store, asked the questions `revolt-permissions` has about `user`
-/// in `channel`.
+/// in `channel`, or across `server`.
 struct StoreQuery<'a> {
     store: &'a ChatStore,
     /// Whose permissions these are.
     user: &'a str,
-    channel: &'a Channel,
+    /// `None` for server permissions, which ask nothing about a channel.
+    channel: Option<&'a Channel>,
     /// The channel's server, for server channels.
     server: Option<&'a Server>,
     /// `user`'s membership of `server`.
@@ -229,22 +265,23 @@ impl PermissionQuery for StoreQuery<'_> {
 
     async fn get_channel_type(&mut self) -> ChannelType {
         match self.channel {
-            Channel::SavedMessages { .. } => ChannelType::SavedMessages,
-            Channel::DirectMessage { .. } => ChannelType::DirectMessage,
-            Channel::Group { .. } => ChannelType::Group,
-            Channel::TextChannel { .. } => ChannelType::ServerChannel,
+            Some(Channel::SavedMessages { .. }) => ChannelType::SavedMessages,
+            Some(Channel::DirectMessage { .. }) => ChannelType::DirectMessage,
+            Some(Channel::Group { .. }) => ChannelType::Group,
+            Some(Channel::TextChannel { .. }) => ChannelType::ServerChannel,
+            None => ChannelType::Unknown,
         }
     }
 
     async fn get_default_channel_permissions(&mut self) -> Override {
         match self.channel {
-            Channel::TextChannel {
+            Some(Channel::TextChannel {
                 default_permissions,
                 ..
-            } => default_permissions.map(Override::from).unwrap_or_default(),
+            }) => default_permissions.map(Override::from).unwrap_or_default(),
             // A group's permissions are what its members may do, so they
             // count as allowed bits.
-            Channel::Group { permissions, .. } => Override {
+            Some(Channel::Group { permissions, .. }) => Override {
                 allow: permissions.map_or(*DEFAULT_PERMISSION_DIRECT_MESSAGE, |bits| bits as u64),
                 deny: 0,
             },
@@ -253,9 +290,9 @@ impl PermissionQuery for StoreQuery<'_> {
     }
 
     async fn get_our_channel_role_overrides(&mut self) -> Vec<Override> {
-        let Channel::TextChannel {
+        let Some(Channel::TextChannel {
             role_permissions, ..
-        } = self.channel
+        }) = self.channel
         else {
             return Vec::new();
         };
@@ -268,15 +305,15 @@ impl PermissionQuery for StoreQuery<'_> {
 
     async fn do_we_own_the_channel(&mut self) -> bool {
         match self.channel {
-            Channel::Group { owner, .. } => owner == self.user,
-            Channel::SavedMessages { user, .. } => user == self.user,
+            Some(Channel::Group { owner, .. }) => owner == self.user,
+            Some(Channel::SavedMessages { user, .. }) => user == self.user,
             _ => false,
         }
     }
 
     async fn are_we_part_of_the_channel(&mut self) -> bool {
         match self.channel {
-            Channel::DirectMessage { recipients, .. } | Channel::Group { recipients, .. } => {
+            Some(Channel::DirectMessage { recipients, .. } | Channel::Group { recipients, .. }) => {
                 recipients.iter().any(|id| id == self.user)
             }
             _ => false,
@@ -284,7 +321,7 @@ impl PermissionQuery for StoreQuery<'_> {
     }
 
     async fn set_recipient_as_user(&mut self) {
-        if let Channel::DirectMessage { recipients, .. } = self.channel {
+        if let Some(Channel::DirectMessage { recipients, .. }) = self.channel {
             // A DM with yourself has only you in it.
             self.other = recipients
                 .iter()

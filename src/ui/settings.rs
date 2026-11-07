@@ -20,7 +20,7 @@ use crate::shortcuts::{self, Group, Keys, Shortcut};
 use crate::themes::{self, Appearance, Palette};
 use crate::ui::AppRoot;
 use crate::ui::app_prefs::AppPrefs;
-use crate::ui::profile_editor::ProfileEditor;
+use crate::ui::profile_editor::{ProfileEditor, render_server_identities};
 
 /// Builds one section of the window, each time the window renders.
 pub type PageFn = fn(&SettingsView, &mut App) -> SettingPage;
@@ -128,7 +128,8 @@ impl Render for SettingsView {
     }
 }
 
-/// Profile: the account on screen's display name, pronouns and bio.
+/// Profile: the account on screen's avatar, banner, display name, pronouns
+/// and bio, and its identity on each server.
 fn profile_page(view: &SettingsView, cx: &mut App) -> SettingPage {
     let page = SettingPage::new("Profile")
         .icon(IconName::CircleUser)
@@ -143,12 +144,26 @@ fn profile_page(view: &SettingsView, cx: &mut App) -> SettingPage {
         }),
     };
     // Custom rows only match a search by their keywords.
-    page.group(SettingGroup::new().item(item.keywords([
+    let page = page.group(SettingGroup::new().item(item.keywords([
         "profile",
         "display name",
         "pronouns",
         "bio",
-    ])))
+        "avatar",
+        "banner",
+    ])));
+    let Some((_, chat)) = view.root().and_then(|root| root.read(cx).shown_chat()) else {
+        return page;
+    };
+    page.group(
+        SettingGroup::new()
+            .title("Server identities")
+            .description("A nickname, avatar and pronouns for one server.")
+            .item(
+                SettingItem::render(move |_, _, cx| render_server_identities(&chat, cx))
+                    .keywords(["server identities", "nickname", "server avatar"]),
+            ),
+    )
 }
 
 /// Appearance: the colour palette, and light, dark or following macOS.

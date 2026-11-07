@@ -201,6 +201,25 @@ fn own_membership_is_available_for_nicknames() {
     assert!(store.member("srv-beta", "u-me").unwrap().nickname.is_none());
 }
 
+/// Stoat's answer to an identity change applies at once, and only on that
+/// server.
+#[test]
+fn stoats_answer_to_an_identity_change_applies_at_once() {
+    let mut store = store();
+    let answer: stoat_gpui::api::models::Member = serde_json::from_value(serde_json::json!({
+        "_id": { "server": "srv-beta", "user": "u-me" },
+        "joined_at": "2026-01-01T00:00:00.000Z",
+        "nickname": "Beta Me", "pronouns": "they/them"
+    }))
+    .unwrap();
+    store.apply_member(answer);
+    let member = store.member("srv-beta", "u-me").unwrap();
+    assert_eq!(member.nickname.as_deref(), Some("Beta Me"));
+    assert_eq!(member.pronouns.as_deref(), Some("they/them"));
+    let alpha = store.member("srv-alpha", "u-me").unwrap();
+    assert_eq!(alpha.nickname.as_deref(), Some("Captain Me"));
+}
+
 #[test]
 fn a_new_ready_replaces_the_old_state() {
     let mut store = store();
