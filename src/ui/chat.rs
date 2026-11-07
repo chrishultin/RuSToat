@@ -1,7 +1,7 @@
 //! The signed-in UI: server rail, channel list, and the selected channel.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -341,6 +341,16 @@ pub struct ChatView {
     /// Profiles fetched this session, by user ID, shown while the card
     /// fetches them again. `None`: Stoat won't show this one.
     profiles: HashMap<String, Option<UserProfile>>,
+    /// Invites seen in messages this session, by code: what each leads to,
+    /// for its card.
+    invites: HashMap<String, InviteLookup>,
+    /// Codes waiting to be looked up, one at a time: lookups share a rate
+    /// limit with joins, and a channel may hold many.
+    invite_queue: VecDeque<String>,
+    /// A lookup is on its way.
+    invite_loading: bool,
+    /// Invites being joined from their card.
+    invite_joins: HashSet<String>,
     /// The person whose DM is being asked for ("Message" on their card).
     dm_opening: Option<String>,
     /// People whose friend request or block is on its way to Stoat.
@@ -501,6 +511,8 @@ impl ChatView {
                     this.update(cx, |this, cx| {
                         this.web_app = root.app;
                         this.image_limits = image_limits;
+                        // Before `set_media`, whose re-sync adds the cards.
+                        this.store.set_invite_hosts(this.invite_hosts());
                         this.set_media(media, cx);
                         this.composer
                             .update(cx, |composer, _| composer.set_limits(limits));
@@ -729,6 +741,10 @@ impl ChatView {
             card: None,
             card_focus: cx.focus_handle(),
             profiles: HashMap::new(),
+            invites: HashMap::new(),
+            invite_queue: VecDeque::new(),
+            invite_loading: false,
+            invite_joins: HashSet::new(),
             image_limits: ImageLimits::default(),
             window: window.window_handle(),
             dm_opening: None,
@@ -1361,6 +1377,8 @@ impl ChatView {
                 }
             }
             RowAction::CopyId(id) => cx.write_to_clipboard(ClipboardItem::new_string(id)),
+            RowAction::JoinInvite(code) => self.join_invite_card(&code, window, cx),
+            RowAction::RetryInvite(code) => self.retry_invite(&code, cx),
             RowAction::MarkUnread(id) => self.mark_unread(channel, &id, cx),
             RowAction::JumpTo(id) => self.jump_to_message(channel, id, window, cx),
             RowAction::RevealBlocked(ids) => {
@@ -2439,7 +2457,9 @@ impl ChatView {
     /// Open an external link (`http`, `https` or `mailto`) whose text, if
     /// it said something other than the address, was `text`. Links to the
     /// user's own instance and to trusted sites open at once; anything else
-    /// asks first.
+    /// asks first. An invite link of this instance opens the Join dialog
+    /// instead, whatever its text: the preview shows where it leads, and
+    /// nothing happens until Join.
     fn open_external(
         &mut self,
         url: String,
@@ -2447,6 +2467,10 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(code) = crate::invites::code_from_link(&url, &self.invite_hosts()) {
+            self.open_join_dialog(Some(code), window, cx);
+            return;
+        }
         let own = self.media.bases().chain(self.web_app.as_deref());
         if is_own_instance(&url, own) || self.safety.trusts(&url) {
             cx.open_url(&url);
@@ -4571,6 +4595,7 @@ impl ChatView {
             });
             self.fetch_reply_sources(channel, cx);
         self.fetch_missing_emojis(channel, cx);
+            self.fetch_invites(channel, cx);
             return;
         }
 
@@ -4591,6 +4616,172 @@ impl ChatView {
         );
         self.fetch_reply_sources(channel, cx);
         self.fetch_missing_emojis(channel, cx);
+        self.fetch_invites(channel, cx);
+    }
+
+    /// Queue the invites in `channel`'s rows that haven't been looked up,
+    /// for their cards.
+    fn fetch_invites(&mut self, channel: &str, cx: &mut Context<Self>) {
+        let Some(pane) = self.panes.get(channel) else {
+            return;
+        };
+        let codes: Vec<String> = pane
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                TimelineRow::Message(message) => Some(&message.invites),
+                _ => None,
+            })
+            .flatten()
+            .filter(|code| !self.invites.contains_key(*code))
+            .cloned()
+            .collect();
+        for code in codes {
+            if !self.invites.contains_key(&code) {
+                self.invites.insert(code.clone(), InviteLookup::Loading);
+                self.invite_queue.push_back(code);
+            }
+        }
+        self.next_invite_lookup(cx);
+    }
+
+    /// Look up the next queued invite, unless one is on its way. A rate
+    /// limit waits as long as Stoat asks, then tries the same one again.
+    fn next_invite_lookup(&mut self, cx: &mut Context<Self>) {
+        if self.invite_loading {
+            return;
+        }
+        let Some(code) = self.invite_queue.pop_front() else {
+            return;
+        };
+        self.invite_loading = true;
+        let request = spawn_io({
+            let (client, code) = (self.client.clone(), code.clone());
+            async move { client.fetch_invite(&code).await }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = request.await;
+            if let Ok(Err(ApiError::RateLimited { retry_after_ms })) = &result {
+                let wait = Duration::from_millis(retry_after_ms.unwrap_or(2_000));
+                log::debug!("invite {code}: rate limited, waiting {wait:?}");
+                cx.background_executor().timer(wait).await;
+            }
+            this.update(cx, |this, cx| {
+                this.invite_loading = false;
+                let lookup = match result {
+                    Ok(Ok(invite)) => InviteLookup::Found(Rc::new(InvitePreview::new(invite))),
+                    Ok(Err(ApiError::RateLimited { .. })) => {
+                        this.invite_queue.push_front(code.clone());
+                        InviteLookup::Loading
+                    }
+                    Ok(Err(err))
+                        if matches!(err.error_type(), Some(revolt_result::ErrorType::NotFound)) =>
+                    {
+                        InviteLookup::Invalid
+                    }
+                    Ok(Err(err)) => {
+                        log::info!("couldn't look up invite {code}: {err:?}");
+                        InviteLookup::Failed
+                    }
+                    Err(err) => {
+                        log::warn!("invite lookup task failed: {err:?}");
+                        InviteLookup::Failed
+                    }
+                };
+                this.invites.insert(code, lookup);
+                this.next_invite_lookup(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// What each invite card shows: what it leads to, whether the user is
+    /// already in, and whether it's being joined.
+    fn invite_cards(&self) -> HashMap<String, InviteCard> {
+        self.invites
+            .iter()
+            .map(|(code, lookup)| {
+                let card = match lookup {
+                    InviteLookup::Found(invite) => InviteCard::Found {
+                        icon: invite.icon.as_ref().and_then(|icon| self.media.file(icon)),
+                        member: self.is_invite_member(invite),
+                        joining: self.invite_joins.contains(code),
+                        invite: invite.clone(),
+                    },
+                    InviteLookup::Loading => InviteCard::Loading,
+                    InviteLookup::Invalid => InviteCard::Invalid,
+                    InviteLookup::Failed => InviteCard::Failed,
+                };
+                (code.clone(), card)
+            })
+            .collect()
+    }
+
+    /// Join an invite from its card (no dialog: the card is the preview),
+    /// or open it if the user is already in.
+    fn join_invite_card(&mut self, code: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(InviteLookup::Found(invite)) = self.invites.get(code).cloned() else {
+            return;
+        };
+        if self.is_invite_member(&invite) {
+            self.open_invite(&invite, cx);
+            return;
+        }
+        if !self.invite_joins.insert(code.to_string()) {
+            return;
+        }
+        cx.notify();
+        let request = spawn_io({
+            let (client, code) = (self.client.clone(), code.to_string());
+            async move { client.join_invite(&code).await }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.invite_joins.remove(&invite.code);
+                match result {
+                    Ok(Ok(joined)) => {
+                        this.invite_joined(&invite, joined, cx);
+                        window.push_notification(
+                            Notification::success(format!("Joined {}.", invite.name)),
+                            cx,
+                        );
+                    }
+                    Ok(Err(err)) if crate::invites::already_joined(&err) => {
+                        this.open_invite(&invite, cx)
+                    }
+                    Ok(Err(err)) => {
+                        log::info!("couldn't join invite {}: {err:?}", invite.code);
+                        window.push_notification(
+                            Notification::error(crate::invites::join_error_text(&err)),
+                            cx,
+                        );
+                    }
+                    Err(err) => {
+                        log::warn!("invite join task failed: {err:?}");
+                        window.push_notification(
+                            Notification::error("Couldn't reach Stoat. Try again."),
+                            cx,
+                        );
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Look a card's invite up again, after it failed.
+    fn retry_invite(&mut self, code: &str, cx: &mut Context<Self>) {
+        if matches!(self.invites.get(code), Some(InviteLookup::Failed)) {
+            self.invites.insert(code.to_string(), InviteLookup::Loading);
+            self.invite_queue.push_back(code.to_string());
+            self.next_invite_lookup(cx);
+            cx.notify();
+        }
     }
 
     /// Fetch originals that `channel`'s replies need, a few at a time. Each
@@ -5723,6 +5914,7 @@ impl ChatView {
                             choices: Rc::new(self.store.reaction_choices(&channel.id)),
                             open_for: self.picker_for.clone(),
                             can_link: self.web_app.is_some(),
+                            invites: Rc::new(self.invite_cards()),
                         });
                         let view = cx.entity().downgrade();
                         let channel_id = channel.id.clone();
@@ -6255,6 +6447,7 @@ impl ChatView {
             choices: Rc::default(),
             open_for: None,
             can_link: false,
+            invites: Rc::default(),
         };
         let people = self.people(Some(channel.id.clone()), cx);
         v_flex()
@@ -6879,6 +7072,10 @@ enum RowAction {
     CopyLink(String),
     /// Copy a message's ID.
     CopyId(String),
+    /// Join (or open) the invite with this code, from its card.
+    JoinInvite(String),
+    /// Look an invite up again, after it failed.
+    RetryInvite(String),
     /// Make the channel unread from this message on.
     MarkUnread(String),
     /// Edit one of the user's messages in the message box.
@@ -6983,6 +7180,8 @@ struct Pickers {
     /// Whether the message menu offers "Copy message link": only when the
     /// instance says where its web client is.
     can_link: bool,
+    /// The invite cards' states, by code (see [`MessageRow::invites`]).
+    invites: Rc<HashMap<String, InviteCard>>,
 }
 
 fn render_row(
@@ -7419,6 +7618,18 @@ fn render_message_row(
                         .children(message.embeds.iter().enumerate().map(|(ix, embed)| {
                             let id = SharedString::from(format!("embed-{}-{ix}", message.id));
                             render_embed(id, embed, colors, on_action, people)
+                        })),
+                )
+            })
+            .when(!preview && !message.invites.is_empty(), |el| {
+                el.child(
+                    v_flex()
+                        .gap_1()
+                        .mt_1()
+                        .children(message.invites.iter().map(|code| {
+                            let id = SharedString::from(format!("invite-{}-{code}", message.id));
+                            let card = pickers.invites.get(code);
+                            render_invite_card(id, code, card, colors, on_action)
                         })),
                 )
             })
@@ -8490,6 +8701,131 @@ fn render_embed(
 
 /// A link preview or bot embed: colour bar, site, title (linked), description,
 /// and a picture beside or under the text.
+/// How looking up an invite seen in a message went.
+#[derive(Clone)]
+enum InviteLookup {
+    Loading,
+    Found(Rc<InvitePreview>),
+    /// Unknown, expired or used up.
+    Invalid,
+    /// Couldn't ask (offline, or Stoat failed): Retry tries again.
+    Failed,
+}
+
+/// What an invite card under a message shows.
+enum InviteCard {
+    Loading,
+    Found {
+        invite: Rc<InvitePreview>,
+        /// The server's icon.
+        icon: Option<String>,
+        /// The user is already in: Open rather than Join.
+        member: bool,
+        joining: bool,
+    },
+    Invalid,
+    Failed,
+}
+
+/// Invite cards are one height whatever their state, so a lookup coming
+/// back doesn't move the messages around them.
+const INVITE_CARD_HEIGHT: f32 = 64.;
+const INVITE_CARD_WIDTH: f32 = 400.;
+const INVITE_CARD_ICON: f32 = 40.;
+
+/// The card for the invite `code` in a message: the server's icon, name
+/// and member count, with Join (or Open); or how looking it up went.
+fn render_invite_card(
+    id: SharedString,
+    code: &str,
+    card: Option<&InviteCard>,
+    colors: RowColors,
+    on_action: &OnRowAction,
+) -> AnyElement {
+    let frame = h_flex()
+        .id(id.clone())
+        .w_full()
+        .max_w(px(INVITE_CARD_WIDTH))
+        .h(px(INVITE_CARD_HEIGHT))
+        .flex_none()
+        .px_3()
+        .gap_3()
+        .rounded_md()
+        .border_1()
+        .border_color(colors.border)
+        .bg(colors.card_bg);
+    let note = |text: &'static str| {
+        div()
+            .flex_1()
+            .min_w_0()
+            .text_sm()
+            .text_color(colors.muted)
+            .truncate()
+            .child(text)
+    };
+    let action = |action: RowAction| {
+        let on_action = on_action.clone();
+        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+            on_action(action.clone(), window, cx)
+        }
+    };
+    match card {
+        None | Some(InviteCard::Loading) => frame.child(note("Loading invite…")),
+        Some(InviteCard::Invalid) => frame.child(note(crate::invites::INVALID_INVITE)),
+        Some(InviteCard::Failed) => frame.child(note("Couldn't load this invite.")).child(
+            Button::new(SharedString::from(format!("{id}-retry")))
+                .small()
+                .outline()
+                .label("Retry")
+                .on_click(action(RowAction::RetryInvite(code.to_string()))),
+        ),
+        Some(InviteCard::Found {
+            invite,
+            icon,
+            member,
+            joining,
+        }) => frame
+            .child(avatar(
+                format!("{id}-icon"),
+                icon.clone(),
+                &invite.name,
+                INVITE_CARD_ICON,
+                colors.avatar_bg,
+                colors.avatar_fg,
+            ))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .truncate()
+                            .child(invite.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.muted)
+                            .truncate()
+                            .child(invite.detail()),
+                    ),
+            )
+            .child(
+                Button::new(SharedString::from(format!("{id}-join")))
+                    .small()
+                    .when(*member, |button| button.outline())
+                    .when(!*member, |button| button.primary())
+                    .label(if *member { "Open" } else { "Join" })
+                    .loading(*joining)
+                    .disabled(*joining)
+                    .on_click(action(RowAction::JoinInvite(code.to_string()))),
+            ),
+    }
+    .into_any_element()
+}
+
 fn render_embed_card(
     id: SharedString,
     card: &EmbedCard,

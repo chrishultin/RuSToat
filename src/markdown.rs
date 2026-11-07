@@ -863,6 +863,32 @@ fn hide_spoilers(content: &str) -> String {
     out
 }
 
+/// The pieces of `content` that show as text: outside code, math and
+/// spoilers (where invite links make cards, see [`crate::invites`]).
+pub fn visible_text_spans(content: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    for segment in segments(content) {
+        let Segment::Text(text) = segment else {
+            continue;
+        };
+        let mut rest = text;
+        let mut start = 0;
+        while let Some(at) = rest[start..].find("||").map(|at| start + at) {
+            match spoiler(&rest[at..]) {
+                Some((_, after)) => {
+                    out.push(&rest[..at]);
+                    rest = after;
+                    start = 0;
+                }
+                None => start = at + 2,
+            }
+        }
+        out.push(rest);
+    }
+    out.retain(|span| !span.is_empty());
+    out
+}
+
 /// A one-line plain-text preview of message content (reply previews): the
 /// first line with text in it, Markdown markers removed, mentions as
 /// `@Name`, and at most `max_chars` characters (cut with "…").

@@ -221,6 +221,7 @@ fn row(id: &str, body: &str) -> TimelineRow {
         body: Some(body.into()),
         attachments: Vec::new(),
         embeds: Vec::new(),
+        invites: Vec::new(),
         reactions: Vec::new(),
         allowed_reactions: None,
         system: false,

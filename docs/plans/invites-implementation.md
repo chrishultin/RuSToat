@@ -55,3 +55,44 @@ Supervision: continuous. The user asked for every manual check to be batched at 
 
 ### Manual Validation
 Deferred: the user asked for every manual check to be run together at the end.
+
+## Chunk 2: Invite cards in messages, and invite links that open in RuSToat
+
+### Changes Made
+- `src/markdown.rs`: `pub fn visible_text_spans(content)`, the pieces of text outside code, math and spoilers (built on the private `segments` and `spoiler`). What `prepare` makes is unchanged.
+- `src/invites.rs`:
+  - `CARDS_MAX = 5` and `InviteHosts::has_links`
+  - `invite_codes(content, &hosts)`: words split on whitespace and `<>()[]"'`, with Markdown `*_~` and trailing punctuation trimmed; scheme optional, deduplicated, capped at 5, with a cheap early exit when the text has no `/`
+  - `is_invite_embed(&Embed, codes, &hosts)`
+  - 2 new unit tests (14 in the module).
+- `src/store.rs`:
+  - `ChatStore.invite_hosts` with `set_invite_hosts`
+  - `MessageRow.invites: Vec<String>`, filled in `message_row` for non-system messages
+  - website embeds whose `url` or `original_url` is one of those invites are dropped (embed keys keep their original index)
+- `src/ui/chat.rs`:
+  - **The cache:** `invites: HashMap<code, InviteLookup>` (Loading / Found / Invalid / Failed), `invite_queue`, `invite_loading` and `invite_joins`.
+  - **Fetching:** `fetch_invites(channel)` runs from both branches of `sync_pane`. `next_invite_lookup` makes one lookup at a time; on a 429 it waits `retry_after` and requeues the same code.
+  - **Cards:** `invite_cards()` builds the per-render card states (icon URL, member, joining) and passes them through the `Pickers` snapshot (empty in search and pins).
+  - **Actions:** `join_invite_card` (joins straight from the card, toasts success or error; already in → open), `retry_invite`, and `RowAction::JoinInvite` / `RetryInvite`.
+  - **Drawing:** `render_invite_card` (a fixed 64 px height in every state, max 400 px wide), drawn after the embeds when not a preview.
+  - **Links:** `open_external` sends invite links of this instance to `open_join_dialog(Some(code))` before any warning. This covers plain links, links whose text isn't their address, and embed links.
+  - The invite hosts are set on the store before `set_media` when the root config loads, so the re-sync adds the cards.
+- `tests/store_invites.rs` (new): codes on a row, none without hosts, none for system messages, and a duplicate website preview dropped while another embed is kept.
+- `tests/store_live.rs`: `invites: Vec::new()` in its hand-built `MessageRow`.
+
+### Divergences
+- **The "bare" check (~7333) didn't need changing.** Invite codes only come from text, so a message with cards always has a body.
+- **Clicked invite links are caught in `ChatView::open_external`**, not `People::link_handler`, so every link-opening path (Markdown links, masked links, embed links) is covered by one check.
+- **`InviteLookup::Found` / `InviteCard::Found` hold `Rc<InvitePreview>`**, because clippy's `large_enum_variant` flagged the plain value.
+- **No remeasure was needed:** every card state is the same height, as the plan's Risks suggested.
+
+### Verification Performed
+- `cargo test --lib invites`: 14 passed. `cargo test --test store_invites`: 4 passed. `store_live`: 37 passed.
+- `cargo test`: 881 passed, 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean, after the `Rc` change.
+- rustfmt `Diff in` counts:
+  - `src/ui/chat.rs` 17, after splitting one long line that had broken an existing hunk in two; `src/store.rs` 15; `src/markdown.rs` 1. All unchanged.
+  - `src/invites.rs`, `tests/store_invites.rs` and `tests/store_live.rs`: 0.
+
+### Manual Validation
+Deferred to the end, at the user's request.

@@ -16,6 +16,7 @@ use crate::complete::{Candidate, RoleCandidate, TokenRef};
 use crate::emoji::CustomEmoji;
 use crate::draft::DraftAttachment;
 use crate::embed::EmbedView;
+use crate::invites::InviteHosts;
 use crate::media::MediaUrls;
 use crate::notify::{self, NotificationSettings};
 use crate::slowmode::Cooldowns;
@@ -137,6 +138,9 @@ pub struct MessageRow {
     pub attachments: Vec<AttachmentView>,
     /// Link previews and bot embeds, in order.
     pub embeds: Vec<EmbedView>,
+    /// The codes of the invite links in its text, for cards (see
+    /// [`crate::invites::invite_codes`]).
+    pub invites: Vec<String>,
     pub system: bool,
     pub edited: bool,
     /// Same author as the previous message, soon after it: drawn without a
@@ -536,6 +540,9 @@ pub struct ChatStore {
     histories: HashMap<String, History>,
     /// Where images come from. Set once `GET /` has loaded.
     media: MediaUrls,
+    /// Which links are invites (shown as cards under their message). Set
+    /// once `GET /` has loaded.
+    invite_hosts: InviteHosts,
     /// Custom emoji of the user's servers, by ID.
     emojis: HashMap<String, Emoji>,
     /// Custom emoji of other servers, fetched by ID when a reaction or
@@ -2084,6 +2091,10 @@ impl ChatStore {
         &self.media
     }
 
+    pub fn set_invite_hosts(&mut self, hosts: InviteHosts) {
+        self.invite_hosts = hosts;
+    }
+
     /// Load a large image the user asked to see, despite its size. Its row
     /// changes from a card to the image.
     pub fn reveal_image(&mut self, file_id: &str) {
@@ -2327,6 +2338,10 @@ impl ChatStore {
                     })
                 }),
         };
+        let invites = match (&message.system, message.content.as_deref()) {
+            (None, Some(content)) => crate::invites::invite_codes(content, &self.invite_hosts),
+            _ => Vec::new(),
+        };
         MessageRow {
             id: message.id.clone(),
             key: match &message.nonce {
@@ -2353,11 +2368,16 @@ impl ChatStore {
                 .iter()
                 .flatten()
                 .enumerate()
+                // An invite's card already shows what its link leads to.
+                .filter(|(_, embed)| {
+                    !crate::invites::is_invite_embed(embed, &invites, &self.invite_hosts)
+                })
                 .filter_map(|(ix, embed)| {
                     let key = format!("{}:embed{ix}", message.id);
                     EmbedView::new(embed, &self.media, self, &self.revealed_images, &key)
                 })
                 .collect(),
+            invites,
             system,
             edited: message.edited.is_some(),
             continuation,

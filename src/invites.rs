@@ -11,7 +11,7 @@
 use revolt_result::ErrorType;
 
 use crate::api::ApiError;
-use crate::api::models::{File, InviteResponse};
+use crate::api::models::{Embed, File, InviteResponse};
 
 /// The official instance's web client: the only one the short links and
 /// the older hosts lead to.
@@ -33,6 +33,9 @@ const STOAT_HOSTS: [&str; 5] = [
 ];
 /// A path on a short host that isn't an invite.
 const NOT_A_CODE: &str = "discover";
+
+/// Most invite cards under one message.
+pub const CARDS_MAX: usize = 5;
 
 /// What the Join dialog says when what's typed isn't an invite.
 pub const NOT_AN_INVITE: &str = "That isn't an invite link or code.";
@@ -65,6 +68,12 @@ impl InviteHosts {
     /// Whether this is the official instance, whose links are `stt.gg`.
     pub fn is_official(&self) -> bool {
         self.official
+    }
+
+    /// Whether any link can be an invite (the instance said where its web
+    /// client is).
+    pub fn has_links(&self) -> bool {
+        self.own.is_some() || self.official
     }
 
     /// The example in the Join dialog's field.
@@ -140,6 +149,50 @@ pub fn code_from_link(link: &str, hosts: &InviteHosts) -> Option<String> {
         None
     };
     code.map(str::to_string)
+}
+
+/// The codes of the invite links in a message's text, for its cards: in
+/// order, each once, at most [`CARDS_MAX`]. Links in code, math or
+/// spoilers don't count (a card would give a hidden link away). The scheme
+/// is optional, as in revite.
+pub fn invite_codes(content: &str, hosts: &InviteHosts) -> Vec<String> {
+    let mut codes = Vec::new();
+    if !hosts.has_links() || !content.contains('/') {
+        return codes;
+    }
+    for span in crate::markdown::visible_text_spans(content) {
+        let words = span.split(|c: char| c.is_whitespace() || "<>()[]\"'".contains(c));
+        for word in words {
+            let word = word
+                .trim_start_matches(['*', '_', '~'])
+                .trim_end_matches(['*', '_', '~', '.', ',', '!', '?', ';', ':']);
+            if !word.contains('/') {
+                continue;
+            }
+            if let Some(code) = code_from_link(word, hosts)
+                && !codes.contains(&code)
+            {
+                codes.push(code);
+                if codes.len() == CARDS_MAX {
+                    return codes;
+                }
+            }
+        }
+    }
+    codes
+}
+
+/// Whether `embed` is a website preview of one of the invites in `codes`
+/// (its card already shows what it leads to).
+pub fn is_invite_embed(embed: &Embed, codes: &[String], hosts: &InviteHosts) -> bool {
+    let Embed::Website(site) = embed else {
+        return false;
+    };
+    [&site.url, &site.original_url]
+        .into_iter()
+        .flatten()
+        .filter_map(|url| code_from_link(url, hosts))
+        .any(|code| codes.contains(&code))
 }
 
 /// What's typed in the Join dialog, as a code: a bare code, or an invite
@@ -442,6 +495,48 @@ mod tests {
     fn short_links_are_another_instance_on_a_self_hosted_one() {
         let hosts = InviteHosts::new(Some("https://chat.example.org"));
         assert_eq!(parse_input("stt.gg/abc", &hosts), Err(OTHER_INSTANCE));
+    }
+
+    #[test]
+    fn invite_links_in_text_give_cards() {
+        let hosts = official();
+        let codes = |text: &str| invite_codes(text, &hosts);
+        assert_eq!(codes("join https://stt.gg/abc!"), ["abc"]);
+        assert_eq!(codes("(stt.gg/abc), <https://stt.gg/def>"), ["abc", "def"]);
+        assert_eq!(
+            codes("[here](https://stt.gg/abc) and **stt.gg/def**"),
+            ["abc", "def"]
+        );
+        assert_eq!(codes("stt.gg/abc then https://stt.gg/abc"), ["abc"]);
+        let seven = (1..=7)
+            .map(|n| format!("stt.gg/c{n}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(codes(&seven), ["c1", "c2", "c3", "c4", "c5"]);
+        assert!(codes("`https://stt.gg/abc`").is_empty());
+        assert!(codes("```\nstt.gg/abc\n```").is_empty());
+        assert!(codes("||stt.gg/abc||").is_empty());
+        assert_eq!(codes("||secret|| stt.gg/abc"), ["abc"]);
+        assert!(codes("$$stt.gg/abc$$").is_empty());
+        assert!(codes("https://stt.gg/discover").is_empty());
+        assert!(codes("no links here").is_empty());
+    }
+
+    #[test]
+    fn a_self_hosted_instance_only_cards_its_own_links() {
+        let hosts = InviteHosts::new(Some("https://chat.example.org"));
+        assert!(invite_codes("stt.gg/abc", &hosts).is_empty());
+        assert_eq!(
+            invite_codes("https://chat.example.org/invite/abc", &hosts),
+            ["abc"]
+        );
+        assert!(
+            invite_codes(
+                "https://chat.example.org/invite/abc",
+                &InviteHosts::new(None)
+            )
+            .is_empty()
+        );
     }
 
     #[test]
