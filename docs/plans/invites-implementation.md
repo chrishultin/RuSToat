@@ -178,3 +178,7 @@ _Completed: 2026-11-07_
 
 ### Remaining Manual Steps
 The batched manual checks for chunks 1–3, and the plan's Manual Tests, which only the user can run (they need the app and two Stoat accounts).
+
+## Manual sign-off
+
+_2026-11-07:_ the user ran the bundled app (PID 96795, built from `82325cc`) and said it was looking good. The individual checks above weren't confirmed one by one.
