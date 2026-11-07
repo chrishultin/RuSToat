@@ -1,7 +1,9 @@
+pub mod account_page;
 pub mod actions;
 pub mod app_prefs;
 pub mod app_root;
 pub mod chat;
+pub mod confirm_dialog;
 pub mod composer;
 pub mod emoji_picker;
 pub mod friends;
@@ -12,6 +14,7 @@ pub mod markup;
 pub mod math;
 pub mod profile_card;
 pub mod profile_editor;
+pub mod sessions_page;
 pub mod settings;
 pub mod switcher;
 pub mod thumbhash;

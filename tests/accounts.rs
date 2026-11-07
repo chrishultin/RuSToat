@@ -61,3 +61,25 @@ fn unknown_and_missing_fields_are_tolerated() {
     assert_eq!(list.accounts[0].user_id, None);
     assert_eq!(list.active, None);
 }
+
+#[test]
+fn a_file_from_before_session_ids_still_loads_and_they_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("accounts.json");
+    std::fs::write(
+        &path,
+        r#"{"accounts":[{"id":"a1","instance":"https://api.stoat.chat","user_id":"01A","name":"Ann"}],"active":"a1"}"#,
+    )
+    .unwrap();
+    let file = FileAccounts::at(path);
+    let mut list = file.load().unwrap().unwrap();
+    assert_eq!(list.get("a1").unwrap().session_id, None);
+
+    assert!(list.set_session("a1", "01SESSION"));
+    file.save(&list).unwrap();
+    let again = file.load().unwrap().unwrap();
+    assert_eq!(
+        again.get("a1").unwrap().session_id.as_deref(),
+        Some("01SESSION")
+    );
+}

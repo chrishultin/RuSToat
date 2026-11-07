@@ -19,8 +19,10 @@ use crate::login_item::{self, LoginItem};
 use crate::shortcuts::{self, Group, Keys, Shortcut};
 use crate::themes::{self, Appearance, Palette};
 use crate::ui::AppRoot;
+use crate::ui::account_page::AccountSecurityView;
 use crate::ui::app_prefs::AppPrefs;
 use crate::ui::profile_editor::{ProfileEditor, render_server_identities};
+use crate::ui::sessions_page::SessionsView;
 
 /// Builds one section of the window, each time the window renders.
 pub type PageFn = fn(&SettingsView, &mut App) -> SettingPage;
@@ -33,6 +35,10 @@ pub struct SettingsView {
     /// The Profile page's form for each account it has shown, by account
     /// ID, so unsaved edits survive switching accounts.
     profile_editors: HashMap<String, Entity<ProfileEditor>>,
+    /// The Sessions page for each account it has shown, by account ID.
+    sessions_views: HashMap<String, Entity<SessionsView>>,
+    /// The Account page for each account it has shown, by account ID.
+    account_views: HashMap<String, Entity<AccountSecurityView>>,
     /// Bumped to go back to the first page (Profile): a new ID gives the
     /// sidebar new state, which starts there.
     page_reset: usize,
@@ -62,6 +68,8 @@ impl SettingsView {
             root,
             pages,
             profile_editors: HashMap::new(),
+            sessions_views: HashMap::new(),
+            account_views: HashMap::new(),
             page_reset: 0,
             _subscriptions: subscriptions,
         }
@@ -91,6 +99,62 @@ impl SettingsView {
         self.profile_editors.insert(id, editor);
     }
 
+    /// The Sessions page for the account on screen, made the first time
+    /// it's shown, and again when the account signs in afresh.
+    fn sync_sessions_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.root() else {
+            return;
+        };
+        let Some((id, chat)) = root.read(cx).shown_chat() else {
+            return;
+        };
+        let session = root.read(cx).shown_session_id();
+        if self
+            .sessions_views
+            .get(&id)
+            .is_some_and(|view| view.read(cx).is_for(&chat, session.as_deref()))
+        {
+            return;
+        }
+        let view = cx.new(|cx| SessionsView::new(chat, session, window, cx));
+        self.sessions_views.insert(id, view);
+    }
+
+    /// The Account page for the account on screen, made the first time it's
+    /// shown, and again when the account signs in afresh.
+    fn sync_account_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((id, chat)) = self.root().and_then(|root| root.read(cx).shown_chat()) else {
+            return;
+        };
+        if self
+            .account_views
+            .get(&id)
+            .is_some_and(|view| view.read(cx).is_for(&chat))
+        {
+            return;
+        }
+        let view = cx.new(|cx| AccountSecurityView::new(chat, window, cx));
+        self.account_views.insert(id, view);
+    }
+
+    /// The Account page for the account on screen, if it's signed in.
+    fn shown_account_view(&self, cx: &App) -> Option<Entity<AccountSecurityView>> {
+        let (id, chat) = self.root()?.read(cx).shown_chat()?;
+        let view = self.account_views.get(&id)?;
+        view.read(cx).is_for(&chat).then(|| view.clone())
+    }
+
+    /// The Sessions page for the account on screen, if it's signed in.
+    fn shown_sessions_view(&self, cx: &App) -> Option<Entity<SessionsView>> {
+        let root = self.root()?;
+        let (id, chat) = root.read(cx).shown_chat()?;
+        let session = root.read(cx).shown_session_id();
+        let view = self.sessions_views.get(&id)?;
+        view.read(cx)
+            .is_for(&chat, session.as_deref())
+            .then(|| view.clone())
+    }
+
     /// The Profile page's form for the account on screen, if it's signed in.
     fn shown_profile_editor(&self, cx: &App) -> Option<Entity<ProfileEditor>> {
         let (id, chat) = self.root()?.read(cx).shown_chat()?;
@@ -102,6 +166,8 @@ impl SettingsView {
     pub fn app_pages() -> Vec<PageFn> {
         vec![
             profile_page,
+            account_page,
+            sessions_page,
             appearance_page,
             notifications_page,
             app_page,
@@ -119,6 +185,8 @@ impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Inputs need the window, which a page function doesn't have.
         self.sync_profile_editor(window, cx);
+        self.sync_sessions_view(window, cx);
+        self.sync_account_view(window, cx);
         let pages: Vec<SettingPage> = self.pages.iter().map(|page| page(self, cx)).collect();
         div().size_full().bg(cx.theme().background).child(
             Settings::new(("settings", self.page_reset))
@@ -164,6 +232,55 @@ fn profile_page(view: &SettingsView, cx: &mut App) -> SettingPage {
                     .keywords(["server identities", "nickname", "server avatar"]),
             ),
     )
+}
+
+/// Account: the account on screen's two-factor authentication.
+fn account_page(view: &SettingsView, cx: &mut App) -> SettingPage {
+    let page = SettingPage::new("Account")
+        .icon(IconName::KeyRound)
+        .resettable(false);
+    let item = match view.shown_account_view(cx) {
+        Some(account) => SettingItem::render(move |_, _, _| account.clone()),
+        None => signed_out_item("Sign in to manage your account."),
+    };
+    page.group(
+        SettingGroup::new()
+            .title("Two-factor authentication")
+            .item(item.keywords([
+                "account",
+                "two-factor",
+                "2fa",
+                "mfa",
+                "authenticator",
+                "totp",
+                "recovery codes",
+                "security",
+            ])),
+    )
+}
+
+/// Sessions: where the account on screen is signed in.
+fn sessions_page(view: &SettingsView, cx: &mut App) -> SettingPage {
+    let page = SettingPage::new("Sessions")
+        .icon(IconName::MonitorSmartphone)
+        .resettable(false);
+    let item = match view.shown_sessions_view(cx) {
+        Some(sessions) => SettingItem::render(move |_, _, _| sessions.clone()),
+        None => signed_out_item("Sign in to manage your sessions."),
+    };
+    page.group(
+        SettingGroup::new().item(item.keywords(["sessions", "devices", "log out", "sign out"])),
+    )
+}
+
+/// A page's only row when no account is signed in on screen.
+fn signed_out_item(text: &'static str) -> SettingItem {
+    SettingItem::render(move |_, _, cx| {
+        div()
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .child(text)
+    })
 }
 
 /// Appearance: the colour palette, and light, dark or following macOS.

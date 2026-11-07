@@ -40,6 +40,9 @@ image = { version = "0.25", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # An attachment's MIME type from its extension. Already in the tree.
 mime_guess = "2"
+# The QR code for setting up an authenticator app (src/security.rs). Nayuki's
+# reference encoder: small, with no dependencies.
+qrcodegen = "1.8"
 thiserror = "2"
 # Session token storage: macOS Keychain (Windows/Linux stores come along with the v1 feature).
 keyring = "4.2"

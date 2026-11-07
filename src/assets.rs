@@ -24,17 +24,23 @@ gpui_kit::assets::icon_assets!(
         House,
         IdCard,
         Image,
+        KeyRound,
         Keyboard,
         Link,
+        LogOut,
         Mail,
         MessageCircle,
+        Monitor,
+        MonitorSmartphone,
         Paperclip,
         Pencil,
         Pin,
         PinOff,
+        RefreshCw,
         Reply,
         SendHorizontal,
         ShieldCheck,
+        Smartphone,
         TextQuote,
         Trash,
         UserCheck,
@@ -140,6 +146,24 @@ mod tests {
             IconName::Pencil,
             IconName::Close,
             IconName::UserPen,
+        ] {
+            let path = icon.path();
+            assert!(AppAssets.load(&path).unwrap().is_some(), "{path} missing");
+        }
+    }
+
+    /// The Sessions and Account pages.
+    #[test]
+    fn security_icons_load() {
+        for icon in [
+            IconName::Copy,
+            IconName::KeyRound,
+            IconName::LogOut,
+            IconName::Monitor,
+            IconName::MonitorSmartphone,
+            IconName::RefreshCw,
+            IconName::ShieldCheck,
+            IconName::Smartphone,
         ] {
             let path = icon.path();
             assert!(AppAssets.load(&path).unwrap().is_some(), "{path} missing");

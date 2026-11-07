@@ -381,7 +381,7 @@ pub fn identity_error_text(err: &ApiError) -> String {
 }
 
 /// Why a change was refused, else `fallback`.
-fn error_text(err: &ApiError, fallback: &str) -> String {
+pub(crate) fn error_text(err: &ApiError, fallback: &str) -> String {
     match err {
         ApiError::RateLimited {
             retry_after_ms: Some(ms),

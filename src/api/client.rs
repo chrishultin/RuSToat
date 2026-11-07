@@ -2,10 +2,11 @@ use std::time::Duration;
 
 use reqwest::{Client, Method};
 use revolt_models::v0::{
-    AllMemberResponse, BulkMessageResponse, Channel, DataEditMessage, DataEditUser, DataLogin,
-    DataMemberEdit, DataMessageSearch, DataMessageSend, DataSendFriendRequest, Emoji, FieldsUser,
-    MFAResponse, Member, Message, MessageSort, OptionsQueryMessages, Presence, ReplyIntent,
-    ResponseLogin, User, UserProfile, UserStatus,
+    AllMemberResponse, BulkMessageResponse, Channel, DataEditMessage, DataEditSession,
+    DataEditUser, DataLogin, DataMemberEdit, DataMessageSearch, DataMessageSend,
+    DataSendFriendRequest, Emoji, FieldsUser, MFAResponse, MFATicket, Member, Message, MessageSort,
+    MultiFactorStatus, OptionsQueryMessages, Presence, ReplyIntent, ResponseLogin,
+    ResponseTotpSecret, SessionInfo, User, UserProfile, UserStatus,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -765,6 +766,119 @@ impl StoatClient {
         self.send_raw(Method::PUT, &format!("/servers/{server}/ack"), None::<&()>)
             .await
             .map(|_| ())
+    }
+
+    /// `GET /auth/session/all`: every session of the account, this one
+    /// included (Stoat doesn't say which is which).
+    pub async fn fetch_sessions(&self) -> Result<Vec<SessionInfo>, ApiError> {
+        self.send(Method::GET, "/auth/session/all", None::<&()>)
+            .await
+    }
+
+    /// `PATCH /auth/session/{id}`: rename one of the account's sessions.
+    /// Needs no MFA ticket.
+    pub async fn rename_session(&self, id: &str, name: &str) -> Result<SessionInfo, ApiError> {
+        let body = DataEditSession {
+            friendly_name: name.to_string(),
+        };
+        self.send(Method::PATCH, &format!("/auth/session/{id}"), Some(&body))
+            .await
+    }
+
+    /// `DELETE /auth/session/{id}`: log one of the account's sessions out.
+    /// Needs a validated MFA `ticket` (see [`Self::create_mfa_ticket`]),
+    /// which this uses up.
+    pub async fn revoke_session(&self, ticket: &str, id: &str) -> Result<(), ApiError> {
+        let path = format!("/auth/session/{id}");
+        self.send_with_ticket(Method::DELETE, &path, ticket, None::<&()>)
+            .await
+            .map(|_| ())
+    }
+
+    /// `DELETE /auth/session/all?revoke_self=false`: log out every session
+    /// but this one. Needs a validated MFA `ticket`.
+    pub async fn revoke_other_sessions(&self, ticket: &str) -> Result<(), ApiError> {
+        let path = "/auth/session/all?revoke_self=false";
+        self.send_with_ticket(Method::DELETE, path, ticket, None::<&()>)
+            .await
+            .map(|_| ())
+    }
+
+    /// `GET /auth/mfa/`: which second factors the account has. Stoat leaves
+    /// out the ones that are off.
+    pub async fn mfa_status(&self) -> Result<MultiFactorStatus, ApiError> {
+        self.send(Method::GET, "/auth/mfa/", None::<&()>).await
+    }
+
+    /// `PUT /auth/mfa/ticket`: confirm it's the user (password, or a TOTP
+    /// or recovery code once TOTP is on) for a single-use ticket, valid for
+    /// five minutes, that protected actions take in `X-MFA-Ticket`. A
+    /// recovery code used here is used up.
+    pub async fn create_mfa_ticket(&self, response: &MFAResponse) -> Result<MFATicket, ApiError> {
+        self.send(Method::PUT, "/auth/mfa/ticket", Some(response))
+            .await
+    }
+
+    /// `POST /auth/mfa/recovery`: the account's recovery codes (none if it
+    /// has none). Needs a validated MFA `ticket`.
+    pub async fn fetch_recovery_codes(&self, ticket: &str) -> Result<Vec<String>, ApiError> {
+        let (status, body) = self
+            .send_with_ticket(Method::POST, "/auth/mfa/recovery", ticket, None::<&()>)
+            .await?;
+        parse(status, &body)
+    }
+
+    /// `PATCH /auth/mfa/recovery`: replace the account's recovery codes with
+    /// ten new ones, and return them. Needs a validated MFA `ticket`.
+    pub async fn generate_recovery_codes(&self, ticket: &str) -> Result<Vec<String>, ApiError> {
+        let (status, body) = self
+            .send_with_ticket(Method::PATCH, "/auth/mfa/recovery", ticket, None::<&()>)
+            .await?;
+        parse(status, &body)
+    }
+
+    /// `POST /auth/mfa/totp`: a new authenticator secret (base32), pending
+    /// until [`Self::enable_totp`] confirms a code from it. Needs a
+    /// validated MFA `ticket`. Asking again replaces the pending secret.
+    pub async fn create_totp_secret(&self, ticket: &str) -> Result<String, ApiError> {
+        let (status, body) = self
+            .send_with_ticket(Method::POST, "/auth/mfa/totp", ticket, None::<&()>)
+            .await?;
+        parse::<ResponseTotpSecret>(status, &body).map(|r| r.secret)
+    }
+
+    /// `PUT /auth/mfa/totp`: turn the authenticator on with the current
+    /// code from the pending secret. Needs no ticket.
+    pub async fn enable_totp(&self, code: &str) -> Result<(), ApiError> {
+        let body = MFAResponse::Totp {
+            totp_code: code.to_string(),
+        };
+        self.send_raw(Method::PUT, "/auth/mfa/totp", Some(&body))
+            .await
+            .map(|_| ())
+    }
+
+    /// `DELETE /auth/mfa/totp`: turn the authenticator off (recovery codes
+    /// stay). Needs a validated MFA `ticket`.
+    pub async fn disable_totp(&self, ticket: &str) -> Result<(), ApiError> {
+        self.send_with_ticket(Method::DELETE, "/auth/mfa/totp", ticket, None::<&()>)
+            .await
+            .map(|_| ())
+    }
+
+    /// Send a request that needs an MFA ticket, returning the raw body.
+    async fn send_with_ticket<B>(
+        &self,
+        method: Method,
+        path: &str,
+        ticket: &str,
+        body: Option<&B>,
+    ) -> Result<(reqwest::StatusCode, Vec<u8>), ApiError>
+    where
+        B: Serialize + ?Sized,
+    {
+        self.send_raw_with(method, path, body, &[("X-MFA-Ticket", ticket)])
+            .await
     }
 
     /// `POST /auth/session/logout`: end this client's session on the server.

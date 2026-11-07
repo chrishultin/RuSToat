@@ -31,6 +31,7 @@ pub mod profile_edit;
 pub mod runtime;
 pub mod safety;
 pub mod search;
+pub mod security;
 pub mod session;
 pub mod shortcuts;
 pub mod slowmode;

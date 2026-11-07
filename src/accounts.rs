@@ -36,6 +36,10 @@ pub struct AccountEntry {
     /// Display name, as last seen.
     #[serde(default)]
     pub name: Option<String>,
+    /// The ID of this client's session (from its login), to tell it apart
+    /// in the session list. `None` for sessions saved before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 /// The saved accounts, in the order they were added, and which one was shown last.
@@ -86,8 +90,21 @@ impl AccountList {
             instance: instance.to_string(),
             user_id: Some(user_id.to_string()),
             name,
+            session_id: None,
         });
         id
+    }
+
+    /// Remember the session an account just logged in with. Returns whether
+    /// it changed.
+    pub fn set_session(&mut self, id: &str, session_id: &str) -> bool {
+        match self.accounts.iter_mut().find(|a| a.id == id) {
+            Some(entry) if entry.session_id.as_deref() != Some(session_id) => {
+                entry.session_id = Some(session_id.to_string());
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Fill in who an account belongs to, once its session is checked.
@@ -233,6 +250,7 @@ pub async fn migrate_legacy(tokens: Arc<dyn TokenStore>, instance: String) -> Ac
                     instance: instance.clone(),
                     user_id: None,
                     name: None,
+                    session_id: None,
                 }],
                 active: Some(instance),
             }
@@ -258,6 +276,7 @@ mod tests {
                     instance: "https://a".into(),
                     user_id: Some(id.to_string()),
                     name: None,
+                    session_id: None,
                 })
                 .collect(),
             active: None,
@@ -270,6 +289,19 @@ mod tests {
             keychain_name("https://api.stoat.chat", "01ABC"),
             "https://api.stoat.chat#01ABC"
         );
+    }
+
+    #[test]
+    fn a_login_remembers_its_session() {
+        let mut accounts = AccountList::default();
+        let id = accounts.add_or_update("https://a", "u1", None);
+        assert!(accounts.set_session(&id, "s1"));
+        assert!(!accounts.set_session(&id, "s1"));
+        // Signing in again replaces it.
+        accounts.add_or_update("https://a", "u1", None);
+        assert!(accounts.set_session(&id, "s2"));
+        assert_eq!(accounts.get(&id).unwrap().session_id.as_deref(), Some("s2"));
+        assert!(!accounts.set_session("nobody", "s3"));
     }
 
     #[test]
@@ -296,6 +328,7 @@ mod tests {
                 instance: "https://a".into(),
                 user_id: None,
                 name: None,
+                session_id: None,
             }],
             active: None,
         };

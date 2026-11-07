@@ -247,6 +247,12 @@ impl AppRoot {
         Some((id.to_string(), self.chat_view(id)?.clone()))
     }
 
+    /// The ID of the session the account on screen is signed in with, if
+    /// it's known (saved at login since milestone 16).
+    pub fn shown_session_id(&self) -> Option<String> {
+        self.accounts.get(self.shown_account()?)?.session_id.clone()
+    }
+
     fn chat_view(&self, id: &str) -> Option<&Entity<ChatView>> {
         match self.states.get(id) {
             Some(AccountState::Chat { view, .. }) => Some(view),
@@ -330,6 +336,7 @@ impl AppRoot {
                 instance.clone(),
                 session.token.clone(),
                 session.user_id.clone(),
+                session.id.clone(),
                 window,
                 cx,
             ),
@@ -488,6 +495,7 @@ impl AppRoot {
                 instance.clone(),
                 session.token.clone(),
                 session.user_id.clone(),
+                session.id.clone(),
                 window,
                 cx,
             ),
@@ -524,6 +532,7 @@ impl AppRoot {
         instance: String,
         token: String,
         me: String,
+        session_id: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -551,6 +560,8 @@ impl AppRoot {
         }
 
         let id = self.accounts.add_or_update(&instance, &me, None);
+        // So the session list can mark this device.
+        self.accounts.set_session(&id, &session_id);
         self.save_accounts();
         let save = spawn_io(session::remember(
             self.store.clone(),
