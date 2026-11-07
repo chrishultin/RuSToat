@@ -36,11 +36,16 @@ pub enum ApiError {
 impl ApiError {
     /// Classify a non-success HTTP response. A 429 is `RateLimited`, except
     /// a slowmode refusal (`{"type":"InSlowmode","retry_after":N}`, in
-    /// seconds), which is the Stoat error it is.
+    /// seconds) and the once-a-day limit on a new `#tag`
+    /// (`{"type":"DiscriminatorChangeRatelimited"}`), which are the Stoat
+    /// errors they are.
     pub fn from_response(status: StatusCode, body: &[u8]) -> Self {
         if status == StatusCode::TOO_MANY_REQUESTS {
             if let Ok(err) = serde_json::from_slice::<StoatError>(body)
-                && matches!(err.error_type, ErrorType::InSlowmode { .. })
+                && matches!(
+                    err.error_type,
+                    ErrorType::InSlowmode { .. } | ErrorType::DiscriminatorChangeRatelimited
+                )
             {
                 return ApiError::Api(err);
             }
@@ -193,6 +198,18 @@ mod tests {
             ApiError::RateLimited {
                 retry_after_ms: Some(1500)
             }
+        ));
+    }
+
+    #[test]
+    fn a_new_tag_too_soon_isnt_a_rate_limit() {
+        let err = ApiError::from_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            br#"{"type":"DiscriminatorChangeRatelimited"}"#,
+        );
+        assert!(matches!(
+            err.error_type(),
+            Some(ErrorType::DiscriminatorChangeRatelimited)
         ));
     }
 

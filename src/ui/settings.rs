@@ -19,6 +19,7 @@ use crate::login_item::{self, LoginItem};
 use crate::shortcuts::{self, Group, Keys, Shortcut};
 use crate::themes::{self, Appearance, Palette};
 use crate::ui::AppRoot;
+use crate::ui::account_details::AccountDetailsView;
 use crate::ui::account_page::AccountSecurityView;
 use crate::ui::app_prefs::AppPrefs;
 use crate::ui::profile_editor::{ProfileEditor, render_server_identities};
@@ -39,6 +40,9 @@ pub struct SettingsView {
     sessions_views: HashMap<String, Entity<SessionsView>>,
     /// The Account page for each account it has shown, by account ID.
     account_views: HashMap<String, Entity<AccountSecurityView>>,
+    /// The Account page's details for each account it has shown, by
+    /// account ID.
+    details_views: HashMap<String, Entity<AccountDetailsView>>,
     /// Bumped to go back to the first page (Profile): a new ID gives the
     /// sidebar new state, which starts there.
     page_reset: usize,
@@ -70,6 +74,7 @@ impl SettingsView {
             profile_editors: HashMap::new(),
             sessions_views: HashMap::new(),
             account_views: HashMap::new(),
+            details_views: HashMap::new(),
             page_reset: 0,
             _subscriptions: subscriptions,
         }
@@ -137,6 +142,31 @@ impl SettingsView {
         self.account_views.insert(id, view);
     }
 
+    /// The Account page's details for the account on screen, made the
+    /// first time they're shown, and again when the account signs in afresh.
+    fn sync_details_view(&mut self, cx: &mut Context<Self>) {
+        let Some((id, chat)) = self.root().and_then(|root| root.read(cx).shown_chat()) else {
+            return;
+        };
+        if self
+            .details_views
+            .get(&id)
+            .is_some_and(|view| view.read(cx).is_for(&chat))
+        {
+            return;
+        }
+        let view = cx.new(|_| AccountDetailsView::new(chat));
+        self.details_views.insert(id, view);
+    }
+
+    /// The Account page's details for the account on screen, if it's
+    /// signed in.
+    fn shown_details_view(&self, cx: &App) -> Option<Entity<AccountDetailsView>> {
+        let (id, chat) = self.root()?.read(cx).shown_chat()?;
+        let view = self.details_views.get(&id)?;
+        view.read(cx).is_for(&chat).then(|| view.clone())
+    }
+
     /// The Account page for the account on screen, if it's signed in.
     fn shown_account_view(&self, cx: &App) -> Option<Entity<AccountSecurityView>> {
         let (id, chat) = self.root()?.read(cx).shown_chat()?;
@@ -187,6 +217,7 @@ impl Render for SettingsView {
         self.sync_profile_editor(window, cx);
         self.sync_sessions_view(window, cx);
         self.sync_account_view(window, cx);
+        self.sync_details_view(cx);
         let pages: Vec<SettingPage> = self.pages.iter().map(|page| page(self, cx)).collect();
         div().size_full().bg(cx.theme().background).child(
             Settings::new(("settings", self.page_reset))
@@ -234,30 +265,50 @@ fn profile_page(view: &SettingsView, cx: &mut App) -> SettingPage {
     )
 }
 
-/// Account: the account on screen's two-factor authentication.
+/// Account: the account on screen's login details and two-factor
+/// authentication.
 fn account_page(view: &SettingsView, cx: &mut App) -> SettingPage {
     let page = SettingPage::new("Account")
         .icon(IconName::KeyRound)
         .resettable(false);
-    let item = match view.shown_account_view(cx) {
-        Some(account) => SettingItem::render(move |_, _, _| account.clone()),
-        None => signed_out_item("Sign in to manage your account."),
+    let (Some(details), Some(security)) =
+        (view.shown_details_view(cx), view.shown_account_view(cx))
+    else {
+        return page.group(
+            SettingGroup::new().item(
+                signed_out_item("Sign in to manage your account.").keywords(ACCOUNT_KEYWORDS),
+            ),
+        );
     };
-    page.group(
-        SettingGroup::new()
-            .title("Two-factor authentication")
-            .item(item.keywords([
-                "account",
-                "two-factor",
-                "2fa",
-                "mfa",
-                "authenticator",
-                "totp",
-                "recovery codes",
-                "security",
-            ])),
-    )
+    page.group(SettingGroup::new().title("Account details").item(
+        SettingItem::render(move |_, _, _| details.clone()).keywords([
+            "account", "username", "email", "password", "change", "login",
+        ]),
+    ))
+    .group(SettingGroup::new().title("Two-factor authentication").item(
+        SettingItem::render(move |_, _, _| security.clone()).keywords([
+            "account",
+            "two-factor",
+            "2fa",
+            "mfa",
+            "authenticator",
+            "totp",
+            "recovery codes",
+            "security",
+        ]),
+    ))
 }
+
+/// What finds the Account page while no account is signed in.
+const ACCOUNT_KEYWORDS: [&str; 7] = [
+    "account",
+    "username",
+    "email",
+    "password",
+    "two-factor",
+    "2fa",
+    "security",
+];
 
 /// Sessions: where the account on screen is signed in.
 fn sessions_page(view: &SettingsView, cx: &mut App) -> SettingPage {

@@ -1,3 +1,4 @@
+pub mod account_details;
 pub mod account_page;
 pub mod actions;
 pub mod app_prefs;

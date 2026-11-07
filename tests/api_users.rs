@@ -490,3 +490,71 @@ async fn a_new_avatar_and_banner_send_their_upload_ids() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn changing_the_username_sends_the_name_and_password() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/users/@me/username"))
+        .and(header("x-session-token", "tok"))
+        .and(body_json(
+            json!({ "username": "ada", "password": "pw123456" }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "_id": "u-me", "username": "ada", "discriminator": "5678",
+            "relationship": "User", "online": true
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let me = client(&server)
+        .change_username("ada", "pw123456")
+        .await
+        .unwrap();
+    assert_eq!(me.username, "ada");
+    assert_eq!(me.discriminator, "5678");
+}
+
+#[tokio::test]
+async fn a_new_tag_too_soon_isnt_a_rate_limit() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/users/@me/username"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .set_body_json(json!({ "type": "DiscriminatorChangeRatelimited" })),
+        )
+        .mount(&server)
+        .await;
+
+    let err = client(&server)
+        .change_username("ada", "pw123456")
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err.error_type(),
+        Some(ErrorType::DiscriminatorChangeRatelimited)
+    ));
+}
+
+#[tokio::test]
+async fn a_plain_429_on_a_username_change_is_still_a_rate_limit() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/users/@me/username"))
+        .respond_with(ResponseTemplate::new(429).set_body_json(json!({ "retry_after": 2500 })))
+        .mount(&server)
+        .await;
+
+    let err = client(&server)
+        .change_username("ada", "pw123456")
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ApiError::RateLimited {
+            retry_after_ms: Some(2500)
+        }
+    ));
+}

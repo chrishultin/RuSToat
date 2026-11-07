@@ -548,7 +548,12 @@ impl Render for AccountSecurityView {
 }
 
 /// One setting: its name and what it's doing, with its buttons on the right.
-fn row(title: &'static str, detail: &'static str, actions: AnyElement, cx: &App) -> AnyElement {
+pub(crate) fn row(
+    title: &'static str,
+    detail: impl Into<SharedString>,
+    actions: AnyElement,
+    cx: &App,
+) -> AnyElement {
     h_flex()
         .w_full()
         .gap_3()
@@ -561,7 +566,7 @@ fn row(title: &'static str, detail: &'static str, actions: AnyElement, cx: &App)
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child(detail),
+                        .child(detail.into()),
                 ),
         )
         .child(actions)

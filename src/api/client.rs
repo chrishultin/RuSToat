@@ -645,6 +645,21 @@ impl StoatClient {
         self.send(Method::PATCH, "/users/@me", Some(&body)).await
     }
 
+    /// `PATCH /users/@me/username`: change the user's username, confirmed
+    /// with their current `password` (never an MFA ticket). Stoat answers
+    /// with the user as stored: the name may be cleaned up, and the `#tag`
+    /// may change if it's taken under the new name.
+    pub async fn change_username(&self, username: &str, password: &str) -> Result<User, ApiError> {
+        #[derive(Serialize)]
+        struct ChangeUsername<'a> {
+            username: &'a str,
+            password: &'a str,
+        }
+        let body = ChangeUsername { username, password };
+        self.send(Method::PATCH, "/users/@me/username", Some(&body))
+            .await
+    }
+
     /// `PATCH /servers/{server}/members/{user}`: change a membership, such
     /// as the user's own nickname, avatar and pronouns on a server. Only
     /// what's set is sent, as with [`Self::edit_user`]. Stoat answers with

@@ -4,6 +4,7 @@
 //! `main.rs` only boots the app. Integration tests in `tests/` can import
 //! from here.
 
+pub mod account_edit;
 pub mod accounts;
 pub mod api;
 pub mod assets;
