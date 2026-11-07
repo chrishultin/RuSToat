@@ -1,6 +1,7 @@
 //! App-wide preferences, kept between launches: the default skin tone for
 //! emoji, whether the member list is open, the colour palette and
-//! appearance, and whether closing the window keeps RuSToat running. Like [`crate::places`], plain data with no GPUI, saved
+//! appearance, whether closing the window keeps RuSToat running, and
+//! whether notifications play a sound. Like [`crate::places`], plain data with no GPUI, saved
 //! as a small JSON file in the app's folder and read and written
 //! synchronously.
 
@@ -176,6 +177,9 @@ pub struct Prefs {
     /// Closing the main window hides it, so accounts stay connected and
     /// notifications keep coming. Quitting is ⌘Q. On unless turned off.
     pub keep_running: bool,
+    /// A message notice plays a sound (see [`crate::sound`]). On unless
+    /// turned off. Not synced: it's this Mac's.
+    pub notification_sounds: bool,
 }
 
 impl Default for Prefs {
@@ -186,6 +190,7 @@ impl Default for Prefs {
             palette: Palette::default(),
             appearance: Appearance::default(),
             keep_running: true,
+            notification_sounds: true,
         }
     }
 }
@@ -266,6 +271,7 @@ mod tests {
             palette: Palette::MacosClassic,
             appearance: Appearance::Dark,
             keep_running: false,
+            notification_sounds: false,
         };
         file.save(&prefs).unwrap();
         assert_eq!(file.load(), prefs);
@@ -338,6 +344,26 @@ mod tests {
         assert_eq!(new.appearance, Appearance::Light);
         std::fs::write(&path, br#"{"keep_running":false}"#).unwrap();
         assert!(!PrefsFile::at(&path).load().keep_running);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn notification_sounds_are_on_unless_a_file_says_otherwise() {
+        let dir = temp_dir("sounds");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("prefs.json");
+        assert!(Prefs::default().notification_sounds);
+        // A file from before the setting existed.
+        std::fs::write(&path, br#"{"keep_running":false}"#).unwrap();
+        let old = PrefsFile::at(&path).load();
+        assert!(old.notification_sounds);
+        assert!(!old.keep_running);
+        let off = Prefs {
+            notification_sounds: false,
+            ..Prefs::default()
+        };
+        PrefsFile::at(&path).save(&off).unwrap();
+        assert!(!PrefsFile::at(&path).load().notification_sounds);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

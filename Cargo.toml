@@ -57,11 +57,12 @@ markdown = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Dock badge (AppKit's NSDockTile), checking whether banners can be posted
-# (bundle identifier, notification permission), and hiding the main window
-# (NSWindow). The same versions GPUI already uses.
+# (bundle identifier, notification permission), hiding the main window
+# (NSWindow), and the notification sound (NSSound). The same versions GPUI
+# already uses.
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSBundle", "NSError"] }
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile", "NSResponder", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile", "NSResponder", "NSSound", "NSView", "NSWindow"] }
 # Reaching a GPUI window's NSWindow, to hide it without closing it
 # (src/window_hide.rs). The version GPUI already uses.
 raw-window-handle = "0.6"

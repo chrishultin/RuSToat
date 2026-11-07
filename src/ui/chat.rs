@@ -824,6 +824,11 @@ impl ChatView {
                     self.sync_pane(&channel, cx);
                 }
                 if let Some(notice) = notice {
+                    // Banner or toast, a message notice plays the sound.
+                    let sounds_on = crate::ui::app_prefs::AppPrefs::get(cx).notification_sounds;
+                    if crate::sound::should_play(sounds_on, true) {
+                        crate::sound::play_message_sound();
+                    }
                     match notify::delivery(viewing.window_active, crate::banners::available()) {
                         Delivery::Banner => self.show_banner(notice, message_id, cx),
                         Delivery::Toast => self.show_toast(notice, window, cx),

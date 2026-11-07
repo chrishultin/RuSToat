@@ -138,3 +138,35 @@ Pending: batched for the end (the chunk 2 manual check in the plan). It also cov
 
 ### Manual Validation
 Pending: batched for the end (the chunk 3 manual check in the plan).
+
+## Chunk 4: Notification sounds
+
+### Changes Made
+- `Cargo.toml`: adds `"NSSound"` to `objc2-app-kit`'s features (macOS-only dependency), and the comment now mentions it.
+- `src/sound.rs` (new, registered in `src/lib.rs`):
+  - `MESSAGE_SOUND = "Glass"` and `MIN_GAP = 1 s`.
+  - `should_play(sounds_on, is_message_notice)`.
+  - `Throttle`, which allows at most one sound per `MIN_GAP` and uses `saturating_duration_since`, so a backwards step can't let a burst through. A static `Mutex<Throttle>` makes it app-wide, so two accounts notifying at once play once.
+  - `play_message_sound()` (throttled) and `preview_message_sound()` (not throttled).
+  - `play`: `NSSound::soundNamed` then `play` on macOS. A missing sound is logged once, and other platforms are a no-op.
+  - Unit tests.
+- `src/prefs.rs`: `Prefs.notification_sounds` (serde-defaulted through `#[serde(default)]` on the struct; `Default` is `true`). Adds a test: the default is on, a file from before the setting reads as on, and `false` round-trips. The existing round-trip test sets it to `false`.
+- `src/ui/settings.rs`: `notifications_page` (Bell icon), second in `app_pages()`, after Appearance. Its "Sounds" group has:
+  - the "Notification sounds" switch ("Play a sound when a message notifies you.", default on)
+  - a "Preview" row with a "Play" button (Play icon) that calls `preview_message_sound`
+  - The whole file was formatted with rustfmt; it had no drift before.
+- `src/ui/chat.rs`: in the live-message path, once `should_notify` returns a notice and before delivery (banner or toast), the sound plays if `AppPrefs::get(cx).notification_sounds`. The friend-request path (`friend_request_notice` → `show_friend_banner` or `show_toast`) is untouched, so it stays silent.
+- `src/assets.rs`: the settings icons test also covers `Bell` and `Play`. Both are in gpui-kit's default icon set, so nothing new is bundled.
+
+### Divergences
+- Minor: the throttle is a static in `sound.rs` (one of the plan's two options), so it's app-wide across accounts rather than per view.
+- Minor: there's no test that the Notifications page is listed. Pages are `fn` pointers that need a GPUI `App` to build, there's no existing settings test to extend, and comparing function pointers is unreliable. That it's listed is part of the manual check.
+- The plan's note on macOS Focus stands: the sound plays even if macOS Focus hides the banner. RuSToat's own Busy presence already suppresses notices, and with them the sound, because the sound only plays for a notice `should_notify` returned.
+
+### Verification Performed
+- `cargo test`: 758 passed, 0 failed (4 new). `cargo clippy --all-targets -- -D warnings`: clean.
+- Build check: `cargo build` links the binary with `NSSound`.
+- rustfmt drift: `chat.rs` 17 (unchanged). `prefs.rs`, `assets.rs`, `ui/settings.rs` and `sound.rs` are 0.
+
+### Manual Validation
+Pending: batched for the end (the chunk 4 manual check in the plan).

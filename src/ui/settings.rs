@@ -54,7 +54,12 @@ impl SettingsView {
 
     /// The app's own sections, in sidebar order.
     pub fn app_pages() -> Vec<PageFn> {
-        vec![appearance_page, app_page, shortcuts_page]
+        vec![
+            appearance_page,
+            notifications_page,
+            app_page,
+            shortcuts_page,
+        ]
     }
 
     /// The main window's content, if it's still open.
@@ -120,6 +125,41 @@ fn appearance_page(_: &SettingsView, _: &mut App) -> SettingPage {
                         .default_value(Appearance::default().label()),
                     )
                     .description("Light or dark, or System to follow macOS."),
+                ),
+        )
+}
+
+/// Notifications: whether a message notice plays a sound, with a preview.
+fn notifications_page(_: &SettingsView, _: &mut App) -> SettingPage {
+    SettingPage::new("Notifications")
+        .icon(IconName::Bell)
+        .group(
+            SettingGroup::new()
+                .title("Sounds")
+                .item(
+                    SettingItem::new(
+                        "Notification sounds",
+                        SettingField::switch(
+                            |cx| AppPrefs::get(cx).notification_sounds,
+                            |on, cx| AppPrefs::update(cx, |prefs| prefs.notification_sounds = on),
+                        )
+                        .default_value(true),
+                    )
+                    .description("Play a sound when a message notifies you."),
+                )
+                .item(
+                    SettingItem::new(
+                        "Preview",
+                        SettingField::render(|_, _, _| {
+                            Button::new("preview-sound")
+                                .label("Play")
+                                .icon(IconName::Play)
+                                .outline()
+                                .small()
+                                .on_click(|_, _, _| crate::sound::preview_message_sound())
+                        }),
+                    )
+                    .description("macOS's Glass sound."),
                 ),
         )
 }
