@@ -7,7 +7,9 @@ use revolt_result::ErrorType;
 use unicode_properties::{GeneralCategory, GeneralCategoryGroup, UnicodeGeneralCategory};
 
 use crate::api::ApiError;
+use crate::api::models::MultiFactorStatus;
 use crate::profile_edit::error_text;
+use crate::security::{ConfirmMethod, confirm_methods};
 
 /// Usernames: 2 to 32 characters (`delta`'s `DataChangeUsername`).
 pub const USERNAME_MIN: usize = 2;
@@ -76,27 +78,101 @@ fn username_char(c: char) -> bool {
 /// `FailedValidation` about the password rather than the name.
 pub fn username_error(err: &ApiError, short_password: bool) -> ChangeError {
     use ChangeField::{Current, Value};
-    let field = |field, text: &str| ChangeError::Field(field, text.into());
-    match err {
-        ApiError::RateLimited { .. } => ChangeError::Field(ChangeField::Form, error_text(err, "")),
-        ApiError::Unauthorized | ApiError::Network(_) => ChangeError::Toast(err.to_string()),
-        _ => match err.error_type() {
-            Some(ErrorType::InvalidCredentials) => field(Current, "That password isn't right."),
-            Some(ErrorType::FailedValidation { .. }) if short_password => {
-                field(Current, "That password isn't right.")
+    change_error(err, "Couldn't change your username. Try again.", |error| {
+        Some(match error {
+            ErrorType::FailedValidation { .. } if short_password => {
+                (Current, "That password isn't right.")
             }
-            Some(ErrorType::FailedValidation { .. }) => {
-                field(Value, "Use 2–32 letters, numbers, _, . or -.")
-            }
-            Some(ErrorType::InvalidUsername) => field(Value, "Stoat doesn't allow that username."),
-            Some(ErrorType::UsernameTaken) => field(Value, "That username is taken. Try another."),
-            Some(ErrorType::DiscriminatorChangeRatelimited) => field(
+            ErrorType::FailedValidation { .. } => (Value, "Use 2–32 letters, numbers, _, . or -."),
+            ErrorType::InvalidUsername => (Value, "Stoat doesn't allow that username."),
+            ErrorType::UsernameTaken => (Value, "That username is taken. Try another."),
+            ErrorType::DiscriminatorChangeRatelimited => (
                 Value,
                 "Your #number can only change once a day, and that name needs a new one. \
                  Try again tomorrow, or pick another name.",
             ),
-            _ => ChangeError::Toast(error_text(err, "Couldn't change your username. Try again.")),
+            _ => return None,
+        })
+    })
+}
+
+/// What a refused email change says.
+pub fn email_error(err: &ApiError) -> ChangeError {
+    change_error(err, "Couldn't change your email. Try again.", |error| {
+        Some(match error {
+            ErrorType::IncorrectData { .. } => {
+                (ChangeField::Value, "That isn't a valid email address.")
+            }
+            ErrorType::Blacklisted => (
+                ChangeField::Value,
+                "Stoat doesn't accept addresses from that provider.",
+            ),
+            _ => return None,
+        })
+    })
+}
+
+/// What any refused change says: a wrong current password, a rate limit
+/// (with the wait), what `specific` places at a field, or else a toast
+/// with `fallback`.
+fn change_error(
+    err: &ApiError,
+    fallback: &str,
+    specific: impl Fn(&ErrorType) -> Option<(ChangeField, &'static str)>,
+) -> ChangeError {
+    match err {
+        ApiError::RateLimited { .. } => ChangeError::Field(ChangeField::Form, error_text(err, "")),
+        ApiError::Unauthorized | ApiError::Network(_) => ChangeError::Toast(err.to_string()),
+        _ => match err.error_type() {
+            Some(ErrorType::InvalidCredentials) => {
+                ChangeError::Field(ChangeField::Current, "That password isn't right.".into())
+            }
+            Some(error) => match specific(error) {
+                Some((field, text)) => ChangeError::Field(field, text.into()),
+                None => ChangeError::Toast(error_text(err, fallback)),
+            },
+            None => ChangeError::Toast(error_text(err, fallback)),
         },
+    }
+}
+
+/// Under the code field after a change failed with it: Stoat used the
+/// code up on the way.
+pub const CODE_USED: &str = "That code is used up. Enter a new one.";
+
+/// The ways to give a code for a change that needs one: none without an
+/// authenticator app (the current password is enough); with one, its
+/// code, or a recovery code if any are left.
+pub fn code_methods(status: &MultiFactorStatus) -> Vec<ConfirmMethod> {
+    confirm_methods(status)
+        .into_iter()
+        .filter(|method| *method != ConfirmMethod::Password)
+        .collect()
+}
+
+/// The email shown until it's revealed.
+pub const MASKED_EMAIL: &str = "••••••••@••••••";
+
+/// Check a new email roughly as Stoat will (it decides): trimmed, one `@`
+/// with something before it, a domain with a dot after it, and no spaces.
+/// `Err(None)` has nothing to say yet (blank).
+pub fn check_email(text: &str) -> Result<&str, Option<&'static str>> {
+    let email = text.trim();
+    if email.is_empty() {
+        return Err(None);
+    }
+    let valid = !email.contains(char::is_whitespace)
+        && email.split_once('@').is_some_and(|(local, domain)| {
+            !local.is_empty()
+                && !domain.contains('@')
+                && domain
+                    .split_once('.')
+                    .is_some_and(|(name, rest)| !name.is_empty() && !rest.is_empty())
+        });
+    if valid {
+        Ok(email)
+    } else {
+        Err(Some("That isn't a valid email address."))
     }
 }
 
@@ -229,6 +305,77 @@ mod tests {
             username_changed_text("1234", "ada", "5678"),
             "Your username is now ada#5678. #1234 was taken under that name, so Stoat gave \
              you a new number."
+        );
+    }
+
+    #[test]
+    fn emails_are_roughly_checked() {
+        assert_eq!(check_email("a@b.co"), Ok("a@b.co"));
+        assert_eq!(check_email(" a@b.co "), Ok("a@b.co"));
+        assert_eq!(
+            check_email("a.b+c@mail.example.org"),
+            Ok("a.b+c@mail.example.org")
+        );
+        assert_eq!(check_email(""), Err(None));
+        assert_eq!(check_email("  "), Err(None));
+        for bad in [
+            "ab.co", "a@", "@b.co", "a@b", "a@.co", "a@b.", "a b@c.de", "a@b@c.de",
+        ] {
+            assert_eq!(
+                check_email(bad),
+                Err(Some("That isn't a valid email address.")),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn email_refusals_land_on_their_field() {
+        let at = |field, text: &str| ChangeError::Field(field, text.into());
+        assert_eq!(
+            email_error(&api(ErrorType::IncorrectData {
+                with: "email".into()
+            })),
+            at(ChangeField::Value, "That isn't a valid email address.")
+        );
+        assert_eq!(
+            email_error(&api(ErrorType::Blacklisted)),
+            at(
+                ChangeField::Value,
+                "Stoat doesn't accept addresses from that provider."
+            )
+        );
+        assert_eq!(
+            email_error(&api(ErrorType::InvalidCredentials)),
+            at(ChangeField::Current, "That password isn't right.")
+        );
+        assert_eq!(
+            email_error(&ApiError::RateLimited {
+                retry_after_ms: None
+            }),
+            at(
+                ChangeField::Form,
+                "Stoat is limiting changes. Try again in a moment."
+            )
+        );
+        assert_eq!(
+            email_error(&api(ErrorType::InternalError)),
+            ChangeError::Toast("Couldn't change your email. Try again.".into())
+        );
+    }
+
+    #[test]
+    fn a_code_is_asked_for_only_with_an_authenticator() {
+        let status = |json| serde_json::from_str::<MultiFactorStatus>(json).unwrap();
+        assert_eq!(code_methods(&status("{}")), []);
+        assert_eq!(code_methods(&status(r#"{"recovery_active":true}"#)), []);
+        assert_eq!(
+            code_methods(&status(r#"{"totp_mfa":true}"#)),
+            [ConfirmMethod::Totp]
+        );
+        assert_eq!(
+            code_methods(&status(r#"{"totp_mfa":true,"recovery_active":true}"#)),
+            [ConfirmMethod::Totp, ConfirmMethod::Recovery]
         );
     }
 }

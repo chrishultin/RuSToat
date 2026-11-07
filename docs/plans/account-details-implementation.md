@@ -54,3 +54,46 @@ Pending (batched for the end):
 - Change only its case; the tag stays.
 - A wrong password shows "That password isn't right." under the password field, and the dialog stays.
 - "stoat" is refused before sending.
+
+## Chunk 2: Changing your email, with the code field for two-factor
+
+### Changes Made
+- `src/api/client.rs`:
+  - `fetch_account() -> AccountInfo` (`GET /auth/account/`)
+  - `change_email(ticket: Option<&str>, email, current_password)` (`PATCH /auth/account/change/email`, `DataChangeEmail`, 204)
+  - a private `send_maybe_ticket` that adds `X-MFA-Ticket` only when there's a ticket
+  - The import list is hand-formatted.
+- `src/account_edit.rs`:
+  - `email_error(err)`: `IncorrectData` / `Blacklisted` on the value, `InvalidCredentials` on the current password, a rate limit on the form, else a toast.
+  - A shared private `change_error(err, fallback, specific)`, which `username_error` now uses too.
+  - `check_email(text)`: trimmed; one `@` with a local part; a domain with a dot that has text on both sides; no whitespace. `Err(None)` when blank.
+  - `code_methods(&status)` (`confirm_methods` minus `Password`), `CODE_USED` and `MASKED_EMAIL`.
+  - 3 more unit tests.
+- `src/ui/account_details.rs`:
+  - **The Email row:** `••••••••@••••••` with Reveal (fetches `GET /auth/account/`; a failure toasts and stays hidden), or the address with Hide, plus Change.
+  - **After a change:** "Your email is now …" if Stoat changed it at once (the follow-up `fetch_account` already shows it), or "Check … for a link to confirm the change." and a "Waiting for you to open the link sent to …" note under the row.
+  - **The dialog** is now one `ChangeDialog` for both kinds (`ChangeKind { Username, Email }`), with per-kind intro, label, checks and errors.
+  - **The code step:** for an email change it fetches the MFA status ("Checking your account…", Retry on failure). With an authenticator on, it adds a "Two-factor code" field with the method's prompt, the "Each code works once, even if the change fails." note, and a link to switch to a recovery code.
+  - **Submitting:** it makes the ticket from the code, then sends the change with it, all in one IO task. A refused code shows under the code field (`ticket_error`; `DisallowedMFAMethod` fetches the status again). A refused change that used a code empties the code field and shows "That code is used up. Enter a new one." under it, besides the reason at its own field.
+  - Enter moves value → current password → code → submit.
+  - The ticket token, code, password and email are never logged.
+- `tests/api_account.rs` (new):
+  - the account's email parses
+  - an email change sends exactly `{"email":"new@example.com","current_password":"pw"}`, with no `x-mfa-ticket` for `None` and `x-mfa-ticket: t1` for `Some("t1")`, and accepts 204
+  - a 401 `InvalidCredentials` is an `Api` error, not `Unauthorized`
+
+### Divergences
+- `Outcome::Username` boxes its `User` (clippy's `large_enum_variant`).
+- Emptying the code field (as a used code is) leaves what's said about it, so the "used up" note and the error at another field survive the input's change event.
+- The code field's label is "Two-factor code", with the method's own prompt under it ("Enter the 6-digit code from your authenticator app.").
+
+### Verification Performed
+- Full suite `cargo test`: 851 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt drift: `src/api/client.rs` 3 (unchanged); 0 in `src/account_edit.rs`, `src/ui/account_details.rs` and `tests/api_account.rs`.
+
+### Manual Validation
+Pending (batched for the end):
+- Reveal shows your email, and Hide masks it.
+- Without two-factor: change your email; the toast and the row say to check the new address; the link arrives. After opening it, Reveal shows the new address.
+- With two-factor on: the dialog asks for an authenticator code too. A wrong password clears the code and says it's used up; a right one sends the link.
+- Change it back afterwards.

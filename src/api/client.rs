@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use reqwest::{Client, Method};
 use revolt_models::v0::{
-    AllMemberResponse, BulkMessageResponse, Channel, DataEditMessage, DataEditSession,
-    DataEditUser, DataLogin, DataMemberEdit, DataMessageSearch, DataMessageSend,
+    AccountInfo, AllMemberResponse, BulkMessageResponse, Channel, DataChangeEmail, DataEditMessage,
+    DataEditSession, DataEditUser, DataLogin, DataMemberEdit, DataMessageSearch, DataMessageSend,
     DataSendFriendRequest, Emoji, FieldsUser, MFAResponse, MFATicket, Member, Message, MessageSort,
     MultiFactorStatus, OptionsQueryMessages, Presence, ReplyIntent, ResponseLogin,
     ResponseTotpSecret, SessionInfo, User, UserProfile, UserStatus,
@@ -879,6 +879,50 @@ impl StoatClient {
         self.send_with_ticket(Method::DELETE, "/auth/mfa/totp", ticket, None::<&()>)
             .await
             .map(|_| ())
+    }
+
+    /// `GET /auth/account/`: the account's ID and login email.
+    pub async fn fetch_account(&self) -> Result<AccountInfo, ApiError> {
+        self.send(Method::GET, "/auth/account/", None::<&()>).await
+    }
+
+    /// `PATCH /auth/account/change/email`: change the login email,
+    /// confirmed with the current password and, when the account has an
+    /// authenticator app, a validated MFA `ticket`. Stoat usually emails a
+    /// link to the new address, and the email changes once it's opened.
+    pub async fn change_email(
+        &self,
+        ticket: Option<&str>,
+        email: &str,
+        current_password: &str,
+    ) -> Result<(), ApiError> {
+        let body = DataChangeEmail {
+            email: email.to_string(),
+            current_password: current_password.to_string(),
+        };
+        self.send_maybe_ticket(Method::PATCH, "/auth/account/change/email", ticket, &body)
+            .await
+            .map(|_| ())
+    }
+
+    /// Send a request with an MFA ticket if there is one.
+    async fn send_maybe_ticket<B>(
+        &self,
+        method: Method,
+        path: &str,
+        ticket: Option<&str>,
+        body: &B,
+    ) -> Result<(reqwest::StatusCode, Vec<u8>), ApiError>
+    where
+        B: Serialize + ?Sized,
+    {
+        match ticket {
+            Some(ticket) => {
+                self.send_with_ticket(method, path, ticket, Some(body))
+                    .await
+            }
+            None => self.send_raw(method, path, Some(body)).await,
+        }
     }
 
     /// Send a request that needs an MFA ticket, returning the raw body.
