@@ -96,3 +96,85 @@ Deferred: the user asked for every manual check to be run together at the end.
 
 ### Manual Validation
 Deferred to the end, at the user's request.
+
+## Chunk 3: Create an invite and copy its link
+
+### Changes Made
+- `src/api/client.rs`:
+  - `RootLimits.global: GlobalLimits { max_invite_duration_days: Option<u32> }`
+  - `create_invite(channel, max_uses, expires: Option<&str>) -> Invite` (`POST /channels/{id}/invites`), with a private `CreateInvite` body whose fields are skipped when `None`, so no options send `{}`
+- `src/links.rs`: `invite_link(app, code)`: `https://stt.gg/{code}` when `app` is `https://stoat.chat` (with or without `/`), else `{app}/invite/{code}`.
+- `src/invites.rs`:
+  - `Expiry` (`ALL`, `label`, `duration`, `options(max_days)`)
+  - `MAX_USES_OPTIONS` and `max_uses_label`
+  - `expires_at(expiry, now)` (RFC 3339, milliseconds, `Z`)
+  - `invite_summary(expiry, max_uses)`, `invite_code(&Invite)` and `create_error_text(&ApiError, had_expiry)`
+  - 4 new unit tests (18 in the module).
+- `src/permissions.rs`: `can_invite` (server channels with `InviteOthers`). `src/store.rs`: `ChatStore::can_invite(channel)`.
+- `src/ui/invites.rs`: `CreateInviteDialog`.
+  - The "Expire after" and "Max uses" pickers (outline buttons with `DropdownMenu` and checked items), defaulting to Never and No limit, with Expire after limited to the instance's maximum.
+  - Create, with errors under the pickers.
+  - After creating: the link in a Menlo box, the summary, Copy link (toast "Copied the invite link."), and Done. Without an `app`, it shows the code with "Copy code".
+- `src/ui/chat.rs`:
+  - `web_app()`, `open_create_invite(channel)` (title "Invite people to {server}"), `first_invitable_channel(server)` and `invite_max_days`, read from the root config
+  - "Create invite…" (UserPlus icon) in `channel_menu` before the separator, when `can_invite`
+  - "Invite people…" in `server_menu` after "Edit identity…", when some channel allows it
+  - a ghost `UserPlus` "Create invite" button in the channel header before Pins, when `can_invite` on the open channel
+- Tests:
+  - `tests/api_invites.rs`: create with `{}`, create with both options (exact body), the `Invite` parse and code, and `MissingPermission` as an `Api` error.
+  - `tests/links.rs`: `invite_link` on stoat.chat and elsewhere, and `max_invite_duration_days` read from the root config (or `None`).
+  - `tests/permissions.rs`: `can_invite` by default, a channel override denying it, the owner, and no invites in DMs, groups or Saved Notes.
+
+### Divergences
+- **`invite_summary` takes the chosen options,** not the `Invite` and `now`. The returned `expires` is an `iso8601_timestamp::Timestamp`, a crate RuSToat doesn't use directly, and the options already say the same thing.
+- **The header button doesn't also require a known `web_app`,** because the dialog shows the code with "Copy code" when there's no link, as the plan's Risks suggested.
+- **The root-config test went in `tests/links.rs`,** next to the existing `app` test, rather than `tests/api_login.rs`.
+- **The dialog's submit button ID is `create-invite-submit`,** so it can't clash with the header's `create-invite`.
+
+### Verification Performed
+- `cargo test --lib invites`: 18 passed. `cargo test --test api_invites --test links --test permissions`: 9, 7 and 31 passed.
+- `cargo test`: 893 passed, 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt `Diff in` counts:
+  - `src/ui/chat.rs` 17, after hand-formatting the server menu's new `let invite = …` chain; `src/api/client.rs` 3; `src/store.rs` 15. All unchanged.
+  - 0 in `src/links.rs`, `src/permissions.rs`, `src/invites.rs`, `src/ui/invites.rs`, `tests/api_invites.rs`, `tests/links.rs` and `tests/permissions.rs`.
+
+### Manual Validation
+Deferred to the end, at the user's request.
+
+## Summary
+
+_Completed: 2026-11-07_
+
+### Chunks Completed
+1. Join a server from a code or link: the dialog with a preview, the rail "+", and Stoat → Join Server….
+2. Invite cards in messages (up to 5, from text outside code, math and spoilers), and invite links that open the Join dialog.
+3. Create an invite (expiry and max uses) from the channel menu, the server menu or the header, and copy its link.
+
+### Divergences
+- Chunk 1:
+  - "Joining as @name#tag" always shows.
+  - The JoinDialog is its own entity.
+  - The rail's second divider only shows with servers.
+- Chunk 2:
+  - The bare check was unchanged.
+  - Invite links are caught in `open_external`.
+  - Card states hold `Rc<InvitePreview>`.
+- Chunk 3:
+  - The summary is built from the chosen options.
+  - The header button doesn't require `web_app`.
+  - The root-config test is in `tests/links.rs`.
+
+### Definition of Done
+- [x] "+" and Stoat → Join Server… open "Join a server". It accepts a code, a ULID, `{app}/invite/{code}`, and the stoat.chat short and old hosts. It previews first, says Open when already in, and never calls join for a server already in the store (`JoinDialog::join` checks `is_invite_member`).
+- [x] After joining, the server or group is added at once and opened. `ServerCreate` doesn't duplicate it (`tests/store_servers.rs`).
+- [x] `NotFound`, `Banned`, `TooManyServers`, `GroupTooLarge` and rate limits have their own messages; bad input and other instances' links are refused locally.
+- [x] Invite links in a message's text (not code, math or spoilers), up to 5, show as cards with Join or Open, and invalid ones say so. Lookups are cached and queued one at a time.
+- [x] Clicking an invite link opens the Join dialog, already looked up.
+- [x] The three Create invite entry points appear only with `InviteOthers`. Max uses (1–100) and expiry (up to 7 days, within the instance's limit) are optional; with neither, the body is `{}`.
+- [x] Copy link copies `https://stt.gg/{code}` on stoat.chat and `{app}/invite/{code}` elsewhere, and toasts.
+- [x] `cargo test` (893 passed) and `cargo clippy --all-targets -- -D warnings` pass, and no touched file's rustfmt drift grew.
+- [ ] Every chunk's manual check recorded here: pending. The user is running them all together.
+
+### Remaining Manual Steps
+The batched manual checks for chunks 1–3, and the plan's Manual Tests, which only the user can run (they need the app and two Stoat accounts).

@@ -1,11 +1,11 @@
-//! Invites against a mock Stoat API: `GET /invites/{code}` (look one up)
-//! and `POST /invites/{code}` (join).
+//! Invites against a mock Stoat API: `GET /invites/{code}` (look one up),
+//! `POST /invites/{code}` (join) and `POST /channels/{id}/invites` (create).
 
 use revolt_result::ErrorType;
 use serde_json::json;
-use stoat_gpui::api::models::{InviteJoinResponse, InviteResponse};
+use stoat_gpui::api::models::{Invite, InviteJoinResponse, InviteResponse};
 use stoat_gpui::api::{ApiError, StoatClient};
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn client(server: &MockServer) -> StoatClient {
@@ -150,4 +150,74 @@ async fn already_in_the_server_is_an_api_error() {
     let err = client(&server).join_invite("wVEJDGVs").await.unwrap_err();
     assert!(matches!(&err, ApiError::Api(_)), "{err:?}");
     assert!(stoat_gpui::invites::already_joined(&err));
+}
+
+fn created() -> serde_json::Value {
+    json!({
+        "type": "Server", "_id": "abcdEFGH", "server": "s1", "creator": "u-me",
+        "channel": "c1", "uses": 0
+    })
+}
+
+#[tokio::test]
+async fn an_invite_without_options_sends_an_empty_object() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/channels/c1/invites"))
+        .and(header("x-session-token", "tok"))
+        .and(body_json(json!({})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(created()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let invite = client(&server)
+        .create_invite("c1", None, None)
+        .await
+        .unwrap();
+    assert!(matches!(&invite, Invite::Server { code, .. } if code == "abcdEFGH"));
+    assert_eq!(stoat_gpui::invites::invite_code(&invite), "abcdEFGH");
+}
+
+#[tokio::test]
+async fn an_invite_with_options_sends_both() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/channels/c1/invites"))
+        .and(body_json(json!({
+            "max_uses": 10,
+            "expires": "2026-11-14T12:00:00.000Z"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(created()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client(&server)
+        .create_invite("c1", Some(10), Some("2026-11-14T12:00:00.000Z"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn creating_without_permission_is_an_api_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/channels/c1/invites"))
+        .respond_with(
+            ResponseTemplate::new(403).set_body_json(
+                json!({ "type": "MissingPermission", "permission": "InviteOthers" }),
+            ),
+        )
+        .mount(&server)
+        .await;
+
+    let err = client(&server)
+        .create_invite("c1", None, None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err.error_type(), Some(ErrorType::MissingPermission { .. })),
+        "{err:?}"
+    );
 }

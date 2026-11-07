@@ -134,6 +134,16 @@ pub fn can_mention_everyone(store: &ChatStore, user: &str, channel: &str) -> boo
         )
 }
 
+/// Whether `user` may create invites to `channel`: only server channels
+/// here (group invites come with group management), with Invite Others.
+pub fn can_invite(store: &ChatStore, user: &str, channel: &str) -> bool {
+    in_server(store, channel)
+        && has(
+            channel_permissions(store, user, channel),
+            ChannelPermission::InviteOthers,
+        )
+}
+
 /// Whether `user` may send embeds in `channel` (which a GIF is).
 pub fn can_send_embeds(store: &ChatStore, user: &str, channel: &str) -> bool {
     has(

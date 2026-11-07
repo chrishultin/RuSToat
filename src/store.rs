@@ -2499,6 +2499,12 @@ impl ChatStore {
         crate::permissions::can_pin(self, &self.me, channel)
     }
 
+    /// Whether the user may create invites to `channel` (see
+    /// [`crate::permissions::can_invite`]).
+    pub fn can_invite(&self, channel: &str) -> bool {
+        crate::permissions::can_invite(self, &self.me, channel)
+    }
+
     /// What a `UserSlowmodes` event says, received at `now_ms`: the user's
     /// cooldowns in the channels it lists (see [`Cooldowns::apply`]).
     pub fn apply_slowmodes(&mut self, slowmodes: &[ChannelSlowmode], now_ms: u64) {

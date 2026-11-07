@@ -7,7 +7,7 @@ use revolt_permissions::{
 use serde_json::{Value, json};
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::permissions::{
-    can_bypass_slowmode, can_change_avatar, can_change_nickname, can_mention_everyone,
+    can_bypass_slowmode, can_change_avatar, can_change_nickname, can_invite, can_mention_everyone,
     can_mention_roles, can_pin, can_send_embeds, can_view, channel_permissions, has,
     server_permissions,
 };
@@ -555,4 +555,37 @@ fn outside_a_server_there_is_nothing_to_change() {
     assert_eq!(server_permissions(&store, "u-stranger", "srv"), 0);
     assert!(!can_change_nickname(&store, "u-stranger", "srv"));
     assert_eq!(server_permissions(&store, "u-plain", "srv-unknown"), 0);
+}
+
+#[test]
+fn members_can_invite_by_default_unless_a_channel_takes_it_away() {
+    const INVITE: u64 = ChannelPermission::InviteOthers as u64;
+    let channels = json!([
+        { "channel_type": "TextChannel", "_id": "ch-open", "server": "srv", "name": "open" },
+        {
+            "channel_type": "TextChannel", "_id": "ch-closed", "server": "srv", "name": "closed",
+            "default_permissions": { "a": 0, "d": INVITE }
+        }
+    ]);
+    let store = store_with(
+        channels,
+        vec![user("u-owner", json!({}))],
+        vec![
+            member("u-me", &[], json!({})),
+            member("u-owner", &[], json!({})),
+        ],
+    );
+    assert!(can_invite(&store, "u-me", "ch-open"));
+    assert!(store.can_invite("ch-open"));
+    assert!(!can_invite(&store, "u-me", "ch-closed"));
+    // The owner can do everything.
+    assert!(can_invite(&store, "u-owner", "ch-closed"));
+}
+
+#[test]
+fn invites_to_dms_and_groups_are_not_offered() {
+    let store = conversations();
+    assert!(!can_invite(&store, "u-me", "dm-friend"));
+    assert!(!can_invite(&store, "u-me", "grp-mine"));
+    assert!(!can_invite(&store, "u-me", "ch-saved"));
 }

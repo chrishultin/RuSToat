@@ -72,7 +72,7 @@ use crate::ui::emoji_picker::emoji_grid;
 use crate::ui::friends::{RowButtons, render_add_friend, render_friends_page};
 use crate::ui::gif_picker::GifCache;
 use crate::ui::identity_dialog::{IDENTITY_DIALOG_WIDTH, IdentityEditor};
-use crate::ui::invites::{JOIN_DIALOG_WIDTH, JoinDialog};
+use crate::ui::invites::{CREATE_DIALOG_WIDTH, CreateInviteDialog, JOIN_DIALOG_WIDTH, JoinDialog};
 use crate::ui::markup::{MarkupPlugin, RevealSpoiler, code_block_actions};
 use crate::ui::math::MathPlugin;
 use crate::ui::profile_card::{CardBio, CardContent, OnLink, render_profile_card};
@@ -351,6 +351,9 @@ pub struct ChatView {
     invite_loading: bool,
     /// Invites being joined from their card.
     invite_joins: HashSet<String>,
+    /// The longest an invite may last on this instance, in days, when it
+    /// says.
+    invite_max_days: Option<u32>,
     /// The person whose DM is being asked for ("Message" on their card).
     dm_opening: Option<String>,
     /// People whose friend request or block is on its way to Stoat.
@@ -513,6 +516,7 @@ impl ChatView {
                         this.image_limits = image_limits;
                         // Before `set_media`, whose re-sync adds the cards.
                         this.store.set_invite_hosts(this.invite_hosts());
+                        this.invite_max_days = root.features.limits.global.max_invite_duration_days;
                         this.set_media(media, cx);
                         this.composer
                             .update(cx, |composer, _| composer.set_limits(limits));
@@ -745,6 +749,7 @@ impl ChatView {
             invite_queue: VecDeque::new(),
             invite_loading: false,
             invite_joins: HashSet::new(),
+            invite_max_days: None,
             image_limits: ImageLimits::default(),
             window: window.window_handle(),
             dm_opening: None,
@@ -3360,6 +3365,7 @@ impl ChatView {
                 return menu;
             };
             let store = &this.read(cx).store;
+            let invitable = in_server && store.can_invite(&channel_id);
             let mute = store.channel_mute_until(&channel_id);
             let current = store.notification_settings().channel_override(&channel_id);
             let inherited = store.level_source(&channel_id).label();
@@ -3395,11 +3401,26 @@ impl ChatView {
                 Rc::new(move |settings, level| settings.set_channel_level(&channel, level))
             };
             let levels = view.clone();
-            menu.submenu("Notifications", window, cx, move |menu, _, _| {
+            let menu = menu.submenu("Notifications", window, cx, move |menu, _, _| {
                 level_items(menu, &levels, Some(default.clone()), current, &set)
-            })
-            .separator()
-            .item(copy_id_item("Copy channel ID", channel_id.clone()))
+            });
+            let menu = if invitable {
+                let (view, channel) = (view.clone(), channel_id.clone());
+                menu.item(
+                    PopupMenuItem::new("Create invite…")
+                        .icon(IconName::UserPlus)
+                        .on_click(move |_, window, cx| {
+                            view.update(cx, |this, cx| {
+                                this.open_create_invite(channel.clone(), window, cx)
+                            })
+                            .ok();
+                        }),
+                )
+            } else {
+                menu
+            };
+            menu.separator()
+                .item(copy_id_item("Copy channel ID", channel_id.clone()))
         })
     }
 
@@ -3432,9 +3453,29 @@ impl ChatView {
                     .ok();
                 }
             };
+            let invite = this
+                .read(cx)
+                .first_invitable_channel(&server)
+                .map(|channel| {
+                    let view = view.clone();
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        view.update(cx, |this, cx| {
+                            this.open_create_invite(channel.clone(), window, cx)
+                        })
+                        .ok();
+                    }
+                });
             let menu = menu
                 .item(PopupMenuItem::new("Mark as read").on_click(mark_read))
                 .item(PopupMenuItem::new("Edit identity…").on_click(edit_identity));
+            let menu = match invite {
+                Some(invite) => menu.item(
+                    PopupMenuItem::new("Invite people…")
+                        .icon(IconName::UserPlus)
+                        .on_click(invite),
+                ),
+                None => menu,
+            };
             let menu = match mute {
                 None => {
                     let mute: SetMute = {
@@ -4157,6 +4198,48 @@ impl ChatView {
     /// The window this view is in.
     pub fn window_handle(&self) -> AnyWindowHandle {
         self.window
+    }
+
+    /// The instance's web client (e.g. `https://stoat.chat`), when it says.
+    pub fn web_app(&self) -> Option<&str> {
+        self.web_app.as_deref()
+    }
+
+    /// "Invite people to {server}": create an invite to `channel` and copy
+    /// its link.
+    pub fn open_create_invite(
+        &mut self,
+        channel: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(server) = self
+            .store
+            .channel_server(&channel)
+            .and_then(|server| self.store.server(server))
+        else {
+            return;
+        };
+        let title = SharedString::from(format!("Invite people to {}", server.name));
+        let max_days = self.invite_max_days;
+        let dialog = cx.new(|_| CreateInviteDialog::new(self, channel, max_days));
+        window.open_dialog(cx, move |modal, _, _| {
+            modal
+                .title(title.clone())
+                .w(px(CREATE_DIALOG_WIDTH))
+                .child(dialog.clone())
+        });
+    }
+
+    /// The first channel of `server`, in sidebar order, the user may create
+    /// invites to ("Invite people…" in its menu).
+    fn first_invitable_channel(&self, server: &str) -> Option<String> {
+        self.store
+            .server_channels(server)
+            .into_iter()
+            .flat_map(|section| section.channels)
+            .map(|entry| entry.id)
+            .find(|channel| self.store.can_invite(channel))
     }
 
     /// Which links are invites on this account's instance.
@@ -5847,6 +5930,24 @@ impl ChatView {
             // Right side: search in every channel, but DMs and Saved Notes
             // have no member list to toggle.
             .when(usable, |el| el.child(search_box))
+            // Invites, in server channels where the user may make them.
+            .when_some(
+                channel
+                    .as_ref()
+                    .filter(|c| usable && self.store.can_invite(&c.id))
+                    .map(|c| c.id.clone()),
+                |el, id| {
+                    el.child(
+                        Button::new("create-invite")
+                            .ghost()
+                            .icon(IconName::UserPlus)
+                            .tooltip("Create invite")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_create_invite(id.clone(), window, cx)
+                            })),
+                    )
+                },
+            )
             // Pins are in every channel.
             .when(usable, |el| {
                 let open = matches!(

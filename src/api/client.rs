@@ -4,7 +4,7 @@ use reqwest::{Client, Method};
 use revolt_models::v0::{
     AccountInfo, AllMemberResponse, BulkMessageResponse, Channel, DataChangeEmail,
     DataChangePassword, DataEditMessage, DataEditSession, DataEditUser, DataLogin, DataMemberEdit,
-    DataMessageSearch, DataMessageSend, DataSendFriendRequest, Emoji, FieldsUser,
+    DataMessageSearch, DataMessageSend, DataSendFriendRequest, Emoji, FieldsUser, Invite,
     InviteJoinResponse, InviteResponse, MFAResponse, MFATicket, Member, Message, MessageSort,
     MultiFactorStatus, OptionsQueryMessages, Presence, ReplyIntent, ResponseLogin,
     ResponseTotpSecret, SessionInfo, User, UserProfile, UserStatus,
@@ -62,9 +62,19 @@ pub struct RootFeatures {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RootLimits {
     #[serde(default)]
+    pub global: GlobalLimits,
+    #[serde(default)]
     pub default: AccountLimits,
     #[serde(default)]
     pub new_user: AccountLimits,
+}
+
+/// The instance-wide limits this client uses.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct GlobalLimits {
+    /// The longest an invite may last, in days (Stoat's default is 30).
+    #[serde(default)]
+    pub max_invite_duration_days: Option<u32>,
 }
 
 /// The limits this client uses, out of many.
@@ -791,6 +801,34 @@ impl StoatClient {
     pub async fn join_invite(&self, code: &str) -> Result<InviteJoinResponse, ApiError> {
         self.send(Method::POST, &format!("/invites/{code}"), None::<&()>)
             .await
+    }
+
+    /// `POST /channels/{channel}/invites`: a new invite to `channel`, used
+    /// at most `max_uses` times (1 to 100) and lasting until `expires` (an
+    /// RFC 3339 time, see [`crate::invites::expires_at`]). Neither: one
+    /// that works for anyone, forever.
+    pub async fn create_invite(
+        &self,
+        channel: &str,
+        max_uses: Option<u64>,
+        expires: Option<&str>,
+    ) -> Result<Invite, ApiError> {
+        // `DataCreateInvite` wants an `iso8601_timestamp`, a crate this
+        // client doesn't otherwise use; the JSON is the same.
+        #[derive(Serialize)]
+        struct CreateInvite<'a> {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            max_uses: Option<u64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            expires: Option<&'a str>,
+        }
+        let body = CreateInvite { max_uses, expires };
+        self.send(
+            Method::POST,
+            &format!("/channels/{channel}/invites"),
+            Some(&body),
+        )
+        .await
     }
 
     /// `PUT /servers/{server}/ack`: mark every channel in `server` read.

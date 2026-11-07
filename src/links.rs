@@ -15,3 +15,13 @@ pub fn message_link(app: &str, server: Option<&str>, channel: &str, message: &st
         None => format!("{app}/channel/{channel}/{message}"),
     }
 }
+
+/// The link to share for invite `code`, as Stoat's web client copies it:
+/// the short `https://stt.gg/{code}` on the official instance, else
+/// `{app}/invite/{code}`.
+pub fn invite_link(app: &str, code: &str) -> String {
+    if crate::invites::is_official_app(app) {
+        return format!("https://stt.gg/{code}");
+    }
+    format!("{}/invite/{code}", app.trim_end_matches('/'))
+}

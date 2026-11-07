@@ -11,7 +11,7 @@
 use revolt_result::ErrorType;
 
 use crate::api::ApiError;
-use crate::api::models::{Embed, File, InviteResponse};
+use crate::api::models::{Embed, File, Invite, InviteResponse};
 
 /// The official instance's web client: the only one the short links and
 /// the older hosts lead to.
@@ -321,6 +321,133 @@ impl InvitePreview {
     }
 }
 
+/// How long a new invite lasts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Expiry {
+    Minutes30,
+    Hour1,
+    Hours6,
+    Hours12,
+    Day1,
+    Days7,
+    Never,
+}
+
+impl Expiry {
+    /// Every choice, shortest first.
+    pub const ALL: [Expiry; 7] = [
+        Expiry::Minutes30,
+        Expiry::Hour1,
+        Expiry::Hours6,
+        Expiry::Hours12,
+        Expiry::Day1,
+        Expiry::Days7,
+        Expiry::Never,
+    ];
+
+    /// "30 minutes", …, "Never".
+    pub fn label(self) -> &'static str {
+        match self {
+            Expiry::Minutes30 => "30 minutes",
+            Expiry::Hour1 => "1 hour",
+            Expiry::Hours6 => "6 hours",
+            Expiry::Hours12 => "12 hours",
+            Expiry::Day1 => "1 day",
+            Expiry::Days7 => "7 days",
+            Expiry::Never => "Never",
+        }
+    }
+
+    /// How long it lasts. `None`: forever.
+    pub fn duration(self) -> Option<chrono::Duration> {
+        Some(match self {
+            Expiry::Minutes30 => chrono::Duration::minutes(30),
+            Expiry::Hour1 => chrono::Duration::hours(1),
+            Expiry::Hours6 => chrono::Duration::hours(6),
+            Expiry::Hours12 => chrono::Duration::hours(12),
+            Expiry::Day1 => chrono::Duration::days(1),
+            Expiry::Days7 => chrono::Duration::days(7),
+            Expiry::Never => return None,
+        })
+    }
+
+    /// The choices an instance allows: none longer than its
+    /// `max_invite_duration_days`, when it says. Never is always allowed
+    /// (Stoat only limits invites that expire).
+    pub fn options(max_days: Option<u32>) -> Vec<Expiry> {
+        Self::ALL
+            .into_iter()
+            .filter(|expiry| match (expiry.duration(), max_days) {
+                (Some(duration), Some(days)) => duration <= chrono::Duration::days(days.into()),
+                _ => true,
+            })
+            .collect()
+    }
+}
+
+/// The choices of how many times a new invite works. `None`: no limit.
+pub const MAX_USES_OPTIONS: [Option<u64>; 7] = [
+    None,
+    Some(1),
+    Some(5),
+    Some(10),
+    Some(25),
+    Some(50),
+    Some(100),
+];
+
+/// "No limit", "1 use", "10 uses".
+pub fn max_uses_label(max_uses: Option<u64>) -> String {
+    match max_uses {
+        None => "No limit".into(),
+        Some(1) => "1 use".into(),
+        Some(uses) => format!("{uses} uses"),
+    }
+}
+
+/// When an invite made at `now` with `expiry` stops working, as Stoat
+/// takes it (RFC 3339, in milliseconds, UTC). `None` for Never.
+pub fn expires_at(expiry: Expiry, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+    let at = now + expiry.duration()?;
+    Some(at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
+/// What a new invite's options were: "Expires in 7 days · 10 uses",
+/// "Never expires · No limit".
+pub fn invite_summary(expiry: Expiry, max_uses: Option<u64>) -> String {
+    let expires = match expiry {
+        Expiry::Never => "Never expires".to_string(),
+        expiry => format!("Expires in {}", expiry.label()),
+    };
+    format!("{expires} · {}", max_uses_label(max_uses))
+}
+
+/// A created invite's code.
+pub fn invite_code(invite: &Invite) -> &str {
+    match invite {
+        Invite::Server { code, .. } | Invite::Group { code, .. } => code,
+    }
+}
+
+/// Why creating an invite failed, in words. `had_expiry`: it was to
+/// expire (Stoat's `InvalidOperation` then means "too long").
+pub fn create_error_text(err: &ApiError, had_expiry: bool) -> String {
+    match err.error_type() {
+        Some(ErrorType::MissingPermission { .. }) => {
+            "You can't create invites in this channel.".into()
+        }
+        Some(ErrorType::InvalidOperation) if had_expiry => {
+            "Stoat doesn't allow invites to last that long.".into()
+        }
+        Some(ErrorType::FailedValidation { .. }) => "Pick between 1 and 100 uses.".into(),
+        _ => match err {
+            ApiError::RateLimited { .. } => join_error_text(err),
+            ApiError::Network(_) => "Couldn't reach Stoat. Try again.".into(),
+            _ => "Couldn't create the invite. Try again.".into(),
+        },
+    }
+}
+
 /// Whether Stoat refused a join because the user is already in: the
 /// store hadn't caught up, so open it instead.
 pub fn already_joined(err: &ApiError) -> bool {
@@ -602,6 +729,93 @@ mod tests {
         assert_eq!(
             join_error_text(&api_error(ErrorType::InternalError)),
             "Couldn't join. Try again."
+        );
+    }
+
+    #[test]
+    fn expiry_times_are_rfc_3339_in_utc() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-07T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            expires_at(Expiry::Days7, now).as_deref(),
+            Some("2026-11-14T12:00:00.000Z")
+        );
+        assert_eq!(
+            expires_at(Expiry::Minutes30, now).as_deref(),
+            Some("2026-11-07T12:30:00.000Z")
+        );
+        assert_eq!(expires_at(Expiry::Never, now), None);
+    }
+
+    #[test]
+    fn expiry_choices_follow_the_instance_limit() {
+        assert_eq!(Expiry::options(None), Expiry::ALL);
+        assert_eq!(Expiry::options(Some(30)), Expiry::ALL);
+        assert_eq!(
+            Expiry::options(Some(1)),
+            [
+                Expiry::Minutes30,
+                Expiry::Hour1,
+                Expiry::Hours6,
+                Expiry::Hours12,
+                Expiry::Day1,
+                Expiry::Never
+            ]
+        );
+        assert_eq!(Expiry::options(Some(0)), [Expiry::Never]);
+    }
+
+    #[test]
+    fn summaries_say_how_long_and_how_often() {
+        assert_eq!(
+            invite_summary(Expiry::Never, None),
+            "Never expires · No limit"
+        );
+        assert_eq!(
+            invite_summary(Expiry::Minutes30, Some(1)),
+            "Expires in 30 minutes · 1 use"
+        );
+        assert_eq!(
+            invite_summary(Expiry::Days7, Some(10)),
+            "Expires in 7 days · 10 uses"
+        );
+    }
+
+    #[test]
+    fn create_errors_in_words() {
+        let missing = api_error(ErrorType::MissingPermission {
+            permission: "InviteOthers".into(),
+        });
+        assert_eq!(
+            create_error_text(&missing, false),
+            "You can't create invites in this channel."
+        );
+        assert_eq!(
+            create_error_text(&api_error(ErrorType::InvalidOperation), true),
+            "Stoat doesn't allow invites to last that long."
+        );
+        assert_eq!(
+            create_error_text(&api_error(ErrorType::InvalidOperation), false),
+            "Couldn't create the invite. Try again."
+        );
+        assert_eq!(
+            create_error_text(
+                &api_error(ErrorType::FailedValidation {
+                    error: "max_uses".into()
+                }),
+                false
+            ),
+            "Pick between 1 and 100 uses."
+        );
+        assert_eq!(
+            create_error_text(
+                &ApiError::RateLimited {
+                    retry_after_ms: Some(2500)
+                },
+                false
+            ),
+            "Stoat is limiting requests. Try again in 3 s."
         );
     }
 
