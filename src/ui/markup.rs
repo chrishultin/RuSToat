@@ -9,6 +9,10 @@
 //! - Hidden spoilers: each word a bar, revealed (for the session) by a click.
 //! - Role mentions in the role's colour (with a dot of it), and `@everyone`
 //!   and `@online` in the theme's primary colour.
+//! - Channel mentions, and links to a channel or message on this instance's
+//!   web client, as a solid pill like the web client's: the channel's icon
+//!   and name, then `› 💬` for a message ("Private Channel" for one this
+//!   account can't see). Only with [`MarkupPlugin::with_channels`].
 //!
 //! Also the copy button on fenced code blocks ([`code_block_actions`]).
 
@@ -24,10 +28,12 @@ use gpui_kit::component::text::{
     markdown_ast,
 };
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme, Sizable, h_flex};
+use gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
+use crate::invites::InviteHosts;
+use crate::links::{ChannelLink, channel_from_link};
 use crate::markdown::{InternalLink, parse_internal_link};
 use crate::time::{format_timestamp, local_from_seconds, timestamp_tooltip};
 use crate::ui::chat::hex_colour;
@@ -70,6 +76,30 @@ enum Markup {
         last: bool,
         text: String,
     },
+    /// A channel mention, or a link to a channel or message.
+    Channel(ChannelLink),
+}
+
+/// What a channel pill shows: the channel's name and icon.
+pub struct ChannelPill {
+    pub name: String,
+    pub icon: IconName,
+}
+
+/// Channel `id`'s pill, looked up as it's drawn (so a rename shows), or
+/// `None` if this account can't see it.
+pub type LookupChannel = Arc<dyn Fn(&str, &App) -> Option<ChannelPill> + Send + Sync>;
+/// Opens a channel (at its message) when its pill is clicked.
+pub type OpenChannel = Arc<dyn Fn(&ChannelLink, &mut Window, &mut App) + Send + Sync>;
+
+/// How [`MarkupPlugin`] draws channel mentions and links as pills.
+#[derive(Clone)]
+pub struct ChannelPills {
+    /// Which links lead into this instance's web client.
+    pub hosts: InviteHosts,
+    pub lookup: LookupChannel,
+    /// `None` where a click does something else (search results jump).
+    pub open: Option<OpenChannel>,
 }
 
 /// Reveals spoiler `n` of the message being drawn.
@@ -80,6 +110,7 @@ pub type RevealSpoiler = Arc<dyn Fn(usize, &mut Window, &mut App) + Send + Sync>
 #[derive(Default)]
 pub struct MarkupPlugin {
     reveal: Option<RevealSpoiler>,
+    channels: Option<ChannelPills>,
 }
 
 impl MarkupPlugin {
@@ -88,8 +119,29 @@ impl MarkupPlugin {
     pub fn revealing(reveal: RevealSpoiler) -> Self {
         Self {
             reveal: Some(reveal),
+            channels: None,
         }
     }
+
+    /// Channel mentions and links drawn as pills. Without this they're
+    /// ordinary links.
+    pub fn with_channels(mut self, channels: ChannelPills) -> Self {
+        self.channels = Some(channels);
+        self
+    }
+
+    /// Where `url` leads, if it's to be drawn as a channel pill.
+    fn channel_link(&self, url: &str) -> Option<ChannelLink> {
+        channel_from_link(url, &self.channels.as_ref()?.hosts)
+    }
+}
+
+/// A channel pill's node, copied as `copied` (what was sent, so a copy can
+/// be sent again).
+fn channel_node(link: ChannelLink, copied: String) -> MarkdownNode {
+    MarkdownNode::new(NAME, Markup::Channel(link))
+        .text(copied.clone())
+        .markdown(copied)
 }
 
 impl MarkdownPlugin for MarkupPlugin {
@@ -105,7 +157,12 @@ impl MarkdownPlugin for MarkupPlugin {
         let markdown_ast::Node::Link(link) = node else {
             return None;
         };
-        match parse_internal_link(&link.url)? {
+        let Some(internal) = parse_internal_link(&link.url) else {
+            // A plain web link.
+            let channel = self.channel_link(&link.url)?;
+            return Some(channel_node(channel, link.url.clone()));
+        };
+        match internal {
             InternalLink::Time { seconds, style } => {
                 // Copied as typed, so a copy can be sent again.
                 let source = match style {
@@ -143,10 +200,21 @@ impl MarkdownPlugin for MarkupPlugin {
             InternalLink::Everyone | InternalLink::Online => {
                 Some(mention(node.to_string(), Mention::Everyone))
             }
-            // Drawn as ordinary links.
-            InternalLink::User(_) | InternalLink::Channel(_) | InternalLink::External { .. } => {
-                None
+            InternalLink::Channel(channel) if self.channels.is_some() => {
+                let copied = format!("<#{channel}>");
+                let link = ChannelLink {
+                    channel,
+                    message: None,
+                };
+                Some(channel_node(link, copied))
             }
+            // Its text isn't its address, but the pill says where it leads.
+            InternalLink::External { url, .. } => {
+                let link = self.channel_link(&url)?;
+                Some(channel_node(link, url))
+            }
+            // Drawn as ordinary links.
+            InternalLink::User(_) | InternalLink::Channel(_) => None,
         }
     }
 
@@ -178,6 +246,10 @@ impl MarkdownPlugin for MarkupPlugin {
                 window,
                 cx,
             )),
+            Markup::Channel(link) => {
+                let channels = self.channels.as_ref()?;
+                Some(render_channel(link, channels, at, context, window, cx))
+            }
         }
     }
 }
@@ -229,6 +301,63 @@ fn render_mention(
             el.child(div().flex_none().size(ROLE_DOT).rounded_full().bg(colour))
         })
         .child(label.to_string());
+    InlineElement::new(pill).with_baseline(baseline)
+}
+
+/// A channel or message link as a solid pill in the theme's primary colour
+/// (which reads on both bubbles: the user's own are only tinted): the
+/// channel's icon and name, then `›` and a speech bubble for a message.
+/// Clicking it opens the channel at the message. One this account can't see
+/// says "Private Channel", and does nothing.
+fn render_channel(
+    link: &ChannelLink,
+    channels: &ChannelPills,
+    at: usize,
+    context: &InlineRenderContext,
+    window: &mut Window,
+    cx: &App,
+) -> InlineElement {
+    let theme = cx.theme();
+    let (bg, fg) = (theme.primary, theme.primary_foreground);
+    let pill = (channels.lookup)(&link.channel, cx);
+    let open = channels.open.clone().filter(|_| pill.is_some());
+    let (channel_icon, name) = match pill {
+        Some(pill) => (pill.icon, pill.name),
+        None => (IconName::Hash, "Private Channel".to_string()),
+    };
+    let font = context.text_style().font();
+    let (size, line_height) = (context.font_size(), context.line_height());
+    let text_system = window.text_system();
+    let baseline = text_system.baseline_offset(text_system.resolve_font(&font), size, line_height);
+    let icon = |name: IconName| Icon::new(name).size(size).text_color(fg);
+    let pill = h_flex()
+        .id(("stoat-channel", at))
+        .flex_none()
+        .whitespace_nowrap()
+        .items_center()
+        .gap(size * 0.25)
+        .pl(size * 0.15)
+        .pr(size * 0.4)
+        .rounded(size * 0.5)
+        .bg(bg)
+        .font(font)
+        .text_size(size)
+        .line_height(line_height)
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(fg)
+        .child(icon(channel_icon))
+        .child(name)
+        .when(link.message.is_some(), |el| {
+            el.child(icon(IconName::ChevronRight))
+                .child(icon(IconName::MessageCircle))
+        })
+        .when_some(open, |el, open| {
+            let link = link.clone();
+            el.cursor_pointer()
+                // A press here mustn't start a text selection.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_, window, cx| open(&link, window, cx))
+        });
     InlineElement::new(pill).with_baseline(baseline)
 }
 

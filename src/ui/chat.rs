@@ -73,7 +73,10 @@ use crate::ui::friends::{RowButtons, render_add_friend, render_friends_page};
 use crate::ui::gif_picker::GifCache;
 use crate::ui::identity_dialog::{IDENTITY_DIALOG_WIDTH, IdentityEditor};
 use crate::ui::invites::{CREATE_DIALOG_WIDTH, CreateInviteDialog, JOIN_DIALOG_WIDTH, JoinDialog};
-use crate::ui::markup::{MarkupPlugin, RevealSpoiler, code_block_actions};
+use crate::ui::markup::{
+    ChannelPill, ChannelPills, LookupChannel, MarkupPlugin, OpenChannel, RevealSpoiler,
+    code_block_actions,
+};
 use crate::ui::math::MathPlugin;
 use crate::ui::profile_card::{CardBio, CardContent, OnLink, render_profile_card};
 
@@ -2463,6 +2466,23 @@ impl ChatView {
         cx.notify();
     }
 
+    /// Open the channel `link` leads to, scrolled to its message if it has
+    /// one. Nothing happens for a channel this account can't see.
+    fn go_to_channel_link(
+        &mut self,
+        link: &crate::links::ChannelLink,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.store.channel(&link.channel).is_none() {
+            return;
+        }
+        self.open_channel(&link.channel, cx);
+        if let Some(message) = &link.message {
+            self.jump_to_message(&link.channel, message.clone(), window, cx);
+        }
+    }
+
     /// Ask before deleting: a dialog showing the message, with Cancel and
     /// Delete (Enter confirms, Esc cancels).
     /// Open an external link (`http`, `https` or `mailto`) whose text, if
@@ -2486,10 +2506,7 @@ impl ChatView {
         if let Some(link) = crate::links::channel_from_link(&url, &self.invite_hosts())
             && self.store.channel(&link.channel).is_some()
         {
-            self.open_channel(&link.channel, cx);
-            if let Some(message) = link.message {
-                self.jump_to_message(&link.channel, message, window, cx);
-            }
+            self.go_to_channel_link(&link, window, cx);
             return;
         }
         let own = self.media.bases().chain(self.web_app.as_deref());
@@ -3829,6 +3846,7 @@ impl ChatView {
         People {
             view: cx.entity().downgrade(),
             channel,
+            hosts: self.invite_hosts(),
         }
     }
 
@@ -7462,9 +7480,44 @@ pub(crate) struct People {
     view: WeakEntity<ChatView>,
     /// The channel they're shown in (where Mention mentions them).
     channel: Option<String>,
+    /// Which links lead to channels and messages here.
+    hosts: InviteHosts,
 }
 
 impl People {
+    /// Channel mentions and links as pills, opening the channel when
+    /// clicked if `clickable`.
+    fn channel_pills(&self, clickable: bool) -> ChannelPills {
+        let view = self.view.clone();
+        let lookup: LookupChannel = Arc::new(move |channel, cx| {
+            let entry = view.upgrade()?.read(cx).store.channel_entry(channel)?;
+            Some(ChannelPill {
+                name: entry.name,
+                icon: channel_icon(entry.kind),
+            })
+        });
+        let people = self.clone();
+        let open: OpenChannel =
+            Arc::new(move |link, window, cx| people.go_to_channel_link(link, window, cx));
+        ChannelPills {
+            hosts: self.hosts.clone(),
+            lookup,
+            open: clickable.then_some(open),
+        }
+    }
+
+    /// Open the channel `link` leads to (see [`ChatView::go_to_channel_link`]).
+    fn go_to_channel_link(
+        &self,
+        link: &crate::links::ChannelLink,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.view
+            .update(cx, |this, cx| this.go_to_channel_link(link, window, cx))
+            .ok();
+    }
+
     /// What clicking a hidden spoiler in `message` does: reveal it.
     fn spoiler_revealer(&self, message: &str) -> RevealSpoiler {
         let (view, channel, message) =
@@ -7506,8 +7559,9 @@ impl People {
     }
 
     /// What clicking a link in Markdown does: a person (a mention, or a
-    /// name in a system message) opens their card, and web links open in
-    /// the browser.
+    /// name in a system message) opens their card, a channel mention opens
+    /// the channel, and web links open in the browser (or here, for a
+    /// channel or message link).
     fn link_handler(&self) -> OnLink {
         let people = self.clone();
         Arc::new(move |url, window, cx| match parse_internal_link(url) {
@@ -7516,11 +7570,17 @@ impl People {
             Some(InternalLink::External { url, text }) => {
                 people.open_link(url, Some(text), window, cx)
             }
-            // Channel links don't go anywhere yet; `ui::markup` draws the
-            // rest, so they aren't links.
+            // Where it isn't drawn as a pill (bios, embeds).
+            Some(InternalLink::Channel(channel)) => {
+                let link = crate::links::ChannelLink {
+                    channel,
+                    message: None,
+                };
+                people.go_to_channel_link(&link, window, cx)
+            }
+            // `ui::markup` draws the rest, so they aren't links.
             Some(
-                InternalLink::Channel(_)
-                | InternalLink::Role { .. }
+                InternalLink::Role { .. }
                 | InternalLink::Everyone
                 | InternalLink::Online
                 | InternalLink::Time { .. }
@@ -7688,11 +7748,16 @@ fn render_message_row(
                         .plugin(MathPlugin)
                         // Timestamps, and spoilers revealed by a click
                         // (not in search results, where a click jumps).
-                        .plugin(if preview {
-                            MarkupPlugin::default()
-                        } else {
-                            MarkupPlugin::revealing(people.spoiler_revealer(&message.id))
-                        })
+                        .plugin(
+                            if preview {
+                                MarkupPlugin::default()
+                            } else {
+                                MarkupPlugin::revealing(people.spoiler_revealer(&message.id))
+                            }
+                            // Channel pills, which open the channel (but in
+                            // search results the row's click jumps).
+                            .with_channels(people.channel_pills(!preview)),
+                        )
                         // A copy button (and the language) on each code block.
                         .code_block_actions(code_block_actions)
                         // Emoji-only messages are drawn big (custom ones are sized
