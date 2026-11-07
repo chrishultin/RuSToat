@@ -79,7 +79,7 @@ Some milestones lay foundations that later ones reuse. When the earlier one's pl
 - Edit notification levels (All, Mentions, None) and muting, for a set time or until you unmute, per server and per channel, from their right-click menus. This writes Stoat's synced settings, so it carries across clients.
 - Notification sounds, with an on/off switch
 
-### Milestone 15: Your profile (M)
+### Milestone 15: Your profile (M). Plan: [`your-profile.md`](your-profile.md)
 - Edit your display name, avatar, banner, bio and pronouns
 - A per-server identity for yourself (nickname and avatar)
 - No crop editor: images are centre-cropped. Add one later if it's missed.
