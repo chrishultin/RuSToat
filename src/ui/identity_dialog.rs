@@ -19,6 +19,7 @@ use crate::profile_edit::{
     identity_error_text,
 };
 use crate::runtime::spawn_io;
+use crate::store::ChatStore;
 use crate::ui::chat::ChatView;
 use crate::ui::profile_editor::{
     ImageKind, ImageSlot, Preview, avatar_preview, field, prompt_for_image, render_image_row,
@@ -51,17 +52,20 @@ pub struct IdentityEditor {
 }
 
 impl IdentityEditor {
-    /// The form for the user's membership of `server`, filled from what
-    /// the account's store has. The placeholders are what shows when a
+    /// The form for the user's membership of `server`, filled from
+    /// `store`, the account's. The placeholders are what shows when a
     /// field is blank: the global display name and pronouns.
+    ///
+    /// It takes the store rather than reading `chat`, which is being
+    /// updated while it opens the dialog.
     pub fn new(
-        chat: Entity<ChatView>,
+        chat: WeakEntity<ChatView>,
+        store: &ChatStore,
         server: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let (me, loaded, name, pronouns) = {
-            let store = chat.read(cx).store();
             let me = store.me().to_string();
             let member = store.member(&server, &me);
             let loaded = IdentityForm {
@@ -98,7 +102,7 @@ impl IdentityEditor {
             cx.subscribe(&pronouns, |_, _, _: &InputEvent, cx| cx.notify()),
         ];
         Self {
-            chat: chat.downgrade(),
+            chat,
             server,
             me,
             nickname,

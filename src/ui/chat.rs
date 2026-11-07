@@ -4144,8 +4144,9 @@ impl ChatView {
             return;
         };
         let focus = crate::permissions::can_change_nickname(&self.store, self.store.me(), &server);
-        let chat = cx.entity();
-        let editor = cx.new(|cx| IdentityEditor::new(chat, server, window, cx));
+        let chat = cx.entity().downgrade();
+        let store = &self.store;
+        let editor = cx.new(|cx| IdentityEditor::new(chat, store, server, window, cx));
         let title = SharedString::from(format!("Change identity on {name}"));
         let first_build = std::cell::Cell::new(true);
         window.open_dialog(cx, move |dialog, window, cx| {
