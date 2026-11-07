@@ -34,7 +34,7 @@ use crate::api::StoatClient;
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
 use crate::api::gifbox::GifboxClient;
 use crate::api::models::{
-    BulkMessageResponse, FieldsMessage, MessageSort, ReplyIntent, UserProfile,
+    BulkMessageResponse, FieldsMessage, MessageSort, Presence, ReplyIntent, UserProfile,
 };
 use crate::attachment::{AttachmentView, fit_into};
 use crate::complete::{Query, QueryKind, Suggestion, TokenRef, rank, rank_mentions};
@@ -54,6 +54,7 @@ use crate::search::{
     MAX_QUERY_CHARS, PINS_LIMIT, QueryCheck, RELEVANCE_LIMIT, SearchCursor, check_query,
     next_cursor, page_limit,
 };
+use crate::status::{PRESENCES, STATUS_TEXT_MAX, StatusCheck, check_status_text};
 use crate::store::{
     ChannelEntry, ChannelKind, ChannelSection, ChatStore, MemberList, MemberListRow, MessageRow,
     PendingAttachment, PendingMessage, PendingState, PickerEmoji, PresenceKind, ReactionEmoji,
@@ -345,6 +346,11 @@ pub struct ChatView {
     /// What happened to the last request sent from it, shown under it.
     add_friend_state: Option<AddFriendState>,
     _add_friend_input: Subscription,
+    /// The custom status editor's field. Enter saves.
+    status_input: Entity<InputState>,
+    _status_input: Subscription,
+    /// A presence or custom status change is on its way to Stoat.
+    status_saving: bool,
     /// The message whose reaction picker is open.
     picker_for: Option<String>,
     /// Reaction changes waiting on the server, as (message, emoji). Another
@@ -563,6 +569,18 @@ impl ChatView {
                 _ => {}
             },
         );
+        let status_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("What's happening?"));
+        let status_events = cx.subscribe_in(
+            &status_input,
+            window,
+            |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.save_status_text(window, cx),
+                // The character count.
+                InputEvent::Change => window.refresh(),
+                _ => {}
+            },
+        );
         let composer_events = cx.subscribe_in(
             &composer,
             window,
@@ -699,6 +717,9 @@ impl ChatView {
             add_friend_input,
             add_friend_state: None,
             _add_friend_input: add_friend_events,
+            status_input,
+            _status_input: status_events,
+            status_saving: false,
             picker_for: None,
             reacting: HashSet::new(),
             reply_fetches: HashSet::new(),
@@ -3192,6 +3213,179 @@ impl ChatView {
         .detach();
     }
 
+    /// The custom status editor ("Set your status"): one field, filled with
+    /// the current status, a character count, and Cancel/Save. Saving it
+    /// empty clears the status.
+    fn open_status_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.store.my_status().1.unwrap_or_default();
+        self.status_input
+            .update(cx, |input, cx| input.set_value(current, window, cx));
+        let view = cx.entity().downgrade();
+        let input = self.status_input.clone();
+        let first_build = std::cell::Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first_build.replace(false) {
+                let focus = input.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
+            }
+            let saving = view
+                .upgrade()
+                .is_some_and(|view| view.read(cx).status_saving);
+            let save = {
+                let view = view.clone();
+                move |window: &mut Window, cx: &mut App| {
+                    view.update(cx, |this, cx| this.save_status_text(window, cx))
+                        .ok();
+                }
+            };
+            dialog
+                .title("Set your status")
+                .w(px(STATUS_DIALOG_WIDTH))
+                .child(render_status_editor(&input, saving, save, cx))
+        });
+    }
+
+    /// Save what's typed in the custom status editor: set it, or clear it if
+    /// it's blank. Too long, it waits (Save is disabled); unchanged, the
+    /// editor just closes.
+    fn save_status_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let typed = self.status_input.read(cx).value().to_string();
+        let text = match check_status_text(&typed) {
+            StatusCheck::TooLong(_) => return,
+            StatusCheck::Clear => None,
+            StatusCheck::Ok(text) => Some(text.to_string()),
+        };
+        if text == self.store.my_status().1 {
+            window.close_dialog(cx);
+            return;
+        }
+        self.change_status(StatusChange::Text(text), true, window, cx);
+    }
+
+    /// Send a presence or custom status change. Stoat's answer is applied
+    /// at once, rather than waiting on the `UserUpdate` echo; a failure says
+    /// so in a toast. With `close_editor`, the editor closes once it's saved.
+    fn change_status(
+        &mut self,
+        change: StatusChange,
+        close_editor: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.status_saving {
+            return;
+        }
+        self.status_saving = true;
+        window.refresh();
+        cx.notify();
+        let request = spawn_io({
+            let client = self.client.clone();
+            async move {
+                match change {
+                    StatusChange::Presence(presence) => client.set_presence(presence).await,
+                    StatusChange::Text(text) => client.set_status_text(text.as_deref()).await,
+                }
+            }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.status_saving = false;
+                match result {
+                    Ok(Ok(me)) => {
+                        this.store.set_my_status(me.status);
+                        // The member list and Friends page may show the user.
+                        this.forget_member_lists();
+                        if close_editor {
+                            window.close_dialog(cx);
+                        }
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't change status: {err:?}");
+                        window.push_notification(Notification::error(STATUS_FAILED_TEXT), cx);
+                    }
+                    Err(err) => {
+                        log::warn!("status task failed: {err:?}");
+                        window.push_notification(Notification::error(STATUS_FAILED_TEXT), cx);
+                    }
+                }
+                window.refresh();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The status menu, opened from the user's avatar: the presences (the
+    /// current one checked), then setting, editing or clearing the custom
+    /// status.
+    fn status_menu(
+        &self,
+        cx: &Context<Self>,
+    ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+        let view = cx.entity().downgrade();
+        move |menu, _, cx| {
+            let Some(this) = view.upgrade() else {
+                return menu;
+            };
+            let (current, text) = this.read(cx).store.my_status();
+            let menu = menu
+                .check_side(gpui_kit::component::Side::Right)
+                .min_w(px(220.));
+            let menu = PRESENCES.iter().fold(menu, |menu, presence| {
+                let (view, chosen) = (view.clone(), presence.clone());
+                let shown = presence.clone();
+                menu.item(
+                    PopupMenuItem::element(move |_, cx| render_presence_item(&shown, cx))
+                        .checked(*presence == current)
+                        .on_click(move |_, window, cx| {
+                            let change = StatusChange::Presence(chosen.clone());
+                            view.update(cx, |this, cx| {
+                                this.change_status(change, false, window, cx)
+                            })
+                            .ok();
+                        }),
+                )
+            });
+            let edit = {
+                let view = view.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    view.update(cx, |this, cx| this.open_status_editor(window, cx))
+                        .ok();
+                }
+            };
+            let menu = menu.separator();
+            match text {
+                None => menu.item(
+                    PopupMenuItem::new("Set status…")
+                        .icon(IconName::FaceSlightlySmilingPlus)
+                        .on_click(edit),
+                ),
+                Some(text) => {
+                    let view = view.clone();
+                    menu.item(PopupMenuItem::label(text))
+                        .item(
+                            PopupMenuItem::new("Edit status…")
+                                .icon(IconName::Pencil)
+                                .on_click(edit),
+                        )
+                        .item(
+                            PopupMenuItem::new("Clear status")
+                                .icon(IconName::Close)
+                                .on_click(move |_, window, cx| {
+                                    view.update(cx, |this, cx| {
+                                        let change = StatusChange::Text(None);
+                                        this.change_status(change, false, window, cx)
+                                    })
+                                    .ok();
+                                }),
+                        )
+                }
+            }
+        }
+    }
+
     /// "Message" on `user`'s card: open the DM with them. One that's known
     /// opens here (reopened if it was closed). Otherwise Stoat is asked for
     /// it, which creates it if it's allowed (see [`crate::profile::can_message`]).
@@ -4599,9 +4793,14 @@ impl ChatView {
                 .is_some_and(|id| id == FRIENDS)
     }
 
+    /// Under the user's name: their custom status, else their presence,
+    /// while connected; else how the connection is going.
     fn status_line(&self) -> SharedString {
         match &self.status {
-            Status::Connected => "Online".into(),
+            Status::Connected => match self.store.my_status() {
+                (_, Some(text)) => text.into(),
+                (presence, None) => crate::status::presence_label(&presence).into(),
+            },
             Status::Connecting { attempt: 1 } => "Connecting…".into(),
             Status::Connecting { .. } => "Reconnecting…".into(),
             Status::Reconnecting { retry_in, .. } => {
@@ -4886,14 +5085,39 @@ impl ChatView {
             .unwrap_or_else(|| "…".into())
             .into();
         let online = matches!(self.status, Status::Connected);
-        let me_avatar = avatar(
-            "my-avatar",
-            Some(self.store.user_avatar_url(self.store.me())),
-            &name,
-            32.,
-            theme.secondary,
-            theme.secondary_foreground,
+        let (presence, _) = self.store.my_status();
+        // Not connected, the user shows as offline to everyone.
+        let dot = presence_dot(
+            if online {
+                crate::status::presence_dot(&presence)
+            } else {
+                PresenceKind::Offline
+            },
+            online && presence == Presence::Invisible,
+            12.,
+            theme.sidebar,
+            cx,
         );
+        let me_avatar = Button::new("my-status")
+            .ghost()
+            .compact()
+            .rounded(px(16.))
+            .tooltip("Set status")
+            .child(
+                div()
+                    .relative()
+                    .size(px(32.))
+                    .child(avatar(
+                        "my-avatar",
+                        Some(self.store.user_avatar_url(self.store.me())),
+                        &name,
+                        32.,
+                        theme.secondary,
+                        theme.secondary_foreground,
+                    ))
+                    .child(div().absolute().right(px(-2.)).bottom(px(-2.)).child(dot)),
+            )
+            .dropdown_menu_with_anchor(Anchor::BottomLeft, self.status_menu(cx));
         h_flex()
             .h(px(56.))
             .flex_none()
@@ -5818,6 +6042,127 @@ impl ChatView {
 
 /// Width of the add-friend dialog.
 const ADD_FRIEND_DIALOG_WIDTH: f32 = 420.;
+/// The custom status editor.
+const STATUS_DIALOG_WIDTH: f32 = 420.;
+/// A presence or custom status change Stoat didn't take.
+const STATUS_FAILED_TEXT: &str = "Couldn't change your status.";
+
+/// A change to the user's own status.
+enum StatusChange {
+    Presence(Presence),
+    /// Set the custom status, or clear it with `None`.
+    Text(Option<String>),
+}
+
+/// The colour of a presence dot.
+fn presence_colour(presence: PresenceKind, cx: &App) -> Hsla {
+    let theme = cx.theme();
+    match presence {
+        PresenceKind::Online => theme.success,
+        PresenceKind::Idle => theme.warning,
+        PresenceKind::Focus => theme.info,
+        PresenceKind::Busy => theme.danger,
+        PresenceKind::Offline => theme.muted_foreground,
+    }
+}
+
+/// A presence dot of `size`, ringed in `ring` so it reads against an
+/// avatar. `hollow` draws it as a ring (Invisible).
+fn presence_dot(presence: PresenceKind, hollow: bool, size: f32, ring: Hsla, cx: &App) -> Div {
+    h_flex()
+        .size(px(size))
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .border_2()
+        .border_color(ring)
+        .bg(presence_colour(presence, cx))
+        .when(hollow, |el| {
+            el.child(div().size(px(size / 3.)).rounded_full().bg(ring))
+        })
+}
+
+/// A presence in the status menu: its dot and name, and what it does to
+/// notifications under it.
+fn render_presence_item(presence: &Presence, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let dot = presence_dot(
+        crate::status::presence_dot(presence),
+        *presence == Presence::Invisible,
+        12.,
+        theme.popover,
+        cx,
+    );
+    h_flex()
+        .gap_2()
+        .py_1()
+        .items_center()
+        .child(dot)
+        .child(
+            v_flex()
+                .child(crate::status::presence_label(presence))
+                .children(crate::status::presence_hint(presence).map(|hint| {
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(hint)
+                })),
+        )
+        .into_any_element()
+}
+
+/// The custom status editor's body: the field with a character count under
+/// it, and Cancel/Save. Save is disabled while the text is too long.
+fn render_status_editor(
+    input: &Entity<InputState>,
+    saving: bool,
+    on_save: impl Fn(&mut Window, &mut App) + 'static,
+    cx: &App,
+) -> AnyElement {
+    let theme = cx.theme();
+    let typed = input.read(cx).value();
+    let count = typed.trim().chars().count();
+    let too_long = matches!(check_status_text(&typed), StatusCheck::TooLong(_));
+    v_flex()
+        .gap_3()
+        .child(
+            v_flex()
+                .gap_1()
+                .child(Input::new(input).disabled(saving))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_right()
+                        .text_color(if too_long {
+                            theme.danger
+                        } else {
+                            theme.muted_foreground
+                        })
+                        .child(format!("{count}/{STATUS_TEXT_MAX}")),
+                ),
+        )
+        .child(
+            h_flex()
+                .gap_2()
+                .justify_end()
+                .child(
+                    Button::new("cancel-status")
+                        .outline()
+                        .label("Cancel")
+                        .on_click(|_, window, cx| window.close_dialog(cx)),
+                )
+                .child(
+                    Button::new("save-status")
+                        .primary()
+                        .label("Save")
+                        .loading(saving)
+                        .disabled(saving || too_long)
+                        .on_click(move |_, window, cx| on_save(window, cx)),
+                ),
+        )
+        .into_any_element()
+}
 
 /// Width of the right-hand panel.
 const MEMBER_PANEL_WIDTH: f32 = 240.;

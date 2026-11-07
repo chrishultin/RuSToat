@@ -16,6 +16,7 @@ gpui_kit::assets::icon_assets!(
         CornerUpRight,
         Download,
         FaceSlightlySmiling,
+        FaceSlightlySmilingPlus,
         FileImage,
         FileMusic,
         FileVideoCamera,
@@ -128,6 +129,19 @@ mod tests {
     fn slowmode_icon_loads() {
         let path = IconName::Clock.path();
         assert!(AppAssets.load(&path).unwrap().is_some(), "{path} missing");
+    }
+
+    /// The status menu on the user's avatar.
+    #[test]
+    fn status_icons_load() {
+        for icon in [
+            IconName::FaceSlightlySmilingPlus,
+            IconName::Pencil,
+            IconName::Close,
+        ] {
+            let path = icon.path();
+            assert!(AppAssets.load(&path).unwrap().is_some(), "{path} missing");
+        }
     }
 
     /// The settings window's sidebar icons.

@@ -317,3 +317,95 @@ async fn friend_requests_by_username_can_be_refused() {
     );
     assert_eq!(err.to_string(), "Bots can't be friends.");
 }
+
+/// Who Stoat answers a `PATCH /users/@me` with: the user, as changed.
+fn me_with_status(status: serde_json::Value) -> serde_json::Value {
+    json!({
+        "_id": "u-me", "username": "me", "discriminator": "0001",
+        "relationship": "User", "online": true, "status": status
+    })
+}
+
+#[tokio::test]
+async fn setting_a_presence_sends_only_the_presence() {
+    use stoat_gpui::api::models::Presence;
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/users/@me"))
+        .and(header("x-session-token", "tok"))
+        .and(body_json(json!({ "status": { "presence": "Busy" } })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(me_with_status(json!({ "text": "brb", "presence": "Busy" }))),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let me = client(&server).set_presence(Presence::Busy).await.unwrap();
+    // Stoat merges the status: the text stays.
+    let status = me.status.unwrap();
+    assert_eq!(status.presence, Some(Presence::Busy));
+    assert_eq!(status.text.as_deref(), Some("brb"));
+}
+
+#[tokio::test]
+async fn setting_a_custom_status_sends_only_the_text() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/users/@me"))
+        .and(body_json(json!({ "status": { "text": "brb" } })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(me_with_status(json!({ "text": "brb" }))),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let me = client(&server)
+        .set_status_text(Some("  brb "))
+        .await
+        .unwrap();
+    assert_eq!(me.status.unwrap().text.as_deref(), Some("brb"));
+}
+
+#[tokio::test]
+async fn clearing_the_custom_status_removes_it() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/users/@me"))
+        .and(body_json(json!({ "remove": ["StatusText"] })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "_id": "u-me", "username": "me", "discriminator": "0001",
+            "relationship": "User", "online": true
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let client = client(&server);
+    assert!(client.set_status_text(None).await.unwrap().status.is_none());
+    // Blank text clears it too.
+    client.set_status_text(Some("   ")).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_status_stoat_refuses_is_an_api_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/users/@me"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "type": "FailedValidation", "error": "status.text: length", "location": "x"
+        })))
+        .mount(&server)
+        .await;
+
+    let err = client(&server)
+        .set_status_text(Some(&"a".repeat(129)))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, ApiError::Api(e) if matches!(e.error_type, ErrorType::FailedValidation { .. })),
+        "got {err:?}"
+    );
+}

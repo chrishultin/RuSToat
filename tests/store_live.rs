@@ -849,3 +849,63 @@ fn becoming_friends_offers_message_and_remove_friend() {
         RelationshipAction::RemoveFriend
     )));
 }
+
+#[test]
+fn the_users_own_status_follows_user_updates() {
+    use stoat_gpui::api::models::Presence;
+    let mut store = store_with_page(50);
+    assert_eq!(store.my_status(), (Presence::Online, None));
+
+    let apply = |store: &mut ChatStore, frame: serde_json::Value| {
+        let Some(ServerEvent::UserUpdate { id, data, clear }) =
+            parse_frame(&frame.to_string()).pop()
+        else {
+            panic!("not a user update: {frame}");
+        };
+        store.apply_user_update(&id, *data, &clear);
+    };
+    apply(
+        &mut store,
+        serde_json::json!({
+            "type": "UserUpdate", "id": "u-me",
+            "data": { "status": { "text": "  brb ", "presence": "Busy" } }, "clear": []
+        }),
+    );
+    assert_eq!(store.my_status(), (Presence::Busy, Some("brb".into())));
+    assert_eq!(store.my_presence(), Some(Presence::Busy));
+
+    // Clearing the text keeps the presence.
+    apply(
+        &mut store,
+        serde_json::json!({
+            "type": "UserUpdate", "id": "u-me", "data": {}, "clear": ["StatusText"]
+        }),
+    );
+    assert_eq!(store.my_status(), (Presence::Busy, None));
+
+    // Someone else's status isn't the user's.
+    apply(
+        &mut store,
+        serde_json::json!({
+            "type": "UserUpdate", "id": "u-ada",
+            "data": { "status": { "text": "away", "presence": "Idle" } }, "clear": []
+        }),
+    );
+    assert_eq!(store.my_status(), (Presence::Busy, None));
+}
+
+#[test]
+fn stoats_answer_sets_the_users_own_status_at_once() {
+    use stoat_gpui::api::models::{Presence, UserStatus};
+    let mut store = store_with_page(50);
+    store.set_my_status(Some(UserStatus {
+        text: Some("lunch".into()),
+        presence: Some(Presence::Invisible),
+    }));
+    assert_eq!(
+        store.my_status(),
+        (Presence::Invisible, Some("lunch".into()))
+    );
+    store.set_my_status(None);
+    assert_eq!(store.my_status(), (Presence::Online, None));
+}

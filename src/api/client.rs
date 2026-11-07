@@ -2,9 +2,10 @@ use std::time::Duration;
 
 use reqwest::{Client, Method};
 use revolt_models::v0::{
-    AllMemberResponse, BulkMessageResponse, Channel, DataEditMessage, DataLogin, DataMessageSearch,
-    DataMessageSend, DataSendFriendRequest, Emoji, MFAResponse, Member, Message, MessageSort,
-    OptionsQueryMessages, ReplyIntent, ResponseLogin, User, UserProfile,
+    AllMemberResponse, BulkMessageResponse, Channel, DataEditMessage, DataEditUser, DataLogin,
+    DataMessageSearch, DataMessageSend, DataSendFriendRequest, Emoji, FieldsUser, MFAResponse,
+    Member, Message, MessageSort, OptionsQueryMessages, Presence, ReplyIntent, ResponseLogin, User,
+    UserProfile, UserStatus,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -582,6 +583,47 @@ impl StoatClient {
             .await
     }
 
+    /// `PATCH /users/@me`: change the user's own account. Only what's set
+    /// is sent: unset fields would go as `null`, and an empty `remove` is
+    /// left out too. Stoat merges `status`, so setting a presence keeps the
+    /// text.
+    pub async fn edit_user(&self, edit: &DataEditUser) -> Result<User, ApiError> {
+        let mut body = without_nulls(serde_json::to_value(edit).expect("user edit serialises"));
+        if let Some(map) = body.as_object_mut()
+            && map
+                .get("remove")
+                .is_some_and(|r| r.as_array().is_some_and(Vec::is_empty))
+        {
+            map.remove("remove");
+        }
+        self.send(Method::PATCH, "/users/@me", Some(&body)).await
+    }
+
+    /// Set the user's presence (Online, Idle, Focus, Busy or Invisible).
+    pub async fn set_presence(&self, presence: Presence) -> Result<User, ApiError> {
+        self.edit_user(&edit_status(Some(UserStatus {
+            text: None,
+            presence: Some(presence),
+        })))
+        .await
+    }
+
+    /// Set the user's custom status, or clear it with `None` (or blank
+    /// text).
+    pub async fn set_status_text(&self, text: Option<&str>) -> Result<User, ApiError> {
+        let edit = match text.map(str::trim).filter(|t| !t.is_empty()) {
+            Some(text) => edit_status(Some(UserStatus {
+                text: Some(text.to_string()),
+                presence: None,
+            })),
+            None => DataEditUser {
+                remove: vec![FieldsUser::StatusText],
+                ..edit_status(None)
+            },
+        };
+        self.edit_user(&edit).await
+    }
+
     /// `PUT /users/{id}/block`: block them (bots too).
     pub async fn block_user(&self, id: &str) -> Result<User, ApiError> {
         self.send(Method::PUT, &format!("/users/{id}/block"), None::<&()>)
@@ -724,6 +766,20 @@ fn parse<T: DeserializeOwned>(status: reqwest::StatusCode, bytes: &[u8]) -> Resu
         status: status.as_u16(),
         detail: format!("couldn't parse response: {e}"),
     })
+}
+
+/// A `PATCH /users/@me` that changes only the status.
+fn edit_status(status: Option<UserStatus>) -> DataEditUser {
+    DataEditUser {
+        display_name: None,
+        pronouns: None,
+        avatar: None,
+        status,
+        profile: None,
+        badges: None,
+        flags: None,
+        remove: Vec::new(),
+    }
 }
 
 /// `value` with every `null` object field removed, at any depth.

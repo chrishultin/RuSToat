@@ -9,7 +9,7 @@ use crate::api::models::{
     AllMemberResponse, BulkMessageResponse, Channel, ChannelSlowmode, Embed, Emoji, EmojiParent, FieldsChannel, FieldsMember,
     FieldsMessage, FieldsRole, FieldsServer, FieldsUser, File, Member, MemberCompositeKey, Message,
     MessageFlags, PartialChannel, PartialMember, PartialMessage, PartialRole, PartialServer, PartialUser,
-    Presence, ReplyIntent, Role, Server, SystemMessage, User,
+    Presence, ReplyIntent, Role, Server, SystemMessage, User, UserStatus,
 };
 use crate::attachment::AttachmentView;
 use crate::complete::{Candidate, RoleCandidate, TokenRef};
@@ -1319,6 +1319,30 @@ impl ChatStore {
     /// The user's own presence (Online, Focus, Busy...), if known.
     pub fn my_presence(&self) -> Option<Presence> {
         self.users.get(&self.me)?.status.as_ref()?.presence.clone()
+    }
+
+    /// The user's own presence (Online if unset) and custom status text
+    /// (trimmed; `None` if unset or blank).
+    pub fn my_status(&self) -> (Presence, Option<String>) {
+        let status = self.users.get(&self.me).and_then(|u| u.status.as_ref());
+        let presence = status
+            .and_then(|s| s.presence.clone())
+            .unwrap_or(Presence::Online);
+        let text = status
+            .and_then(|s| s.text.as_deref())
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string);
+        (presence, text)
+    }
+
+    /// The user's own status as Stoat answered a change to it, so the
+    /// panel needn't wait for the `UserUpdate` echo.
+    pub fn set_my_status(&mut self, status: Option<UserStatus>) {
+        let me = self.me.clone();
+        if let Some(user) = self.users.get_mut(&me) {
+            user.status = status;
+        }
     }
 
     /// Muted in the user's notification settings (the channel or its server),
