@@ -1415,6 +1415,9 @@ impl ChatView {
             self.land_jump(channel, &id, cx);
             return;
         }
+        // The latest page, still on its way (a channel just opened), would
+        // replace the window around `id`.
+        self.loading.remove(channel);
         let client = self.client.clone();
         let request = spawn_io({
             let (channel, id) = (channel.to_string(), id.clone());
@@ -1454,6 +1457,9 @@ impl ChatView {
                             "Couldn't load that message.".to_string()
                         }
                     };
+                    // A channel opened for the jump has nothing loaded yet:
+                    // show its latest messages instead.
+                    this.ensure_current_loaded(cx);
                     window.push_notification(Notification::error(error), cx);
                 })
                 .ok();
@@ -2464,7 +2470,8 @@ impl ChatView {
     /// user's own instance and to trusted sites open at once; anything else
     /// asks first. An invite link of this instance opens the Join dialog
     /// instead, whatever its text: the preview shows where it leads, and
-    /// nothing happens until Join.
+    /// nothing happens until Join. A link to a channel or message this
+    /// account can see opens it here, scrolled to the message.
     fn open_external(
         &mut self,
         url: String,
@@ -2474,6 +2481,15 @@ impl ChatView {
     ) {
         if let Some(code) = crate::invites::code_from_link(&url, &self.invite_hosts()) {
             self.open_join_dialog(Some(code), window, cx);
+            return;
+        }
+        if let Some(link) = crate::links::channel_from_link(&url, &self.invite_hosts())
+            && self.store.channel(&link.channel).is_some()
+        {
+            self.open_channel(&link.channel, cx);
+            if let Some(message) = link.message {
+                self.jump_to_message(&link.channel, message, window, cx);
+            }
             return;
         }
         let own = self.media.bases().chain(self.web_app.as_deref());
@@ -4495,7 +4511,8 @@ impl ChatView {
         self.saved_places = places;
     }
 
-    /// Start loading the current channel's history if it isn't loaded or loading.
+    /// Start loading the current channel's history if it isn't loaded or
+    /// loading, or being loaded around a message by a jump.
     fn ensure_current_loaded(&mut self, cx: &mut Context<Self>) {
         if !self.has_ready {
             return;
@@ -4504,6 +4521,7 @@ impl ChatView {
         if let Some(channel) = self.current_channel()
             && self.store.history(&channel.id).is_none()
             && !self.loading.contains_key(&channel.id)
+            && !self.jumps.contains_key(&channel.id)
             && !self.gated(&channel.id)
         {
             self.load_history(channel.id, cx);

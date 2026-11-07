@@ -76,6 +76,20 @@ impl InviteHosts {
         self.own.is_some() || self.official
     }
 
+    /// Whether `url` is on this instance's web client: its own host (port
+    /// included), or on the official instance, the Stoat and Revolt hosts
+    /// (not the short ones, which only carry invites).
+    pub fn is_web_client(&self, url: &url::Url) -> bool {
+        let Some(host) = url.host_str().map(str::to_ascii_lowercase) else {
+            return false;
+        };
+        let port = url.port();
+        if self.own.as_ref() == Some(&(host.clone(), port)) {
+            return true;
+        }
+        self.official && port.is_none() && STOAT_HOSTS.contains(&host.as_str())
+    }
+
     /// The example in the Join dialog's field.
     pub fn placeholder(&self) -> String {
         match &self.own {
@@ -100,7 +114,7 @@ pub fn is_code(text: &str) -> bool {
 
 /// `text` as a web address, with or without its `http(s)://`. `None` for
 /// other schemes, and for addresses with a user name (`stt.gg@evil.com`).
-fn web_url(text: &str) -> Option<url::Url> {
+pub fn web_url(text: &str) -> Option<url::Url> {
     let lower = text.get(..8).unwrap_or(text).to_ascii_lowercase();
     let has_scheme = lower.starts_with("https://") || lower.starts_with("http://");
     let url = if has_scheme {

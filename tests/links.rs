@@ -1,5 +1,21 @@
 use stoat_gpui::api::RootConfig;
-use stoat_gpui::links::{invite_link, message_link};
+use stoat_gpui::invites::InviteHosts;
+use stoat_gpui::links::{ChannelLink, channel_from_link, invite_link, message_link};
+
+const SERVER: &str = "01FD4WDPDDRW4B003G94V1Y73X";
+const CHANNEL: &str = "01M4Y2PA27KZK3V5G28MZKGH9N";
+const MESSAGE: &str = "01M6VW0J4YMRGZ5SRBCRVVYCXY";
+
+fn official() -> InviteHosts {
+    InviteHosts::new(Some("https://stoat.chat"))
+}
+
+fn to(message: Option<&str>) -> Option<ChannelLink> {
+    Some(ChannelLink {
+        channel: CHANNEL.into(),
+        message: message.map(Into::into),
+    })
+}
 
 #[test]
 fn server_channel_links_include_the_server() {
@@ -77,4 +93,82 @@ fn the_longest_invite_comes_from_the_root_config_when_sent() {
     let root: RootConfig =
         serde_json::from_str(include_str!("fixtures/root.json")).expect("root.json");
     assert_eq!(root.features.limits.global.max_invite_duration_days, None);
+}
+
+#[test]
+fn message_links_lead_to_their_channel_and_message() {
+    let hosts = official();
+    for link in [
+        format!("https://stoat.chat/server/{SERVER}/channel/{CHANNEL}/{MESSAGE}"),
+        format!("https://stoat.chat/channel/{CHANNEL}/{MESSAGE}"),
+        format!("https://stoat.chat/server/{SERVER}/channel/{CHANNEL}/{MESSAGE}/"),
+        format!("https://STOAT.chat/channel/{CHANNEL}/{MESSAGE}?x=1#top"),
+        format!("https://app.revolt.chat/channel/{CHANNEL}/{MESSAGE}"),
+        format!("stoat.chat/channel/{CHANNEL}/{MESSAGE}"),
+    ] {
+        assert_eq!(
+            channel_from_link(&link, &hosts),
+            to(Some(MESSAGE)),
+            "{link}"
+        );
+    }
+}
+
+#[test]
+fn channel_links_lead_to_their_channel() {
+    let hosts = official();
+    for link in [
+        format!("https://stoat.chat/server/{SERVER}/channel/{CHANNEL}"),
+        format!("https://stoat.chat/channel/{CHANNEL}/"),
+    ] {
+        assert_eq!(channel_from_link(&link, &hosts), to(None), "{link}");
+    }
+}
+
+#[test]
+fn a_made_message_link_reads_back() {
+    let hosts = InviteHosts::new(Some("https://chat.example.org:8443"));
+    let link = message_link(
+        "https://chat.example.org:8443",
+        Some(SERVER),
+        CHANNEL,
+        MESSAGE,
+    );
+    assert_eq!(channel_from_link(&link, &hosts), to(Some(MESSAGE)));
+}
+
+#[test]
+fn other_links_are_not_channel_links() {
+    let hosts = official();
+    for link in [
+        // Elsewhere, or not the web client.
+        format!("https://example.com/channel/{CHANNEL}/{MESSAGE}"),
+        format!("https://stt.gg/channel/{CHANNEL}/{MESSAGE}"),
+        format!("https://stoat.chat:8080/channel/{CHANNEL}/{MESSAGE}"),
+        format!("https://stoat.chat@example.com/channel/{CHANNEL}/{MESSAGE}"),
+        format!("ftp://stoat.chat/channel/{CHANNEL}/{MESSAGE}"),
+        // Not a channel or message.
+        format!("https://stoat.chat/server/{SERVER}"),
+        "https://stoat.chat/invite/wVEJDGVs".to_string(),
+        "https://stoat.chat/".to_string(),
+        format!("https://stoat.chat/channel/{CHANNEL}/{MESSAGE}/more"),
+        format!("https://stoat.chat/server/{SERVER}/channel/{CHANNEL}/settings"),
+        "https://stoat.chat/channel/general".to_string(),
+        format!("https://stoat.chat/server/x/channel/{CHANNEL}"),
+    ] {
+        assert_eq!(channel_from_link(&link, &hosts), None, "{link}");
+    }
+}
+
+#[test]
+fn self_hosted_instances_only_know_their_own_links() {
+    let hosts = InviteHosts::new(Some("https://chat.example.org"));
+    let own = format!("https://chat.example.org/channel/{CHANNEL}/{MESSAGE}");
+    assert_eq!(channel_from_link(&own, &hosts), to(Some(MESSAGE)));
+    let official = format!("https://stoat.chat/channel/{CHANNEL}/{MESSAGE}");
+    assert_eq!(channel_from_link(&official, &hosts), None);
+
+    // An instance that doesn't say where its web client is has none.
+    let unknown = InviteHosts::new(None);
+    assert_eq!(channel_from_link(&own, &unknown), None);
 }
