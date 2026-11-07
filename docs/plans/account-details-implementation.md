@@ -168,3 +168,9 @@ Every chunk's manual check above, plus the plan's Manual Tests 2–6:
 4. Rapid wrong passwords say how long to wait.
 5. Light and dark themes are readable.
 6. Put the username, email and password back afterwards, and turn two-factor off if you turned it on.
+
+## Manual sign-off
+
+_2026-11-07:_ the user ran the bundled app and asked to merge to `main`. The individual "Pending" checks above weren't confirmed one by one.
+
+While testing, opening a server identity editor crashed the app ("cannot read ChatView while it is already being updated"). The bug dated from milestone 15 (`1814405`), not this milestone: `IdentityEditor::new` read the chat while `ChatView::open_identity_editor` was updating it. It's fixed in `b622e2b`: the editor now takes the store and a weak chat handle.
