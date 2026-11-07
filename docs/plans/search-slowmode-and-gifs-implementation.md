@@ -278,3 +278,41 @@ Pending (batched to the end).
 - **Fix 2:** `render_results` asks `window.use_asset::<ImgResourceLoader>` for the hovered GIF's animation. This starts the load and redraws the picker when it lands. The tile shows the still until the animation is decoded, then switches straight to it. `with_loading` is no longer used.
 - **Files:** `src/ui/gif_picker.rs` (`render` passes `window` to `render_results`).
 - **Verified:** the user confirmed hovering now plays with no flash. `cargo test` passed 722, 0 failed. Clippy is clean, and `src/ui/gif_picker.rs` has 0 rustfmt drift.
+
+## Summary
+
+_Completed: 2026-11-06_
+
+### Chunks Completed
+1. Latest and Oldest searches page with `before`/`after` cursors and "Load more". Relevance asks for the top 100 (`4343a50`).
+2. A slowmode badge on the typing line: "Slowmode 30s", or "Slowmode (exempt)" with Bypass Slowmode (`fee73ff`).
+3. A slowmode countdown in the badge and send button, from `UserSlowmodes` events, a local start on a successful send, and `InSlowmode` refusals. Enter keeps the text and shows a hint (`debd79d`).
+4. A Gifbox GIF picker in the message box for `api.stoat.chat` accounts with Send Embeds: categories, trending and search. Picking a GIF sends it at once (`687f55a`). A follow-up made hovered GIFs actually play, without a flash (`a67cc1c`).
+5. Video-only Gifbox embeds show as proxied stills with a "GIF" badge that open through the link safety prompt (`7e685d5`).
+
+### Divergences
+All are listed under each chunk. The ones worth knowing:
+- **The Gifbox fixture is made up, not real.** It follows the shape the plan records, and the `dims` key is a guess. It's worth replacing with a real response.
+- A Gifbox 401 is `ApiError::Unauthorized`, which the existing error parsing already produces. It isn't `ApiError::Api`.
+- The GIF cache lives with each account's chat view, because the picker is rebuilt every time it opens.
+- "Load more" reuses `search_task`, and `MoreState::Failed` keeps its cursor for Retry.
+- `next_cooldown_end()` became `cooldown_ends(channel)`. Events merge into the known cooldowns rather than replacing them.
+- The `UserSlowmodes` decode test is in `src/api/events.rs`, not `tests/live_events.rs`.
+- Manual testing found that GPUI only animates an `img` with an element id, and that a loading `img` draws nothing for its first 200 ms. Both are fixed in the picker.
+
+### Definition of Done
+- [x] Latest and Oldest show "Load more" while the last page was full, and page with `before`/`after` cursors without duplicates. Relevance fetches 100 and has no "Load more". Covered by `search.rs` and `tests/api_search.rs`.
+- [x] Slowmode shows by the message box as "Slowmode {duration}" or "Slowmode (exempt)", and updates live. Covered by `tests/store_slowmode.rs` and `tests/permissions.rs`.
+- [x] After a send in a slowmode channel, the badge and send button count down, from `UserSlowmodes` and a local start on success. The box won't send until 0:00, and the text is kept.
+- [x] A 429 `InSlowmode` parses as `ErrorType::InSlowmode` and starts the countdown. Other 429s stay `RateLimited` (`tests/api_send.rs`).
+- [x] Accounts on `api.stoat.chat` with Send Embeds get a GIF button. The picker shows categories, trending and search results as stills, animates the hovered GIF, and sends the GIF's page URL on pick, as a reply when one is set.
+- [x] No Gifbox request is made for other instances: `GifboxClient::for_account` is tested.
+- [x] Video-only Gifbox embeds show as badged stills that open through the safety prompt (`tests/store_embeds.rs`).
+- [x] `cargo test` (722 passed) and `cargo clippy --all-targets -- -D warnings` pass, and no touched file's rustfmt drift grew.
+- [~] Every chunk's manual check recorded here. The user ran the app:
+  - Hovering in the GIF picker failed at first, then passed after the fix (`a67cc1c`).
+  - Category posters and Trending showed.
+  - The user signed off on the rest ("lgtm") without reporting each check.
+
+### Remaining Manual Steps
+None required. The user signed off. Not individually confirmed: the slowmode checks with a second account and a relaunch mid-countdown, scrolling with about 300 search results, and memory after browsing GIFs.
