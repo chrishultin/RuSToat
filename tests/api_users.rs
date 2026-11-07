@@ -442,6 +442,7 @@ fn profile(display_name: &str, pronouns: &str, bio: &str) -> stoat_gpui::profile
         display_name: display_name.into(),
         pronouns: pronouns.into(),
         bio: bio.into(),
+        ..Default::default()
     }
 }
 
@@ -471,6 +472,21 @@ async fn clearing_the_name_and_bio_removes_them() {
         profile("Ada", "she/her", "hi"),
         profile("", "she/her", "  "),
         json!({ "remove": ["DisplayName", "ProfileContent"] }),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_new_avatar_and_banner_send_their_upload_ids() {
+    use stoat_gpui::profile_edit::{ProfileForm, ProfileImage};
+    assert_profile_edit_sends(
+        ProfileForm::default(),
+        ProfileForm {
+            avatar: ProfileImage::Current("file-1".into()),
+            banner: ProfileImage::Current("file-2".into()),
+            ..ProfileForm::default()
+        },
+        json!({ "avatar": "file-1", "profile": { "background": "file-2" } }),
     )
     .await;
 }

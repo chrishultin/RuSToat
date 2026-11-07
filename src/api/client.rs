@@ -80,11 +80,20 @@ pub struct FileSizeLimits {
     /// Largest attachment, in bytes.
     #[serde(default)]
     pub attachments: Option<u64>,
+    /// Largest avatar (a user's, or theirs on a server).
+    #[serde(default)]
+    pub avatars: Option<u64>,
+    /// Largest profile banner.
+    #[serde(default)]
+    pub backgrounds: Option<u64>,
 }
 
 /// Used when `GET /` doesn't say: Stoat's own defaults (20 MB, 5 files).
 pub const DEFAULT_ATTACHMENT_SIZE_LIMIT: u64 = 20_000_000;
 pub const DEFAULT_MAX_ATTACHMENTS: usize = 5;
+/// Stoat's defaults for avatars (4 MB) and profile banners (6 MB).
+pub const DEFAULT_AVATAR_SIZE_LIMIT: u64 = 4_000_000;
+pub const DEFAULT_BACKGROUND_SIZE_LIMIT: u64 = 6_000_000;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServiceFeature {
@@ -107,12 +116,32 @@ impl RootConfig {
     /// (this client doesn't know which applies), else
     /// [`DEFAULT_ATTACHMENT_SIZE_LIMIT`].
     pub fn attachment_size_limit(&self) -> u64 {
+        self.stricter_size_limit(|l| l.attachments)
+            .unwrap_or(DEFAULT_ATTACHMENT_SIZE_LIMIT)
+    }
+
+    /// Largest avatar, in bytes, chosen the same way, else
+    /// [`DEFAULT_AVATAR_SIZE_LIMIT`].
+    pub fn avatar_size_limit(&self) -> u64 {
+        self.stricter_size_limit(|l| l.avatars)
+            .unwrap_or(DEFAULT_AVATAR_SIZE_LIMIT)
+    }
+
+    /// Largest profile banner, in bytes, chosen the same way, else
+    /// [`DEFAULT_BACKGROUND_SIZE_LIMIT`].
+    pub fn background_size_limit(&self) -> u64 {
+        self.stricter_size_limit(|l| l.backgrounds)
+            .unwrap_or(DEFAULT_BACKGROUND_SIZE_LIMIT)
+    }
+
+    /// The stricter of the two account limits on one kind of file, if
+    /// either says.
+    fn stricter_size_limit(&self, limit: impl Fn(&FileSizeLimits) -> Option<u64>) -> Option<u64> {
         let limits = &self.features.limits;
         [&limits.default, &limits.new_user]
             .iter()
-            .filter_map(|l| l.file_upload_size_limits.attachments)
+            .filter_map(|l| limit(&l.file_upload_size_limits))
             .min()
-            .unwrap_or(DEFAULT_ATTACHMENT_SIZE_LIMIT)
     }
 
     /// Most files one message can carry, chosen the same way, else
@@ -302,8 +331,30 @@ impl StoatClient {
     }
 
     /// `POST {file_server}/attachments`: upload the file at `path` for a
-    /// message, as the multipart field `file`. Returns its ID, to send in
+    /// message (see [`Self::upload_file`]). Returns its ID, to send in
     /// [`Self::send_message`]'s `attachments` (each ID can be used once).
+    pub async fn upload_attachment(
+        &self,
+        file_server: &str,
+        name: &str,
+        content_type: &str,
+        path: &std::path::Path,
+        on_progress: impl Fn(u64, u64) + Send + Sync + 'static,
+    ) -> Result<String, ApiError> {
+        self.upload_file(
+            file_server,
+            "attachments",
+            name,
+            content_type,
+            path,
+            on_progress,
+        )
+        .await
+    }
+
+    /// `POST {file_server}/{tag}`: upload the file at `path` as the
+    /// multipart field `file`, for what `tag` says (`attachments`,
+    /// `avatars`, `backgrounds`, …). Returns its ID.
     ///
     /// The file is read from disk in chunks as it's sent, never held whole.
     /// Its size is taken when the upload starts; if it can't be opened, or
@@ -311,9 +362,10 @@ impl StoatClient {
     ///
     /// `on_progress(sent, total)` is called as the body is handed to the
     /// connection, ending with `(total, total)`.
-    pub async fn upload_attachment(
+    pub async fn upload_file(
         &self,
         file_server: &str,
+        tag: &str,
         name: &str,
         content_type: &str,
         path: &std::path::Path,
@@ -366,7 +418,7 @@ impl StoatClient {
             })?;
         let form = Form::new().part("file", part);
 
-        let url = format!("{}/attachments", file_server.trim_end_matches('/'));
+        let url = format!("{}/{tag}", file_server.trim_end_matches('/'));
         log::debug!("POST {url} ({name}, {content_type}, {total} bytes)");
         let mut request = self.http.post(&url).multipart(form).timeout(UPLOAD_TIMEOUT);
         if let Some(token) = &self.token {

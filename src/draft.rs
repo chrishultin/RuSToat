@@ -295,7 +295,7 @@ impl std::fmt::Display for AttachError {
 
 /// A limit as Stoat states it: decimal units, so 20 000 000 bytes is
 /// "20 MB" (not 19.1). Falls back to [`size_label`] for odd sizes.
-fn decimal_size_label(bytes: u64) -> String {
+pub fn decimal_size_label(bytes: u64) -> String {
     if bytes >= 1_000_000 && bytes.is_multiple_of(1_000_000) {
         format!("{} MB", bytes / 1_000_000)
     } else {

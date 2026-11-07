@@ -142,6 +142,7 @@ Stoat's web client (`stoatchat/for-web`, read 2026-11-06) is the reference: `set
   - `IMAGE_TYPES` (PNG, JPEG, GIF, WebP)
   - `check_image(path, size, limit) -> Result<content_type, ImageProblem>` (wrong type, too big with the limit in MB)
   - `ImageChange { Keep | Replace(path) | Remove }` in `ProfileForm`, mapped to `avatar`, `profile.background` or `remove`
+    - _Amended in implementation:_ `ProfileImage { None | Current(file id) | New(path) }` instead, so the form knows whether there's an image to remove, and an upload's ID slots in as `Current(id)`.
 - `src/draft.rs` (or `profile_edit.rs`): `ImageLimits { avatar, background }::from_root`, passed to `ChatView` beside `AttachmentLimits` at `chat.rs` ~484.
 - `src/ui/profile_editor.rs`:
   - The avatar row: a centre-cropped circle preview (the new file, else the current avatar), with Change… and Remove.
@@ -177,7 +178,7 @@ Stoat's web client (`stoatchat/for-web`, read 2026-11-06) is the reference: `set
 **Files likely touched:**
 - `src/api/client.rs`: `edit_member(server, user, &DataMemberEdit) -> Result<Member, ApiError>`, a `PATCH /servers/{server}/members/{user}` with nulls and an empty `remove` stripped, as in `edit_user`.
 - `src/permissions.rs`: `server_permissions(store, user, server) -> u64` with `calculate_server_permissions`, then `can_change_nickname` and `can_change_avatar`.
-- `src/profile_edit.rs`: `check_nickname`, and `IdentityForm { nickname, avatar: ImageChange, pronouns }` with `changes -> DataMemberEdit` (blanks in `remove`).
+- `src/profile_edit.rs`: `check_nickname`, and `IdentityForm { nickname, avatar: ProfileImage, pronouns }` with `changes -> DataMemberEdit` (blanks in `remove`).
 - `src/ui/identity_dialog.rs` (new, or in `chat.rs` beside the status editor):
   - The dialog, opened with `window.open_dialog` and titled "Change identity on {server}".
   - Avatar row (preview, else your global avatar), Nickname and Pronouns fields, with counters.

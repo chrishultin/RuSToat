@@ -48,6 +48,7 @@ use crate::media::MediaUrls;
 use crate::notify::{self, Delivery, Level, MuteFor, Notice, NotificationSettings, Viewing};
 use crate::places::{Place, Places, PlacesFile};
 use crate::profile::{RelationshipAction, UserMenuItem};
+use crate::profile_edit::ImageLimits;
 use crate::runtime::spawn_io;
 use crate::safety::{LinkCheck, SafetyFile, SafetySettings, classify, is_own_instance, origin};
 use crate::search::{
@@ -404,6 +405,8 @@ pub struct ChatView {
     panel_channel: Option<String>,
     /// The message box, under the open channel.
     composer: Entity<Composer>,
+    /// How big an avatar and profile banner may be (for the Profile page).
+    image_limits: ImageLimits,
     /// The default skin tone for emoji (`:` suggestions use it too).
     skin_tone: crate::prefs::Tone,
     _composer: Subscription,
@@ -483,12 +486,14 @@ impl ChatView {
                 Ok(Ok(root)) => {
                     let media = MediaUrls::from_root(&api, &root);
                     let limits = AttachmentLimits::from_root(&root);
+                    let image_limits = ImageLimits::from_root(&root);
                     log::debug!(
-                        "media: {media:?}, attachments: {limits:?}, web app: {:?}",
+                        "media: {media:?}, attachments: {limits:?}, images: {image_limits:?}, web app: {:?}",
                         root.app
                     );
                     this.update(cx, |this, cx| {
                         this.web_app = root.app;
+                        this.image_limits = image_limits;
                         this.set_media(media, cx);
                         this.composer
                             .update(cx, |composer, _| composer.set_limits(limits));
@@ -717,6 +722,7 @@ impl ChatView {
             card: None,
             card_focus: cx.focus_handle(),
             profiles: HashMap::new(),
+            image_limits: ImageLimits::default(),
             dm_opening: None,
             relationship_pending: HashSet::new(),
             friends_tab: FriendsTab::default(),
@@ -4100,6 +4106,11 @@ impl ChatView {
         &self.store
     }
 
+    /// How big an avatar and profile banner may be.
+    pub fn image_limits(&self) -> ImageLimits {
+        self.image_limits
+    }
+
     /// A profile fetched elsewhere (the Profile page), kept for the card.
     pub fn cache_profile(&mut self, user: String, profile: UserProfile) {
         self.profiles.insert(user, Some(profile));
@@ -4107,16 +4118,20 @@ impl ChatView {
 
     /// The Profile page saved the user's profile: show Stoat's answer at
     /// once (name, avatar, pronouns), and the bio that was sent on their
-    /// card. `bio` is `None` if it didn't change.
+    /// card. `bio` is `None` if it didn't change. A new banner isn't known
+    /// as a file here, so with `banner_changed` the card fetches it again.
     pub fn own_profile_saved(
         &mut self,
         me: crate::api::models::User,
         bio: Option<Option<String>>,
+        banner_changed: bool,
         cx: &mut Context<Self>,
     ) {
         self.store.apply_own_user(me);
         let id = self.store.me().to_string();
-        if let Some(bio) = bio
+        if banner_changed {
+            self.profiles.remove(&id);
+        } else if let Some(bio) = bio
             && let Some(Some(profile)) = self.profiles.get_mut(&id)
         {
             profile.content = bio;

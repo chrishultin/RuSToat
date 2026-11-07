@@ -12,8 +12,8 @@ pub mod gifbox;
 pub mod instance;
 
 pub use client::{
-    DEFAULT_API_URL, DEFAULT_ATTACHMENT_SIZE_LIMIT, DEFAULT_MAX_ATTACHMENTS, RootConfig, SESSION_FRIENDLY_NAME,
-    StoatClient, file_url,
+    DEFAULT_API_URL, DEFAULT_ATTACHMENT_SIZE_LIMIT, DEFAULT_AVATAR_SIZE_LIMIT, DEFAULT_BACKGROUND_SIZE_LIMIT,
+    DEFAULT_MAX_ATTACHMENTS, RootConfig, SESSION_FRIENDLY_NAME, StoatClient, file_url,
 };
 pub use error::ApiError;
 pub use instance::{InstanceError, normalize_instance, resolve_instance};

@@ -263,3 +263,58 @@ async fn too_many_attachments_is_refused_with_the_max() {
         "{err:?}"
     );
 }
+
+#[tokio::test]
+async fn avatars_and_banners_go_to_their_own_tags() {
+    let autumn = MockServer::start().await;
+    for (tag, id) in [("avatars", "f-avatar"), ("backgrounds", "f-banner")] {
+        Mock::given(method("POST"))
+            .and(path(format!("/{tag}")))
+            .and(header("x-session-token", "tok"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": id })))
+            .expect(1)
+            .mount(&autumn)
+            .await;
+    }
+
+    let (_dir, file) = temp_file("me.gif", b"GIF89a");
+    let client = client("http://unused.invalid");
+    for (tag, id) in [("avatars", "f-avatar"), ("backgrounds", "f-banner")] {
+        let uploaded = client
+            .upload_file(&autumn.uri(), tag, "me.gif", "image/gif", &file, |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(uploaded, id);
+    }
+}
+
+#[test]
+fn root_config_gives_the_avatar_and_banner_limits() {
+    use stoat_gpui::profile_edit::ImageLimits;
+    // The fixture has `avatars` but no `backgrounds`: Stoat's 6 MB default.
+    let root: RootConfig = serde_json::from_value(fixture("root.json")).unwrap();
+    assert_eq!(
+        ImageLimits::from_root(&root),
+        ImageLimits {
+            avatar: 4_000_000,
+            background: 6_000_000
+        }
+    );
+
+    // The stricter of the two account limits.
+    let mut value = fixture("root.json");
+    let limits = &mut value["features"]["limits"];
+    limits["default"]["file_upload_size_limits"]["backgrounds"] = json!(6_000_000);
+    limits["new_user"]["file_upload_size_limits"]["backgrounds"] = json!(3_000_000);
+    limits["new_user"]["file_upload_size_limits"]["avatars"] = json!(2_000_000);
+    let root: RootConfig = serde_json::from_value(value).unwrap();
+    assert_eq!(root.avatar_size_limit(), 2_000_000);
+    assert_eq!(root.background_size_limit(), 3_000_000);
+
+    // Without limits at all, both defaults.
+    let mut value = fixture("root.json");
+    value["features"].as_object_mut().unwrap().remove("limits");
+    let root: RootConfig = serde_json::from_value(value).unwrap();
+    assert_eq!(ImageLimits::from_root(&root), ImageLimits::default());
+    assert_eq!(ImageLimits::default().avatar, 4_000_000);
+}
