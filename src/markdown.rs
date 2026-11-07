@@ -37,9 +37,13 @@
 //!   so the next line isn't pulled into the quote (CommonMark's "lazy
 //!   continuation").
 //!
-//! Nothing is rewritten inside code (fenced blocks or inline spans). Inside
-//! `$$…$$` math only `<` is escaped (`\<`, which [`crate::math`] reads back
-//! as `<`); `ui::math` draws the formula.
+//! Before all that, characters that can't be drawn are dealt with, in code
+//! too: private-use ones are left out, and emoji the system's emoji font
+//! lacks become `:shortcode:` (see [`crate::emoji::drawable_text`]).
+//!
+//! Otherwise nothing is rewritten inside code (fenced blocks or inline
+//! spans). Inside `$$…$$` math only `<` is escaped (`\<`, which
+//! [`crate::math`] reads back as `<`); `ui::math` draws the formula.
 
 /// Name lookups for mentions.
 pub trait Names {
@@ -79,6 +83,9 @@ pub fn prepare(content: &str, names: &impl Names) -> String {
 /// [`prepare`], with spoiler `n` (counting from 0 in the message) shown
 /// when `revealed(n)`.
 pub fn prepare_with(content: &str, names: &impl Names, revealed: impl Fn(usize) -> bool) -> String {
+    // No boxes for characters that can't be drawn.
+    let content = crate::emoji::drawable_text(content);
+    let content = &*content;
     let emoji_px = if is_jumbo(content) {
         JUMBO_EMOJI_PX
     } else {
@@ -831,9 +838,10 @@ fn is_autolink(inner: &str) -> bool {
 /// Message text as plain text (notification bodies): mentions as `@Name`,
 /// custom emoji as `:name:`, timestamps in local time, and spoilers as
 /// `[spoiler]`, so they don't give anything away. Markdown punctuation is
-/// left as typed.
+/// left as typed. Characters that can't be drawn go as in [`prepare`].
 pub fn plain_text(content: &str, names: &impl Names) -> String {
-    plain_mentions(&hide_spoilers(content), names)
+    let content = crate::emoji::drawable_text(content);
+    plain_mentions(&hide_spoilers(&content), names)
 }
 
 /// Every spoiler outside code as `[spoiler]`.

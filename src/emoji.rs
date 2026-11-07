@@ -12,6 +12,7 @@
 //! (see [`hide_undrawable`]), so they're never offered as a box with a
 //! question mark.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
@@ -80,6 +81,64 @@ fn drawable(emoji: &emojis::Emoji) -> bool {
     MISSING
         .get()
         .is_none_or(|missing| !emoji.as_str().chars().any(|c| missing.contains(&c)))
+}
+
+/// Most characters in one emoji (a toned kiss is 10).
+const LONGEST_EMOJI: usize = 12;
+
+/// `text` as it can be drawn: private-use characters left out (they only
+/// mean something with the sender's font, and Stoat's web client shows them
+/// blank), and emoji the emoji font can't draw as `:shortcode:`, without
+/// their skin tone. Borrowed when nothing needs changing.
+pub fn drawable_text(text: &str) -> Cow<'_, str> {
+    let missing = |c: char| MISSING.get().is_some_and(|missing| missing.contains(&c));
+    if !text.chars().any(|c| is_private_use(c) || missing(c)) {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        if is_private_use(c) {
+            rest = &rest[c.len_utf8()..];
+            continue;
+        }
+        // The longest emoji starting here, so a sequence goes as a whole.
+        let emoji = rest
+            .char_indices()
+            .skip(1)
+            .map(|(end, _)| end)
+            .chain([rest.len()])
+            .take(LONGEST_EMOJI)
+            .filter_map(|end| Some((emojis::get(&rest[..end])?, end)))
+            .last();
+        let len = match emoji {
+            Some((emoji, len)) if !drawable(emoji) => {
+                let base = emoji
+                    .with_skin_tone(emojis::SkinTone::Default)
+                    .unwrap_or(emoji);
+                out.push(':');
+                out.push_str(&shortcode_of(base));
+                out.push(':');
+                len
+            }
+            Some((_, len)) => {
+                out.push_str(&rest[..len]);
+                len
+            }
+            None => {
+                out.push(c);
+                c.len_utf8()
+            }
+        };
+        rest = &rest[len..];
+    }
+    Cow::Owned(out)
+}
+
+/// Whether `c` is in one of Unicode's private use areas, other than Apple's
+/// logo (U+F8FF), which Apple's fonts draw.
+fn is_private_use(c: char) -> bool {
+    matches!(c, '\u{E000}'..='\u{F8FE}' | '\u{F0000}'..='\u{FFFFD}' | '\u{100000}'..='\u{10FFFD}')
 }
 
 /// A server's custom emoji.

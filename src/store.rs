@@ -430,6 +430,7 @@ impl ReactionChip {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReactionEmoji {
+    /// The emoji as drawn (see [`crate::emoji::drawable_text`]).
     Unicode(String),
     Custom {
         id: String,
@@ -1805,7 +1806,8 @@ impl ChatStore {
             .collect()
     }
 
-    /// How a reaction key is drawn: custom emoji are told apart by being a ULID.
+    /// How a reaction key is drawn: custom emoji are told apart by being a
+    /// ULID. A Unicode emoji the system can't draw goes by name.
     fn reaction_emoji(&self, key: &str) -> ReactionEmoji {
         if crate::time::is_ulid(key) {
             let name = self.emoji(key).map_or("emoji", |e| e.name.as_str());
@@ -1815,7 +1817,7 @@ impl ChatStore {
                 name: format!(":{name}:"),
             }
         } else {
-            ReactionEmoji::Unicode(key.to_string())
+            ReactionEmoji::Unicode(crate::emoji::drawable_text(key).into_owned())
         }
     }
 
