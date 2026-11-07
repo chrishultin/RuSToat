@@ -10,6 +10,7 @@ pub mod login;
 pub mod markup;
 pub mod math;
 pub mod profile_card;
+pub mod profile_editor;
 pub mod settings;
 pub mod switcher;
 pub mod thumbhash;

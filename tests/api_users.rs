@@ -409,3 +409,68 @@ async fn a_status_stoat_refuses_is_an_api_error() {
         "got {err:?}"
     );
 }
+
+/// A profile edit as the Profile page builds it, sent as exactly `body`.
+async fn assert_profile_edit_sends(
+    loaded: stoat_gpui::profile_edit::ProfileForm,
+    edited: stoat_gpui::profile_edit::ProfileForm,
+    body: serde_json::Value,
+) {
+    use stoat_gpui::profile_edit::ProfileForm;
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/users/@me"))
+        .and(header("x-session-token", "tok"))
+        .and(body_json(body))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "_id": "u-me", "username": "me", "discriminator": "0001",
+            "display_name": "Ada", "relationship": "User", "online": true
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let me = client(&server)
+        .edit_user(&ProfileForm::changes(&loaded, &edited))
+        .await
+        .unwrap();
+    assert_eq!(me.display_name.as_deref(), Some("Ada"));
+}
+
+fn profile(display_name: &str, pronouns: &str, bio: &str) -> stoat_gpui::profile_edit::ProfileForm {
+    stoat_gpui::profile_edit::ProfileForm {
+        display_name: display_name.into(),
+        pronouns: pronouns.into(),
+        bio: bio.into(),
+    }
+}
+
+#[tokio::test]
+async fn a_new_display_name_sends_only_the_name() {
+    assert_profile_edit_sends(
+        profile("", "they/them", "hello"),
+        profile(" Ada ", "they/them", "hello"),
+        json!({ "display_name": "Ada" }),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn new_pronouns_and_bio_send_the_bio_as_profile_content() {
+    assert_profile_edit_sends(
+        profile("Ada", "", ""),
+        profile("Ada", "she/her", "hi"),
+        json!({ "pronouns": "she/her", "profile": { "content": "hi" } }),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn clearing_the_name_and_bio_removes_them() {
+    assert_profile_edit_sends(
+        profile("Ada", "she/her", "hi"),
+        profile("", "she/her", "  "),
+        json!({ "remove": ["DisplayName", "ProfileContent"] }),
+    )
+    .await;
+}

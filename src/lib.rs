@@ -27,6 +27,7 @@ pub mod permissions;
 pub mod places;
 pub mod prefs;
 pub mod profile;
+pub mod profile_edit;
 pub mod runtime;
 pub mod safety;
 pub mod search;

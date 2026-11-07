@@ -14,7 +14,9 @@ actions!(
         /// Sign in to another account.
         AddAccount,
         /// Open the settings window, or bring it forward (⌘,).
-        OpenSettings
+        OpenSettings,
+        /// Open the settings window on the Profile page ("Edit profile…").
+        OpenProfileSettings
     ]
 );
 

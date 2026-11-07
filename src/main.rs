@@ -126,7 +126,8 @@ fn main() {
 
         cx.bind_keys(app_key_bindings());
         cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.on_action(|_: &OpenSettings, cx| SettingsWindow::open_or_focus(cx));
+        cx.on_action(|_: &OpenSettings, cx| SettingsWindow::open_or_focus(false, cx));
+        cx.on_action(|_: &OpenProfileSettings, cx| SettingsWindow::open_or_focus(true, cx));
         set_menus(&[], cx);
 
         on_switch_account::<SwitchAccount1>(0, cx);
@@ -309,32 +310,51 @@ impl MainWindow {
     }
 }
 
-/// The settings window, while it's open. There's only ever one.
-struct SettingsWindow(Option<WindowHandle<gpui_kit::component::Root>>);
+/// The settings window and its content, while it's open. There's only
+/// ever one.
+struct SettingsWindow(
+    Option<(
+        WindowHandle<gpui_kit::component::Root>,
+        WeakEntity<SettingsView>,
+    )>,
+);
 
 impl Global for SettingsWindow {}
 
 impl SettingsWindow {
     /// Open the settings window, or bring it forward if it's already open.
-    fn open_or_focus(cx: &mut App) {
+    /// With `profile`, on the Profile page. A new window starts there anyway,
+    /// as it's the first page.
+    fn open_or_focus(profile: bool, cx: &mut App) {
         // Deferred: from a key binding, GPUI is still updating the window
         // the key was pressed in, which may be this one.
-        cx.defer(|cx| {
-            if let Some(window) = cx.global::<Self>().0
+        cx.defer(move |cx| {
+            if let Some((window, view)) = cx.global::<Self>().0.clone()
                 && window
-                    .update(cx, |_, window, _| window.activate_window())
+                    .update(cx, |_, window, cx| {
+                        window.activate_window();
+                        if profile {
+                            view.update(cx, |view, cx| view.show_profile(cx)).ok();
+                        }
+                    })
                     .is_ok()
             {
+                cx.activate(true);
                 return;
             }
             match Self::open(cx) {
-                Ok(window) => cx.global_mut::<Self>().0 = Some(window),
+                Ok(opened) => cx.global_mut::<Self>().0 = Some(opened),
                 Err(err) => log::error!("couldn't open the settings window: {err:#}"),
             }
         });
     }
 
-    fn open(cx: &mut App) -> anyhow::Result<WindowHandle<gpui_kit::component::Root>> {
+    fn open(
+        cx: &mut App,
+    ) -> anyhow::Result<(
+        WindowHandle<gpui_kit::component::Root>,
+        WeakEntity<SettingsView>,
+    )> {
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                 None,
@@ -351,12 +371,13 @@ impl SettingsWindow {
             .try_global::<MainWindow>()
             .and_then(|main| Some(main.current.as_ref()?.1.clone()))
             .unwrap_or_else(WeakEntity::new_invalid);
-        let (window, _) = gpui_kit::open_window(options, cx, |window, cx| {
+        let (window, view) = gpui_kit::open_window(options, cx, |window, cx| {
             cx.new(|cx| SettingsView::new(root, SettingsView::app_pages(), window, cx))
         })?;
         cx.activate(true);
-        window
+        let window = window
             .downcast()
-            .ok_or_else(|| anyhow::anyhow!("the settings window isn't a Root"))
+            .ok_or_else(|| anyhow::anyhow!("the settings window isn't a Root"))?;
+        Ok((window, view.downgrade()))
     }
 }

@@ -970,3 +970,39 @@ fn going_invisible_shows_whichever_way_stoat_says_it() {
     );
     assert!(!store.user("u-bob").unwrap().online);
 }
+
+/// Stoat's answer to a profile change: the new name shows at once, and the
+/// status stays (the answer says offline, which isn't a status change).
+#[test]
+fn stoats_answer_to_a_profile_change_applies_at_once() {
+    use stoat_gpui::api::models::{Presence, User, UserStatus};
+    use stoat_gpui::store::display_name;
+    let mut store = store_with_page(50);
+    store.set_my_status(
+        Some(UserStatus {
+            text: Some("lunch".into()),
+            presence: Some(Presence::Busy),
+        }),
+        true,
+    );
+    let answer: User = serde_json::from_value(serde_json::json!({
+        "_id": "u-me", "username": "me", "discriminator": "0001",
+        "display_name": "Mia", "pronouns": "she/her",
+        "relationship": "User", "online": false
+    }))
+    .unwrap();
+    store.apply_own_user(answer);
+    let me = store.user("u-me").unwrap();
+    assert_eq!(display_name(me), "Mia");
+    assert_eq!(me.pronouns.as_deref(), Some("she/her"));
+    assert_eq!(store.my_status(), (Presence::Busy, Some("lunch".into())));
+
+    // Someone else's user isn't taken for the user's own.
+    let other: User = serde_json::from_value(serde_json::json!({
+        "_id": "u-ada", "username": "ada", "discriminator": "1815", "display_name": "Imposter",
+        "relationship": "Friend", "online": true
+    }))
+    .unwrap();
+    store.apply_own_user(other);
+    assert_eq!(display_name(store.user("u-ada").unwrap()), "Ada L.");
+}

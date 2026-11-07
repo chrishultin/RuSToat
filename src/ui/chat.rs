@@ -63,6 +63,7 @@ use crate::store::{
 };
 use crate::time::{format_countdown, format_duration_short, ulid_millis};
 use crate::typing::{OutgoingTyping, TypingSignal, TypingState, typing_label};
+use crate::ui::actions::OpenProfileSettings;
 use crate::ui::composer::{Composer, ComposerEvent, file_icon};
 use crate::ui::emoji_picker::emoji_grid;
 use crate::ui::friends::{RowButtons, render_add_friend, render_friends_page};
@@ -1003,6 +1004,9 @@ impl ChatView {
                 self.refresh_suggestions(cx);
             }
             ConnectionEvent::Event(ServerEvent::UserUpdate { id, data, clear }) => {
+                // Stoat sends no bio or banner here, so a changed user's card
+                // fetches their profile afresh rather than show a stale one.
+                self.profiles.remove(&id);
                 let shown = self.store.apply_user_update(&id, *data, &clear);
                 // The member list shows presence and status too.
                 let listed = self.member_panel_lists(&id);
@@ -3564,7 +3568,7 @@ impl ChatView {
                 }
             };
             let menu = menu.separator();
-            match text {
+            let menu = match text {
                 None => menu.item(
                     PopupMenuItem::new("Set status…")
                         .icon(IconName::FaceSlightlySmilingPlus)
@@ -3590,7 +3594,14 @@ impl ChatView {
                                 }),
                         )
                 }
-            }
+            };
+            menu.separator().item(
+                PopupMenuItem::new("Edit profile…")
+                    .icon(IconName::UserPen)
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(OpenProfileSettings), cx)
+                    }),
+            )
         }
     }
 
@@ -4077,6 +4088,45 @@ impl ChatView {
             display_name(user).to_string(),
             self.store.user_avatar_url(me),
         ))
+    }
+
+    /// This account's API client (for the Profile page's requests).
+    pub fn client(&self) -> &StoatClient {
+        &self.client
+    }
+
+    /// This account's chats, people and servers.
+    pub fn store(&self) -> &ChatStore {
+        &self.store
+    }
+
+    /// A profile fetched elsewhere (the Profile page), kept for the card.
+    pub fn cache_profile(&mut self, user: String, profile: UserProfile) {
+        self.profiles.insert(user, Some(profile));
+    }
+
+    /// The Profile page saved the user's profile: show Stoat's answer at
+    /// once (name, avatar, pronouns), and the bio that was sent on their
+    /// card. `bio` is `None` if it didn't change.
+    pub fn own_profile_saved(
+        &mut self,
+        me: crate::api::models::User,
+        bio: Option<Option<String>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.store.apply_own_user(me);
+        let id = self.store.me().to_string();
+        if let Some(bio) = bio
+            && let Some(Some(profile)) = self.profiles.get_mut(&id)
+        {
+            profile.content = bio;
+        }
+        self.forget_member_lists();
+        for channel in self.store.channels_showing(&id) {
+            self.sync_pane(&channel, cx);
+        }
+        self.refresh_suggestions(cx);
+        cx.notify();
     }
 
     /// Log what makes up [`Self::sync_outside`]'s count.

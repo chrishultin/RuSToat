@@ -1417,6 +1417,23 @@ impl ChatStore {
         }
     }
 
+    /// The user's own account as Stoat answered a profile change (display
+    /// name, avatar, pronouns), so nothing waits for the `UserUpdate` echo.
+    /// Their status and `online` stay as they are: the answer says offline
+    /// for Invisible (see [`Self::my_status`]), and it isn't a status change.
+    pub fn apply_own_user(&mut self, user: User) {
+        if user.id != self.me {
+            return;
+        }
+        let mut user = user;
+        if let Some(before) = self.users.get(&self.me) {
+            user.status = before.status.clone();
+            user.online = before.online;
+            user.relationship = before.relationship.clone();
+        }
+        self.users.insert(user.id.clone(), user);
+    }
+
     /// Muted in the user's notification settings (the channel or its server),
     /// right now.
     pub fn is_muted(&self, channel_id: &str) -> bool {

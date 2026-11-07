@@ -39,6 +39,7 @@ gpui_kit::assets::icon_assets!(
         Trash,
         UserCheck,
         UserMinus,
+        UserPen,
         UserPlus,
         UserX,
         Users,
@@ -138,6 +139,7 @@ mod tests {
             IconName::FaceSlightlySmilingPlus,
             IconName::Pencil,
             IconName::Close,
+            IconName::UserPen,
         ] {
             let path = icon.path();
             assert!(AppAssets.load(&path).unwrap().is_some(), "{path} missing");

@@ -240,6 +240,13 @@ impl AppRoot {
         }
     }
 
+    /// The account on screen and its chat, if it's signed in (for the
+    /// settings window's Profile page).
+    pub fn shown_chat(&self) -> Option<(String, Entity<ChatView>)> {
+        let id = self.shown_account()?;
+        Some((id.to_string(), self.chat_view(id)?.clone()))
+    }
+
     fn chat_view(&self, id: &str) -> Option<&Entity<ChatView>> {
         match self.states.get(id) {
             Some(AccountState::Chat { view, .. }) => Some(view),

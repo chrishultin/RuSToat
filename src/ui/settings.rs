@@ -3,12 +3,14 @@
 //! A section is a function returning its page ([`PageFn`]), so a later
 //! section is one more function in the list the view is created with.
 
+use std::collections::HashMap;
+
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::setting::{
-    SettingField, SettingGroup, SettingItem, SettingPage, Settings,
+    SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage, Settings,
 };
 use gpui_kit::component::{ActiveTheme, Sizable, WindowExt, h_flex};
 use gpui_kit::*;
@@ -18,6 +20,7 @@ use crate::shortcuts::{self, Group, Keys, Shortcut};
 use crate::themes::{self, Appearance, Palette};
 use crate::ui::AppRoot;
 use crate::ui::app_prefs::AppPrefs;
+use crate::ui::profile_editor::ProfileEditor;
 
 /// Builds one section of the window, each time the window renders.
 pub type PageFn = fn(&SettingsView, &mut App) -> SettingPage;
@@ -27,7 +30,13 @@ pub struct SettingsView {
     /// The main window's content, for sections about the account on screen.
     root: WeakEntity<AppRoot>,
     pages: Vec<PageFn>,
-    _subscriptions: [Subscription; 2],
+    /// The Profile page's form for each account it has shown, by account
+    /// ID, so unsaved edits survive switching accounts.
+    profile_editors: HashMap<String, Entity<ProfileEditor>>,
+    /// Bumped to go back to the first page (Profile): a new ID gives the
+    /// sidebar new state, which starts there.
+    page_reset: usize,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl SettingsView {
@@ -37,7 +46,7 @@ impl SettingsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let subscriptions = [
+        let mut subscriptions = vec![
             // Show what the sections read from the preferences, whichever
             // window changed them.
             cx.observe_global::<AppPrefs>(|_, cx| cx.notify()),
@@ -45,16 +54,54 @@ impl SettingsView {
             // closed.
             cx.observe_window_appearance(window, |_, _, cx| themes::apply_current(cx)),
         ];
+        // The Profile page follows the account on screen.
+        if let Some(root) = root.upgrade() {
+            subscriptions.push(cx.observe(&root, |_, _, cx| cx.notify()));
+        }
         Self {
             root,
             pages,
+            profile_editors: HashMap::new(),
+            page_reset: 0,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Go to the Profile page ("Edit profile…" with the window open).
+    pub fn show_profile(&mut self, cx: &mut Context<Self>) {
+        self.page_reset += 1;
+        cx.notify();
+    }
+
+    /// The Profile page's form for the account on screen, made the first
+    /// time it's shown. A form whose account has since signed out and in
+    /// again is replaced, since its chat has gone.
+    fn sync_profile_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((id, chat)) = self.root().and_then(|root| root.read(cx).shown_chat()) else {
+            return;
+        };
+        if self
+            .profile_editors
+            .get(&id)
+            .is_some_and(|editor| editor.read(cx).is_for(&chat))
+        {
+            return;
+        }
+        let editor = cx.new(|cx| ProfileEditor::new(chat, window, cx));
+        self.profile_editors.insert(id, editor);
+    }
+
+    /// The Profile page's form for the account on screen, if it's signed in.
+    fn shown_profile_editor(&self, cx: &App) -> Option<Entity<ProfileEditor>> {
+        let (id, chat) = self.root()?.read(cx).shown_chat()?;
+        let editor = self.profile_editors.get(&id)?;
+        editor.read(cx).is_for(&chat).then(|| editor.clone())
     }
 
     /// The app's own sections, in sidebar order.
     pub fn app_pages() -> Vec<PageFn> {
         vec![
+            profile_page,
             appearance_page,
             notifications_page,
             app_page,
@@ -69,13 +116,39 @@ impl SettingsView {
 }
 
 impl Render for SettingsView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Inputs need the window, which a page function doesn't have.
+        self.sync_profile_editor(window, cx);
         let pages: Vec<SettingPage> = self.pages.iter().map(|page| page(self, cx)).collect();
-        div()
-            .size_full()
-            .bg(cx.theme().background)
-            .child(Settings::new("settings").pages(pages))
+        div().size_full().bg(cx.theme().background).child(
+            Settings::new(("settings", self.page_reset))
+                .default_selected_index(SelectIndex::default())
+                .pages(pages),
+        )
     }
+}
+
+/// Profile: the account on screen's display name, pronouns and bio.
+fn profile_page(view: &SettingsView, cx: &mut App) -> SettingPage {
+    let page = SettingPage::new("Profile")
+        .icon(IconName::CircleUser)
+        .resettable(false);
+    let item = match view.shown_profile_editor(cx) {
+        Some(editor) => SettingItem::render(move |_, _, _| editor.clone()),
+        None => SettingItem::render(|_, _, cx| {
+            div()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child("Sign in to edit your profile.")
+        }),
+    };
+    // Custom rows only match a search by their keywords.
+    page.group(SettingGroup::new().item(item.keywords([
+        "profile",
+        "display name",
+        "pronouns",
+        "bio",
+    ])))
 }
 
 /// Appearance: the colour palette, and light, dark or following macOS.
