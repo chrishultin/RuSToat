@@ -74,7 +74,7 @@ Some milestones lay foundations that later ones reuse. When the earlier one's pl
 - **Themes:** pick from a fixed set of colour palettes, each with a light and a dark variant, or follow the system. Built on gpui-component's theme registry.
 - **App behaviour:** start at login, and keep running in the background when the window closes, so notifications continue. Today closing the window disconnects every account.
 
-### Milestone 14: Status and notifications (M)
+### Milestone 14: Status and notifications (M). Plan: [`status-and-notifications.md`](status-and-notifications.md)
 - Set your presence (Online, Idle, Focus, Busy, Invisible) and a custom status, from your avatar
 - Edit notification levels (All, Mentions, None) and muting, for a set time or until you unmute, per server and per channel, from their right-click menus. This writes Stoat's synced settings, so it carries across clients.
 - Notification sounds, with an on/off switch
