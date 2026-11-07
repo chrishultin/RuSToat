@@ -7997,7 +7997,8 @@ const REACTION_HEIGHT: f32 = 24.;
 const REACTION_EMOJI_PX: f32 = 16.;
 
 /// The message's reaction chips (emoji and count, outlined when the user is
-/// one of them), wrapping under the bubble. `None` without reactions.
+/// one of them, with who reacted in the tooltip), wrapping under the
+/// bubble. `None` without reactions.
 fn render_reactions(
     message: &MessageRow,
     colors: RowColors,
@@ -8007,7 +8008,7 @@ fn render_reactions(
         return None;
     }
     let chips = message.reactions.iter().enumerate().map(|(ix, chip)| {
-        let (emoji, tooltip): (AnyElement, SharedString) = match &chip.emoji {
+        let (emoji, label): (AnyElement, SharedString) = match &chip.emoji {
             ReactionEmoji::Unicode(emoji) => (
                 div().text_sm().child(emoji.clone()).into_any_element(),
                 emoji.clone().into(),
@@ -8036,6 +8037,7 @@ fn render_reactions(
                 name.clone().into(),
             ),
         };
+        let tooltip = SharedString::from(chip.tooltip(&label));
         h_flex()
             .id(SharedString::from(format!("reaction-{}-{ix}", message.id)))
             .h(px(REACTION_HEIGHT))

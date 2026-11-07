@@ -126,3 +126,14 @@ _Completed: 2026-11-06 (code); manual checks pending_
 
 ### Remaining Manual Steps
 Every chunk's manual check above, plus the plan's Manual Tests 2–5 (two accounts never cross; bio/banner changed in the web client show on the card; rapid saves show the rate-limit wait and nothing half-saves; light and dark themes are readable).
+
+## Addendum: who reacted, in a reaction's tooltip
+
+Added at the user's request during milestone 15, though unrelated to it: hovering over a reaction chip names who reacted ("You, Ada and 3 others reacted with 👍").
+- `src/store.rs`: `ReactionChip` gains `names` (others who reacted, as the channel names them — server nickname first — in reaction order, at most `REACTOR_NAMES_SHOWN` = 8, only people the store knows) and `ReactionChip::tooltip(emoji)`; `name_in` now shares a `known_name_in` helper.
+- `src/ui/chat.rs`: `render_reactions` uses the chip's tooltip.
+- `tests/store_reactions.rs`: four tests (wording, counting the unnamed, names from the store, the cap).
+- Limitation: people the store hasn't loaded (common on large servers) are counted as "others", not fetched.
+- Verified: `cargo test` 803 passed, 0 failed, 5 ignored; clippy clean; drift unchanged (`chat.rs` 17, `store.rs` 15, `tests/store_reactions.rs` 0).
+
+The milestone's manual checks were still pending when the user moved on to milestone 16.

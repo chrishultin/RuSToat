@@ -389,6 +389,39 @@ pub struct ReactionChip {
     pub count: usize,
     /// The logged-in user is one of them.
     pub mine: bool,
+    /// The names of the others who used it, as the channel shows them, in
+    /// the order they reacted: at most [`REACTOR_NAMES_SHOWN`], and only
+    /// those this client knows. The rest are counted as "others".
+    pub names: Vec<String>,
+}
+
+/// The most names a reaction's tooltip lists.
+pub const REACTOR_NAMES_SHOWN: usize = 8;
+
+impl ReactionChip {
+    /// Who reacted, for the chip's tooltip: "You, Ada and 3 others reacted
+    /// with 👍". `emoji` is how the emoji is named (itself, or `:name:`).
+    pub fn tooltip(&self, emoji: &str) -> String {
+        let mut who: Vec<String> = Vec::new();
+        if self.mine {
+            who.push("You".into());
+        }
+        who.extend(self.names.iter().cloned());
+        let others = self.count.saturating_sub(who.len());
+        match others {
+            0 => {}
+            1 if who.is_empty() => who.push("1 person".into()),
+            1 => who.push("1 other".into()),
+            n if who.is_empty() => who.push(format!("{n} people")),
+            n => who.push(format!("{n} others")),
+        }
+        let who = match who.split_last() {
+            None => return emoji.to_string(),
+            Some((last, [])) => last.clone(),
+            Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        };
+        format!("{who} reacted with {emoji}")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1755,6 +1788,12 @@ impl ChatStore {
                 emoji: self.reaction_emoji(key),
                 count: users.len(),
                 mine: users.contains(&self.me),
+                names: users
+                    .iter()
+                    .filter(|user| **user != self.me)
+                    .filter_map(|user| self.known_name_in(&message.channel, user))
+                    .take(REACTOR_NAMES_SHOWN)
+                    .collect(),
             })
             .collect()
     }
@@ -2352,12 +2391,17 @@ impl ChatStore {
     /// What `user` is called in `channel`: their nickname in its server, else
     /// their display name (for "Ada is typing…").
     pub fn name_in(&self, channel: &str, user: &str) -> String {
+        self.known_name_in(channel, user)
+            .unwrap_or_else(|| "Someone".into())
+    }
+
+    /// [`Self::name_in`], or `None` for someone this client doesn't know.
+    fn known_name_in(&self, channel: &str, user: &str) -> Option<String> {
         self.server_of(channel)
             .and_then(|server| self.member(server, user))
             .and_then(|m| m.nickname.clone())
             .filter(|n| !n.trim().is_empty())
             .or_else(|| self.user_name(user))
-            .unwrap_or_else(|| "Someone".into())
     }
 
     /// Who `@` suggests in `channel`, best first: people who wrote there

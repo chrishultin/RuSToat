@@ -447,3 +447,94 @@ fn another_servers_emoji_is_missing_until_fetched_then_named_but_not_offered() {
     assert!(!store.reaction_choices(CH).iter().any(|c| c.key == PARTY));
     assert!(store.custom_emoji_for(CH).is_empty());
 }
+
+fn chip(count: usize, mine: bool, names: &[&str]) -> ReactionChip {
+    ReactionChip {
+        key: s("👍"),
+        emoji: ReactionEmoji::Unicode(s("👍")),
+        count,
+        mine,
+        names: names.iter().map(|n| s(n)).collect(),
+    }
+}
+
+#[test]
+fn a_reactions_tooltip_says_who_reacted() {
+    assert_eq!(
+        chip(1, false, &["Ada"]).tooltip("👍"),
+        "Ada reacted with 👍"
+    );
+    assert_eq!(chip(1, true, &[]).tooltip("👍"), "You reacted with 👍");
+    assert_eq!(
+        chip(2, true, &["Ada"]).tooltip(":party:"),
+        "You and Ada reacted with :party:"
+    );
+    assert_eq!(
+        chip(3, false, &["Ada", "Bob", "Cara"]).tooltip("👍"),
+        "Ada, Bob and Cara reacted with 👍"
+    );
+}
+
+#[test]
+fn people_without_a_name_are_counted() {
+    assert_eq!(
+        chip(5, true, &["Ada"]).tooltip("👍"),
+        "You, Ada and 3 others reacted with 👍"
+    );
+    assert_eq!(
+        chip(2, false, &["Ada"]).tooltip("👍"),
+        "Ada and 1 other reacted with 👍"
+    );
+    assert_eq!(
+        chip(4, false, &[]).tooltip("👍"),
+        "4 people reacted with 👍"
+    );
+    assert_eq!(
+        chip(1, false, &[]).tooltip("👍"),
+        "1 person reacted with 👍"
+    );
+}
+
+#[test]
+fn chips_name_the_people_who_reacted_that_the_store_knows() {
+    use stoat_gpui::api::models::User;
+    let mut store = store_with(json!({ "👍": ["u-ada", "u-me", "u-ghost", "u-bob"] }));
+    for (id, display) in [("u-ada", Some("Ada L.")), ("u-bob", None)] {
+        let mut user = json!({
+            "_id": id, "username": id.trim_start_matches("u-"), "discriminator": "0001",
+            "relationship": "None", "online": true
+        });
+        if let Some(display) = display {
+            user["display_name"] = json!(display);
+        }
+        store.add_user(serde_json::from_value::<User>(user).unwrap());
+    }
+    let chip = chips(&store).remove(0);
+    // In reaction order, without the user (who's "You"), and without
+    // someone the store doesn't know.
+    assert_eq!(chip.names, [s("Ada L."), s("bob")]);
+    assert_eq!(
+        chip.tooltip("👍"),
+        "You, Ada L., bob and 1 other reacted with 👍"
+    );
+}
+
+#[test]
+fn a_long_list_of_names_is_cut_short() {
+    use stoat_gpui::api::models::User;
+    use stoat_gpui::store::REACTOR_NAMES_SHOWN;
+    let ids: Vec<String> = (0..12).map(|n| format!("u-{n}")).collect();
+    let mut store = store_with(json!({ "👍": ids }));
+    for id in &ids {
+        store.add_user(
+            serde_json::from_value::<User>(json!({
+                "_id": id, "username": id, "discriminator": "0001",
+                "relationship": "None", "online": true
+            }))
+            .unwrap(),
+        );
+    }
+    let chip = chips(&store).remove(0);
+    assert_eq!(chip.names.len(), REACTOR_NAMES_SHOWN);
+    assert!(chip.tooltip("👍").ends_with("and 4 others reacted with 👍"));
+}
