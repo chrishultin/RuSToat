@@ -32,6 +32,8 @@ pub struct ChannelEntry {
     pub unread: bool,
     /// Unread messages that mention the user.
     pub mentions: usize,
+    /// Muted now, by its own mute or its server's. Drawn dimmed.
+    pub muted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1346,6 +1348,21 @@ impl ChatStore {
         self.notifications_updated = updated;
         self.notifications = settings;
         true
+    }
+
+    /// A channel's own mute, if it's muted now (as
+    /// [`Self::server_mute_until`]). Its server's mute isn't included.
+    pub fn channel_mute_until(&self, channel: &str) -> Option<Option<i64>> {
+        self.notifications.channel_mute(channel, notify::now_ms())
+    }
+
+    /// The level a channel has without its own: its server's, or All for
+    /// DMs, groups and Saved Notes.
+    pub fn level_source(&self, channel: &str) -> notify::Level {
+        match self.server_of(channel) {
+            Some(server) => self.notifications.server_level(server),
+            None => notify::Level::All,
+        }
     }
 
     /// Put back notification settings held before a change Stoat didn't
@@ -3215,10 +3232,12 @@ impl ChatStore {
             }
         };
         let id = channel_id(channel).to_string();
+        let muted = self.is_muted(&id);
         Some(ChannelEntry {
             // Muted: no unread dot, but mentions still show.
-            unread: self.is_unread(&id) && !self.is_muted(&id),
+            unread: self.is_unread(&id) && !muted,
             mentions: self.mention_count(&id),
+            muted,
             id,
             name,
             kind,

@@ -110,3 +110,90 @@ fn muting_a_server_hides_its_unread_dot() {
     assert_eq!(store.server_mute_until("srv-alpha"), None);
     assert!(alpha_unread(&store));
 }
+
+/// Change the store's settings with `change`, as a newer copy.
+fn change(store: &mut ChatStore, change: impl FnOnce(&mut NotificationSettings)) {
+    let mut settings = store.notification_settings().clone();
+    change(&mut settings);
+    let updated = store.notifications_updated() + 1;
+    assert!(store.set_notification_settings(updated, settings));
+}
+
+fn entry(store: &ChatStore, channel: &str) -> stoat_gpui::store::ChannelEntry {
+    store.channel_entry(channel).unwrap()
+}
+
+#[test]
+fn a_muted_channel_is_muted_and_shows_no_unread_dot() {
+    let mut store = store();
+    // dm-bob has messages the user hasn't read (no read position).
+    assert!(entry(&store, "dm-bob").unread);
+    assert!(!entry(&store, "dm-bob").muted);
+
+    let until = now_ms() + 60_000;
+    change(&mut store, |s| s.mute_channel("dm-bob", Some(until)));
+    let bob = entry(&store, "dm-bob");
+    assert!(bob.muted);
+    assert!(!bob.unread);
+    assert_eq!(store.channel_mute_until("dm-bob"), Some(Some(until)));
+
+    change(&mut store, |s| s.unmute_channel("dm-bob"));
+    assert!(!entry(&store, "dm-bob").muted);
+    assert_eq!(store.channel_mute_until("dm-bob"), None);
+}
+
+#[test]
+fn a_channel_in_a_muted_server_is_muted() {
+    let mut store = store();
+    change(&mut store, |s| s.mute_server("srv-alpha", None));
+    assert!(entry(&store, "ch-general").muted);
+    assert!(entry(&store, "ch-random").muted);
+    // The channel itself isn't: its menu still offers Mute Channel.
+    assert_eq!(store.channel_mute_until("ch-general"), None);
+    assert!(!entry(&store, "dm-ada").muted);
+}
+
+#[test]
+fn a_mute_that_has_ended_isnt_muted() {
+    let mut store = store();
+    change(&mut store, |s| {
+        s.mute_channel("grp-weekend", Some(now_ms() - 1));
+        s.mute_server("srv-alpha", Some(now_ms() - 1));
+    });
+    assert!(!entry(&store, "grp-weekend").muted);
+    assert!(!entry(&store, "ch-general").muted);
+    assert_eq!(store.channel_mute_until("grp-weekend"), None);
+}
+
+#[test]
+fn the_level_source_is_the_servers_or_all_outside_servers() {
+    let mut store = store();
+    assert_eq!(store.level_source("ch-general"), Level::Mention);
+    assert_eq!(store.level_source("dm-ada"), Level::All);
+    assert_eq!(store.level_source("grp-weekend"), Level::All);
+    assert_eq!(store.level_source("ch-saved"), Level::All);
+
+    change(&mut store, |s| s.set_server_level("srv-alpha", Level::None));
+    assert_eq!(store.level_source("ch-general"), Level::None);
+}
+
+#[test]
+fn clearing_a_channels_level_returns_it_to_the_servers() {
+    let mut store = store();
+    change(&mut store, |s| {
+        s.set_server_level("srv-alpha", Level::All);
+        s.set_channel_level("ch-general", Some(Level::None));
+    });
+    let level = |store: &ChatStore| {
+        store
+            .notification_settings()
+            .level("ch-general", Some("srv-alpha"))
+    };
+    assert_eq!(level(&store), Level::None, "the channel's own level wins");
+    change(&mut store, |s| s.set_channel_level("ch-general", None));
+    assert_eq!(
+        store.notification_settings().channel_override("ch-general"),
+        None
+    );
+    assert_eq!(level(&store), Level::All, "back to the server's");
+}

@@ -418,6 +418,8 @@ pub struct ChatView {
     /// Wakes up as each second of the open channel's slowmode cooldown runs
     /// out, to count down. `None` when it isn't counting.
     slowmode_tick: Option<Task<()>>,
+    /// Redraws when the next timed mute ends (see [`Self::schedule_mute_tick`]).
+    mute_tick: Option<Task<()>>,
     /// Draws relative timestamps again as time passes.
     _relative_tick: Task<()>,
     connection: Connection,
@@ -753,6 +755,7 @@ impl ChatView {
             gifs,
             typing_tick: None,
             slowmode_tick: None,
+            mute_tick: None,
             _relative_tick: relative_tick,
             connection,
             _events: events,
@@ -773,6 +776,7 @@ impl ChatView {
             ConnectionEvent::Event(ServerEvent::Ready(ready)) => {
                 let reconnect = self.has_ready;
                 self.store.apply_ready(*ready);
+                self.schedule_mute_tick(cx);
                 self.card = None;
                 self.has_ready = true;
                 self.status = Status::Connected;
@@ -835,6 +839,7 @@ impl ChatView {
                     return;
                 }
                 log::debug!("notification settings updated ({updated})");
+                self.schedule_mute_tick(cx);
             }
             ConnectionEvent::Event(ServerEvent::MessageUpdate {
                 id,
@@ -2864,6 +2869,26 @@ impl ChatView {
         });
     }
 
+    /// When the next timed mute ends, redraw (its rows undim, its server's
+    /// tooltip changes) and wait for the one after. Re-armed whenever the
+    /// settings change; nothing waits while no timed mute is running.
+    fn schedule_mute_tick(&mut self, cx: &mut Context<Self>) {
+        let now = notify::now_ms();
+        let ends = self.store.notification_settings().next_mute_expiry(now);
+        self.mute_tick = ends.map(|ends| {
+            // Just past the end: a mute ending at `until` is over after it.
+            let wait = Duration::from_millis((ends - now).max(0) as u64 + 1);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(wait).await;
+                this.update(cx, |this, cx| {
+                    this.schedule_mute_tick(cx);
+                    cx.notify();
+                })
+                .ok();
+            })
+        });
+    }
+
     /// Add or remove the user's reaction: shown at once, then sent. If the
     /// server refuses, it's undone and a toast says why. The server echoes a
     /// successful change back as an event, which changes nothing by then.
@@ -3240,6 +3265,7 @@ impl ChatView {
         self.store.set_notification_settings(updated, settings);
         self.notifications_write += 1;
         let write = self.notifications_write;
+        self.schedule_mute_tick(cx);
         cx.notify();
         let request = spawn_io({
             let client = self.client.clone();
@@ -3262,6 +3288,7 @@ impl ChatView {
                 {
                     let (updated, settings) = before;
                     this.store.restore_notification_settings(updated, settings);
+                    this.schedule_mute_tick(cx);
                 }
                 window.push_notification(Notification::error(NOTIFICATIONS_FAILED_TEXT), cx);
                 cx.notify();
@@ -3269,6 +3296,64 @@ impl ChatView {
             .ok();
         })
         .detach();
+    }
+
+    /// A channel's, DM's or group's right-click menu: Mute Channel (for how
+    /// long), or Unmute Channel and until when it's muted; its
+    /// Notifications level, led by its default (the server's level, or
+    /// All for DMs and groups); Copy channel ID. A channel in a muted
+    /// server still offers Mute Channel: the server's mute is what
+    /// silences it.
+    fn channel_menu(&self, channel: &ChannelEntry, cx: &Context<Self>) -> MenuBuilder {
+        let view = cx.entity().downgrade();
+        let channel_id = channel.id.clone();
+        let in_server = matches!(channel.kind, ChannelKind::Text { .. });
+        Rc::new(move |menu, window, cx| {
+            let Some(this) = view.upgrade() else {
+                return menu;
+            };
+            let store = &this.read(cx).store;
+            let mute = store.channel_mute_until(&channel_id);
+            let current = store.notification_settings().channel_override(&channel_id);
+            let inherited = store.level_source(&channel_id).label();
+            let default = if in_server {
+                format!("Server Default ({inherited})")
+            } else {
+                format!("Default ({inherited})")
+            };
+            let menu = match mute {
+                None => {
+                    let mute: SetMute = {
+                        let channel = channel_id.clone();
+                        Rc::new(move |settings, until| settings.mute_channel(&channel, until))
+                    };
+                    let view = view.clone();
+                    menu.submenu("Mute Channel", window, cx, move |menu, _, _| {
+                        mute_items(menu, &view, &mute)
+                    })
+                }
+                Some(until) => {
+                    let channel = channel_id.clone();
+                    menu.item(notifications_item(
+                        &view,
+                        "Unmute Channel",
+                        false,
+                        move |settings| settings.unmute_channel(&channel),
+                    ))
+                    .item(PopupMenuItem::label(notify::mute_label(until)))
+                }
+            };
+            let set: SetLevel = {
+                let channel = channel_id.clone();
+                Rc::new(move |settings, level| settings.set_channel_level(&channel, level))
+            };
+            let levels = view.clone();
+            menu.submenu("Notifications", window, cx, move |menu, _, _| {
+                level_items(menu, &levels, Some(default.clone()), current, &set)
+            })
+            .separator()
+            .item(copy_id_item("Copy channel ID", channel_id.clone()))
+        })
     }
 
     /// A server's right-click menu: Mark as read; Mute Server (for how
@@ -5140,7 +5225,8 @@ impl ChatView {
         let hover_fg = theme.sidebar_accent_foreground;
         let unread_fg = theme.sidebar_foreground;
         let id = channel.id.clone();
-        let (unread, mentions) = (channel.unread, channel.mentions);
+        let (unread, mentions, muted) = (channel.unread, channel.mentions, channel.muted);
+        let menu = self.channel_menu(&channel, cx);
         h_flex()
             .id(SharedString::from(format!("channel-{}", channel.id)))
             .gap_2()
@@ -5164,24 +5250,27 @@ impl ChatView {
                 .hover(move |style| style.bg(hover_bg).text_color(hover_fg))
             })
             .on_click(cx.listener(move |this, _, _, cx| this.select_channel(id.clone(), cx)))
-            .child(match channel.avatar.clone() {
-                Some(url) => avatar(
-                    format!("channel-avatar-{}", channel.id),
-                    Some(url),
-                    &channel.name,
-                    20.,
-                    theme.secondary,
-                    theme.secondary_foreground,
-                ),
-                None => Icon::new(channel_icon(channel.kind))
-                    .small()
-                    .into_any_element(),
-            })
+            .child(
+                h_flex()
+                    .flex_none()
+                    .when(muted, |el| el.opacity(MUTED_ICON_OPACITY))
+                    .child(match channel.avatar.clone() {
+                        Some(url) => avatar(
+                            format!("channel-avatar-{}", channel.id),
+                            Some(url),
+                            &channel.name,
+                            20.,
+                            theme.secondary,
+                            theme.secondary_foreground,
+                        ),
+                        None => Icon::new(channel_icon(channel.kind))
+                            .small()
+                            .into_any_element(),
+                    }),
+            )
             .child(div().flex_1().min_w_0().truncate().child(channel.name))
             .when(mentions > 0, |el| el.child(mention_badge(mentions, cx)))
-            .context_menu(move |menu, _, _| {
-                menu.item(copy_id_item("Copy channel ID", channel.id.clone()))
-            })
+            .context_menu(move |popup, window, cx| menu(popup, window, cx))
             .into_any_element()
     }
 
@@ -6155,6 +6244,8 @@ const ADD_FRIEND_DIALOG_WIDTH: f32 = 420.;
 const STATUS_DIALOG_WIDTH: f32 = 420.;
 /// A presence or custom status change Stoat didn't take.
 const STATUS_FAILED_TEXT: &str = "Couldn't change your status.";
+/// A muted channel's icon or avatar is this opaque.
+const MUTED_ICON_OPACITY: f32 = 0.3;
 /// A notification settings change Stoat didn't take.
 const NOTIFICATIONS_FAILED_TEXT: &str = "Couldn't save notification settings.";
 

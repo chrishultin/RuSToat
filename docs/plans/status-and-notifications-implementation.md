@@ -105,3 +105,36 @@ Pending: batched for the end at the user's request (the chunk 1 manual check in 
 
 ### Manual Validation
 Pending: batched for the end (the chunk 2 manual check in the plan). It also covers the plan's risk that submenus and checked items haven't been used in this app before, for keyboard and mouse.
+
+## Chunk 3: Channel, DM and group menus; muted look
+
+### Changes Made
+- `src/store.rs`:
+  - `ChannelEntry.muted`: the channel's own mute, or its server's, right now. It's computed once in `entry_for`, which also hides the unread dot as before.
+  - `channel_mute_until(channel)`: the channel's own running mute only. The server's mute isn't included, so a channel in a muted server still offers "Mute Channel".
+  - `level_source(channel)`: the server's level, or All for DMs, groups and Saved Notes.
+- `src/ui/chat.rs`:
+  - `channel_menu(entry) -> MenuBuilder`, the same for channels, DMs, groups and Saved Notes:
+    - "Mute Channel" (the duration submenu), or "Unmute Channel" followed by a "Muted until …" label
+    - "Notifications": "Server Default (…)" for server channels or "Default (…)" elsewhere (this clears the override), then All Messages, Mentions Only and None, with the current override checked
+    - a separator, then Copy channel ID
+    - It reuses chunk 2's `mute_items`, `level_items` and `notifications_item`.
+  - `render_channel_row`: a muted row's icon or avatar is wrapped at `MUTED_ICON_OPACITY` (0.3). Muted rows are never unread, so their text is already `muted_foreground` unless selected. The right-click menu is `channel_menu`.
+  - `mute_tick` and `schedule_mute_tick`: a one-shot timer to 1 ms past `next_mute_expiry`. It notifies (undimming rows and updating server tooltips) and re-arms, and nothing is armed while no timed mute is running. It's armed after `Ready`, after an applied `UserSettingsUpdate`, after `update_notifications`, and after a revert.
+- `tests/store_notifications.rs`:
+  - a muted channel's entry is `muted` and not `unread`, and unmuting it clears that
+  - a channel in a muted server is `muted`, but `channel_mute_until` is `None`
+  - ended mutes (server and channel) aren't muted
+  - `level_source` covers server channels, DMs, groups and Saved Notes, and follows the server's level
+  - clearing a channel's level returns it to the server's
+
+### Divergences
+- None of substance. The plan's risk about `ChannelEntry` equality driving list diffing doesn't apply: `sections()` rebuilds the list from the store on every render, so `muted` shows on the next `cx.notify()`. The `notify` test that a channel override wins and `None` falls back is covered by chunk 2's `mutators_change_levels_and_mutes`.
+- Saved Notes: its menu says "Default (All Messages)", as the plan expected.
+
+### Verification Performed
+- `cargo test`: 754 passed, 0 failed (5 new). `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt drift: `store.rs` 15 and `chat.rs` 17 (unchanged). `tests/store_notifications.rs` is 0.
+
+### Manual Validation
+Pending: batched for the end (the chunk 3 manual check in the plan).
