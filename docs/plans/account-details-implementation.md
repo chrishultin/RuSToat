@@ -97,3 +97,74 @@ Pending (batched for the end):
 - Without two-factor: change your email; the toast and the row say to check the new address; the link arrives. After opening it, Reveal shows the new address.
 - With two-factor on: the dialog asks for an authenticator code too. A wrong password clears the code and says it's used up; a right one sends the link.
 - Change it back afterwards.
+
+## Chunk 3: Changing your password
+
+### Changes Made
+- `src/api/client.rs`: `change_password(ticket: Option<&str>, password, current_password)` (`PATCH /auth/account/change/password`, `DataChangePassword`, 204) through `send_maybe_ticket`. Import list and call hand-formatted.
+- `src/account_edit.rs`:
+  - `check_new_password(new, again) -> Result<(), Option<(ChangeField, &str)>>`: at least `PASSWORD_MIN_BYTES` (8) bytes, as Stoat counts, else "Use at least 8 characters." on the value. Then the same twice, else "The passwords don't match." on the confirm field. Nothing is said while either is blank.
+  - `password_error(err)`: `ShortPassword` / `CompromisedPassword` ("That password has appeared in a data breach. Pick another.") on the value, `InvalidCredentials` on the current password, a rate limit on the form, else a toast.
+  - 2 more unit tests.
+- `src/ui/account_details.rs`:
+  - A Password row ("Change the password you sign in with.", Change).
+  - `ChangeKind::Password`: "Use at least 8 characters. Your other sessions stay signed in.", masked "New password" and "Confirm new password" fields, the current password, and the two-factor code field from chunk 2.
+  - `checked_value` now names the field its message is about, and `message_at` places check messages and Stoat's refusals together.
+  - Enter moves new → confirm → current → code → submit.
+  - Success toasts "Password changed. Your other sessions stay signed in; you can log them out in Settings → Sessions."
+- `tests/api_account.rs`: a password change sends exactly `{"password":"newpass123","current_password":"pw"}`, without `x-mfa-ticket` for `None` and with it for `Some`; `CompromisedPassword` decodes.
+
+### Divergences
+None.
+
+### Verification Performed
+- Full suite `cargo test`: 855 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt drift: `src/api/client.rs` 3 (unchanged); 0 in every other touched file.
+- `log::` calls in `src/ui/account_details.rs` print only error values (types and response snippets) and the change kind. Never passwords, codes, tickets or emails.
+
+### Manual Validation
+Pending (batched for the end):
+- Without two-factor: change your password; the toast points to Sessions. Log in from the web client with the new password, and RuSToat stays signed in.
+- "password" is refused as compromised.
+- With two-factor on: the change asks for a code and works (the web client can't do this).
+- Change it back afterwards.
+
+## Summary
+
+_Completed: 2026-11-07 (code); manual checks pending_
+
+### Chunks Completed
+1. Account details group, and changing your username
+2. Changing your email, with the code field for two-factor
+3. Changing your password
+
+### Divergences
+- Chunk 1:
+  - The Email and Password rows came with their chunks.
+  - `check_username` returns `Err(None)` for blank or unchanged input.
+  - `ChangeField::Form` was added for rate limits, which keep the dialog open.
+  - The signed-out Account page shows one message.
+- Chunk 2:
+  - `Outcome::Username` is boxed (clippy).
+  - Emptying the code field keeps its "used up" note.
+  - The code field is labelled "Two-factor code", with the method's prompt under it.
+- Chunk 3: none.
+
+### Definition of Done
+- **The "Account details" group:** Settings → Account has it above "Two-factor authentication", for the account on screen: Username (`@name#tag`), Email (hidden, with Reveal/Hide) and Password, each with Change. Implemented.
+- **Username:** changes with the current password only. The toast shows what Stoat stored and says when the `#tag` changed. The once-a-day tag limit is explained, not shown as a generic rate limit. Implemented and tested.
+- **Email and password:** change with the current password, plus an authenticator or recovery code in the same dialog when two-factor is on. Without two-factor, no `X-MFA-Ticket` is sent. Implemented and tested.
+- **A pending email change:** says to check the new address. On an instance without email, it says the email has changed. Implemented; the real email flow is a manual check.
+- **The password dialog:** asks for the new password twice, and success points to Settings → Sessions. Implemented.
+- **Errors:** wrong passwords, invalid values and wrong codes show under their field without closing the dialog, and a code used up by a failed change is cleared and said to be used. Implemented, with the error mappings unit-tested.
+- **Logging:** passwords, codes, tickets and emails are never logged. Met.
+- **Tests and formatting:** `cargo test` and `cargo clippy --all-targets -- -D warnings` pass, and no touched file's rustfmt drift grew. Met.
+- **Manual checks recorded here:** pending the walkthrough.
+
+### Remaining Manual Steps
+Every chunk's manual check above, plus the plan's Manual Tests 2–6:
+2. Two accounts never cross.
+3. A username change from the web client shows in the Username row.
+4. Rapid wrong passwords say how long to wait.
+5. Light and dark themes are readable.
+6. Put the username, email and password back afterwards, and turn two-factor off if you turned it on.

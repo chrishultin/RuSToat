@@ -112,6 +112,42 @@ pub fn email_error(err: &ApiError) -> ChangeError {
     })
 }
 
+/// What a refused password change says.
+pub fn password_error(err: &ApiError) -> ChangeError {
+    change_error(err, "Couldn't change your password. Try again.", |error| {
+        Some(match error {
+            ErrorType::ShortPassword => (ChangeField::Value, "Use at least 8 characters."),
+            ErrorType::CompromisedPassword => (
+                ChangeField::Value,
+                "That password has appeared in a data breach. Pick another.",
+            ),
+            _ => return None,
+        })
+    })
+}
+
+/// Check a new password, typed twice: at least 8 bytes (as Stoat counts),
+/// and the same both times. `Err(None)` has nothing to say yet (either is
+/// blank); otherwise it says what's wrong, and at which field.
+pub fn check_new_password(
+    new: &str,
+    again: &str,
+) -> Result<(), Option<(ChangeField, &'static str)>> {
+    if new.is_empty() {
+        return Err(None);
+    }
+    if new.len() < PASSWORD_MIN_BYTES {
+        return Err(Some((ChangeField::Value, "Use at least 8 characters.")));
+    }
+    if again.is_empty() {
+        return Err(None);
+    }
+    if again != new {
+        return Err(Some((ChangeField::Confirm, "The passwords don't match.")));
+    }
+    Ok(())
+}
+
 /// What any refused change says: a wrong current password, a rate limit
 /// (with the wait), what `specific` places at a field, or else a toast
 /// with `fallback`.
@@ -376,6 +412,58 @@ mod tests {
         assert_eq!(
             code_methods(&status(r#"{"totp_mfa":true,"recovery_active":true}"#)),
             [ConfirmMethod::Totp, ConfirmMethod::Recovery]
+        );
+    }
+
+    #[test]
+    fn a_new_password_is_long_enough_and_typed_twice() {
+        assert_eq!(check_new_password("", ""), Err(None));
+        assert_eq!(
+            check_new_password("short", ""),
+            Err(Some((ChangeField::Value, "Use at least 8 characters.")))
+        );
+        assert_eq!(check_new_password("12345678", ""), Err(None));
+        assert_eq!(check_new_password("12345678", "12345678"), Ok(()));
+        // Stoat counts bytes: 8 characters, 10 bytes.
+        assert_eq!(check_new_password("pässwörd", "pässwörd"), Ok(()));
+        // 4 characters, 8 bytes.
+        assert_eq!(check_new_password("ääää", "ääää"), Ok(()));
+        assert_eq!(
+            check_new_password("12345678", "12345679"),
+            Err(Some((ChangeField::Confirm, "The passwords don't match.")))
+        );
+    }
+
+    #[test]
+    fn password_refusals_land_on_their_field() {
+        let at = |field, text: &str| ChangeError::Field(field, text.into());
+        assert_eq!(
+            password_error(&api(ErrorType::ShortPassword)),
+            at(ChangeField::Value, "Use at least 8 characters.")
+        );
+        assert_eq!(
+            password_error(&api(ErrorType::CompromisedPassword)),
+            at(
+                ChangeField::Value,
+                "That password has appeared in a data breach. Pick another."
+            )
+        );
+        assert_eq!(
+            password_error(&api(ErrorType::InvalidCredentials)),
+            at(ChangeField::Current, "That password isn't right.")
+        );
+        assert_eq!(
+            password_error(&ApiError::RateLimited {
+                retry_after_ms: Some(1000)
+            }),
+            at(
+                ChangeField::Form,
+                "Stoat is limiting changes. Try again in 1 s."
+            )
+        );
+        assert_eq!(
+            password_error(&api(ErrorType::InternalError)),
+            ChangeError::Toast("Couldn't change your password. Try again.".into())
         );
     }
 }

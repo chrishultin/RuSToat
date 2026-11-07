@@ -1,5 +1,5 @@
 //! The account's login details against a mock Stoat API: its email, and
-//! changing it, with an MFA ticket only when one is given.
+//! changing it or the password, with an MFA ticket only when one is given.
 
 use revolt_result::ErrorType;
 use serde_json::json;
@@ -90,5 +90,54 @@ async fn a_wrong_password_isnt_a_dead_session() {
     assert!(matches!(
         err.error_type(),
         Some(ErrorType::InvalidCredentials)
+    ));
+}
+
+#[tokio::test]
+async fn changing_the_password_sends_a_ticket_only_when_given() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/auth/account/change/password"))
+        .and(header("x-session-token", "tok"))
+        .and(body_json(
+            json!({ "password": "newpass123", "current_password": "pw" }),
+        ))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let client = client(&server);
+    client
+        .change_password(None, "newpass123", "pw")
+        .await
+        .unwrap();
+    client
+        .change_password(Some("t1"), "newpass123", "pw")
+        .await
+        .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    assert!(!requests[0].headers.contains_key("x-mfa-ticket"));
+    assert_eq!(requests[1].headers["x-mfa-ticket"], "t1");
+}
+
+#[tokio::test]
+async fn a_compromised_password_is_refused_as_such() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/auth/account/change/password"))
+        .respond_with(
+            ResponseTemplate::new(400).set_body_json(json!({ "type": "CompromisedPassword" })),
+        )
+        .mount(&server)
+        .await;
+
+    let err = client(&server)
+        .change_password(None, "password", "pw")
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err.error_type(),
+        Some(ErrorType::CompromisedPassword)
     ));
 }

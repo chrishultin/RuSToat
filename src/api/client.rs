@@ -2,11 +2,11 @@ use std::time::Duration;
 
 use reqwest::{Client, Method};
 use revolt_models::v0::{
-    AccountInfo, AllMemberResponse, BulkMessageResponse, Channel, DataChangeEmail, DataEditMessage,
-    DataEditSession, DataEditUser, DataLogin, DataMemberEdit, DataMessageSearch, DataMessageSend,
-    DataSendFriendRequest, Emoji, FieldsUser, MFAResponse, MFATicket, Member, Message, MessageSort,
-    MultiFactorStatus, OptionsQueryMessages, Presence, ReplyIntent, ResponseLogin,
-    ResponseTotpSecret, SessionInfo, User, UserProfile, UserStatus,
+    AccountInfo, AllMemberResponse, BulkMessageResponse, Channel, DataChangeEmail,
+    DataChangePassword, DataEditMessage, DataEditSession, DataEditUser, DataLogin, DataMemberEdit,
+    DataMessageSearch, DataMessageSend, DataSendFriendRequest, Emoji, FieldsUser, MFAResponse,
+    MFATicket, Member, Message, MessageSort, MultiFactorStatus, OptionsQueryMessages, Presence,
+    ReplyIntent, ResponseLogin, ResponseTotpSecret, SessionInfo, User, UserProfile, UserStatus,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -903,6 +903,30 @@ impl StoatClient {
         self.send_maybe_ticket(Method::PATCH, "/auth/account/change/email", ticket, &body)
             .await
             .map(|_| ())
+    }
+
+    /// `PATCH /auth/account/change/password`: change the login password,
+    /// confirmed with the current one and, when the account has an
+    /// authenticator app, a validated MFA `ticket`. Other sessions stay
+    /// signed in.
+    pub async fn change_password(
+        &self,
+        ticket: Option<&str>,
+        password: &str,
+        current_password: &str,
+    ) -> Result<(), ApiError> {
+        let body = DataChangePassword {
+            password: password.to_string(),
+            current_password: current_password.to_string(),
+        };
+        self.send_maybe_ticket(
+            Method::PATCH,
+            "/auth/account/change/password",
+            ticket,
+            &body,
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Send a request with an MFA ticket if there is one.

@@ -1,7 +1,8 @@
-//! The Account page's "Account details", for one account: the username and
-//! email it signs in with. Each is changed in a dialog that confirms it's
-//! the user with their current password, plus an authenticator or recovery
-//! code when Stoat wants one (an email change with an authenticator app on).
+//! The Account page's "Account details", for one account: the username,
+//! email and password it signs in with. Each is changed in a dialog that
+//! confirms it's the user with their current password, plus an
+//! authenticator or recovery code when Stoat wants one (an email or
+//! password change with an authenticator app on).
 //!
 //! The settings window keeps one per account, as it does the other
 //! account pages.
@@ -14,7 +15,8 @@ use gpui_kit::*;
 
 use crate::account_edit::{
     CODE_USED, ChangeError, ChangeField, MASKED_EMAIL, PASSWORD_MIN_BYTES, USERNAME_MAX,
-    check_email, check_username, code_methods, email_error, username_changed_text, username_error,
+    check_email, check_new_password, check_username, code_methods, email_error, password_error,
+    username_changed_text, username_error,
 };
 use crate::api::models::User;
 use crate::api::{ApiError, StoatClient};
@@ -202,6 +204,12 @@ impl Render for AccountDetailsView {
                 cx,
             ))
             .child(self.render_email(cx))
+            .child(row(
+                "Password",
+                "Change the password you sign in with.",
+                change_button(ChangeKind::Password, cx).into_any_element(),
+                cx,
+            ))
     }
 }
 
@@ -219,6 +227,7 @@ fn change_button(kind: ChangeKind, cx: &mut Context<AccountDetailsView>) -> Butt
 pub enum ChangeKind {
     Username,
     Email,
+    Password,
 }
 
 impl ChangeKind {
@@ -226,6 +235,7 @@ impl ChangeKind {
         match self {
             ChangeKind::Username => "Change your username",
             ChangeKind::Email => "Change your email",
+            ChangeKind::Password => "Change your password",
         }
     }
 
@@ -238,6 +248,9 @@ impl ChangeKind {
             ChangeKind::Email => {
                 "Stoat sends a link to the new address. Your email changes once you open it."
             }
+            ChangeKind::Password => {
+                "Use at least 8 characters. Your other sessions stay signed in."
+            }
         }
     }
 
@@ -246,6 +259,7 @@ impl ChangeKind {
         match self {
             ChangeKind::Username => ("New username", ""),
             ChangeKind::Email => ("New email", "someone@example.com"),
+            ChangeKind::Password => ("New password", "New password"),
         }
     }
 
@@ -254,7 +268,7 @@ impl ChangeKind {
     fn needs_code(self) -> bool {
         match self {
             ChangeKind::Username => false,
-            ChangeKind::Email => true,
+            ChangeKind::Email | ChangeKind::Password => true,
         }
     }
 
@@ -263,6 +277,7 @@ impl ChangeKind {
         match self {
             ChangeKind::Username => "Couldn't change your username. Try again.",
             ChangeKind::Email => "Couldn't change your email. Try again.",
+            ChangeKind::Password => "Couldn't change your password. Try again.",
         }
     }
 }
@@ -271,6 +286,7 @@ impl ChangeKind {
 enum Request {
     Username { name: String, password: String },
     Email { email: String, password: String },
+    Password { new: String, password: String },
 }
 
 /// What a change came back with.
@@ -278,7 +294,11 @@ enum Outcome {
     /// The user as Stoat stored them.
     Username(Box<User>),
     /// The new email, and whether it's changed already.
-    Email { email: String, changed: bool },
+    Email {
+        email: String,
+        changed: bool,
+    },
+    Password,
 }
 
 /// Why a change didn't go through.
@@ -305,6 +325,10 @@ impl Request {
                     .is_ok_and(|account| account.email == email);
                 Ok(Outcome::Email { email, changed })
             }
+            Request::Password { new, password } => client
+                .change_password(ticket, &new, &password)
+                .await
+                .map(|()| Outcome::Password),
         }
     }
 }
@@ -330,6 +354,8 @@ pub struct ChangeDialog {
     username: String,
     tag: String,
     value: Entity<InputState>,
+    /// The new password, typed again.
+    confirm: Entity<InputState>,
     current: Entity<InputState>,
     code: Entity<InputState>,
     methods: Methods,
@@ -357,12 +383,19 @@ impl ChangeDialog {
         let (_, placeholder) = kind.value_label();
         let initial = match kind {
             ChangeKind::Username => username.clone(),
-            ChangeKind::Email => String::new(),
+            ChangeKind::Email | ChangeKind::Password => String::new(),
         };
+        let masked = kind == ChangeKind::Password;
         let value = cx.new(|cx| {
             InputState::new(window, cx)
+                .masked(masked)
                 .default_value(initial)
                 .placeholder(placeholder)
+        });
+        let confirm = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .placeholder("New password again")
         });
         let current = cx.new(|cx| {
             InputState::new(window, cx)
@@ -373,10 +406,23 @@ impl ChangeDialog {
         let subscriptions = vec![
             cx.subscribe_in(&value, window, |this, _, event, window, cx| match event {
                 InputEvent::PressEnter { .. } => {
-                    let focus = this.current.read(cx).focus_handle(cx);
+                    let next = if this.kind == ChangeKind::Password {
+                        &this.confirm
+                    } else {
+                        &this.current
+                    };
+                    let focus = next.read(cx).focus_handle(cx);
                     window.focus(&focus, cx);
                 }
                 InputEvent::Change => this.edited(ChangeField::Value, cx),
+                _ => {}
+            }),
+            cx.subscribe_in(&confirm, window, |this, _, event, window, cx| match event {
+                InputEvent::PressEnter { .. } => {
+                    let focus = this.current.read(cx).focus_handle(cx);
+                    window.focus(&focus, cx);
+                }
+                InputEvent::Change => this.edited(ChangeField::Confirm, cx),
                 _ => {}
             }),
             cx.subscribe_in(&current, window, |this, _, event, window, cx| match event {
@@ -407,6 +453,7 @@ impl ChangeDialog {
             username,
             tag,
             value,
+            confirm,
             current,
             code,
             methods: Methods::Loaded(Vec::new()),
@@ -494,13 +541,28 @@ impl ChangeDialog {
     }
 
     /// The new value, if it passes the checks; else what they say, if
-    /// anything.
-    fn checked_value(&self, cx: &App) -> Result<String, Option<&'static str>> {
+    /// anything, and at which field.
+    fn checked_value(&self, cx: &App) -> Result<String, Option<(ChangeField, &'static str)>> {
         let typed = self.value.read(cx).value();
+        let at_value = |text: Option<&'static str>| text.map(|text| (ChangeField::Value, text));
         match self.kind {
-            ChangeKind::Username => check_username(&typed, &self.username).map(str::to_string),
-            ChangeKind::Email => check_email(&typed).map(str::to_string),
+            ChangeKind::Username => check_username(&typed, &self.username)
+                .map(str::to_string)
+                .map_err(at_value),
+            ChangeKind::Email => check_email(&typed).map(str::to_string).map_err(at_value),
+            ChangeKind::Password => check_new_password(&typed, &self.confirm.read(cx).value())
+                .map(|()| typed.to_string()),
         }
+    }
+
+    /// What the checks say at `field`, unless Stoat has said something
+    /// there since.
+    fn message_at(&self, field: ChangeField, cx: &App) -> Option<String> {
+        self.error_at(field)
+            .or_else(|| match self.checked_value(cx) {
+                Err(Some((at, text))) if at == field => Some(text.to_string()),
+                _ => None,
+            })
     }
 
     /// The code, as Stoat takes it: `Some(None)` when none is needed, and
@@ -537,6 +599,10 @@ impl ChangeDialog {
             },
             ChangeKind::Email => Request::Email {
                 email: value,
+                password,
+            },
+            ChangeKind::Password => Request::Password {
+                new: value,
                 password,
             },
         };
@@ -580,6 +646,7 @@ impl ChangeDialog {
                         let error = match kind {
                             ChangeKind::Username => username_error(&err, short_password),
                             ChangeKind::Email => email_error(&err),
+                            ChangeKind::Password => password_error(&err),
                         };
                         this.refused(error, window, cx);
                     }
@@ -611,6 +678,13 @@ impl ChangeDialog {
                     .update(cx, |view, cx| view.email_sent(email, changed, window, cx))
                     .ok();
             }
+            Outcome::Password => window.push_notification(
+                Notification::success(
+                    "Password changed. Your other sessions stay signed in; you can log them out \
+                     in Settings → Sessions.",
+                ),
+                cx,
+            ),
         }
     }
 
@@ -642,7 +716,8 @@ impl ChangeDialog {
         match error {
             ChangeError::Field(field, text) => {
                 let input = match field {
-                    ChangeField::Value | ChangeField::Confirm => Some(&self.value),
+                    ChangeField::Value => Some(&self.value),
+                    ChangeField::Confirm => Some(&self.confirm),
                     ChangeField::Current => Some(&self.current),
                     ChangeField::Code => Some(&self.code),
                     ChangeField::Form => None,
@@ -671,10 +746,7 @@ impl ChangeDialog {
     fn render_value(&self, cx: &App) -> Div {
         let theme = cx.theme();
         let (muted, danger) = (theme.muted_foreground, theme.danger);
-        // What the checks say, unless Stoat has said something since.
-        let error = self
-            .error_at(ChangeField::Value)
-            .or_else(|| self.checked_value(cx).err().flatten().map(str::to_string));
+        let error = self.message_at(ChangeField::Value, cx);
         let (label_text, _) = self.kind.value_label();
         let input = Input::new(&self.value).disabled(self.busy);
         match self.kind {
@@ -708,6 +780,25 @@ impl ChangeDialog {
                 .child(label(label_text))
                 .child(input)
                 .children(error_line(error, danger)),
+            ChangeKind::Password => v_flex()
+                .gap_3()
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(label(label_text))
+                        .child(input)
+                        .children(error_line(error, danger)),
+                )
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(label("Confirm new password"))
+                        .child(Input::new(&self.confirm).disabled(self.busy))
+                        .children(error_line(
+                            self.message_at(ChangeField::Confirm, cx),
+                            danger,
+                        )),
+                ),
         }
     }
 
