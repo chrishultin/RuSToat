@@ -170,3 +170,42 @@ Pending: batched for the end (the chunk 3 manual check in the plan).
 
 ### Manual Validation
 Pending: batched for the end (the chunk 4 manual check in the plan).
+
+## Summary
+
+_Completed: 2026-11-06 (code). Manual validation is pending._
+
+### Chunks Completed
+1. Presence and custom status, set from your avatar (`f924119`).
+2. Writing notification settings, and the server menu (`319d372`).
+3. Channel, DM and group menus, and the muted look (`546e88e`).
+4. Notification sounds (`d1326a7`).
+
+### Divergences
+All are minor, and each is recorded under its chunk:
+- Chunk 1:
+  - Menu icons: `Close` for "Clear status", and a newly bundled `FaceSlightlySmilingPlus` for "Set status…".
+  - An empty `remove` is stripped from `PATCH /users/@me`.
+  - Presence hints are drawn in the menu items rather than as tooltips.
+- Chunk 2:
+  - `server_mute` and `channel_mute` take `now_ms`.
+  - `UserSettingsUpdate` boxes the settings (clippy's `large_enum_variant`).
+  - `update_notifications` only notifies, because nothing caches the sidebar.
+  - The clock-skew mitigation is as planned.
+  - `MenuAction` was removed.
+- Chunk 3: none of substance.
+- Chunk 4:
+  - The throttle is an app-wide static.
+  - There's no automated test that the Notifications page is listed.
+
+### Definition of Done
+- [x] The avatar menu sets Online, Idle, Focus, Do Not Disturb or Invisible, and sets, edits or clears a custom status of up to 128 characters. Requests are `PATCH /users/@me` with only the changed fields, and the panel shows the presence dot and status. Exact bodies are tested; the UI is pending the manual check.
+- [x] Servers' menus mute (15 min, 1 h, 3 h, 8 h, 24 h, or until unmuted), unmute, and set All, Mentions Only or None. Channels', DMs' and groups' menus do the same, plus Server Default or Default. The UI is pending the manual check.
+- [x] Changes write the whole `notifications` setting with `POST /sync/settings/set?timestamp=…`, keep unknown fields, apply at once, revert with a toast on failure, and ignore older echoes. Tested in `tests/api_settings.rs` and `tests/store_notifications.rs`; live sync is pending the manual check.
+- [x] Muted rows dim, muted servers say so in their tooltip, and both return to normal when a timed mute ends (`schedule_mute_tick`). Timing is pending the manual check.
+- [x] Message notices play "Glass" at most once a second, friend requests don't, and the Settings → Notifications switch (on by default, in `prefs.json`) and "Play" preview exist. The sound itself is pending the manual check.
+- [x] `cargo test` (758 passed) and `cargo clippy --all-targets -- -D warnings` pass, and no touched file's rustfmt drift grew.
+- [ ] Every chunk's manual check is recorded here. Pending: the user batched them for the end.
+
+### Remaining Manual Steps
+Each chunk's manual check in the plan, then the plan-level Manual Tests (two accounts, web client sync both ways, relaunch persistence, light and dark themes). See the conversation's checklist.
