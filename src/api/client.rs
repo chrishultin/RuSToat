@@ -624,6 +624,28 @@ impl StoatClient {
         self.edit_user(&edit).await
     }
 
+    /// `POST /sync/settings/set?timestamp=…`: write synced user settings,
+    /// each `(key, value)` replacing the key's value whole. Values are
+    /// strings of JSON (as the web client writes them), and `timestamp_ms`
+    /// is when they were changed, which other clients use to order copies.
+    pub async fn set_settings(
+        &self,
+        settings: &[(&str, String)],
+        timestamp_ms: i64,
+    ) -> Result<(), ApiError> {
+        let body: serde_json::Map<String, serde_json::Value> = settings
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.clone().into()))
+            .collect();
+        self.send_raw(
+            Method::POST,
+            &format!("/sync/settings/set?timestamp={timestamp_ms}"),
+            Some(&body),
+        )
+        .await
+        .map(|_| ())
+    }
+
     /// `PUT /users/{id}/block`: block them (bots too).
     pub async fn block_user(&self, id: &str) -> Result<User, ApiError> {
         self.send(Method::PUT, &format!("/users/{id}/block"), None::<&()>)

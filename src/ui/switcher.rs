@@ -5,11 +5,12 @@
 use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
+use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::{ActiveTheme, Icon, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
-use crate::ui::chat::{MenuAction, avatar, rail_button};
+use crate::ui::chat::{MenuBuilder, avatar, rail_button};
 
 /// How an account's session is doing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,9 +74,15 @@ pub fn render_switcher(
                 theme.secondary,
                 theme.secondary_foreground,
             );
-            let log_out: MenuAction = {
+            let log_out: MenuBuilder = {
                 let (id, on_log_out) = (item.id.clone(), on_log_out.clone());
-                Rc::new(move |_, window, cx| on_log_out(&id, window, cx))
+                Rc::new(move |menu, _, _| {
+                    let (id, on_log_out) = (id.clone(), on_log_out.clone());
+                    menu.item(
+                        PopupMenuItem::new("Log Out")
+                            .on_click(move |_, window, cx| on_log_out(&id, window, cx)),
+                    )
+                })
             };
             let on_click = {
                 let (id, on_select) = (item.id.clone(), on_select.clone());
@@ -88,7 +95,7 @@ pub fn render_switcher(
                 item.selected,
                 item.unread && !item.selected,
                 if item.selected { 0 } else { item.mentions },
-                vec![("Log Out", log_out)],
+                Some(log_out),
                 on_click,
                 cx,
             )
@@ -103,7 +110,7 @@ pub fn render_switcher(
         adding,
         false,
         0,
-        Vec::new(),
+        None,
         on_add,
         cx,
     );

@@ -52,3 +52,56 @@ _Started: 2026-11-06_
 
 ### Manual Validation
 Pending: batched for the end at the user's request (the chunk 1 manual check in the plan).
+
+## Chunk 2: Write notification settings; server menu
+
+### Changes Made
+- `src/notify.rs`:
+  - `NotificationSettings` now keeps `raw: serde_json::Map` (the setting as parsed). The typed maps are a view rebuilt from it (`from_raw`) after each change (`edit`), so they can't drift apart.
+  - `parse` moves legacy `"muted"` levels into the mutes maps as `{}`; an existing mute with an end wins over a legacy one.
+  - Mutators: `set_server_level`, `set_channel_level(Option)`, `mute_server`, `mute_channel`, `unmute_server`, `unmute_channel`.
+  - Readers: `server_level`, `channel_override`, `server_mute(id, now)`, `channel_mute(id, now)`, `next_mute_expiry(now)`.
+  - `to_json(now)`: writes `raw` with ended mutes left out. Unknown keys and unknown per-entry values (levels like `"loud"`, extra fields in mute objects, non-object mutes) are kept.
+  - `Level::as_str` and `Level::label` ("All Messages", "Mentions Only", "None").
+  - `MuteFor` (with `ALL`, `until(now)` and `label()`), and `mute_label(until)` ("Muted" or "Muted until 14:05").
+  - Unit tests.
+- `src/time.rs`: `format_until` ("14:05", "tomorrow at 14:05", "9 Nov at 08:00") and `millis_until_label`, with a test.
+- `src/api/events.rs`: `notifications_from_settings` keeps `updated_at`. `Ready.notifications` is `Option<(i64, NotificationSettings)>` and `UserSettingsUpdate.notifications` is `Option<(i64, Box<NotificationSettings>)>`. The event test checks the timestamp.
+- `src/api/client.rs`: `set_settings(&[(&str, String)], timestamp_ms)` sends `POST /sync/settings/set?timestamp=…` with `{key: "<json string>"}`.
+- `src/store.rs`:
+  - `notifications_updated`.
+  - `set_notification_settings(updated, settings) -> bool`: ignores an older copy. For clock skew, an older copy with the same content moves the held time back to it.
+  - `restore_notification_settings` (forced, for reverting) and `server_mute_until(server)`.
+- `src/ui/chat.rs`:
+  - `update_notifications(change, window, cx)`:
+    1. Saves the current settings and timestamp, so it can revert.
+    2. Applies the change with timestamp `max(now, held + 1)`.
+    3. Notifies, so the sidebar redraws from the store.
+    4. Writes `to_json` with that timestamp.
+    5. On failure, reverts, but only if this is the latest write (`notifications_write` sequence) and nothing newer has landed. Then a toast says "Couldn't save notification settings."
+  - The `UserSettingsUpdate` handler ignores older copies.
+  - `server_menu`: Mark as read; then Mute Server (a submenu of durations), or Unmute Server followed by a disabled "Muted until …" label; then a Notifications submenu (All Messages, Mentions Only, None, with the effective level checked); a separator; and Copy server ID.
+  - Helpers shared with chunk 3: `MenuBuilder`, `SetMute`, `SetLevel`, `notifications_item`, `mute_items` and `level_items`.
+  - `rail_button` takes `Option<MenuBuilder>` instead of a flat list. The server icon's tooltip is "Name · Muted until …" (or "· Muted") while muted.
+- `src/ui/switcher.rs`: the account button's "Log Out" menu is built with a `MenuBuilder`. `MenuAction` is gone.
+- `tests/api_settings.rs` (new): the query, header and string-valued body (parsed back, with unknown keys kept), and a 401 being `Unauthorized`.
+- `tests/store_notifications.rs` (new):
+  - Ready brings the timestamp.
+  - A newer copy applies and an older one is ignored (including an older echo arriving after a newer change).
+  - The clock-skew echo moves the time back, so a later change from another client applies.
+  - Muting a server hides its unread dot and gives `server_mute_until`, both for a time and until unmuted. An ended mute doesn't count.
+- `tests/notify_rules.rs`: fixtures updated for the `(timestamp, settings)` shape.
+
+### Divergences
+- Minor: `server_mute` and `channel_mute` take `now_ms` and return only mutes still running (the plan's signature had no time). That's what the menu and tooltip need.
+- Minor: `UserSettingsUpdate` boxes the settings (`Box<NotificationSettings>`), because clippy's `large_enum_variant` fired on `ConnectionEvent` once the raw map was added. Other events already box their payloads.
+- Minor: `update_notifications` just calls `cx.notify()`. The plan's "resync the panes" isn't needed: the rail and channel list are drawn from the store each frame, and no message pane depends on the settings. The Dock badge follows on the owner's next refresh, as before.
+- Clock skew (a plan risk): handled as planned. An echo older than the held copy but with the same content (compared via `to_json`) moves `notifications_updated` back to the echo's time. Writes are stamped `max(now, held + 1)`, so a clock behind Stoat's still produces a newer copy locally. Whether skew bites in practice is for the manual check.
+- `MenuAction` was removed, because nothing uses it any more.
+
+### Verification Performed
+- `cargo test`: 749 passed, 0 failed (14 new). `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt drift: `client.rs` 3, `events.rs` 3, `store.rs` 15 and `chat.rs` 17 (all unchanged). `notify.rs`, `time.rs`, `switcher.rs`, `tests/notify_rules.rs`, `tests/api_settings.rs` and `tests/store_notifications.rs` are 0.
+
+### Manual Validation
+Pending: batched for the end (the chunk 2 manual check in the plan). It also covers the plan's risk that submenus and checked items haven't been used in this app before, for keyboard and mouse.

@@ -45,7 +45,7 @@ use crate::markdown::{
     InternalLink, JUMBO_TEXT_PX, has_relative_time, is_external_link, parse_internal_link,
 };
 use crate::media::MediaUrls;
-use crate::notify::{self, Delivery, Notice, Viewing};
+use crate::notify::{self, Delivery, Level, MuteFor, Notice, NotificationSettings, Viewing};
 use crate::places::{Place, Places, PlacesFile};
 use crate::profile::{RelationshipAction, UserMenuItem};
 use crate::runtime::spawn_io;
@@ -351,6 +351,9 @@ pub struct ChatView {
     _status_input: Subscription,
     /// A presence or custom status change is on its way to Stoat.
     status_saving: bool,
+    /// Counts notification settings writes, so only the latest one's
+    /// failure puts the old settings back.
+    notifications_write: u64,
     /// The message whose reaction picker is open.
     picker_for: Option<String>,
     /// Reaction changes waiting on the server, as (message, emoji). Another
@@ -720,6 +723,7 @@ impl ChatView {
             status_input,
             _status_input: status_events,
             status_saving: false,
+            notifications_write: 0,
             picker_for: None,
             reacting: HashSet::new(),
             reply_fetches: HashSet::new(),
@@ -823,13 +827,14 @@ impl ChatView {
                 }
             }
             ConnectionEvent::Event(ServerEvent::UserSettingsUpdate { notifications }) => {
-                match notifications {
-                    Some(settings) => {
-                        log::debug!("notification settings updated");
-                        self.store.set_notification_settings(settings);
-                    }
-                    None => return,
+                let Some((updated, settings)) = notifications else {
+                    return;
+                };
+                if !self.store.set_notification_settings(updated, *settings) {
+                    log::debug!("notification settings from {updated}: older than ours, ignored");
+                    return;
                 }
+                log::debug!("notification settings updated ({updated})");
             }
             ConnectionEvent::Event(ServerEvent::MessageUpdate {
                 id,
@@ -3213,6 +3218,119 @@ impl ChatView {
         .detach();
     }
 
+    /// Change the user's notification settings: here at once, then written
+    /// whole to Stoat, which passes them on to their other clients. If the
+    /// write fails, the settings from before it come back (unless a later
+    /// write is on its way, or a newer copy has landed) and a toast says so.
+    fn update_notifications(
+        &mut self,
+        change: impl FnOnce(&mut NotificationSettings),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let before = (
+            self.store.notifications_updated(),
+            self.store.notification_settings().clone(),
+        );
+        let mut settings = before.1.clone();
+        change(&mut settings);
+        // Later than the copy held, even if this Mac's clock is behind it.
+        let updated = notify::now_ms().max(before.0 + 1);
+        let json = settings.to_json(updated);
+        self.store.set_notification_settings(updated, settings);
+        self.notifications_write += 1;
+        let write = self.notifications_write;
+        cx.notify();
+        let request = spawn_io({
+            let client = self.client.clone();
+            async move {
+                client
+                    .set_settings(&[("notifications", json)], updated)
+                    .await
+            }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let error = match request.await {
+                Ok(Ok(())) => return,
+                Ok(Err(err)) => format!("{err:?}"),
+                Err(err) => format!("{err:?}"),
+            };
+            this.update_in(cx, |this, window, cx| {
+                log::warn!("couldn't save notification settings: {error}");
+                if write == this.notifications_write
+                    && this.store.notifications_updated() == updated
+                {
+                    let (updated, settings) = before;
+                    this.store.restore_notification_settings(updated, settings);
+                }
+                window.push_notification(Notification::error(NOTIFICATIONS_FAILED_TEXT), cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A server's right-click menu: Mark as read; Mute Server (for how
+    /// long), or Unmute Server and until when it's muted; its Notifications
+    /// level; Copy server ID.
+    fn server_menu(&self, server: &str, cx: &Context<Self>) -> MenuBuilder {
+        let view = cx.entity().downgrade();
+        let server = server.to_string();
+        Rc::new(move |menu, window, cx| {
+            let Some(this) = view.upgrade() else {
+                return menu;
+            };
+            let store = &this.read(cx).store;
+            let mute = store.server_mute_until(&server);
+            let level = store.notification_settings().server_level(&server);
+            let mark_read = {
+                let (view, server) = (view.clone(), server.clone());
+                move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                    view.update(cx, |this, cx| this.mark_server_read(server.clone(), cx))
+                        .ok();
+                }
+            };
+            let menu = menu.item(PopupMenuItem::new("Mark as read").on_click(mark_read));
+            let menu = match mute {
+                None => {
+                    let mute: SetMute = {
+                        let server = server.clone();
+                        Rc::new(move |settings, until| settings.mute_server(&server, until))
+                    };
+                    let view = view.clone();
+                    menu.submenu("Mute Server", window, cx, move |menu, _, _| {
+                        mute_items(menu, &view, &mute)
+                    })
+                }
+                Some(until) => {
+                    let server = server.clone();
+                    menu.item(notifications_item(
+                        &view,
+                        "Unmute Server",
+                        false,
+                        move |settings| settings.unmute_server(&server),
+                    ))
+                    .item(PopupMenuItem::label(notify::mute_label(until)))
+                }
+            };
+            let set: SetLevel = {
+                let server = server.clone();
+                Rc::new(move |settings, level| {
+                    if let Some(level) = level {
+                        settings.set_server_level(&server, level);
+                    }
+                })
+            };
+            let levels = view.clone();
+            menu.submenu("Notifications", window, cx, move |menu, _, _| {
+                level_items(menu, &levels, None, Some(level), &set)
+            })
+            .separator()
+            .item(copy_id_item("Copy server ID", server.clone()))
+        })
+    }
+
     /// The custom status editor ("Set your status"): one field, filled with
     /// the current status, a character count, and Cancel/Save. Saving it
     /// empty clears the status.
@@ -4819,7 +4937,7 @@ impl ChatView {
             self.place == Place::Home,
             home_unread,
             home_mentions,
-            Vec::new(),
+            None,
             cx.listener(|this, _, _, cx| this.select_place(Place::Home, cx)),
             cx,
         );
@@ -4831,27 +4949,18 @@ impl ChatView {
                 let place = Place::Server(server.id.clone());
                 let selected = self.place == place;
                 let icon = server_icon(&server, &self.media, selected);
-                let view = cx.entity().downgrade();
-                let server_id = server.id.clone();
-                let mark_read: MenuAction = Rc::new(move |_, _, cx| {
-                    let server_id = server_id.clone();
-                    view.update(cx, |this, cx| this.mark_server_read(server_id, cx))
-                        .ok();
-                });
-                let copy_id: MenuAction = {
-                    let server_id = server.id.clone();
-                    Rc::new(move |_, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(server_id.clone()))
-                    })
+                let tooltip = match self.store.server_mute_until(&server.id) {
+                    Some(until) => format!("{} · {}", server.name, notify::mute_label(until)),
+                    None => server.name.clone(),
                 };
                 rail_button(
                     SharedString::from(format!("rail-{}", server.id)),
                     icon,
-                    server.name,
+                    tooltip,
                     selected,
                     server.unread,
                     server.mentions,
-                    vec![("Mark as read", mark_read), ("Copy server ID", copy_id)],
+                    Some(self.server_menu(&server.id, cx)),
                     cx.listener(move |this, _, _, cx| this.select_place(place.clone(), cx)),
                     cx,
                 )
@@ -6046,6 +6155,8 @@ const ADD_FRIEND_DIALOG_WIDTH: f32 = 420.;
 const STATUS_DIALOG_WIDTH: f32 = 420.;
 /// A presence or custom status change Stoat didn't take.
 const STATUS_FAILED_TEXT: &str = "Couldn't change your status.";
+/// A notification settings change Stoat didn't take.
+const NOTIFICATIONS_FAILED_TEXT: &str = "Couldn't save notification settings.";
 
 /// A change to the user's own status.
 enum StatusChange {
@@ -8318,8 +8429,78 @@ fn copy_id_item(label: &'static str, id: String) -> PopupMenuItem {
         .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(id.clone())))
 }
 
-/// What a rail button's right-click menu item does.
-pub(crate) type MenuAction = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+/// Builds a right-click menu when it opens.
+pub(crate) type MenuBuilder =
+    Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>;
+
+/// Mutes something in the notification settings, until a time (ms since
+/// the epoch) or until unmuted.
+type SetMute = Rc<dyn Fn(&mut NotificationSettings, Option<i64>)>;
+/// Sets something's level in the notification settings; `None` returns it
+/// to its default.
+type SetLevel = Rc<dyn Fn(&mut NotificationSettings, Option<Level>)>;
+
+/// A menu item that changes the notification settings (see
+/// [`ChatView::update_notifications`]).
+fn notifications_item(
+    view: &WeakEntity<ChatView>,
+    label: impl Into<SharedString>,
+    checked: bool,
+    change: impl Fn(&mut NotificationSettings) + 'static,
+) -> PopupMenuItem {
+    let view = view.clone();
+    PopupMenuItem::new(label)
+        .checked(checked)
+        .on_click(move |_, window, cx| {
+            view.update(cx, |this, cx| {
+                this.update_notifications(&change, window, cx)
+            })
+            .ok();
+        })
+}
+
+/// A Mute submenu: each duration, from when it's picked.
+fn mute_items(menu: PopupMenu, view: &WeakEntity<ChatView>, mute: &SetMute) -> PopupMenu {
+    MuteFor::ALL.into_iter().fold(menu, |menu, duration| {
+        let (view, mute) = (view.clone(), mute.clone());
+        menu.item(
+            PopupMenuItem::new(duration.label()).on_click(move |_, window, cx| {
+                let until = duration.until(notify::now_ms());
+                view.update(cx, |this, cx| {
+                    this.update_notifications(|settings| mute(settings, until), window, cx)
+                })
+                .ok();
+            }),
+        )
+    })
+}
+
+/// A Notifications submenu: with a `default` label, first an item that
+/// returns to the default; then each level. `current` is checked (`None`
+/// is the default).
+fn level_items(
+    menu: PopupMenu,
+    view: &WeakEntity<ChatView>,
+    default: Option<String>,
+    current: Option<Level>,
+    set: &SetLevel,
+) -> PopupMenu {
+    let item = |label: SharedString, level: Option<Level>| {
+        let set = set.clone();
+        notifications_item(view, label, current == level, move |settings| {
+            set(settings, level)
+        })
+    };
+    let menu = match default {
+        Some(label) => menu.item(item(label.into(), None)),
+        None => menu,
+    };
+    [Level::All, Level::Mention, Level::None]
+        .into_iter()
+        .fold(menu, |menu, level| {
+            menu.item(item(level.label().into(), Some(level)))
+        })
+}
 
 /// A rail button, with a marker on the left edge when selected (an icon image
 /// covers the button's own highlight colour). Also used by the account
@@ -8332,7 +8513,7 @@ pub(crate) fn rail_button(
     selected: bool,
     unread: bool,
     mentions: usize,
-    menu: Vec<(&'static str, MenuAction)>,
+    menu: Option<MenuBuilder>,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> Div {
@@ -8367,20 +8548,11 @@ pub(crate) fn rail_button(
         .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         .child(content);
     // Right-click: e.g. "Mark as read" on servers.
-    let button = if menu.is_empty() {
-        button.into_any_element()
-    } else {
-        button
-            .context_menu(move |popup, _, _| {
-                menu.iter().fold(popup, |popup, (label, action)| {
-                    let action = action.clone();
-                    popup.item(
-                        PopupMenuItem::new(*label)
-                            .on_click(move |event, window, cx| action(event, window, cx)),
-                    )
-                })
-            })
-            .into_any_element()
+    let button = match menu {
+        None => button.into_any_element(),
+        Some(menu) => button
+            .context_menu(move |popup, window, cx| menu(popup, window, cx))
+            .into_any_element(),
     };
 
     div()

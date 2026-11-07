@@ -29,7 +29,7 @@ fn ready() -> Ready {
 /// The fixture store, with notification settings (JSON) and our presence.
 fn store(settings: &str, presence: Option<&str>) -> ChatStore {
     let mut ready = ready();
-    ready.notifications = Some(NotificationSettings::parse(settings));
+    ready.notifications = Some((1, NotificationSettings::parse(settings)));
     ready.users.push(
         serde_json::from_value(serde_json::json!({
             "_id": "u-blocked", "username": "troll", "discriminator": "6666",
@@ -563,7 +563,7 @@ fn a_request_then_its_acceptance_through_the_store() {
 /// whose channels default to mentions only.
 fn store_with_role() -> ChatStore {
     let mut ready = ready();
-    ready.notifications = Some(NotificationSettings::parse("{}"));
+    ready.notifications = Some((1, NotificationSettings::parse("{}")));
     let me = ready
         .members
         .iter_mut()

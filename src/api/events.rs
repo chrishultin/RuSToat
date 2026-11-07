@@ -100,10 +100,11 @@ pub enum ServerEvent {
         emoji: String,
     },
     EmojiCreate(Box<Emoji>),
-    /// Some user settings changed. Only `notifications` is kept; `None` if
-    /// this update didn't touch it.
+    /// Some user settings changed. Only `notifications` is kept, with when
+    /// it was written (ms since the epoch); `None` if this update didn't
+    /// touch it.
     UserSettingsUpdate {
-        notifications: Option<NotificationSettings>,
+        notifications: Option<(i64, Box<NotificationSettings>)>,
     },
     /// A channel was read up to `message_id` (by `user`: one of our own
     /// sessions, possibly another client).
@@ -227,8 +228,9 @@ pub struct Ready {
     pub unreads: Vec<ChannelUnread>,
     /// Server IDs in the order the user arranged them, if they have.
     pub server_order: Vec<String>,
-    /// The `notifications` user setting, if the user has one.
-    pub notifications: Option<NotificationSettings>,
+    /// The `notifications` user setting, with when it was written (ms since
+    /// the epoch), if the user has one.
+    pub notifications: Option<(i64, NotificationSettings)>,
     /// List items that didn't parse (for example a new channel type) and were dropped.
     pub skipped: usize,
 }
@@ -399,7 +401,9 @@ fn decode(mut value: Value, out: &mut Vec<ServerEvent>) {
         "UserSettingsUpdate" => {
             let update = value.get_mut("update").map(Value::take);
             out.push(ServerEvent::UserSettingsUpdate {
-                notifications: update.and_then(notifications_from_settings),
+                notifications: update
+                    .and_then(notifications_from_settings)
+                    .map(|(updated, settings)| (updated, Box::new(settings))),
             });
         }
         "EmojiCreate" => out.push(decode_as(value, &kind, |e: Emoji| {
@@ -699,11 +703,12 @@ impl Ready {
     }
 }
 
-/// The `notifications` user setting (`[updated_at, "<json>"]`), parsed.
-fn notifications_from_settings(settings: Value) -> Option<NotificationSettings> {
+/// The `notifications` user setting (`[updated_at, "<json>"]`), parsed,
+/// with its `updated_at`.
+fn notifications_from_settings(settings: Value) -> Option<(i64, NotificationSettings)> {
     let mut parsed: HashMap<String, (i64, String)> = serde_json::from_value(settings).ok()?;
-    let (_, json) = parsed.remove("notifications")?;
-    Some(NotificationSettings::parse(&json))
+    let (updated, json) = parsed.remove("notifications")?;
+    Some((updated, NotificationSettings::parse(&json)))
 }
 
 fn lenient_list<T: DeserializeOwned>(
@@ -1250,16 +1255,17 @@ mod tests {
     fn settings_updates_carry_notification_settings() {
         let events = parse_frame(
             r#"{"type":"Bulk","v":[
-                {"type":"UserSettingsUpdate","id":"u","update":{"notifications":[1,"{\"channel\":{\"c\":\"none\"}}"]}},
+                {"type":"UserSettingsUpdate","id":"u","update":{"notifications":[1730000000123,"{\"channel\":{\"c\":\"none\"}}"]}},
                 {"type":"UserSettingsUpdate","id":"u","update":{"ordering":[1,"{}"]}}
             ]}"#,
         );
         let ServerEvent::UserSettingsUpdate {
-            notifications: Some(settings),
+            notifications: Some((updated, settings)),
         } = &events[0]
         else {
             panic!("expected notifications, got {:?}", events[0]);
         };
+        assert_eq!(*updated, 1730000000123, "the timestamp is kept");
         assert_eq!(settings.level("c", Some("s")), crate::notify::Level::None);
         assert!(matches!(
             events[1],

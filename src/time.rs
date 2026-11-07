@@ -52,6 +52,26 @@ pub fn millis_time_label(millis: u64) -> String {
         .unwrap_or_default()
 }
 
+/// When something ends: "14:05" today, "tomorrow at 14:05", else
+/// "3 Nov at 14:05".
+pub fn format_until(when: NaiveDateTime, now: NaiveDateTime) -> String {
+    let time = when.format("%H:%M");
+    match (when.date() - now.date()).num_days() {
+        0 => time.to_string(),
+        1 => format!("tomorrow at {time}"),
+        _ => format!("{} at {time}", when.format("%-d %b")),
+    }
+}
+
+/// [`format_until`] for milliseconds since the Unix epoch, in local time.
+pub fn millis_until_label(millis: i64) -> String {
+    Local
+        .timestamp_millis_opt(millis)
+        .single()
+        .map(|when| format_until(when.naive_local(), Local::now().naive_local()))
+        .unwrap_or_default()
+}
+
 /// Minutes between two ULIDs (b after a), if both are ULIDs.
 pub fn minutes_between(a: &str, b: &str) -> Option<u64> {
     Some(ulid_millis(b)?.saturating_sub(ulid_millis(a)?) / 60_000)
@@ -357,5 +377,19 @@ mod tests {
     fn seconds_out_of_range_have_no_time() {
         assert!(local_from_seconds(1_762_430_000).is_some());
         assert!(local_from_seconds(i64::MAX).is_none());
+    }
+
+    #[test]
+    fn ends_today_tomorrow_or_later() {
+        let at = |d, h, m| {
+            NaiveDate::from_ymd_opt(2026, 11, d)
+                .unwrap()
+                .and_hms_opt(h, m, 0)
+                .unwrap()
+        };
+        let now = at(6, 22, 30);
+        assert_eq!(format_until(at(6, 23, 45), now), "23:45");
+        assert_eq!(format_until(at(7, 0, 15), now), "tomorrow at 00:15");
+        assert_eq!(format_until(at(9, 8, 0), now), "9 Nov at 08:00");
     }
 }

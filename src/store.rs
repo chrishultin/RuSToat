@@ -516,6 +516,9 @@ pub struct ChatStore {
     read_states: HashMap<String, ReadState>,
     /// The user's notification levels and mutes.
     notifications: NotificationSettings,
+    /// When the copy of `notifications` held was written (ms since the
+    /// epoch), so an older copy arriving late can't undo a newer one.
+    notifications_updated: i64,
     /// Messages the user sent that aren't confirmed yet, by channel, in send order.
     pending: HashMap<String, Vec<PendingMessage>>,
     /// Temporary files (pasted images) of pending messages that are gone
@@ -566,7 +569,7 @@ impl ChatStore {
             .into_iter()
             .map(|e| (e.id.clone(), e))
             .collect();
-        self.notifications = ready.notifications.unwrap_or_default();
+        (self.notifications_updated, self.notifications) = ready.notifications.unwrap_or_default();
         self.read_states = ready
             .unreads
             .into_iter()
@@ -1311,9 +1314,51 @@ impl ChatStore {
         &self.notifications
     }
 
-    /// New notification settings (`UserSettingsUpdate`).
-    pub fn set_notification_settings(&mut self, settings: NotificationSettings) {
+    /// When the notification settings held were written (ms since the
+    /// epoch).
+    pub fn notifications_updated(&self) -> i64 {
+        self.notifications_updated
+    }
+
+    /// New notification settings, written at `updated` (ms since the
+    /// epoch): from another client or session (`UserSettingsUpdate`), or a
+    /// change made here. A copy older than the one held is ignored, so the
+    /// echo of an earlier change can't undo a later one, and false is
+    /// returned.
+    ///
+    /// Stoat clamps a timestamp from the future to its own clock. If this
+    /// Mac's clock runs ahead, the echo of a change made here carries an
+    /// earlier time than the change. Its content is the same, so the held
+    /// time is moved back to it: changes from other clients, stamped by
+    /// Stoat's clock, then still apply.
+    pub fn set_notification_settings(
+        &mut self,
+        updated: i64,
+        settings: NotificationSettings,
+    ) -> bool {
+        if updated < self.notifications_updated {
+            let now = notify::now_ms();
+            if settings.to_json(now) == self.notifications.to_json(now) {
+                self.notifications_updated = updated;
+            }
+            return false;
+        }
+        self.notifications_updated = updated;
         self.notifications = settings;
+        true
+    }
+
+    /// Put back notification settings held before a change Stoat didn't
+    /// take, whatever their time.
+    pub fn restore_notification_settings(&mut self, updated: i64, settings: NotificationSettings) {
+        self.notifications_updated = updated;
+        self.notifications = settings;
+    }
+
+    /// A server's mute, if it's muted now: `Some(Some(until))` (ms since the
+    /// epoch), or `Some(None)` until the user unmutes it.
+    pub fn server_mute_until(&self, server: &str) -> Option<Option<i64>> {
+        self.notifications.server_mute(server, notify::now_ms())
     }
 
     /// The user's own presence (Online, Focus, Busy...), if known.
