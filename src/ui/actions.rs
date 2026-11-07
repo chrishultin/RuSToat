@@ -16,7 +16,9 @@ actions!(
         /// Open the settings window, or bring it forward (⌘,).
         OpenSettings,
         /// Open the settings window on the Profile page ("Edit profile…").
-        OpenProfileSettings
+        OpenProfileSettings,
+        /// "Join a server" for the account on screen.
+        JoinServer
     ]
 );
 

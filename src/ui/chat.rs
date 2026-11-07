@@ -34,13 +34,15 @@ use crate::api::StoatClient;
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
 use crate::api::gifbox::GifboxClient;
 use crate::api::models::{
-    BulkMessageResponse, FieldsMessage, MessageSort, Presence, ReplyIntent, UserProfile,
+    BulkMessageResponse, FieldsMessage, InviteJoinResponse, MessageSort, Presence, ReplyIntent,
+    UserProfile,
 };
 use crate::attachment::{AttachmentView, fit_into};
 use crate::complete::{Query, QueryKind, Suggestion, TokenRef, rank, rank_mentions};
 use crate::draft::{AttachmentLimits, DraftAttachment, ReplyTarget};
 use crate::embed::{Description, EmbedCard, EmbedImage, EmbedView};
 use crate::friends::{AddFriendState, FRIENDS, FriendsTab};
+use crate::invites::{InviteHosts, InvitePreview};
 use crate::markdown::{
     InternalLink, JUMBO_TEXT_PX, has_relative_time, is_external_link, parse_internal_link,
 };
@@ -70,6 +72,7 @@ use crate::ui::emoji_picker::emoji_grid;
 use crate::ui::friends::{RowButtons, render_add_friend, render_friends_page};
 use crate::ui::gif_picker::GifCache;
 use crate::ui::identity_dialog::{IDENTITY_DIALOG_WIDTH, IdentityEditor};
+use crate::ui::invites::{JOIN_DIALOG_WIDTH, JoinDialog};
 use crate::ui::markup::{MarkupPlugin, RevealSpoiler, code_block_actions};
 use crate::ui::math::MathPlugin;
 use crate::ui::profile_card::{CardBio, CardContent, OnLink, render_profile_card};
@@ -4132,6 +4135,89 @@ impl ChatView {
         self.window
     }
 
+    /// Which links are invites on this account's instance.
+    pub fn invite_hosts(&self) -> InviteHosts {
+        InviteHosts::new(self.web_app.as_deref())
+    }
+
+    /// "Join a server": paste an invite link or code, see what it leads
+    /// to, and join it. With `code` (a clicked invite link), it's filled in
+    /// and looked up.
+    pub fn open_join_dialog(
+        &mut self,
+        code: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let weak = cx.entity().downgrade();
+        let dialog = cx.new(|cx| JoinDialog::new(self, weak, code, window, cx));
+        let first_build = std::cell::Cell::new(true);
+        window.open_dialog(cx, move |modal, window, cx| {
+            if first_build.replace(false) {
+                let input = dialog.read(cx).input().read(cx).focus_handle(cx);
+                window.focus(&input, cx);
+            }
+            modal
+                .title("Join a server")
+                .w(px(JOIN_DIALOG_WIDTH))
+                .child(dialog.clone())
+        });
+    }
+
+    /// Whether the user is already in the server or group `invite` leads
+    /// to (so it opens, rather than joining and using up one of its uses).
+    pub fn is_invite_member(&self, invite: &InvitePreview) -> bool {
+        match invite.server_id() {
+            Some(server) => self.store.server(server).is_some(),
+            None => self.store.channel(&invite.channel_id).is_some(),
+        }
+    }
+
+    /// Show what `invite` leads to: its channel, or its server when that
+    /// channel isn't one the user can see.
+    pub fn open_invite(&mut self, invite: &InvitePreview, cx: &mut Context<Self>) {
+        if self.store.channel(&invite.channel_id).is_some() {
+            self.open_channel(&invite.channel_id, cx);
+        } else if let Some(server) = invite.server_id()
+            && self.store.server(server).is_some()
+        {
+            self.select_place(Place::Server(server.to_string()), cx);
+        }
+    }
+
+    /// The user joined through `invite`: add the server (or group) at once
+    /// and show it. Its `ServerCreate` (or `ChannelCreate`) follows and
+    /// replaces it, bringing the server's emoji.
+    pub fn invite_joined(
+        &mut self,
+        invite: &InvitePreview,
+        joined: InviteJoinResponse,
+        cx: &mut Context<Self>,
+    ) {
+        match joined {
+            InviteJoinResponse::Server { channels, server } => {
+                let id = server.id.clone();
+                log::info!("joined server {id} by invite ({} channels)", channels.len());
+                self.store.add_server(server, channels, Vec::new());
+                if self.store.member(&id, self.store.me()).is_none() {
+                    self.fetch_own_member(id, cx);
+                }
+            }
+            InviteJoinResponse::Group { channel, users } => {
+                let id = crate::store::channel_id(&channel).to_string();
+                log::info!("joined group {id} by invite");
+                // Keep what's known of people already met (presence, relationship).
+                for user in users {
+                    if !self.store.knows_user(&user.id) {
+                        self.store.add_user(user);
+                    }
+                }
+                self.store.add_channel(channel);
+            }
+        }
+        self.open_invite(invite, cx);
+    }
+
     /// "Change identity on {server}": the user's nickname, avatar and
     /// pronouns there.
     pub fn open_identity_editor(
@@ -5186,6 +5272,25 @@ impl ChatView {
                 )
             })
             .collect();
+        let has_servers = !servers.is_empty();
+        let join = rail_button(
+            "rail-join",
+            Icon::new(IconName::Plus).into_any_element(),
+            "Join a server",
+            false,
+            false,
+            0,
+            None,
+            cx.listener(|this, _, window, cx| this.open_join_dialog(None, window, cx)),
+            cx,
+        );
+        let divider = || {
+            div()
+                .w(px(32.))
+                .h(px(1.))
+                .flex_none()
+                .bg(theme.sidebar_border)
+        };
 
         v_flex()
             .id("server-rail")
@@ -5200,14 +5305,10 @@ impl ChatView {
             .border_color(theme.sidebar_border)
             .overflow_y_scroll()
             .child(home)
-            .child(
-                div()
-                    .w(px(32.))
-                    .h(px(1.))
-                    .flex_none()
-                    .bg(theme.sidebar_border),
-            )
+            .child(divider())
             .children(servers)
+            .when(has_servers, |rail| rail.child(divider()))
+            .child(join)
     }
 
     fn render_channel_list(&self, cx: &mut Context<Self>) -> impl IntoElement {

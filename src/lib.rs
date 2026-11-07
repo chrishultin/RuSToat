@@ -17,6 +17,7 @@ pub mod embed;
 pub mod emoji;
 pub mod friends;
 pub mod http;
+pub mod invites;
 pub mod links;
 pub mod login_item;
 pub mod markdown;

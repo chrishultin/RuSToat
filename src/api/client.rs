@@ -4,9 +4,10 @@ use reqwest::{Client, Method};
 use revolt_models::v0::{
     AccountInfo, AllMemberResponse, BulkMessageResponse, Channel, DataChangeEmail,
     DataChangePassword, DataEditMessage, DataEditSession, DataEditUser, DataLogin, DataMemberEdit,
-    DataMessageSearch, DataMessageSend, DataSendFriendRequest, Emoji, FieldsUser, MFAResponse,
-    MFATicket, Member, Message, MessageSort, MultiFactorStatus, OptionsQueryMessages, Presence,
-    ReplyIntent, ResponseLogin, ResponseTotpSecret, SessionInfo, User, UserProfile, UserStatus,
+    DataMessageSearch, DataMessageSend, DataSendFriendRequest, Emoji, FieldsUser,
+    InviteJoinResponse, InviteResponse, MFAResponse, MFATicket, Member, Message, MessageSort,
+    MultiFactorStatus, OptionsQueryMessages, Presence, ReplyIntent, ResponseLogin,
+    ResponseTotpSecret, SessionInfo, User, UserProfile, UserStatus,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -774,6 +775,22 @@ impl StoatClient {
         )
         .await
         .map(|_| ())
+    }
+
+    /// `GET /invites/{code}`: what an invite leads to (a server or a
+    /// group), without joining. An unknown, expired or used-up code is
+    /// `NotFound`.
+    pub async fn fetch_invite(&self, code: &str) -> Result<InviteResponse, ApiError> {
+        self.send(Method::GET, &format!("/invites/{code}"), None::<&()>)
+            .await
+    }
+
+    /// `POST /invites/{code}`: join the server or group an invite leads to.
+    /// Stoat counts a use before checking bans and memberships, so check
+    /// the user isn't already in it first.
+    pub async fn join_invite(&self, code: &str) -> Result<InviteJoinResponse, ApiError> {
+        self.send(Method::POST, &format!("/invites/{code}"), None::<&()>)
+            .await
     }
 
     /// `PUT /servers/{server}/ack`: mark every channel in `server` read.

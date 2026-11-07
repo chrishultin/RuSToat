@@ -4,7 +4,7 @@
 use revolt_permissions::{ChannelPermission, DEFAULT_PERMISSION_SERVER};
 use serde_json::{Value, json};
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
-use stoat_gpui::api::models::{BulkMessageResponse, Member};
+use stoat_gpui::api::models::{BulkMessageResponse, InviteJoinResponse, Member};
 use stoat_gpui::store::ChatStore;
 
 const VIEW: u64 = ChannelPermission::ViewChannel as u64;
@@ -135,4 +135,56 @@ fn a_deleted_server_goes_with_its_channels() {
     removed.sort();
     assert_eq!(removed, ["ch-lobby", "ch-staff"]);
     assert!(!store.servers().iter().any(|s| s.id == "srv-new"));
+}
+
+/// What `POST /invites/{code}` answers for `srv-new`: the server and the
+/// channels the user can see, with no emoji (its `ServerCreate` has them).
+fn join_response() -> InviteJoinResponse {
+    let event = server_create("New Place");
+    serde_json::from_value(json!({
+        "type": "Server",
+        "server": event["server"],
+        "channels": [event["channels"][0]]
+    }))
+    .unwrap()
+}
+
+fn add_joined(store: &mut ChatStore) -> bool {
+    let InviteJoinResponse::Server { channels, server } = join_response() else {
+        panic!("a server join");
+    };
+    store.add_server(server, channels, Vec::new())
+}
+
+fn rail_count(store: &ChatStore, id: &str) -> usize {
+    store.servers().into_iter().filter(|s| s.id == id).count()
+}
+
+#[test]
+fn a_join_response_then_its_server_create_gives_one_server_with_emoji() {
+    let mut store = store();
+    assert!(add_joined(&mut store));
+    assert_eq!(
+        store.servers().last().map(|s| s.id.as_str()),
+        Some("srv-new")
+    );
+    assert!(store.channel("ch-lobby").is_some());
+
+    assert!(!add(&mut store, server_create("New Place")));
+    assert_eq!(rail_count(&store, "srv-new"), 1);
+    assert!(store.emoji("01ARYZ6S41TSV4RRFFQ69G5FAV").is_some());
+    assert!(store.channel("ch-staff").is_some());
+}
+
+#[test]
+fn a_server_create_then_the_join_response_keeps_the_emoji() {
+    let mut store = store();
+    assert!(add(&mut store, server_create("New Place")));
+    assert!(!add_joined(&mut store));
+    assert_eq!(rail_count(&store, "srv-new"), 1);
+    assert!(store.emoji("01ARYZ6S41TSV4RRFFQ69G5FAV").is_some());
+    assert_eq!(
+        store.servers().last().map(|s| s.id.as_str()),
+        Some("srv-new")
+    );
 }
