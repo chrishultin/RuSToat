@@ -137,3 +137,7 @@ Added at the user's request during milestone 15, though unrelated to it: hoverin
 - Verified: `cargo test` 803 passed, 0 failed, 5 ignored; clippy clean; drift unchanged (`chat.rs` 17, `store.rs` 15, `tests/store_reactions.rs` 0).
 
 The milestone's manual checks were still pending when the user moved on to milestone 16.
+
+## Manual sign-off
+
+_2026-11-06:_ the user ran manual checks in the bundled app and reported that what they tested looks good, and asked to merge to `main`. They didn't say which checks they ran, so the individual "Pending" items above weren't confirmed one by one.

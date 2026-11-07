@@ -142,3 +142,7 @@ All four are committed together at the end, at the user's request (the SSH commi
 
 ### Remaining Manual Steps
 Every chunk's manual check above, plus the plan's Manual Tests 2–6 (two accounts never cross; logging out an unmarked session that is this one shows "Your session has ended" without breaking Settings; rapid wrong passwords say how long to wait; light and dark themes; turn 2FA off on the test account afterwards).
+
+## Manual sign-off
+
+_2026-11-06:_ the user ran manual checks in the bundled app and reported that what they tested looks good, and asked to merge to `main`. They didn't say which checks they ran, so the individual "Pending" items above weren't confirmed one by one.
