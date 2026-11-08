@@ -44,7 +44,9 @@ fn ready_parses_leniently_and_counts_what_it_skipped() {
     assert_eq!(ready.servers.len(), 2);
     assert_eq!(ready.channels.len(), 11);
     assert_eq!(ready.members.len(), 2);
-    assert_eq!(ready.server_order, vec!["srv-beta", "srv-alpha"]);
+    let (updated, ordering) = ready.ordering.unwrap();
+    assert_eq!(updated, 1730000000000);
+    assert_eq!(ordering.servers(), ["srv-beta", "srv-alpha"]);
 }
 
 #[test]
@@ -77,7 +79,7 @@ fn servers_follow_the_saved_ordering() {
 #[test]
 fn servers_without_saved_ordering_keep_ready_order() {
     let mut ready = ready();
-    ready.server_order.clear();
+    ready.ordering = None;
     let mut store = ChatStore::new("u-me");
     store.apply_ready(ready);
     let ids: Vec<String> = store.servers().into_iter().map(|s| s.id).collect();
@@ -303,7 +305,7 @@ fn a_new_ready_replaces_the_old_state() {
     let mut store = store();
     let mut smaller = ready();
     smaller.servers.retain(|s| s.id == "srv-beta");
-    smaller.server_order.clear();
+    smaller.ordering = None;
     store.apply_ready(smaller);
     let ids: Vec<String> = store.servers().into_iter().map(|s| s.id).collect();
     assert_eq!(ids, vec!["srv-beta"]);

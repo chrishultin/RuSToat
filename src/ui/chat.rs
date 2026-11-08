@@ -52,6 +52,7 @@ use crate::notify::{self, Delivery, Level, MuteFor, Notice, NotificationSettings
 use crate::places::{Place, Places, PlacesFile};
 use crate::profile::{RelationshipAction, UserMenuItem};
 use crate::profile_edit::ImageLimits;
+use crate::rail::{self, Ordering, RailEntry, ServerFolders};
 use crate::runtime::spawn_io;
 use crate::safety::{LinkCheck, SafetyFile, SafetySettings, classify, is_own_instance, origin};
 use crate::search::{
@@ -414,6 +415,9 @@ pub struct ChatView {
     /// Counts notification settings writes, so only the latest one's
     /// failure puts the old settings back.
     notifications_write: u64,
+    /// Counts server list writes (order and folders), as
+    /// `notifications_write`.
+    rail_write: u64,
     /// The message whose reaction picker is open.
     picker_for: Option<String>,
     /// Reaction changes waiting on the server, as (message, emoji). Another
@@ -813,6 +817,7 @@ impl ChatView {
             _status_input: status_events,
             status_saving: false,
             notifications_write: 0,
+            rail_write: 0,
             picker_for: None,
             reacting: HashSet::new(),
             reply_fetches: HashSet::new(),
@@ -863,6 +868,7 @@ impl ChatView {
             ConnectionEvent::Event(ServerEvent::Ready(ready)) => {
                 let reconnect = self.has_ready;
                 self.store.apply_ready(*ready);
+                self.fetch_rail_settings(cx);
                 self.schedule_mute_tick(cx);
                 self.card = None;
                 self.has_ready = true;
@@ -930,16 +936,25 @@ impl ChatView {
                     }
                 }
             }
-            ConnectionEvent::Event(ServerEvent::UserSettingsUpdate { notifications }) => {
-                let Some((updated, settings)) = notifications else {
-                    return;
-                };
-                if !self.store.set_notification_settings(updated, *settings) {
-                    log::debug!("notification settings from {updated}: older than ours, ignored");
-                    return;
+            ConnectionEvent::Event(ServerEvent::UserSettingsUpdate {
+                notifications,
+                ordering,
+                server_folders,
+            }) => {
+                if let Some((updated, settings)) = notifications {
+                    if self.store.set_notification_settings(updated, *settings) {
+                        log::debug!("notification settings updated ({updated})");
+                        self.schedule_mute_tick(cx);
+                    } else {
+                        log::debug!(
+                            "notification settings from {updated}: older than ours, ignored"
+                        );
+                    }
                 }
-                log::debug!("notification settings updated ({updated})");
-                self.schedule_mute_tick(cx);
+                self.apply_rail_settings(
+                    ordering.map(|(updated, ordering)| (updated, *ordering)),
+                    server_folders.map(|(updated, folders)| (updated, *folders)),
+                );
             }
             ConnectionEvent::Event(ServerEvent::MessageUpdate {
                 id,
@@ -3592,6 +3607,136 @@ impl ChatView {
                     this.schedule_mute_tick(cx);
                 }
                 window.push_notification(Notification::error(NOTIFICATIONS_FAILED_TEXT), cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Fetch the rail's order and folders (after `Ready`, which can't carry
+    /// `server-folders`, and brings `ordering` only so the rail doesn't
+    /// jump when this lands). If it fails, the rail keeps `Ready`'s order
+    /// (and the folders held before), until a change arrives.
+    fn fetch_rail_settings(&mut self, cx: &mut Context<Self>) {
+        let request = spawn_io({
+            let client = self.client.clone();
+            async move {
+                client
+                    .fetch_settings(&[rail::ORDERING_KEY, rail::FOLDERS_KEY])
+                    .await
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = request.await;
+            this.update(cx, |this, cx| match result {
+                Ok(Ok(mut settings)) => {
+                    let mut take = |key: &str| settings.remove(key);
+                    let ordering = take(rail::ORDERING_KEY)
+                        .map(|(updated, json)| (updated, Ordering::parse(&json)));
+                    let folders = take(rail::FOLDERS_KEY)
+                        .map(|(updated, json)| (updated, ServerFolders::parse(&json)));
+                    if this.apply_rail_settings(ordering, folders) {
+                        cx.notify();
+                    }
+                }
+                Ok(Err(err)) => log::warn!("couldn't load the server list's order: {err}"),
+                Err(err) => log::warn!("server list order task failed: {err:?}"),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Take the rail's order and folders (each with when it was written)
+    /// unless the copies held are newer. Whether the rail changed.
+    fn apply_rail_settings(
+        &mut self,
+        ordering: Option<(i64, Ordering)>,
+        folders: Option<(i64, ServerFolders)>,
+    ) -> bool {
+        let mut changed = false;
+        if let Some((updated, ordering)) = ordering {
+            let taken = self.store.set_ordering(updated, ordering);
+            log::debug!("server order from {updated}: changed {taken}");
+            changed |= taken;
+        }
+        if let Some((updated, folders)) = folders {
+            let taken = self.store.set_server_folders(updated, folders);
+            log::debug!("server folders from {updated}: changed {taken}");
+            changed |= taken;
+        }
+        changed
+    }
+
+    /// Change the rail's order or folders: here at once, then written to
+    /// Stoat, both keys at one time as the web client writes them, which
+    /// passes them on to the user's other clients. A change that changes
+    /// nothing writes nothing. If the write fails, what was held before
+    /// comes back (unless a later write is on its way, or a newer copy has
+    /// landed) and a toast says so.
+    #[expect(
+        dead_code,
+        reason = "the folder menus and rail dragging will write through it"
+    )]
+    fn update_rail(
+        &mut self,
+        change: impl FnOnce(&mut Ordering, &mut ServerFolders),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let before = (
+            (self.store.ordering_updated(), self.store.ordering().clone()),
+            (
+                self.store.server_folders_updated(),
+                self.store.server_folders().clone(),
+            ),
+        );
+        let (mut ordering, mut folders) = (before.0.1.clone(), before.1.1.clone());
+        change(&mut ordering, &mut folders);
+        if ordering == before.0.1 && folders == before.1.1 {
+            return;
+        }
+        // Later than both copies held, even if this Mac's clock is behind.
+        let updated = notify::now_ms().max(before.0.0.max(before.1.0) + 1);
+        let (ordering_json, folders_json) = (ordering.to_json(), folders.to_json());
+        // Held as written (less empty folders), so the echo changes nothing.
+        self.store
+            .set_ordering(updated, Ordering::parse(&ordering_json));
+        self.store
+            .set_server_folders(updated, ServerFolders::parse(&folders_json));
+        self.rail_write += 1;
+        let write = self.rail_write;
+        cx.notify();
+        let request = spawn_io({
+            let client = self.client.clone();
+            async move {
+                let settings = [
+                    (rail::ORDERING_KEY, ordering_json),
+                    (rail::FOLDERS_KEY, folders_json),
+                ];
+                client.set_settings(&settings, updated).await
+            }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let error = match request.await {
+                Ok(Ok(())) => return,
+                Ok(Err(err)) => format!("{err:?}"),
+                Err(err) => format!("{err:?}"),
+            };
+            this.update_in(cx, |this, window, cx| {
+                log::warn!("couldn't save the server list: {error}");
+                if write == this.rail_write {
+                    let ((ordering_updated, ordering), (folders_updated, folders)) = before;
+                    // Each key unless a newer copy of it has landed.
+                    if this.store.ordering_updated() == updated {
+                        this.store.restore_ordering(ordering_updated, ordering);
+                    }
+                    if this.store.server_folders_updated() == updated {
+                        this.store.restore_server_folders(folders_updated, folders);
+                    }
+                }
+                window.push_notification(Notification::error(RAIL_FAILED_TEXT), cx);
                 cx.notify();
             })
             .ok();
@@ -7376,30 +7521,14 @@ impl ChatView {
             cx.listener(|this, _, _, cx| this.select_place(Place::Home, cx)),
             cx,
         );
+        // Folders are drawn as their servers, in their place.
         let servers: Vec<_> = self
             .store
-            .servers()
-            .into_iter()
-            .map(|server| {
-                let place = Place::Server(server.id.clone());
-                let selected = self.place == place;
-                let icon = server_icon(&server, &self.media, selected);
-                let tooltip = match self.store.server_mute_until(&server.id) {
-                    Some(until) => format!("{} · {}", server.name, notify::mute_label(until)),
-                    None => server.name.clone(),
-                };
-                rail_button(
-                    SharedString::from(format!("rail-{}", server.id)),
-                    icon,
-                    tooltip,
-                    selected,
-                    server.unread,
-                    server.mentions,
-                    Some(self.server_menu(&server.id, cx)),
-                    cx.listener(move |this, _, _, cx| this.select_place(place.clone(), cx)),
-                    cx,
-                )
-            })
+            .rail_entries()
+            .iter()
+            .flat_map(RailEntry::servers)
+            .filter_map(|id| self.store.server_entry(id))
+            .map(|server| self.render_rail_server(&server, cx))
             .collect();
         let has_servers = !servers.is_empty();
         let add = self.render_rail_add(cx);
@@ -7428,6 +7557,29 @@ impl ChatView {
             .children(servers)
             .when(has_servers, |rail| rail.child(divider()))
             .child(add)
+    }
+
+    /// A server's rail icon: its unread and selected pills, mention badge,
+    /// mute in the tooltip and right-click menu. Click opens it.
+    fn render_rail_server(&self, server: &ServerEntry, cx: &Context<Self>) -> Div {
+        let place = Place::Server(server.id.clone());
+        let selected = self.place == place;
+        let icon = server_icon(server, &self.media, selected);
+        let tooltip = match self.store.server_mute_until(&server.id) {
+            Some(until) => format!("{} · {}", server.name, notify::mute_label(until)),
+            None => server.name.clone(),
+        };
+        rail_button(
+            SharedString::from(format!("rail-{}", server.id)),
+            icon,
+            tooltip,
+            selected,
+            server.unread,
+            server.mentions,
+            Some(self.server_menu(&server.id, cx)),
+            cx.listener(move |this, _, _, cx| this.select_place(place.clone(), cx)),
+            cx,
+        )
     }
 
     /// The rail's "+": a menu to create a server or join one.
@@ -8779,6 +8931,8 @@ const STATUS_FAILED_TEXT: &str = "Couldn't change your status.";
 const MUTED_ICON_OPACITY: f32 = 0.3;
 /// A notification settings change Stoat didn't take.
 const NOTIFICATIONS_FAILED_TEXT: &str = "Couldn't save notification settings.";
+/// A server order or folder change Stoat didn't take.
+const RAIL_FAILED_TEXT: &str = "Couldn't save the server list. Try again.";
 
 /// A change to the user's own status.
 enum StatusChange {

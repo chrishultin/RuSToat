@@ -24,6 +24,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use super::{ApiError, StoatClient};
 use crate::notify::NotificationSettings;
+use crate::rail::{self, Ordering, ServerFolders};
 use crate::runtime::runtime;
 
 /// How often to ping. Stoat drops connections that are quiet for 10–30 s.
@@ -100,11 +101,13 @@ pub enum ServerEvent {
         emoji: String,
     },
     EmojiCreate(Box<Emoji>),
-    /// Some user settings changed. Only `notifications` is kept, with when
-    /// it was written (ms since the epoch); `None` if this update didn't
-    /// touch it.
+    /// Some user settings changed. Only `notifications`, `ordering` and
+    /// `server-folders` are kept, each with when it was written (ms since
+    /// the epoch); `None` if this update didn't touch it.
     UserSettingsUpdate {
         notifications: Option<(i64, Box<NotificationSettings>)>,
+        ordering: Option<(i64, Box<Ordering>)>,
+        server_folders: Option<(i64, Box<ServerFolders>)>,
     },
     /// A channel was read up to `message_id` (by `user`: one of our own
     /// sessions, possibly another client).
@@ -243,8 +246,10 @@ pub struct Ready {
     pub emojis: Vec<Emoji>,
     /// The user's read position (and unread mentions) per channel.
     pub unreads: Vec<ChannelUnread>,
-    /// Server IDs in the order the user arranged them, if they have.
-    pub server_order: Vec<String>,
+    /// The `ordering` user setting (the rail's order), with when it was
+    /// written (ms since the epoch), if the user has one. `server-folders`
+    /// can't be asked for in `Ready`; it's fetched after.
+    pub ordering: Option<(i64, Ordering)>,
     /// The `notifications` user setting, with when it was written (ms since
     /// the epoch), if the user has one.
     pub notifications: Option<(i64, NotificationSettings)>,
@@ -416,11 +421,17 @@ fn decode(mut value: Value, out: &mut Vec<ServerEvent>) {
             }))
         }
         "UserSettingsUpdate" => {
-            let update = value.get_mut("update").map(Value::take);
+            let mut update = user_settings(value.get_mut("update").map(Value::take));
             out.push(ServerEvent::UserSettingsUpdate {
-                notifications: update
-                    .and_then(notifications_from_settings)
-                    .map(|(updated, settings)| (updated, Box::new(settings))),
+                notifications: parse_setting(&mut update, "notifications", |json| {
+                    Box::new(NotificationSettings::parse(json))
+                }),
+                ordering: parse_setting(&mut update, rail::ORDERING_KEY, |json| {
+                    Box::new(Ordering::parse(json))
+                }),
+                server_folders: parse_setting(&mut update, rail::FOLDERS_KEY, |json| {
+                    Box::new(ServerFolders::parse(json))
+                }),
             });
         }
         "EmojiCreate" => out.push(decode_as(value, &kind, |e: Emoji| {
@@ -731,12 +742,10 @@ impl Ready {
             "channel unread in Ready",
             &mut skipped,
         );
-        let settings = take("user_settings");
-        let server_order = settings
-            .clone()
-            .map(server_order_from_settings)
-            .unwrap_or_default();
-        let notifications = settings.and_then(notifications_from_settings);
+        let mut settings = user_settings(take("user_settings"));
+        let ordering = parse_setting(&mut settings, rail::ORDERING_KEY, Ordering::parse);
+        let notifications =
+            parse_setting(&mut settings, "notifications", NotificationSettings::parse);
         Ready {
             users,
             servers,
@@ -744,19 +753,35 @@ impl Ready {
             members,
             emojis,
             unreads,
-            server_order,
+            ordering,
             notifications,
             skipped,
         }
     }
 }
 
-/// The `notifications` user setting (`[updated_at, "<json>"]`), parsed,
-/// with its `updated_at`.
-fn notifications_from_settings(settings: Value) -> Option<(i64, NotificationSettings)> {
-    let mut parsed: HashMap<String, (i64, String)> = serde_json::from_value(settings).ok()?;
-    let (updated, json) = parsed.remove("notifications")?;
-    Some((updated, NotificationSettings::parse(&json)))
+/// User settings by key, each `(updated_at, "<json string>")`: they come
+/// as `{key: [updated_at, "<json string>"]}` (`UserSettings` in
+/// `revolt-models`). A key that isn't in that shape is left out.
+fn user_settings(settings: Option<Value>) -> HashMap<String, (i64, String)> {
+    let Some(Value::Object(settings)) = settings else {
+        return HashMap::new();
+    };
+    settings
+        .into_iter()
+        .filter_map(|(key, value)| Some((key, serde_json::from_value(value).ok()?)))
+        .collect()
+}
+
+/// The setting `key` taken from [`user_settings`]' map, parsed, with when it
+/// was written.
+fn parse_setting<T>(
+    settings: &mut HashMap<String, (i64, String)>,
+    key: &str,
+    parse: impl FnOnce(&str) -> T,
+) -> Option<(i64, T)> {
+    let (updated, json) = settings.remove(key)?;
+    Some((updated, parse(&json)))
 }
 
 fn lenient_list<T: DeserializeOwned>(
@@ -778,23 +803,6 @@ fn lenient_list<T: DeserializeOwned>(
             }
         })
         .collect()
-}
-
-/// Server order from the `ordering` user setting.
-///
-/// User settings are `{key: [updated_at, "<json string>"]}` (`UserSettings`
-/// in `revolt-models`). The web client stores `{"servers": [ids…]}` under
-/// `ordering`. Anything unexpected yields an empty list (Ready order is used).
-fn server_order_from_settings(settings: Value) -> Vec<String> {
-    let parsed: Result<HashMap<String, (i64, String)>, _> = serde_json::from_value(settings);
-    let Some((_, ordering)) = parsed.ok().and_then(|mut s| s.remove("ordering")) else {
-        return Vec::new();
-    };
-    serde_json::from_str::<Value>(&ordering)
-        .ok()
-        .and_then(|v| v.get("servers").cloned())
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default()
 }
 
 /// `{"type":"Authenticate","token":…}`, sent right after connecting.
@@ -1312,6 +1320,8 @@ mod tests {
         );
         let ServerEvent::UserSettingsUpdate {
             notifications: Some((updated, settings)),
+            ordering: None,
+            server_folders: None,
         } = &events[0]
         else {
             panic!("expected notifications, got {:?}", events[0]);
@@ -1321,9 +1331,38 @@ mod tests {
         assert!(matches!(
             events[1],
             ServerEvent::UserSettingsUpdate {
-                notifications: None
+                notifications: None,
+                ordering: Some(_),
+                server_folders: None,
             }
         ));
+    }
+
+    #[test]
+    fn settings_updates_carry_the_rails_order_and_folders() {
+        let events = parse_frame(
+            r#"{"type":"UserSettingsUpdate","id":"u","update":{
+                "ordering":[1730000000123,"{\"servers\":[\"a\"],\"serverSidebar\":[\"folder-1\",\"b\",\"a\"]}"],
+                "server-folders":[1730000000124,"{\"folders\":[{\"id\":\"folder-1\",\"name\":\"Games\",\"servers\":[\"b\"]}]}"],
+                "release-notes":[1,"{}"]
+            }}"#,
+        );
+        let [
+            ServerEvent::UserSettingsUpdate {
+                notifications: None,
+                ordering: Some((ordering_updated, ordering)),
+                server_folders: Some((folders_updated, folders)),
+            },
+        ] = events.as_slice()
+        else {
+            panic!("expected the order and folders, got {events:?}");
+        };
+        assert_eq!(*ordering_updated, 1730000000123, "the timestamps are kept");
+        assert_eq!(*folders_updated, 1730000000124);
+        assert_eq!(ordering.servers(), ["a"]);
+        assert_eq!(ordering.sidebar(), ["folder-1", "b", "a"]);
+        assert_eq!(folders.folders[0].name, "Games");
+        assert_eq!(folders.folders[0].servers, ["b"]);
     }
 
     #[test]
@@ -1340,11 +1379,21 @@ mod tests {
     }
 
     #[test]
-    fn server_order_comes_from_the_ordering_setting() {
-        let settings = json!({ "ordering": [1730000000000i64, r#"{"servers":["b","a"]}"#] });
-        assert_eq!(server_order_from_settings(settings), vec!["b", "a"]);
-        assert!(server_order_from_settings(json!({})).is_empty());
-        assert!(server_order_from_settings(json!({ "ordering": [1, "not json"] })).is_empty());
+    fn the_server_order_comes_from_the_ordering_setting() {
+        let mut settings = user_settings(Some(json!({
+            "ordering": [1730000000000i64, r#"{"servers":["b","a"]}"#],
+            "notifications": "not a setting"
+        })));
+        let (updated, ordering) =
+            parse_setting(&mut settings, rail::ORDERING_KEY, Ordering::parse).unwrap();
+        assert_eq!(updated, 1730000000000);
+        assert_eq!(ordering.sidebar(), ["b", "a"]);
+        assert!(settings.is_empty(), "a malformed key is left out");
+        assert!(user_settings(Some(json!({}))).is_empty());
+        let mut garbled = user_settings(Some(json!({ "ordering": [1, "not json"] })));
+        let (_, ordering) =
+            parse_setting(&mut garbled, rail::ORDERING_KEY, Ordering::parse).unwrap();
+        assert!(ordering.sidebar().is_empty());
     }
 
     #[test]

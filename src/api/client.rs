@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use reqwest::{Client, Method};
@@ -723,6 +724,22 @@ impl StoatClient {
             },
         };
         self.edit_user(&edit).await
+    }
+
+    /// `POST /sync/settings/fetch`: synced user settings by key, each as
+    /// `(written at, "<JSON string>")` (ms since the epoch). Keys the user
+    /// has never written are left out. Any key can be fetched, unlike in
+    /// `Ready` (where `server-folders`' hyphen can't be asked for).
+    pub async fn fetch_settings(
+        &self,
+        keys: &[&str],
+    ) -> Result<HashMap<String, (i64, String)>, ApiError> {
+        #[derive(Serialize)]
+        struct Fetch<'a> {
+            keys: &'a [&'a str],
+        }
+        self.send(Method::POST, "/sync/settings/fetch", Some(&Fetch { keys }))
+            .await
     }
 
     /// `POST /sync/settings/set?timestamp=…`: write synced user settings,

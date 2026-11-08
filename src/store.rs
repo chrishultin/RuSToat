@@ -19,6 +19,7 @@ use crate::embed::EmbedView;
 use crate::invites::InviteHosts;
 use crate::media::MediaUrls;
 use crate::notify::{self, NotificationSettings};
+use crate::rail::{self, Ordering, RailEntry, ServerFolders};
 use crate::slowmode::Cooldowns;
 
 /// One entry in the channel list.
@@ -532,8 +533,18 @@ pub struct ChatStore {
     me: String,
     users: HashMap<String, User>,
     servers: HashMap<String, Server>,
-    /// Display order: the user's saved ordering, then any others in `Ready` order.
-    server_order: Vec<String>,
+    /// The user's servers in `Ready` order, then any joined since. The
+    /// rail is in `ordering`'s order; this places the servers it doesn't.
+    ready_order: Vec<String>,
+    /// The rail's order (the `ordering` user setting).
+    ordering: Ordering,
+    /// When the copy of `ordering` held was written (ms since the epoch).
+    ordering_updated: i64,
+    /// The rail's folders (the `server-folders` user setting). `Ready`
+    /// doesn't bring it, so it's kept across one, until fetched again.
+    server_folders: ServerFolders,
+    /// When the copy of `server_folders` held was written.
+    server_folders_updated: i64,
     channels: HashMap<String, Channel>,
     /// Keyed by (server, user).
     members: HashMap<(String, String), Member>,
@@ -647,13 +658,8 @@ impl ChatStore {
             }
         }
 
-        let mut seen = HashSet::new();
-        self.server_order = ready
-            .server_order
-            .into_iter()
-            .chain(ready_order)
-            .filter(|id| self.servers.contains_key(id) && seen.insert(id.clone()))
-            .collect();
+        self.ready_order = ready_order;
+        (self.ordering_updated, self.ordering) = ready.ordering.unwrap_or_default();
     }
 
     /// Store a freshly fetched page of the latest messages for `channel`,
@@ -1410,6 +1416,63 @@ impl ChatStore {
             Some(server) => self.notifications.server_level(server),
             None => notify::Level::All,
         }
+    }
+
+    /// The `ordering` user setting held.
+    pub fn ordering(&self) -> &Ordering {
+        &self.ordering
+    }
+
+    /// When the `ordering` held was written (ms since the epoch).
+    pub fn ordering_updated(&self) -> i64 {
+        self.ordering_updated
+    }
+
+    /// The `server-folders` user setting held.
+    pub fn server_folders(&self) -> &ServerFolders {
+        &self.server_folders
+    }
+
+    /// When the `server-folders` held was written (ms since the epoch).
+    pub fn server_folders_updated(&self) -> i64 {
+        self.server_folders_updated
+    }
+
+    /// A new `ordering`, written at `updated` (ms since the epoch): fetched
+    /// after `Ready`, from another client or session
+    /// (`UserSettingsUpdate`), or a change made here. A copy older than the
+    /// one held is ignored, as for [`Self::set_notification_settings`].
+    /// Returns true if the rail's order changed.
+    pub fn set_ordering(&mut self, updated: i64, ordering: Ordering) -> bool {
+        take_newer(
+            (&mut self.ordering_updated, &mut self.ordering),
+            updated,
+            ordering,
+        )
+    }
+
+    /// A new `server-folders`, written at `updated`, as
+    /// [`Self::set_ordering`]. Returns true if the folders changed.
+    pub fn set_server_folders(&mut self, updated: i64, folders: ServerFolders) -> bool {
+        take_newer(
+            (&mut self.server_folders_updated, &mut self.server_folders),
+            updated,
+            folders,
+        )
+    }
+
+    /// Put back the `ordering` held before a change Stoat didn't take,
+    /// whatever its time.
+    pub fn restore_ordering(&mut self, updated: i64, ordering: Ordering) {
+        self.ordering_updated = updated;
+        self.ordering = ordering;
+    }
+
+    /// Put back the `server-folders` held before a change Stoat didn't
+    /// take, whatever its time.
+    pub fn restore_server_folders(&mut self, updated: i64, folders: ServerFolders) {
+        self.server_folders_updated = updated;
+        self.server_folders = folders;
     }
 
     /// Put back notification settings held before a change Stoat didn't
@@ -3055,7 +3118,7 @@ impl ChatStore {
         let id = server.id.clone();
         let new = self.servers.insert(id.clone(), server).is_none();
         if new {
-            self.server_order.push(id);
+            self.ready_order.push(id);
         }
         for channel in channels {
             self.add_channel(channel);
@@ -3073,7 +3136,7 @@ impl ChatStore {
         let Some(server) = self.servers.remove(id) else {
             return Vec::new();
         };
-        self.server_order.retain(|s| s != id);
+        self.ready_order.retain(|s| s != id);
         // Its listed channels, and any others that point at it.
         let strays: Vec<String> = self
             .channels
@@ -3315,30 +3378,41 @@ impl ChatStore {
         }
     }
 
-    /// Servers for the rail, in the user's order.
+    /// The rail's servers and folders, in the user's order (as the web
+    /// client arranges them: see [`rail::entries`]).
+    pub fn rail_entries(&self) -> Vec<RailEntry> {
+        rail::entries(&self.ordering, &self.server_folders, &self.ready_order)
+    }
+
+    /// Servers for the rail, in the user's order, those in folders in
+    /// their folder's place.
     pub fn servers(&self) -> Vec<ServerEntry> {
-        self.server_order
+        self.rail_entries()
             .iter()
-            .filter_map(|id| self.servers.get(id))
-            .map(|s| {
-                let visible = s.channels.iter().filter(|id| {
-                    matches!(self.channels.get(*id), Some(Channel::TextChannel { .. }))
-                        && self.shows_channel(id)
-                });
-                let (unread, mentions) = visible.fold((false, 0), |(unread, mentions), id| {
-                    let shows_dot = self.is_unread(id) && !self.is_muted(id);
-                    (unread || shows_dot, mentions + self.mention_count(id))
-                });
-                ServerEntry {
-                    id: s.id.clone(),
-                    name: s.name.clone(),
-                    initials: initials(&s.name),
-                    icon: s.icon.clone(),
-                    unread,
-                    mentions,
-                }
-            })
+            .flat_map(RailEntry::servers)
+            .filter_map(|id| self.server_entry(id))
             .collect()
+    }
+
+    /// One server's rail icon: its name, icon and unread state.
+    pub fn server_entry(&self, id: &str) -> Option<ServerEntry> {
+        let s = self.servers.get(id)?;
+        let visible = s.channels.iter().filter(|id| {
+            matches!(self.channels.get(*id), Some(Channel::TextChannel { .. }))
+                && self.shows_channel(id)
+        });
+        let (unread, mentions) = visible.fold((false, 0), |(unread, mentions), id| {
+            let shows_dot = self.is_unread(id) && !self.is_muted(id);
+            (unread || shows_dot, mentions + self.mention_count(id))
+        });
+        Some(ServerEntry {
+            id: s.id.clone(),
+            name: s.name.clone(),
+            initials: initials(&s.name),
+            icon: s.icon.clone(),
+            unread,
+            mentions,
+        })
     }
 
     /// Whether the channel list shows `channel`. Server channels the user
@@ -3848,6 +3922,28 @@ fn set_some<T>(field: &mut Option<T>, new: Option<T>) {
     if new.is_some() {
         *field = new;
     }
+}
+
+/// Take a synced setting's `value`, written at `updated`, into `held` (its
+/// time and value) unless what's held is newer. If it's older but the same
+/// (the echo of a change made here, its time clamped by Stoat because this
+/// Mac's clock is ahead), the held time moves back to it, as for the
+/// notification settings. Returns true if the value changed: the echo of
+/// a change made here changes nothing.
+fn take_newer<T: PartialEq>(held: (&mut i64, &mut T), updated: i64, value: T) -> bool {
+    let (held_updated, held) = held;
+    if updated < *held_updated {
+        if value == *held {
+            *held_updated = updated;
+        }
+        return false;
+    }
+    *held_updated = updated;
+    if value == *held {
+        return false;
+    }
+    *held = value;
+    true
 }
 
 fn last_message_id(channel: &Channel) -> Option<&str> {

@@ -7,6 +7,7 @@ use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::api::models::{
     BulkMessageResponse, CreateServerLegacyResponse, InviteJoinResponse, Member,
 };
+use stoat_gpui::rail::{Ordering, RailEntry, ServerFolders};
 use stoat_gpui::store::ChatStore;
 
 const VIEW: u64 = ChannelPermission::ViewChannel as u64;
@@ -283,4 +284,131 @@ fn ownership_follows_a_server_update() {
         json!({ "type": "ServerUpdate", "id": "srv-beta", "data": { "owner": "u-ada" } }),
     );
     assert!(!store.is_owner("srv-beta"));
+}
+
+/// The fixture's `ordering` was written at this time.
+const READY_ORDERING: i64 = 1730000000000;
+
+fn rail(store: &ChatStore) -> Vec<String> {
+    store.servers().into_iter().map(|s| s.id).collect()
+}
+
+fn ordering(value: Value) -> Ordering {
+    Ordering::parse(&value.to_string())
+}
+
+fn folders(value: Value) -> ServerFolders {
+    ServerFolders::parse(&value.to_string())
+}
+
+#[test]
+fn the_rail_follows_the_sidebar_over_the_legacy_order() {
+    let mut store = store();
+    assert_eq!(rail(&store), ["srv-beta", "srv-alpha"], "Ready's `servers`");
+    // The web client's newer order, fetched after Ready.
+    let newer = ordering(json!({
+        "servers": ["srv-beta", "srv-alpha"],
+        "serverSidebar": ["srv-alpha", "srv-beta"]
+    }));
+    assert!(store.set_ordering(READY_ORDERING + 1, newer));
+    assert_eq!(rail(&store), ["srv-alpha", "srv-beta"]);
+    assert_eq!(store.ordering_updated(), READY_ORDERING + 1);
+}
+
+#[test]
+fn servers_in_a_folder_are_drawn_in_its_place() {
+    let mut store = store();
+    add(&mut store, server_create("New Place"));
+    store.set_ordering(
+        READY_ORDERING + 1,
+        ordering(json!({ "servers": [], "serverSidebar": ["srv-beta", "folder-1", "srv-new"] })),
+    );
+    assert!(store.set_server_folders(
+        5,
+        folders(json!({ "folders": [
+            { "id": "folder-1", "name": "Pair", "servers": ["srv-new", "srv-alpha"] }
+        ] }))
+    ));
+    let entries = store.rail_entries();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0], RailEntry::Server("srv-beta".into()));
+    let RailEntry::Folder { folder, servers } = &entries[1] else {
+        panic!("a folder, got {entries:?}");
+    };
+    assert_eq!(folder.name, "Pair");
+    assert_eq!(servers, &["srv-new", "srv-alpha"]);
+    // For now the rail draws them as plain servers.
+    assert_eq!(rail(&store), ["srv-beta", "srv-new", "srv-alpha"]);
+}
+
+#[test]
+fn a_joined_server_goes_last_outside_any_folder() {
+    let mut store = store();
+    store.set_ordering(
+        READY_ORDERING + 1,
+        ordering(json!({ "servers": [], "serverSidebar": ["folder-1", "srv-beta", "srv-alpha"] })),
+    );
+    store.set_server_folders(
+        5,
+        folders(json!({ "folders": [{ "id": "folder-1", "servers": ["srv-beta", "srv-alpha"] }] })),
+    );
+    add(&mut store, server_create("New Place"));
+    let entries = store.rail_entries();
+    assert_eq!(entries.last(), Some(&RailEntry::Server("srv-new".into())));
+    assert_eq!(entries.len(), 2);
+    // Nothing is written for it: the settings held are as they were.
+    assert_eq!(store.ordering_updated(), READY_ORDERING + 1);
+    assert_eq!(store.server_folders_updated(), 5);
+}
+
+#[test]
+fn older_copies_of_the_order_and_folders_are_ignored() {
+    let mut store = store();
+    let reversed = || ordering(json!({ "servers": ["srv-alpha", "srv-beta"] }));
+    assert!(!store.set_ordering(READY_ORDERING - 1, reversed()));
+    assert_eq!(rail(&store), ["srv-beta", "srv-alpha"]);
+    assert_eq!(store.ordering_updated(), READY_ORDERING);
+
+    let one = || folders(json!({ "folders": [{ "id": "folder-1", "servers": ["srv-alpha"] }] }));
+    assert!(store.set_server_folders(10, one()));
+    assert!(!store.set_server_folders(9, ServerFolders::default()));
+    assert_eq!(store.server_folders(), &one());
+    // The echo of what's held, at the same time, changes nothing.
+    assert!(!store.set_server_folders(10, one()));
+    // The same copy stamped earlier (Stoat clamping a clock that runs
+    // ahead) moves the held time back, so other clients' changes apply.
+    assert!(!store.set_server_folders(8, one()));
+    assert_eq!(store.server_folders_updated(), 8);
+    assert!(store.set_server_folders(9, ServerFolders::default()));
+}
+
+#[test]
+fn a_new_ready_brings_the_order_and_keeps_the_folders() {
+    let mut store = store();
+    let one = folders(json!({ "folders": [{ "id": "folder-1", "servers": ["srv-alpha"] }] }));
+    store.set_server_folders(10, one.clone());
+    store.set_ordering(
+        READY_ORDERING + 5,
+        ordering(json!({ "servers": ["srv-alpha"] })),
+    );
+    let Some(ServerEvent::Ready(ready)) = parse_frame(&fixture("ready.json")).pop() else {
+        panic!("ready fixture");
+    };
+    store.apply_ready(*ready);
+    assert_eq!(store.ordering_updated(), READY_ORDERING);
+    assert_eq!(store.ordering().servers(), ["srv-beta", "srv-alpha"]);
+    // `Ready` can't carry `server-folders`; they're fetched after it.
+    assert_eq!(store.server_folders(), &one);
+    assert_eq!(store.server_folders_updated(), 10);
+}
+
+#[test]
+fn a_folder_whose_servers_are_all_gone_is_not_drawn() {
+    let mut store = store();
+    store.set_server_folders(
+        5,
+        folders(json!({ "folders": [{ "id": "folder-1", "servers": ["srv-alpha"] }] })),
+    );
+    store.remove_server("srv-alpha");
+    assert_eq!(store.rail_entries(), [RailEntry::Server("srv-beta".into())]);
 }

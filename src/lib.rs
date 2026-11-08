@@ -31,6 +31,7 @@ pub mod places;
 pub mod prefs;
 pub mod profile;
 pub mod profile_edit;
+pub mod rail;
 pub mod runtime;
 pub mod safety;
 pub mod search;
