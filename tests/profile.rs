@@ -48,6 +48,11 @@ fn role(id: &str, name: &str, rank: i64, colour: Option<&str>) -> Value {
 }
 
 fn store() -> ChatStore {
+    store_owned_by("u-me")
+}
+
+/// [`store`], with its server owned by `owner`.
+fn store_owned_by(owner: &str) -> ChatStore {
     let ready = json!({
         "type": "Ready",
         "users": [
@@ -63,7 +68,7 @@ fn store() -> ChatStore {
             user("u-closed", json!({}))
         ],
         "servers": [{
-            "_id": "srv", "owner": "u-me", "name": "Test Server", "channels": ["ch"],
+            "_id": "srv", "owner": owner, "name": "Test Server", "channels": ["ch"],
             "default_permissions": *DEFAULT_PERMISSION_SERVER as i64,
             "approximate_member_count": 4,
             "roles": {
@@ -239,6 +244,9 @@ mod menu {
                 CreateGroupWith,
                 Mention,
                 Separator,
+                Kick,
+                Ban,
+                Separator,
                 Relationship(RemoveFriend),
                 Relationship(Block),
                 Separator,
@@ -292,6 +300,9 @@ mod menu {
             [
                 Profile,
                 Mention,
+                Separator,
+                Kick,
+                Ban,
                 Separator,
                 Relationship(AddFriend),
                 Separator,
@@ -375,6 +386,34 @@ mod menu {
             assert!(!menu.contains(&RemoveFromGroup), "{user}");
             assert!(!menu.contains(&MakeGroupOwner), "{user}");
         }
+    }
+
+    #[test]
+    fn kick_and_ban_are_for_server_channels_with_the_permission() {
+        let store = store();
+        // The user owns the server, so may kick and ban anyone else in it.
+        for user in [ADA, "u-plain", "u-bot"] {
+            let menu = user_menu(&store, user, Some("ch"));
+            assert!(menu.contains(&Kick) && menu.contains(&Ban), "{user}");
+        }
+        // Not themselves, nor outside a server.
+        assert!(!user_menu(&store, "u-me", Some("ch")).contains(&Kick));
+        for channel in [Some("dm"), Some("grp"), None] {
+            let menu = user_menu(&store, ADA, channel);
+            assert!(!menu.contains(&Kick) && !menu.contains(&Ban), "{channel:?}");
+        }
+        // A plain member has neither permission, and nobody acts on the owner.
+        let store = store_owned_by("u-plain");
+        for user in [ADA, "u-plain", "u-bob"] {
+            let menu = user_menu(&store, user, Some("ch"));
+            assert!(!menu.contains(&Kick) && !menu.contains(&Ban), "{user}");
+        }
+    }
+
+    #[test]
+    fn only_kick_and_ban_are_destructive() {
+        assert!(Kick.is_destructive() && Ban.is_destructive());
+        assert!(!Profile.is_destructive() && !Relationship(Block).is_destructive());
     }
 
     /// `u-plain`, related to the user by `relationship`.

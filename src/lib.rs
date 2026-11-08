@@ -23,6 +23,7 @@ pub mod links;
 pub mod login_item;
 pub mod markdown;
 pub mod math;
+pub mod moderation;
 pub mod nav;
 pub mod media;
 pub mod notify;

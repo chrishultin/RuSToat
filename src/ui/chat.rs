@@ -87,6 +87,9 @@ use crate::ui::markup::{
     code_block_actions,
 };
 use crate::ui::math::MathPlugin;
+use crate::ui::moderation_dialogs::{
+    MemberActionRequest, confirm_member_action, open_ban_dialog, run_member_action,
+};
 use crate::ui::profile_card::{
     CardBio, CardContent, MUTUALS_DIALOG_WIDTH, MutualList, MutualPick, OnLink, OnMutualPick,
     OnMutuals, render_mutuals_list, render_profile_card,
@@ -5657,6 +5660,18 @@ impl ChatView {
                     self.confirm_make_owner(channel, user, window, cx);
                 }
             }
+            UserMenuItem::Kick => {
+                if let Some(channel) = channel {
+                    self.close_card(false, window, cx);
+                    self.kick(channel, user, shift, window, cx);
+                }
+            }
+            UserMenuItem::Ban => {
+                if let Some(channel) = channel {
+                    self.close_card(false, window, cx);
+                    self.open_ban(channel, user, window, cx);
+                }
+            }
             UserMenuItem::Mention => {
                 let Some(channel) = channel else {
                     return;
@@ -5678,6 +5693,74 @@ impl ChatView {
             UserMenuItem::CopyUserId => cx.write_to_clipboard(ClipboardItem::new_string(user)),
             UserMenuItem::Separator => {}
         }
+    }
+
+    /// Kick `user` from the server of `channel`: "Kick {name}?" first,
+    /// unless `confirmed` (Shift was held). `ServerMemberLeave` takes them
+    /// out of the member list; a refusal toasts.
+    fn kick(
+        &mut self,
+        channel: String,
+        user: String,
+        confirmed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(server) = self.store.channel_server(&channel).map(str::to_string) else {
+            return;
+        };
+        let server_name = self
+            .store
+            .server(&server)
+            .map_or_else(|| "the server".into(), |s| s.name.clone());
+        let name = self.store.name_in(&channel, &user);
+        let action = {
+            let client = self.client.clone();
+            Box::pin(async move { client.kick_member(&server, &user).await })
+        };
+        let failed_text = format!("Couldn't kick {name}. Try again.");
+        if confirmed {
+            run_member_action(action, failed_text, window, cx);
+            return;
+        }
+        let request = MemberActionRequest {
+            title: format!("Kick {name}?").into(),
+            detail: format!(
+                "Kick {name} from {server_name}? They can rejoin with an invite. Hold Shift \
+                 when choosing Kick to skip this."
+            )
+            .into(),
+            ok_label: "Kick",
+            failed_text,
+        };
+        confirm_member_action(request, action, window, cx);
+    }
+
+    /// Open "Ban {name}" for `user` on the server of `channel`.
+    fn open_ban(
+        &mut self,
+        channel: String,
+        user: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(server) = self.store.channel_server(&channel).map(str::to_string) else {
+            return;
+        };
+        let server_name = self
+            .store
+            .server(&server)
+            .map_or_else(|| "the server".into(), |s| s.name.clone());
+        let name = self.store.name_in(&channel, &user);
+        open_ban_dialog(
+            self.client.clone(),
+            server,
+            &server_name,
+            user,
+            &name,
+            window,
+            cx,
+        );
     }
 
     /// Close the profile card. `refocus`: give focus back to the message box
@@ -10921,22 +11004,32 @@ impl People {
                     };
                     let (view, user, channel) =
                         (people.view.clone(), user.clone(), people.channel.clone());
-                    menu.item(PopupMenuItem::new(label).icon(icon).on_click(
-                        move |event: &ClickEvent, window, cx| {
-                            let shift = event.modifiers().shift;
-                            view.update(cx, |this, cx| {
-                                this.on_user_menu(
-                                    user.clone(),
-                                    channel.clone(),
-                                    item,
-                                    shift,
-                                    window,
-                                    cx,
-                                )
-                            })
-                            .ok();
-                        },
-                    ))
+                    let entry = if item.is_destructive() {
+                        PopupMenuItem::element(move |_, cx| {
+                            let danger = cx.theme().danger;
+                            h_flex()
+                                .gap_2()
+                                .text_color(danger)
+                                .child(Icon::new(icon).text_color(danger))
+                                .child(label)
+                        })
+                    } else {
+                        PopupMenuItem::new(label).icon(icon)
+                    };
+                    menu.item(entry.on_click(move |event: &ClickEvent, window, cx| {
+                        let shift = event.modifiers().shift;
+                        view.update(cx, |this, cx| {
+                            this.on_user_menu(
+                                user.clone(),
+                                channel.clone(),
+                                item,
+                                shift,
+                                window,
+                                cx,
+                            )
+                        })
+                        .ok();
+                    }))
                 })
         }
     }
@@ -10951,6 +11044,8 @@ fn user_menu_label(item: UserMenuItem) -> Option<(&'static str, IconName)> {
         UserMenuItem::Mention => ("Mention", IconName::AtSign),
         UserMenuItem::RemoveFromGroup => ("Remove from group…", IconName::UserMinus),
         UserMenuItem::MakeGroupOwner => ("Make group owner…", IconName::Crown),
+        UserMenuItem::Kick => ("Kick…", IconName::UserX),
+        UserMenuItem::Ban => ("Ban…", IconName::Ban),
         UserMenuItem::CopyUsername => ("Copy username", IconName::Copy),
         UserMenuItem::CopyUserId => ("Copy user ID", IconName::IdCard),
         UserMenuItem::Relationship(action) => relationship_label(action),

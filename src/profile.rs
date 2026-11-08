@@ -261,12 +261,24 @@ pub enum UserMenuItem {
     /// Make them the owner of the group the menu was opened in (its owner
     /// only, after asking).
     MakeGroupOwner,
+    /// Kick them from the server the menu was opened in (after asking).
+    Kick,
+    /// Ban them from the server the menu was opened in (a dialog asks for
+    /// a reason and how much of their history goes).
+    Ban,
     /// Change how the user relates to them (friend requests, blocks).
     Relationship(RelationshipAction),
     Separator,
     /// Copy `username#discriminator`.
     CopyUsername,
     CopyUserId,
+}
+
+impl UserMenuItem {
+    /// Whether it's drawn as destructive (in the danger colour).
+    pub fn is_destructive(self) -> bool {
+        matches!(self, Self::Kick | Self::Ban)
+    }
 }
 
 /// A change to how the user relates to someone.
@@ -328,12 +340,14 @@ fn standing_actions(store: &ChatStore, user: &str) -> Vec<RelationshipAction> {
 
 /// The menu for `user`, as seen from `channel`, in the web client's order:
 /// Profile, Message, Create group with (RuSToat's own, for friends),
-/// Mention; Remove from group and Make group owner; the friend requests;
-/// Remove friend and Block or Unblock; then the copy items. Message
-/// follows [`can_message`]; Mention is only for others, in server channels
-/// and groups (where the message box can mention them). Remove from group
-/// and Make group owner are for the owner of the group `channel`, on its
-/// other members. Groups are split by separators.
+/// Mention; Remove from group and Make group owner; Kick and Ban; the
+/// friend requests; Remove friend and Block or Unblock; then the copy
+/// items. Message follows [`can_message`]; Mention is only for others, in
+/// server channels and groups (where the message box can mention them).
+/// Remove from group and Make group owner are for the owner of the group
+/// `channel`, on its other members. Kick and Ban are for server channels,
+/// as [`crate::permissions::moderation`] allows. Groups are split by
+/// separators.
 pub fn user_menu(store: &ChatStore, user: &str, channel: Option<&str>) -> Vec<UserMenuItem> {
     use UserMenuItem::*;
     let me = user == store.me();
@@ -362,6 +376,16 @@ pub fn user_menu(store: &ChatStore, user: &str, channel: Option<&str>) -> Vec<Us
     {
         membership.extend([RemoveFromGroup, MakeGroupOwner]);
     }
+    let mut moderation = Vec::new();
+    if let Some(server) = channel.and_then(|channel| store.channel_server(channel)) {
+        let allowed = crate::permissions::moderation(store, server, user);
+        if allowed.kick {
+            moderation.push(Kick);
+        }
+        if allowed.ban {
+            moderation.push(Ban);
+        }
+    }
     let requests = friend_buttons(store, user)
         .into_iter()
         .map(Relationship)
@@ -373,6 +397,7 @@ pub fn user_menu(store: &ChatStore, user: &str, channel: Option<&str>) -> Vec<Us
     let groups = [
         people,
         membership,
+        moderation,
         requests,
         standing,
         vec![CopyUsername, CopyUserId],

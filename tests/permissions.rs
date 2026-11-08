@@ -10,7 +10,7 @@ use stoat_gpui::permissions::{
     can_add_to_group, can_bypass_slowmode, can_change_avatar, can_change_nickname, can_connect,
     can_invite, can_listen, can_manage_channel, can_manage_channels, can_mention_everyone,
     can_mention_roles, can_pin, can_send_embeds, can_speak, can_view, channel_permissions, has,
-    server_permissions,
+    member_rank, moderation, server_permissions,
 };
 use stoat_gpui::store::ChatStore;
 
@@ -738,4 +738,149 @@ fn a_channel_override_takes_away_each_voice_permission() {
 
     assert!(can_connect(&store, "u-me", "ch-no-listen"));
     assert!(!can_listen(&store, "u-me", "ch-no-listen"));
+}
+
+/// Every moderation permission.
+const MODERATE: u64 = ChannelPermission::KickMembers as u64
+    | ChannelPermission::BanMembers as u64
+    | ChannelPermission::TimeoutMembers as u64
+    | ChannelPermission::ManageNicknames as u64
+    | ChannelPermission::RemoveAvatars as u64
+    | ChannelPermission::AssignRoles as u64
+    | ChannelPermission::MuteMembers as u64
+    | ChannelPermission::DeafenMembers as u64
+    | ChannelPermission::MoveMembers as u64;
+const KICK: u64 = ChannelPermission::KickMembers as u64;
+const BAN: u64 = ChannelPermission::BanMembers as u64;
+const TIMEOUT: u64 = ChannelPermission::TimeoutMembers as u64;
+
+/// A server where the user is `me`, with `boss` (rank 0, every moderation
+/// permission), `kicker` (rank 1, Kick and Ban), `peer` (rank 1 too,
+/// nothing extra), `timer` (rank 3, Timeout Members) and `low` (rank 5,
+/// nothing extra). `u-owner` owns it with no roles.
+fn moderation_store(me: &str) -> ChatStore {
+    let users: Vec<Value> = [
+        "u-owner", "u-boss", "u-kicker", "u-peer", "u-timer", "u-low", "u-plain", "u-gone",
+    ]
+    .map(|id| user(id, json!({})))
+    .into();
+    let ready = json!({
+        "type": "Ready",
+        "users": users,
+        "servers": [{
+            "_id": "srv", "owner": "u-owner", "name": "Test", "channels": [], "approximate_member_count": 7,
+            "default_permissions": *DEFAULT_PERMISSION_SERVER as i64,
+            "roles": {
+                "boss": { "_id": "boss", "name": "Boss", "rank": 0, "permissions": { "a": MODERATE, "d": 0 } },
+                "kicker": { "_id": "kicker", "name": "Kicker", "rank": 1, "permissions": { "a": KICK | BAN, "d": 0 } },
+                "peer": { "_id": "peer", "name": "Peer", "rank": 1, "permissions": { "a": 0, "d": 0 } },
+                "timer": { "_id": "timer", "name": "Timer", "rank": 3, "permissions": { "a": TIMEOUT, "d": 0 } },
+                "low": { "_id": "low", "name": "Low", "rank": 5, "permissions": { "a": 0, "d": 0 } }
+            }
+        }],
+        "channels": [],
+        "members": [
+            member("u-owner", &[], json!({})),
+            member("u-boss", &["boss", "low"], json!({})),
+            member("u-kicker", &["kicker"], json!({})),
+            member("u-peer", &["peer"], json!({})),
+            member("u-timer", &["timer"], json!({})),
+            member("u-low", &["low"], json!({})),
+            member("u-plain", &[], json!({})),
+        ],
+    });
+    let Some(ServerEvent::Ready(ready)) = parse_frame(&ready.to_string()).pop() else {
+        panic!("ready");
+    };
+    let mut store = ChatStore::new(me);
+    store.apply_ready(*ready);
+    store
+}
+
+#[test]
+fn a_members_rank_is_their_best_role() {
+    let store = moderation_store("u-boss");
+    assert_eq!(member_rank(&store, "srv", "u-boss"), 0);
+    assert_eq!(member_rank(&store, "srv", "u-kicker"), 1);
+    // No roles, or no known membership: ranked lowest.
+    assert_eq!(member_rank(&store, "srv", "u-plain"), i64::MAX);
+    assert_eq!(member_rank(&store, "srv", "u-gone"), i64::MAX);
+    assert_eq!(member_rank(&store, "srv", "u-owner"), i64::MAX);
+}
+
+#[test]
+fn a_moderator_can_kick_and_ban_those_ranked_below() {
+    let store = moderation_store("u-kicker");
+    for target in ["u-timer", "u-low", "u-plain"] {
+        let allowed = moderation(&store, "srv", target);
+        assert!(allowed.kick && allowed.ban, "{target}");
+        // Nothing they lack the permission for.
+        assert!(
+            !allowed.nickname && !allowed.roles && !allowed.mute,
+            "{target}"
+        );
+    }
+}
+
+#[test]
+fn nobody_acts_on_an_equal_or_higher_rank() {
+    let store = moderation_store("u-kicker");
+    for target in ["u-peer", "u-boss"] {
+        assert_eq!(
+            moderation(&store, "srv", target),
+            Default::default(),
+            "{target}"
+        );
+    }
+}
+
+#[test]
+fn the_owner_can_act_on_anyone_but_themselves() {
+    let store = moderation_store("u-owner");
+    for target in ["u-boss", "u-kicker", "u-plain", "u-gone"] {
+        let allowed = moderation(&store, "srv", target);
+        assert!(allowed.kick && allowed.ban && allowed.roles, "{target}");
+        assert!(
+            allowed.mute && allowed.deafen && allowed.move_members,
+            "{target}"
+        );
+    }
+    assert_eq!(moderation(&store, "srv", "u-owner"), Default::default());
+}
+
+#[test]
+fn nobody_acts_on_themselves_or_the_owner() {
+    let store = moderation_store("u-boss");
+    assert_eq!(moderation(&store, "srv", "u-boss"), Default::default());
+    assert_eq!(moderation(&store, "srv", "u-owner"), Default::default());
+}
+
+#[test]
+fn every_action_follows_its_permission() {
+    let store = moderation_store("u-boss");
+    let allowed = moderation(&store, "srv", "u-low");
+    assert!(allowed.kick && allowed.ban && allowed.timeout);
+    assert!(allowed.nickname && allowed.remove_avatar && allowed.roles);
+    assert!(allowed.mute && allowed.deafen && allowed.move_members);
+    // Without the permissions, nothing, whatever the rank.
+    let store = moderation_store("u-peer");
+    assert_eq!(moderation(&store, "srv", "u-low"), Default::default());
+}
+
+#[test]
+fn someone_who_can_time_out_cannot_be_timed_out() {
+    let store = moderation_store("u-boss");
+    let allowed = moderation(&store, "srv", "u-timer");
+    assert!(!allowed.timeout);
+    assert!(allowed.kick);
+    assert!(moderation(&store, "srv", "u-low").timeout);
+}
+
+#[test]
+fn an_unknown_membership_is_left_to_stoat() {
+    let store = moderation_store("u-kicker");
+    let allowed = moderation(&store, "srv", "u-gone");
+    assert!(allowed.kick && allowed.ban);
+    // An unknown server gives nothing.
+    assert_eq!(moderation(&store, "nowhere", "u-low"), Default::default());
 }

@@ -212,6 +212,88 @@ pub fn can_send_embeds(store: &ChatStore, user: &str, channel: &str) -> bool {
     )
 }
 
+/// `user`'s rank on `server`: their best (lowest-numbered) role's, or
+/// `i64::MAX` with no roles or an unknown membership, as Stoat's
+/// `get_ranking`. A smaller number outranks a bigger one.
+pub fn member_rank(store: &ChatStore, server: &str, user: &str) -> i64 {
+    let (Some(server), Some(member)) = (store.server(server), store.member(server, user)) else {
+        return i64::MAX;
+    };
+    member
+        .roles
+        .iter()
+        .filter_map(|id| server.roles.get(id))
+        .map(|role| role.rank)
+        .min()
+        .unwrap_or(i64::MAX)
+}
+
+/// The rank the user acts with on `server`: the owner outranks everyone
+/// (Stoat never asks for their membership, so they count as `i64::MIN`),
+/// anyone else has their [`member_rank`].
+pub fn acting_rank(store: &ChatStore, server: &str) -> i64 {
+    let me = store.me();
+    if store
+        .server(server)
+        .is_some_and(|server| server.owner == me)
+    {
+        i64::MIN
+    } else {
+        member_rank(store, server, me)
+    }
+}
+
+/// What the user may do to someone on a server, as Stoat would allow it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Moderation {
+    pub kick: bool,
+    pub ban: bool,
+    /// Time out, or end a timeout.
+    pub timeout: bool,
+    pub nickname: bool,
+    pub remove_avatar: bool,
+    pub roles: bool,
+    /// Server mute (`can_publish`).
+    pub mute: bool,
+    /// Server deafen (`can_receive`).
+    pub deafen: bool,
+    /// Move to another voice channel, or disconnect from one.
+    pub move_members: bool,
+}
+
+/// What the user may do to `target` on `server`. Nothing to themselves, to
+/// the owner, or to anyone who ranks at or above them (the owner outranks
+/// everyone); otherwise each action follows its permission. Timing out
+/// also needs the target not to have Timeout Members. A target whose
+/// membership isn't known counts as ranked lowest with no permissions, and
+/// Stoat has the last word.
+pub fn moderation(store: &ChatStore, server: &str, target: &str) -> Moderation {
+    let me = store.me();
+    let Some(owner) = store.server(server).map(|server| server.owner.as_str()) else {
+        return Moderation::default();
+    };
+    if target == me || target == owner {
+        return Moderation::default();
+    }
+    if member_rank(store, server, target) <= acting_rank(store, server) {
+        return Moderation::default();
+    }
+    let ours = server_permissions(store, me, server);
+    let theirs = server_permissions(store, target, server);
+    Moderation {
+        kick: has(ours, ChannelPermission::KickMembers),
+        ban: has(ours, ChannelPermission::BanMembers),
+        timeout: has(ours, ChannelPermission::TimeoutMembers)
+            && !has(theirs, ChannelPermission::TimeoutMembers),
+        nickname: has(ours, ChannelPermission::ManageNicknames),
+        remove_avatar: has(ours, ChannelPermission::RemoveAvatars),
+        roles: has(ours, ChannelPermission::AssignRoles),
+        mute: has(ours, ChannelPermission::MuteMembers),
+        deafen: has(ours, ChannelPermission::DeafenMembers),
+        move_members: has(ours, ChannelPermission::MoveMembers),
+    }
+}
+
 fn in_server(store: &ChatStore, channel: &str) -> bool {
     matches!(store.channel(channel), Some(Channel::TextChannel { .. }))
 }
@@ -411,7 +493,7 @@ impl PermissionQuery for StoreQuery<'_> {
 }
 
 /// Whether `member`'s timeout is still running.
-fn is_timed_out(member: &Member) -> bool {
+pub fn is_timed_out(member: &Member) -> bool {
     let Some(until) = &member.timeout else {
         return false;
     };

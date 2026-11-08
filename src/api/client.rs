@@ -4,12 +4,12 @@ use std::time::Duration;
 use reqwest::{Client, Method};
 use revolt_models::v0::{
     AccountInfo, AllMemberResponse, BulkMessageResponse, Category, Channel,
-    CreateServerLegacyResponse, CreateVoiceUserResponse, DataChangeEmail, DataChangePassword,
-    DataEditMessage, DataEditSession, DataEditUser, DataLogin, DataMemberEdit, DataMessageSearch,
-    DataMessageSend, DataSendFriendRequest, Emoji, FieldsUser, Invite, InviteJoinResponse,
-    InviteResponse, MFAResponse, MFATicket, Member, Message, MessageSort, MultiFactorStatus,
-    MutualResponse, OptionsQueryMessages, Presence, ReplyIntent, ResponseLogin, ResponseTotpSecret,
-    SessionInfo, User, UserProfile, UserStatus,
+    CreateServerLegacyResponse, CreateVoiceUserResponse, DataBanCreate, DataChangeEmail,
+    DataChangePassword, DataEditMessage, DataEditSession, DataEditUser, DataLogin, DataMemberEdit,
+    DataMessageSearch, DataMessageSend, DataSendFriendRequest, Emoji, FieldsUser, Invite,
+    InviteJoinResponse, InviteResponse, MFAResponse, MFATicket, Member, Message, MessageSort,
+    MultiFactorStatus, MutualResponse, OptionsQueryMessages, Presence, ReplyIntent, ResponseLogin,
+    ResponseTotpSecret, ServerBan, SessionInfo, User, UserProfile, UserStatus,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -753,6 +753,31 @@ impl StoatClient {
         let body = edit_body(serde_json::to_value(edit).expect("member edit serialises"));
         let path = format!("/servers/{server}/members/{user}");
         self.send(Method::PATCH, &path, Some(&body)).await
+    }
+
+    /// `DELETE /servers/{server}/members/{user}`: kick someone (Kick
+    /// Members, on a member who ranks below the user, not the owner).
+    /// `ServerMemberLeave` follows.
+    pub async fn kick_member(&self, server: &str, user: &str) -> Result<(), ApiError> {
+        let path = format!("/servers/{server}/members/{user}");
+        self.send_raw(Method::DELETE, &path, None::<&()>)
+            .await
+            .map(|_| ())
+    }
+
+    /// `PUT /servers/{server}/bans/{user}`: ban someone (Ban Members, with
+    /// the same rules as a kick), member or not, optionally deleting their
+    /// recent messages. Only what's set is sent. `ServerMemberLeave`
+    /// follows for a member.
+    pub async fn ban_user(
+        &self,
+        server: &str,
+        user: &str,
+        ban: &DataBanCreate,
+    ) -> Result<ServerBan, ApiError> {
+        let body = without_nulls(serde_json::to_value(ban).expect("ban serialises"));
+        let path = format!("/servers/{server}/bans/{user}");
+        self.send(Method::PUT, &path, Some(&body)).await
     }
 
     /// Set the user's presence (Online, Idle, Focus, Busy or Invisible).

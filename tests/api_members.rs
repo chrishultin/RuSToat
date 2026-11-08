@@ -1,9 +1,12 @@
-//! The user's own identity on a server against a mock Stoat API:
-//! `PATCH /servers/{server}/members/{user}`.
+//! Server members against a mock Stoat API: the user's own identity
+//! (`PATCH /servers/{server}/members/{user}`), and moderation (kicks and
+//! bans).
 
 use revolt_result::ErrorType;
 use serde_json::json;
+use stoat_gpui::api::models::DataBanCreate;
 use stoat_gpui::api::{ApiError, StoatClient};
+use stoat_gpui::moderation::moderation_error_text;
 use stoat_gpui::profile_edit::{IdentityForm, ProfileImage};
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -106,5 +109,92 @@ async fn a_change_without_permission_is_an_api_error() {
     assert!(
         matches!(&err, ApiError::Api(e) if matches!(e.error_type, ErrorType::MissingPermission { .. })),
         "got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_kick_deletes_the_membership() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/servers/srv/members/u-ada"))
+        .and(header("x-session-token", "tok"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client(&server).kick_member("srv", "u-ada").await.unwrap();
+}
+
+#[tokio::test]
+async fn a_ban_sends_its_reason_and_history() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/servers/srv/bans/u-ada"))
+        .and(header("x-session-token", "tok"))
+        .and(body_json(
+            json!({ "reason": "spam", "delete_message_seconds": 86400 }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "_id": { "server": "srv", "user": "u-ada" }, "reason": "spam"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let ban = DataBanCreate {
+        reason: Some("spam".into()),
+        delete_message_seconds: Some(86400),
+    };
+    let ban = client(&server)
+        .ban_user("srv", "u-ada", &ban)
+        .await
+        .unwrap();
+    assert_eq!(ban.id.user, "u-ada");
+    assert_eq!(ban.reason.as_deref(), Some("spam"));
+}
+
+#[tokio::test]
+async fn a_bare_ban_leaves_out_what_is_unset() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/servers/srv/bans/u-ada"))
+        .and(body_json(json!({})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "_id": { "server": "srv", "user": "u-ada" }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let ban = DataBanCreate {
+        reason: None,
+        delete_message_seconds: None,
+    };
+    client(&server)
+        .ban_user("srv", "u-ada", &ban)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn kicking_someone_who_outranks_you_says_so() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/servers/srv/members/u-ada"))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .set_body_json(json!({ "type": "NotElevated", "location": "x" })),
+        )
+        .mount(&server)
+        .await;
+
+    let err = client(&server)
+        .kick_member("srv", "u-ada")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        moderation_error_text(&err, "Couldn't kick them."),
+        "They rank too high for you to do that."
     );
 }
