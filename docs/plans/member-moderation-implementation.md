@@ -177,3 +177,62 @@ Deferred to the end, with both accounts in a voice channel and the web client:
 - move to the other channel;
 - disconnect;
 - check whether unmuting needs a rejoin.
+
+## Chunk 5: Reports — not started
+
+The user asked to commit and merge into main before chunk 5 was written, so no code exists for it. What was learnt, for whoever picks it up:
+- `ReportedContent`, `ContentReportReason` and `UserReportReason` are in `revolt_models::v0` (`safety_reports.rs`).
+- Stoat's `DataReportContent` is defined only in the route (`crates/delta/src/routes/safety/report_content.rs`), so the client needs its own body type:
+  - `content: ReportedContent`;
+  - `additional_context: String` (default `""`, at most 1000).
+- The web client (`packages/client/components/modal/modals/ReportContent.tsx`) has the reason lists, in its order, with "Other" (`NoneSpecified`) last and needing detail.
+  - Content reasons: Illegal "Content breaks one or more laws", IllegalGoods "Drugs or illegal goods", IllegalExtortion "Extortion or blackmail", IllegalPornography "Revenge or underage pornography", IllegalHacking "Illegal hacking or cracking", ExtremeViolence "Extreme violence, gore or animal cruelty", PromotesHarm "Promotes harm", UnsolicitedSpam "Unsolicited advertising or spam", Raid "Raid or spam attack", SpamAbuse "Spam or similar platform abuse", ScamsFraud "Scams or fraud", Malware "Malware or phishing", Harassment "Harassment or cyberbullying".
+  - User reasons: UnsolicitedSpam, SpamAbuse, InappropriateProfile "User's profile has inappropriate content", Impersonation "Impersonation", BanEvasion "Ban evasion", Underage "Not of minimum age to use the platform".
+  - Titles: "Tell us what's wrong with this user/server/message"; field labels "Reason for report" and "Give us some detail".
+
+## Summary
+
+_Completed (chunks 1–4): 2026-11-08_
+
+### Chunks Completed
+1. Kick and ban: `e4a5866`.
+2. Timeouts: `d2179ec`.
+3. Edit a member's identity and roles: `7b37654`.
+4. Voice moderation: `0f85b53`.
+5. Reports: **not started**, deferred at the user's request.
+
+### Divergences
+- The plan's `confirm_then` is the MFA dialog. `moderation_dialogs::confirm_member_action` / `run_member_action` were added instead, and the plan was amended.
+- Kick's confirmation closes and toasts when Stoat refuses.
+- The confirmation's button can be non-destructive (End timeout).
+- `iso8601-timestamp` is a direct dependency, to name `Timestamp`.
+- `MemberIdentityEditor` is a separate dialog, rather than a generalised `IdentityEditor`.
+- Edit identity and Edit roles need a cached membership, so a stale or unknown one can't wipe roles.
+- Managed (bot) roles are locked, through `Role.owner`.
+- `open_roles_dialog` takes `&ChatView` (clippy's argument limit).
+- "Move to" is a real submenu; `MoveTo` carries no destination.
+- Mute, deafen and disconnect act without asking.
+- A server unmute may need the target to rejoin, because LiveKit drops their publication. This was found by reading the code, not tested live; it's milestone 34 material.
+
+### Definition of Done
+- [x] Kick and Ban (reason, history deletion) from the member menu, offered only with the permission, on a lower-ranked non-owner other than yourself (owner: anyone). Unit and wiremock tested; not yet checked by hand.
+- [x] Time out (six lengths) and End timeout. The card shows "Timed out until …". Tested; not yet checked by hand.
+- [x] Set or clear another member's nickname, remove their server avatar, change their roles. Roles at or above your rank, and managed roles, can't be added. Tested; not yet checked by hand.
+- [x] Server mute, server deafen, Move to and Disconnect, from the member menu and the voice participant rows. Tested; not yet checked by hand.
+- [ ] Report user, message and server: **not done** (chunk 5).
+- [x] Stoat's refusals become plain toasts: `NotElevated`, `IsElevated`, `MissingPermission`, `NotConnected` (and `CannotReportYourself`'s text, ready for chunk 5).
+- [x] `cargo test` (1124 passed) and `cargo clippy --all-targets -- -D warnings` pass. No touched file's rustfmt drift grew.
+
+### Remaining Manual Steps
+Batched at the user's request, and **not yet done**. The work was merged into main before them.
+1. Kick the second account. Have it rejoin, then ban it with "1 hour" of history.
+2. Time it out for 1 minute: its message box refuses, and the card shows the timeout. End it early.
+3. Rename it, remove its server avatar, and give and take away a role. Check that a role above yours is disabled.
+4. With both accounts in a voice channel, plus the web client:
+   - server mute and unmute (does unmuting need a rejoin?);
+   - server deafen and undeafen;
+   - move to the other channel;
+   - disconnect (the target toasts "You were removed from the call.").
+5. With a role between the two accounts' ranks: the lower account sees no moderation items for the higher one.
+6. Both themes: the dialogs are readable, and destructive buttons stand out.
+7. Chunk 5 (Reports) remains to implement.
