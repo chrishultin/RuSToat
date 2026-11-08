@@ -43,7 +43,66 @@ pub fn with_channel_in(
             c.channels.push(channel.to_string());
         }
     }
+    listed_once(&mut edited);
     Some(edited)
+}
+
+/// A new category's ID: a ULID, as the web client makes them (the time,
+/// then 80 random bits, so two made at once don't collide).
+pub fn new_category_id() -> String {
+    ulid::Ulid::generate().to_string()
+}
+
+/// `categories` with a new, empty category `id` called `title` at the end.
+pub fn with_category_added(categories: &[Category], id: &str, title: &str) -> Vec<Category> {
+    let mut edited = categories.to_vec();
+    edited.push(Category {
+        id: id.to_string(),
+        title: title.to_string(),
+        channels: Vec::new(),
+    });
+    listed_once(&mut edited);
+    edited
+}
+
+/// `categories` with category `id` called `title`, and nothing else
+/// changed. `None` if there's no such category any more.
+pub fn with_category_renamed(
+    categories: &[Category],
+    id: &str,
+    title: &str,
+) -> Option<Vec<Category>> {
+    if !categories.iter().any(|c| c.id == id) {
+        return None;
+    }
+    let mut edited = categories.to_vec();
+    for c in edited.iter_mut().filter(|c| c.id == id) {
+        c.title = title.to_string();
+    }
+    listed_once(&mut edited);
+    Some(edited)
+}
+
+/// `categories` without category `id`; its channels become uncategorized
+/// (none are deleted). It may leave none, which is sent as an empty list.
+/// `None` if there's no such category any more.
+pub fn without_category(categories: &[Category], id: &str) -> Option<Vec<Category>> {
+    if !categories.iter().any(|c| c.id == id) {
+        return None;
+    }
+    let mut edited = categories.to_vec();
+    edited.retain(|c| c.id != id);
+    listed_once(&mut edited);
+    Some(edited)
+}
+
+/// Keep each channel where it's first listed, and drop any later copy:
+/// Stoat refuses a list with a channel twice.
+fn listed_once(categories: &mut [Category]) {
+    let mut seen = std::collections::HashSet::new();
+    for c in categories {
+        c.channels.retain(|id| seen.insert(id.clone()));
+    }
 }
 
 /// Why `POST /servers/create` was refused.
@@ -207,6 +266,85 @@ mod tests {
         let categories = [category("k1", &["c1"])];
         assert_eq!(with_channel_in(&categories, "c1", "k-gone"), None);
         assert_eq!(with_channel_in(&[], "c1", "k1"), None);
+    }
+
+    #[test]
+    fn a_new_category_is_appended_empty() {
+        let categories = [category("k1", &["c1"])];
+        let added = with_category_added(&categories, "k2", "Games");
+        assert_eq!(added.len(), 2);
+        assert_eq!(added[0], categories[0]);
+        assert_eq!(
+            added[1],
+            Category {
+                id: "k2".into(),
+                title: "Games".into(),
+                channels: Vec::new(),
+            }
+        );
+        assert_eq!(with_category_added(&[], "k1", "Chat").len(), 1);
+    }
+
+    #[test]
+    fn renaming_changes_only_that_title() {
+        let categories = [category("k1", &["c1"]), category("k2", &["c2"])];
+        let renamed = with_category_renamed(&categories, "k2", "Games").unwrap();
+        assert_eq!(renamed[0], categories[0]);
+        assert_eq!(renamed[1].id, "k2");
+        assert_eq!(renamed[1].title, "Games");
+        assert_eq!(renamed[1].channels, ["c2"]);
+    }
+
+    #[test]
+    fn deleting_removes_only_that_category() {
+        let categories = [
+            category("k1", &["c1"]),
+            category("k2", &["c2", "c3"]),
+            category("k3", &[]),
+        ];
+        assert_eq!(
+            without_category(&categories, "k2").unwrap(),
+            [category("k1", &["c1"]), category("k3", &[])]
+        );
+        // The last one leaves an empty list, to send as it is.
+        assert_eq!(
+            without_category(&[category("k1", &["c1"])], "k1").unwrap(),
+            []
+        );
+    }
+
+    #[test]
+    fn a_missing_category_changes_nothing() {
+        let categories = [category("k1", &["c1"])];
+        assert_eq!(with_category_renamed(&categories, "k-gone", "Games"), None);
+        assert_eq!(without_category(&categories, "k-gone"), None);
+        assert_eq!(without_category(&[], "k1"), None);
+    }
+
+    #[test]
+    fn edits_list_each_channel_once() {
+        let categories = [category("k1", &["c1", "c1"]), category("k2", &["c1", "c2"])];
+        let once = [category("k1", &["c1"]), category("k2", &["c2"])];
+        assert_eq!(with_category_added(&categories, "k3", "New")[..2], once);
+        let renamed = with_category_renamed(&categories, "k1", "K1").unwrap();
+        assert_eq!(renamed, once);
+        assert_eq!(
+            without_category(&categories, "k1").unwrap(),
+            [category("k2", &["c1", "c2"])]
+        );
+    }
+
+    #[test]
+    fn category_ids_are_26_characters_and_differ() {
+        let (a, b) = (new_category_id(), new_category_id());
+        assert_eq!(a.len(), 26);
+        assert_eq!(b.len(), 26);
+        assert_ne!(a, b);
+        // Crockford's base32: digits and capitals, without I, L, O or U.
+        assert!(
+            a.chars()
+                .all(|c| c.is_ascii_digit() || c.is_ascii_uppercase() && !"ILOU".contains(c))
+        );
     }
 
     #[test]

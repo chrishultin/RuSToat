@@ -1,7 +1,9 @@
 //! "Create a server": name it, and Stoat makes it with one text channel.
 //! "Create channel": name it and pick text or voice, and it's made in the
-//! category it was asked for from. The naming rules and the error texts
-//! are in [`crate::server_edit`].
+//! category it was asked for from. "Create a new category" and "Rename
+//! category": a name, and the server's categories are sent again with it.
+//! The naming rules, the category edits and the error texts are in
+//! [`crate::server_edit`].
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -14,7 +16,8 @@ use crate::api::StoatClient;
 use crate::invites::is_official_app;
 use crate::runtime::spawn_io;
 use crate::server_edit::{
-    AUP_URL, NAME_MAX, create_channel_error_text, create_server_error_text, valid_name,
+    AUP_URL, NAME_MAX, categories_error_text, create_channel_error_text, create_server_error_text,
+    new_category_id, valid_name, with_category_added, with_category_renamed,
 };
 use crate::ui::chat::ChatView;
 
@@ -23,6 +26,9 @@ pub const CREATE_SERVER_DIALOG_WIDTH: f32 = 420.;
 
 /// Create channel's width (the same).
 pub const CREATE_CHANNEL_DIALOG_WIDTH: f32 = 420.;
+
+/// Create and Rename category's width (the same).
+pub const NAME_DIALOG_WIDTH: f32 = 420.;
 
 /// The line under the name on the official instance, and its link.
 const AUP_TEXT: &str = "By creating this server, you agree to the Acceptable Use Policy.";
@@ -377,6 +383,174 @@ impl Render for CreateChannelDialog {
                             .disabled(self.creating || !valid)
                             .on_click(move |_, window, cx| {
                                 entity.update(cx, |this, cx| this.create(window, cx)).ok();
+                            }),
+                    ),
+            )
+    }
+}
+
+/// The content of "Create a new category" and "Rename category", for one
+/// server of one account: a name, and the server's categories sent again
+/// with it.
+pub struct NameDialog {
+    chat: WeakEntity<ChatView>,
+    client: StoatClient,
+    server: String,
+    /// The category being renamed; `None` creates one.
+    renaming: Option<String>,
+    input: Entity<InputState>,
+    saving: bool,
+    error: Option<String>,
+    _input: Subscription,
+}
+
+impl NameDialog {
+    /// The dialog for a category of `server`: a new one, or `renaming`
+    /// (its ID and current title, which the field starts with).
+    pub fn new(
+        chat: &ChatView,
+        weak: WeakEntity<ChatView>,
+        server: String,
+        renaming: Option<(String, String)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let (renaming, title) = match renaming {
+            Some((id, title)) => (Some(id), title),
+            None => (None, String::new()),
+        };
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(title));
+        let subscription =
+            cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
+                InputEvent::Change => {
+                    this.error = None;
+                    cx.notify();
+                }
+                InputEvent::PressEnter { .. } => this.save(window, cx),
+                _ => {}
+            });
+        Self {
+            chat: weak,
+            client: chat.client().clone(),
+            server,
+            renaming,
+            input,
+            saving: false,
+            error: None,
+            _input: subscription,
+        }
+    }
+
+    /// The field, to focus when the dialog opens.
+    pub fn input(&self) -> &Entity<InputState> {
+        &self.input
+    }
+
+    /// Send the categories as they are now, with the new one appended or
+    /// this one renamed. Success shows them at once and closes the dialog;
+    /// a refusal says why and keeps it.
+    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.saving {
+            return;
+        }
+        let Some(name) = valid_name(&self.input.read(cx).value()) else {
+            return;
+        };
+        let Some(chat) = self.chat.upgrade() else {
+            return;
+        };
+        let id = self.renaming.clone().unwrap_or_else(new_category_id);
+        let edited = {
+            let store = chat.read(cx).store();
+            let categories = store
+                .server(&self.server)
+                .and_then(|s| s.categories.as_deref())
+                .unwrap_or_default();
+            match self.renaming {
+                None => Some(with_category_added(categories, &id, &name)),
+                Some(_) => with_category_renamed(categories, &id, &name),
+            }
+        };
+        let Some(edited) = edited else {
+            self.error = Some("This category has been deleted.".into());
+            cx.notify();
+            return;
+        };
+        self.saving = true;
+        self.error = None;
+        cx.notify();
+        let request = spawn_io({
+            let (client, server) = (self.client.clone(), self.server.clone());
+            async move { client.edit_categories(&server, &edited).await }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.saving = false;
+                match result {
+                    Ok(Ok(categories)) => {
+                        let server = this.server.clone();
+                        log::debug!("saved category {id} of server {server}");
+                        if let Some(chat) = this.chat.upgrade() {
+                            chat.update(cx, |chat, cx| {
+                                chat.categories_changed(&server, categories, cx)
+                            });
+                        }
+                        window.close_dialog(cx);
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't edit the categories of {}: {err:?}", this.server);
+                        this.error = Some(categories_error_text(&err));
+                    }
+                    Err(err) => {
+                        log::warn!("category edit task failed: {err:?}");
+                        this.error = Some("Couldn't reach Stoat. Try again.".into());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
+impl Render for NameDialog {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let valid = valid_name(&self.input.read(cx).value()).is_some();
+        let entity = cx.entity().downgrade();
+        let (label, action) = match self.renaming {
+            Some(_) => ("New name", "Rename"),
+            None => ("Name", "Create"),
+        };
+
+        v_flex()
+            .gap_3()
+            .child(name_field(
+                label,
+                &self.input,
+                self.saving,
+                self.error.clone(),
+                cx,
+            ))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .justify_end()
+                    .child(
+                        Button::new("cancel-name-dialog")
+                            .outline()
+                            .label("Close")
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("name-dialog-submit")
+                            .primary()
+                            .label(action)
+                            .loading(self.saving)
+                            .disabled(self.saving || !valid)
+                            .on_click(move |_, window, cx| {
+                                entity.update(cx, |this, cx| this.save(window, cx)).ok();
                             }),
                     ),
             )

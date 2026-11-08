@@ -34,8 +34,8 @@ use crate::api::StoatClient;
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
 use crate::api::gifbox::GifboxClient;
 use crate::api::models::{
-    BulkMessageResponse, Channel, CreateServerLegacyResponse, FieldsMessage, InviteJoinResponse,
-    MessageSort, Presence, ReplyIntent, Server, UserProfile,
+    BulkMessageResponse, Category, Channel, CreateServerLegacyResponse, FieldsMessage,
+    InviteJoinResponse, MessageSort, Presence, ReplyIntent, Server, UserProfile,
 };
 use crate::attachment::{AttachmentView, fit_into};
 use crate::complete::{Query, QueryKind, Suggestion, TokenRef, rank, rank_mentions};
@@ -81,7 +81,7 @@ use crate::ui::math::MathPlugin;
 use crate::ui::profile_card::{CardBio, CardContent, OnLink, render_profile_card};
 use crate::ui::server_dialogs::{
     CREATE_CHANNEL_DIALOG_WIDTH, CREATE_SERVER_DIALOG_WIDTH, CreateChannelDialog,
-    CreateServerDialog,
+    CreateServerDialog, NAME_DIALOG_WIDTH, NameDialog,
 };
 
 actions!(
@@ -288,6 +288,9 @@ pub struct ChatView {
     /// The channel whose "Delete {name}?" confirmation is waiting for Stoat
     /// to answer: its buttons are disabled until then.
     deleting_channel: Option<String>,
+    /// The category whose "Delete {TITLE}?" confirmation is waiting for
+    /// Stoat to answer, likewise.
+    deleting_category: Option<String>,
     /// The age gate's "I am at least 18" box, as the user set it in this
     /// channel. In any other channel it starts as `safety.adult_confirmed`.
     age_gate_tick: Option<(String, bool)>,
@@ -734,6 +737,7 @@ impl ChatView {
             safety,
             link_prompt: None,
             deleting_channel: None,
+            deleting_category: None,
             age_gate_tick: None,
             media,
             web_app: None,
@@ -3429,9 +3433,9 @@ impl ChatView {
     /// long), or Unmute Channel and until when it's muted; its
     /// Notifications level, led by its default (the server's level, or
     /// All for DMs and groups); Create invite…, Create channel… (in this
-    /// channel's category) and Delete channel… where allowed; Copy channel
-    /// ID. A channel in a muted server still offers Mute Channel: the
-    /// server's mute is what silences it.
+    /// channel's category), Create category… and Delete channel… where
+    /// allowed; Copy channel ID. A channel in a muted server still offers
+    /// Mute Channel: the server's mute is what silences it.
     fn channel_menu(&self, channel: &ChannelEntry, cx: &Context<Self>) -> MenuBuilder {
         let view = cx.entity().downgrade();
         let channel_id = channel.id.clone();
@@ -3505,7 +3509,9 @@ impl ChatView {
                 menu
             };
             let menu = match create_in {
-                Some((server, category)) => menu.item(create_channel_item(&view, server, category)),
+                Some((server, category)) => menu
+                    .item(create_channel_item(&view, server.clone(), category))
+                    .item(create_category_item(&view, server)),
                 None => menu,
             };
             let menu = if deletable {
@@ -3647,7 +3653,8 @@ impl ChatView {
         .detach();
     }
 
-    /// A category heading's right-click menu: Create channel… (in it) where
+    /// A category heading's right-click menu: Create channel… (in it),
+    /// Create category…, Rename category… and Delete category… where
     /// allowed; Copy category ID.
     fn category_menu(&self, server: &str, category: &str, cx: &Context<Self>) -> MenuBuilder {
         let view = cx.entity().downgrade();
@@ -3657,11 +3664,51 @@ impl ChatView {
                 return menu;
             };
             let menu = if this.read(cx).store.can_manage_channels(&server) {
+                let rename = {
+                    let (view, server, category) = (view.clone(), server.clone(), category.clone());
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        view.update(cx, |this, cx| {
+                            this.open_rename_category(server.clone(), &category, window, cx)
+                        })
+                        .ok();
+                    }
+                };
+                let delete = {
+                    let (view, server, category) = (view.clone(), server.clone(), category.clone());
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        view.update(cx, |this, cx| {
+                            this.confirm_delete_category(
+                                server.clone(),
+                                category.clone(),
+                                window,
+                                cx,
+                            )
+                        })
+                        .ok();
+                    }
+                };
                 menu.item(create_channel_item(
                     &view,
                     server.clone(),
                     Some(category.clone()),
                 ))
+                .item(create_category_item(&view, server.clone()))
+                .item(
+                    PopupMenuItem::new("Rename category…")
+                        .icon(IconName::Pencil)
+                        .on_click(rename),
+                )
+                .item(
+                    PopupMenuItem::element(|_, cx| {
+                        let danger = cx.theme().danger;
+                        h_flex()
+                            .gap_2()
+                            .text_color(danger)
+                            .child(Icon::new(IconName::Trash).text_color(danger))
+                            .child("Delete category…")
+                    })
+                    .on_click(delete),
+                )
                 .separator()
             } else {
                 menu
@@ -3671,7 +3718,8 @@ impl ChatView {
     }
 
     /// The right-click menu of the channel list's empty space, for those
-    /// who may manage `server`'s channels: Create channel… (uncategorized).
+    /// who may manage `server`'s channels: Create channel… (uncategorized)
+    /// and Create category….
     fn channel_list_menu(&self, server: &str, cx: &Context<Self>) -> MenuBuilder {
         let view = cx.entity().downgrade();
         let server = server.to_string();
@@ -3681,10 +3729,144 @@ impl ChatView {
             };
             if this.read(cx).store.can_manage_channels(&server) {
                 menu.item(create_channel_item(&view, server.clone(), None))
+                    .item(create_category_item(&view, server.clone()))
             } else {
                 menu
             }
         })
+    }
+
+    /// Ask before deleting a category of `server`: "Delete {TITLE}?" Its
+    /// channels stay, uncategorized. Once Delete is chosen, the buttons
+    /// wait, disabled, for Stoat's answer.
+    fn confirm_delete_category(
+        &mut self,
+        server: String,
+        category: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(title) = self.category_title(&server, &category) else {
+            return;
+        };
+        let title: SharedString = format!("Delete {}?", title.to_uppercase()).into();
+        let view = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let busy = view
+                .upgrade()
+                .is_some_and(|view| view.read(cx).deleting_category.as_ref() == Some(&category));
+            let delete = {
+                let (view, server, category) = (view.clone(), server.clone(), category.clone());
+                move |window: &mut Window, cx: &mut App| {
+                    view.update(cx, |this, cx| {
+                        this.delete_category(server.clone(), category.clone(), window, cx)
+                    })
+                    .ok();
+                }
+            };
+            alert
+                .title(title.clone())
+                .description("Its channels won't be deleted. They'll move out of the category.")
+                .keyboard(!busy)
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("delete-category-cancel")
+                                .label("Cancel")
+                                .disabled(busy)
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("delete-category-ok")
+                                .with_variant(ButtonVariant::Danger)
+                                .label("Delete")
+                                .loading(busy)
+                                .disabled(busy)
+                                .on_click({
+                                    let delete = delete.clone();
+                                    move |_, window, cx| delete(window, cx)
+                                }),
+                        ),
+                )
+                .on_ok(move |_, window, cx| {
+                    if !busy {
+                        delete(window, cx);
+                    }
+                    false
+                })
+        });
+    }
+
+    /// Delete a category of `server` (the confirmation's Delete): the
+    /// categories as they are now are sent again without it, and Stoat's
+    /// answer is shown at once. If it's already gone there's nothing to
+    /// send. A refusal keeps the confirmation and a toast says why.
+    fn delete_category(
+        &mut self,
+        server: String,
+        category: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.deleting_category.is_some() {
+            return;
+        }
+        let categories = self
+            .store
+            .server(&server)
+            .and_then(|s| s.categories.as_deref())
+            .unwrap_or_default();
+        let Some(edited) = crate::server_edit::without_category(categories, &category) else {
+            log::debug!("category {category} of {server} is already gone");
+            window.close_dialog(cx);
+            return;
+        };
+        self.deleting_category = Some(category.clone());
+        window.refresh();
+        let request = spawn_io({
+            let (client, server) = (self.client.clone(), server.clone());
+            async move { client.edit_categories(&server, &edited).await }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.deleting_category = None;
+                match result {
+                    Ok(Ok(categories)) => {
+                        log::debug!("deleted category {category} of server {server}");
+                        this.categories_changed(&server, categories, cx);
+                        window.close_dialog(cx);
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't delete category {category}: {err:?}");
+                        let error = crate::server_edit::categories_error_text(&err);
+                        window.push_notification(Notification::error(error), cx);
+                    }
+                    Err(err) => {
+                        log::warn!("delete category task failed: {err:?}");
+                        let error = "Couldn't delete the category. Try again.";
+                        window.push_notification(Notification::error(error), cx);
+                    }
+                }
+                window.refresh();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The title of category `category` of `server`, if it's still there.
+    fn category_title(&self, server: &str, category: &str) -> Option<String> {
+        let server = self.store.server(server)?;
+        let category = server
+            .categories
+            .iter()
+            .flatten()
+            .find(|c| c.id == category)?;
+        Some(category.title.clone())
     }
 
     /// A server's right-click menu: Mark as read; Edit identity…; Mute Server (for how
@@ -4647,9 +4829,8 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) {
         let category = category.and_then(|id| {
-            let server = self.store.server(&server)?;
-            let category = server.categories.iter().flatten().find(|c| c.id == id)?;
-            Some((id, category.title.clone()))
+            let title = self.category_title(&server, &id)?;
+            Some((id, title))
         });
         let weak = cx.entity().downgrade();
         let dialog =
@@ -4726,7 +4907,7 @@ impl ChatView {
                 match result {
                     Ok(Ok(categories)) => {
                         log::debug!("moved channel {channel} into category {category}");
-                        this.store.set_categories(&server, categories);
+                        this.categories_changed(&server, categories, cx);
                     }
                     failed => {
                         log::warn!("couldn't move {channel} into {category}: {failed:?}");
@@ -4739,6 +4920,51 @@ impl ChatView {
             .ok();
         })
         .detach();
+    }
+
+    /// "Create a new category" in `server`, appended after the others.
+    pub fn open_create_category(
+        &mut self,
+        server: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let weak = cx.entity().downgrade();
+        let dialog = cx.new(|cx| NameDialog::new(self, weak, server, None, window, cx));
+        open_name_dialog("Create a new category", dialog, window, cx);
+    }
+
+    /// "Rename category" for `category` of `server`, the field starting
+    /// with its title.
+    pub fn open_rename_category(
+        &mut self,
+        server: String,
+        category: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(title) = self.category_title(&server, category) else {
+            return;
+        };
+        let weak = cx.entity().downgrade();
+        let renaming = Some((category.to_string(), title));
+        let dialog = cx.new(|cx| NameDialog::new(self, weak, server, renaming, window, cx));
+        open_name_dialog("Rename category", dialog, window, cx);
+    }
+
+    /// Stoat answered a change to `server`'s categories with `categories`:
+    /// show them now, without waiting for its `ServerUpdate` (which carries
+    /// the same). A deleted category's fold is forgotten.
+    pub fn categories_changed(
+        &mut self,
+        server: &str,
+        categories: Vec<Category>,
+        cx: &mut Context<Self>,
+    ) {
+        self.store.set_categories(server, categories);
+        self.drop_stale_selection();
+        self.remember_places();
+        cx.notify();
     }
 
     /// "Change identity on {server}": the user's nickname, avatar and
@@ -9721,6 +9947,39 @@ fn create_channel_item(
             })
             .ok();
         })
+}
+
+/// "Create category…" in `server`, appended after the others.
+fn create_category_item(view: &WeakEntity<ChatView>, server: String) -> PopupMenuItem {
+    let view = view.clone();
+    PopupMenuItem::new("Create category…")
+        .icon(IconName::FolderPlus)
+        .on_click(move |_, window, cx| {
+            view.update(cx, |this, cx| {
+                this.open_create_category(server.clone(), window, cx)
+            })
+            .ok();
+        })
+}
+
+/// Open a [`NameDialog`] titled `title`, its field focused.
+fn open_name_dialog(
+    title: &'static str,
+    dialog: Entity<NameDialog>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let first_build = std::cell::Cell::new(true);
+    window.open_dialog(cx, move |modal, window, cx| {
+        if first_build.replace(false) {
+            let input = dialog.read(cx).input().read(cx).focus_handle(cx);
+            window.focus(&input, cx);
+        }
+        modal
+            .title(title)
+            .w(px(NAME_DIALOG_WIDTH))
+            .child(dialog.clone())
+    });
 }
 
 /// Builds a right-click menu when it opens.

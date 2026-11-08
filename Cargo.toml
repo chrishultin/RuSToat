@@ -57,6 +57,9 @@ emojis = "0.9.1"
 # links whose text isn't their address (`markdown::guard_links`), and in tests,
 # checking what `prepare` produces parses as intended.
 markdown = "1"
+# New category IDs (src/server_edit.rs), as the web client makes them. Its
+# `rand` is already in the tree.
+ulid = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Dock badge (AppKit's NSDockTile), checking whether banners can be posted

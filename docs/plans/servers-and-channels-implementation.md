@@ -163,3 +163,53 @@ Deferred to the batched manual pass. Steps:
 7. As a member without Manage Channels, none of the three menus offers Create channel…, and right-clicking the empty space does nothing.
 8. With a category deleted in the web client while the dialog is open, Create still makes the channel, uncategorized, with no toast.
 9. Light and dark themes: the dialog, the "in {CATEGORY}" line and the radios are readable.
+
+## Chunk 4: Create, rename and delete categories
+
+### Changes Made
+- `Cargo.toml`, `Cargo.lock`: the `ulid` crate (3.0.0). It adds only itself to the lock file; its `rand` (0.10.3) and `web-time` were already in the tree.
+- `src/server_edit.rs`:
+  - `new_category_id()`: `ulid::Ulid::generate()` as a 26-character string.
+  - `with_category_added(categories, id, title) -> Vec<Category>`: appended, with no channels.
+  - `with_category_renamed(categories, id, title)` and `without_category(categories, id)`, both `-> Option<Vec<Category>>`: `None` if the category is gone. Deleting the last one gives an empty list, which `edit_categories` sends as `{"categories":[]}`.
+  - The private `listed_once`: every edit (and `with_channel_in`) keeps each channel only where it's first listed, so a list Stoat would refuse for a duplicate is never sent.
+  - 6 unit tests.
+- `src/ui/server_dialogs.rs`: `NameDialog` and `NAME_DIALOG_WIDTH` (420), for "Create a new category" ("Name", Create) and "Rename category" ("New name", prefilled with the title, Rename). It uses `name_field` (counter, error line), with Close and the action button (`loading` while saving, disabled until the name is valid). Enter saves. The categories are read from the store when you save (Assumption 5). Stoat's answer goes to `ChatView::categories_changed` and the dialog closes. A refusal shows in the dialog (`categories_error_text`). A category deleted while its Rename dialog is open shows "This category has been deleted." and nothing is sent. `CreateServerDialog` and `CreateChannelDialog` weren't folded onto it: they share only `name_field` and the buttons, which they already share.
+- `src/ui/chat.rs`:
+  - `categories_changed(server, categories, cx)`: `set_categories`, then `drop_stale_selection` (which forgets a deleted category's fold) and `remember_places`. Chunk 3's `move_into_category` uses it too.
+  - `open_create_category(server, ..)` and `open_rename_category(server, category, ..)`, through the free `open_name_dialog(title, dialog, ..)`, which focuses the field.
+  - "Create category…" (`FolderPlus`), through the free `create_category_item(view, server)`, wherever "Create channel…" is: the category heading's menu, the server-channel menu (right after Create channel…) and the channel list's background menu.
+  - The category heading's menu, where `can_manage_channels`: Create channel…, Create category…, Rename category… (`Pencil`), Delete category… (in red with `Trash`, as Delete channel…), a separator, Copy category ID.
+  - `confirm_delete_category(server, category, ..)`: "Delete {TITLE}?", "Its channels won't be deleted. They'll move out of the category.", Cancel and a Danger "Delete". It's built like `confirm_delete_channel`, using a new `deleting_category` field: the buttons are disabled with a spinner and Escape is off while the request runs.
+  - `delete_category(..)`: `without_category` over the store's categories, then `edit_categories`. On success it calls `categories_changed` and closes the dialog. A refusal toasts and leaves the confirmation open and enabled again. If the category is already gone, nothing is sent and the dialog closes.
+  - `category_title(server, category)`, now also used by `open_create_channel`.
+- Tests:
+  - `tests/api_servers.rs`: `PATCH /servers/s1` with no categories sends exactly `{"categories":[]}`.
+  - `tests/store_channels.rs`: deleting `cat-chat` leaves its channels uncategorized, in the server's order, with none deleted, and the category gone. Setting no categories leaves every channel uncategorized.
+
+### Divergences
+- **`with_category_renamed` and `without_category` return `Option`.** The plan says "a missing ID changes nothing". Returning `None` lets the UI skip the request rather than send the list unchanged. Rename then says the category was deleted. Delete treats the category as already gone and closes the confirmation, as `NotFound` does for a channel.
+- **The edits also remove duplicate channel IDs** that were already in the list (the first listing is kept), not only ones they would add. This includes `with_channel_in`. Stoat refuses any list with a channel twice.
+- **`CreateServerDialog` and `CreateChannelDialog` stay as they are.** The plan allows this ("don't force it").
+- **`ulid` is 3.0.0, the current release.** Its generator is `Ulid::generate()`.
+- **A failed delete leaves the confirmation open** beside the toast, as for channels (chunk 2).
+
+### Verification Performed
+- `cargo test --lib server_edit`: 15 passed (6 new). `cargo test --test api_servers`: 10 passed (1 new). `--test store_channels`: 10 passed (2 new).
+- `cargo test`: 945 passed, 0 failed (936 before).
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt `Diff in` counts:
+  - `src/ui/chat.rs` 17: unchanged, after hand-formatting the new code.
+  - `src/server_edit.rs`, `src/ui/server_dialogs.rs`, `tests/api_servers.rs` and `tests/store_channels.rs`: 0.
+
+### Manual Validation
+Deferred to the batched manual pass. Steps:
+1. As a server's owner, right-click a category heading: Create channel…, Create category…, Rename category…, Delete category… (red), a separator, Copy category ID. The channel menu shows Create category… after Create channel…, and so does the list's empty space.
+2. Create a category: "Create a new category", Create disabled until the name is valid. It appears at the bottom, empty. Create a channel in it from its menu: the channel lands in it.
+3. Rename it: "Rename category" with the title filled in. The heading changes here at once, and in the web client.
+4. Delete it: "Delete {TITLE}?" asks. Delete shows a spinner, then its channels move to the top group and none are deleted. The web client shows the same.
+5. Delete the server's last category: everything is uncategorized, with no error.
+6. Fold a category and rename it: it stays folded. Fold one and delete it, then create a category: the new one isn't folded.
+7. Rename or delete a category from the web client while RuSToat's Rename dialog for it is open, then save: the error line says the category was deleted, or the new name is saved over the web client's.
+8. As a member without Manage Channels, none of the menus offer the category items.
+9. Light and dark themes: the dialogs and the red menu item are readable.

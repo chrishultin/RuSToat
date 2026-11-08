@@ -225,3 +225,22 @@ async fn an_answer_without_categories_means_none() {
     let kept = client(&server).edit_categories("s1", &[]).await.unwrap();
     assert!(kept.is_empty());
 }
+
+#[tokio::test]
+async fn deleting_the_last_category_sends_an_empty_list() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/servers/s1"))
+        .and(header("x-session-token", "tok"))
+        .and(body_json(json!({ "categories": [] })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "_id": "s1", "owner": "u-me", "name": "Lounge", "channels": ["c1"],
+            "default_permissions": 0, "approximate_member_count": 1
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let kept = client(&server).edit_categories("s1", &[]).await.unwrap();
+    assert!(kept.is_empty());
+}

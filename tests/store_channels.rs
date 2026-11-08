@@ -1,12 +1,14 @@
 //! Channels coming and going in the store: a deleted channel leaves its
 //! server's list, its category and the sidebar, with everything loaded for
 //! it; a created one shows once, whichever of the response and its
-//! `ChannelCreate` comes first, and moves with the categories. Built on the
-//! `Ready` fixture.
+//! `ChannelCreate` comes first, and moves with the categories; a deleted
+//! category leaves its channels uncategorized. Built on the `Ready`
+//! fixture.
 
 use serde_json::json;
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::api::models::{BulkMessageResponse, Category, Channel};
+use stoat_gpui::server_edit::without_category;
 use stoat_gpui::store::ChatStore;
 
 fn store() -> ChatStore {
@@ -199,4 +201,50 @@ fn categories_of_an_unknown_server_are_ignored() {
     let before = sidebar(&store);
     store.set_categories("srv-unknown", Vec::new());
     assert_eq!(sidebar(&store), before);
+}
+
+#[test]
+fn a_deleted_category_leaves_its_channels_uncategorized() {
+    let mut store = store();
+    let categories = store.server("srv-alpha").unwrap().categories.clone();
+    let edited = without_category(categories.as_deref().unwrap(), "cat-chat").unwrap();
+    store.set_categories("srv-alpha", edited);
+    assert_eq!(
+        sidebar(&store),
+        [
+            (
+                None,
+                vec![
+                    "ch-welcome".to_string(),
+                    "ch-general".into(),
+                    "ch-random".into()
+                ]
+            ),
+            (Some("cat-voice".into()), vec!["ch-voice".into()]),
+            (Some("cat-archive".into()), vec![]),
+        ]
+    );
+    // None of its channels went with it.
+    assert!(store.channel("ch-general").is_some());
+    assert!(store.channel("ch-random").is_some());
+    assert!(!store.has_category("cat-chat"));
+    assert_eq!(store.category_of("srv-alpha", "ch-general"), None);
+}
+
+#[test]
+fn deleting_the_last_category_leaves_every_channel_uncategorized() {
+    let mut store = store();
+    store.set_categories("srv-alpha", Vec::new());
+    assert_eq!(
+        sidebar(&store),
+        [(
+            None,
+            vec![
+                "ch-welcome".to_string(),
+                "ch-general".into(),
+                "ch-random".into(),
+                "ch-voice".into()
+            ]
+        )]
+    );
 }
