@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use super::{ApiError, StoatClient};
-use crate::notify::NotificationSettings;
+use crate::notify::{self, NotificationSettings};
 use crate::rail::{self, Ordering, ServerFolders};
 use crate::runtime::runtime;
 
@@ -301,11 +301,16 @@ pub struct Ready {
     /// Who's in each voice channel (only channels with someone in them).
     pub voice_states: Vec<ChannelVoiceState>,
     /// The `ordering` user setting (the rail's order), with when it was
-    /// written (ms since the epoch), if the user has one. `server-folders`
-    /// can't be asked for in `Ready`; it's fetched after.
+    /// written (ms since the epoch), if `Ready` brings it.
+    ///
+    /// Stoat doesn't, though `READY_FIELDS` asks: Bonfire matches the whole
+    /// `user_settings[<key>]` against `"user_settings"`, so it never takes
+    /// a key (`crates/bonfire/src/config.rs`, read 2026-11-08). The user
+    /// settings, `server-folders` too, are fetched after `Ready` instead, as
+    /// the web client does.
     pub ordering: Option<(i64, Ordering)>,
     /// The `notifications` user setting, with when it was written (ms since
-    /// the epoch), if the user has one.
+    /// the epoch), if `Ready` brings it (see [`Self::ordering`]).
     pub notifications: Option<(i64, NotificationSettings)>,
     /// List items that didn't parse (for example a new channel type) and were dropped.
     pub skipped: usize,
@@ -477,7 +482,7 @@ fn decode(mut value: Value, out: &mut Vec<ServerEvent>) {
         "UserSettingsUpdate" => {
             let mut update = user_settings(value.get_mut("update").map(Value::take));
             out.push(ServerEvent::UserSettingsUpdate {
-                notifications: parse_setting(&mut update, "notifications", |json| {
+                notifications: parse_setting(&mut update, notify::SETTINGS_KEY, |json| {
                     Box::new(NotificationSettings::parse(json))
                 }),
                 ordering: parse_setting(&mut update, rail::ORDERING_KEY, |json| {
@@ -869,8 +874,11 @@ impl Ready {
         let voice_states = lenient_list(take("voice_states"), "voice state in Ready", &mut skipped);
         let mut settings = user_settings(take("user_settings"));
         let ordering = parse_setting(&mut settings, rail::ORDERING_KEY, Ordering::parse);
-        let notifications =
-            parse_setting(&mut settings, "notifications", NotificationSettings::parse);
+        let notifications = parse_setting(
+            &mut settings,
+            notify::SETTINGS_KEY,
+            NotificationSettings::parse,
+        );
         Ready {
             users,
             servers,

@@ -617,7 +617,12 @@ impl ChatStore {
         &self.me
     }
 
-    /// Replace everything with a fresh `Ready` (on first connect and every reconnect).
+    /// Replace everything with a fresh `Ready` (on first connect and every
+    /// reconnect), except the user settings `Ready` doesn't bring: the
+    /// copies held stay until the fetch after `Ready` lands. Stoat leaves
+    /// them out even when asked (see [`Ready::ordering`]), so without this a
+    /// reconnect would forget every mute and level, and the next change
+    /// would write that empty copy over the user's settings.
     pub fn apply_ready(&mut self, ready: Ready) {
         let ready_order: Vec<String> = ready.servers.iter().map(|s| s.id.clone()).collect();
         self.users = ready.users.into_iter().map(|u| (u.id.clone(), u)).collect();
@@ -641,7 +646,9 @@ impl ChatStore {
             .into_iter()
             .map(|e| (e.id.clone(), e))
             .collect();
-        (self.notifications_updated, self.notifications) = ready.notifications.unwrap_or_default();
+        if let Some((updated, settings)) = ready.notifications {
+            (self.notifications_updated, self.notifications) = (updated, settings);
+        }
         self.read_states = ready
             .unreads
             .into_iter()
@@ -677,7 +684,9 @@ impl ChatStore {
         }
 
         self.ready_order = ready_order;
-        (self.ordering_updated, self.ordering) = ready.ordering.unwrap_or_default();
+        if let Some((updated, ordering)) = ready.ordering {
+            (self.ordering_updated, self.ordering) = (updated, ordering);
+        }
         // Replaces everything, so leaves missed while offline don't linger.
         self.voice.clear();
         for state in ready.voice_states {

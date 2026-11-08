@@ -143,6 +143,30 @@ fn a_muted_channel_is_muted_and_shows_no_unread_dot() {
 }
 
 #[test]
+fn a_ready_without_the_settings_keeps_the_mutes_held() {
+    let mut store = store();
+    change(&mut store, |s| {
+        s.mute_channel("dm-bob", None);
+        s.set_server_level("srv-alpha", Level::All);
+    });
+    let updated = store.notifications_updated();
+
+    // Stoat sends `Ready` without the user settings, even when asked.
+    let mut reconnect = ready();
+    reconnect.notifications = None;
+    store.apply_ready(reconnect);
+    assert!(entry(&store, "dm-bob").muted);
+    assert_eq!(alpha_level(&store), Level::All);
+    assert_eq!(store.notifications_updated(), updated);
+
+    // A `Ready` that does bring them is taken.
+    let mut reconnect = ready();
+    reconnect.notifications = Some((updated + 1, NotificationSettings::parse("{}")));
+    store.apply_ready(reconnect);
+    assert!(!entry(&store, "dm-bob").muted);
+}
+
+#[test]
 fn a_channel_in_a_muted_server_is_muted() {
     let mut store = store();
     change(&mut store, |s| s.mute_server("srv-alpha", None));
