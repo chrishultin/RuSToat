@@ -34,8 +34,8 @@ use crate::api::StoatClient;
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
 use crate::api::gifbox::GifboxClient;
 use crate::api::models::{
-    BulkMessageResponse, FieldsMessage, InviteJoinResponse, MessageSort, Presence, ReplyIntent,
-    UserProfile,
+    BulkMessageResponse, Channel, CreateServerLegacyResponse, FieldsMessage, InviteJoinResponse,
+    MessageSort, Presence, ReplyIntent, Server, UserProfile,
 };
 use crate::attachment::{AttachmentView, fit_into};
 use crate::complete::{Query, QueryKind, Suggestion, TokenRef, rank, rank_mentions};
@@ -79,6 +79,7 @@ use crate::ui::markup::{
 };
 use crate::ui::math::MathPlugin;
 use crate::ui::profile_card::{CardBio, CardContent, OnLink, render_profile_card};
+use crate::ui::server_dialogs::{CREATE_SERVER_DIALOG_WIDTH, CreateServerDialog};
 
 actions!(
     chat,
@@ -354,6 +355,9 @@ pub struct ChatView {
     invite_loading: bool,
     /// Invites being joined from their card.
     invite_joins: HashSet<String>,
+    /// Servers whose own membership is being fetched, so a server added
+    /// from a response and again from its `ServerCreate` asks once.
+    own_member_fetches: HashSet<String>,
     /// The longest an invite may last on this instance, in days, when it
     /// says.
     invite_max_days: Option<u32>,
@@ -752,6 +756,7 @@ impl ChatView {
             invite_queue: VecDeque::new(),
             invite_loading: false,
             invite_joins: HashSet::new(),
+            own_member_fetches: HashSet::new(),
             invite_max_days: None,
             image_limits: ImageLimits::default(),
             window: window.window_handle(),
@@ -1228,6 +1233,9 @@ impl ChatView {
     /// doesn't send this session its `ServerMemberJoin`. Its roles decide
     /// which channels show. If it fails, the next reconnect brings it.
     fn fetch_own_member(&mut self, server: String, cx: &mut Context<Self>) {
+        if !self.own_member_fetches.insert(server.clone()) {
+            return;
+        }
         let request = spawn_io({
             let (client, server, me) = (
                 self.client.clone(),
@@ -1238,18 +1246,21 @@ impl ChatView {
         });
         cx.spawn(async move |this, cx| {
             let result = request.await;
-            this.update(cx, |this, cx| match result {
-                Ok(Ok(member)) => {
-                    // Left again before it arrived.
-                    if this.store.server(&server).is_none() {
-                        return;
+            this.update(cx, |this, cx| {
+                this.own_member_fetches.remove(&server);
+                match result {
+                    Ok(Ok(member)) => {
+                        // Left again before it arrived.
+                        if this.store.server(&server).is_none() {
+                            return;
+                        }
+                        this.store.apply_member_join(member);
+                        this.server_permissions_changed(&server, cx);
+                        cx.notify();
                     }
-                    this.store.apply_member_join(member);
-                    this.server_permissions_changed(&server, cx);
-                    cx.notify();
+                    Ok(Err(err)) => log::warn!("couldn't load own membership of {server}: {err}"),
+                    Err(err) => log::warn!("membership task failed: {err:?}"),
                 }
-                Ok(Err(err)) => log::warn!("couldn't load own membership of {server}: {err}"),
-                Err(err) => log::warn!("membership task failed: {err:?}"),
             })
             .ok();
         })
@@ -4337,12 +4348,12 @@ impl ChatView {
     ) {
         match joined {
             InviteJoinResponse::Server { channels, server } => {
-                let id = server.id.clone();
-                log::info!("joined server {id} by invite ({} channels)", channels.len());
-                self.store.add_server(server, channels, Vec::new());
-                if self.store.member(&id, self.store.me()).is_none() {
-                    self.fetch_own_member(id, cx);
-                }
+                log::info!(
+                    "joined server {} by invite ({} channels)",
+                    server.id,
+                    channels.len()
+                );
+                self.server_added(server, channels, cx);
             }
             InviteJoinResponse::Group { channel, users } => {
                 let id = crate::store::channel_id(&channel).to_string();
@@ -4357,6 +4368,54 @@ impl ChatView {
             }
         }
         self.open_invite(invite, cx);
+    }
+
+    /// A server the user just joined or created: add it at once, and ask
+    /// for the user's membership, which Stoat doesn't send this session.
+    /// Its `ServerCreate` follows and replaces it, bringing its emoji.
+    fn server_added(&mut self, server: Server, channels: Vec<Channel>, cx: &mut Context<Self>) {
+        let id = server.id.clone();
+        self.store.add_server(server, channels, Vec::new());
+        if self.store.member(&id, self.store.me()).is_none() {
+            self.fetch_own_member(id, cx);
+        }
+    }
+
+    /// "Create a server": name it, and open it once Stoat has made it.
+    pub fn open_create_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let weak = cx.entity().downgrade();
+        let dialog = cx.new(|cx| CreateServerDialog::new(self, weak, window, cx));
+        let first_build = std::cell::Cell::new(true);
+        window.open_dialog(cx, move |modal, window, cx| {
+            if first_build.replace(false) {
+                let input = dialog.read(cx).input().read(cx).focus_handle(cx);
+                window.focus(&input, cx);
+            }
+            modal
+                .title("Create a server")
+                .w(px(CREATE_SERVER_DIALOG_WIDTH))
+                .child(dialog.clone())
+        });
+    }
+
+    /// The user created a server: add it and open its first channel
+    /// ("General"), or the server itself if it came with none.
+    pub fn server_created(&mut self, created: CreateServerLegacyResponse, cx: &mut Context<Self>) {
+        let CreateServerLegacyResponse { server, channels } = created;
+        let id = server.id.clone();
+        log::debug!("created server {id} ({} channels)", channels.len());
+        self.server_added(server, channels, cx);
+        let first = self
+            .store
+            .server_channels(&id)
+            .into_iter()
+            .flat_map(|section| section.channels)
+            .map(|entry| entry.id)
+            .next();
+        match first {
+            Some(channel) => self.open_channel(&channel, cx),
+            None => self.select_place(Place::Server(id), cx),
+        }
     }
 
     /// "Change identity on {server}": the user's nickname, avatar and
@@ -5583,17 +5642,7 @@ impl ChatView {
             })
             .collect();
         let has_servers = !servers.is_empty();
-        let join = rail_button(
-            "rail-join",
-            Icon::new(IconName::Plus).into_any_element(),
-            "Join a server",
-            false,
-            false,
-            0,
-            None,
-            cx.listener(|this, _, window, cx| this.open_join_dialog(None, window, cx)),
-            cx,
-        );
+        let add = self.render_rail_add(cx);
         let divider = || {
             div()
                 .w(px(32.))
@@ -5618,7 +5667,48 @@ impl ChatView {
             .child(divider())
             .children(servers)
             .when(has_servers, |rail| rail.child(divider()))
-            .child(join)
+            .child(add)
+    }
+
+    /// The rail's "+": a menu to create a server or join one.
+    fn render_rail_add(&self, cx: &Context<Self>) -> impl IntoElement {
+        let view = cx.entity().downgrade();
+        let button = RailMenuButton::new(
+            rail_icon(
+                "rail-add",
+                Icon::new(IconName::Plus).into_any_element(),
+                "Create or join a server",
+                false,
+                cx,
+            ),
+            cx,
+        );
+        let menu = move |menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
+            let (create, join) = (view.clone(), view.clone());
+            menu.item(
+                PopupMenuItem::new("Create a server…")
+                    .icon(IconName::Plus)
+                    .on_click(move |_, window, cx| {
+                        create
+                            .update(cx, |this, cx| this.open_create_server(window, cx))
+                            .ok();
+                    }),
+            )
+            .item(
+                PopupMenuItem::new("Join a server…")
+                    .icon(IconName::LogIn)
+                    .on_click(move |_, window, cx| {
+                        join.update(cx, |this, cx| this.open_join_dialog(None, window, cx))
+                            .ok();
+                    }),
+            )
+        };
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            // Opens beside the rail, rather than over it.
+            .child(button.dropdown_menu_with_anchor(Anchor::LeftCenter, menu))
     }
 
     fn render_channel_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -9367,35 +9457,9 @@ pub(crate) fn rail_button(
     cx: &App,
 ) -> Div {
     let theme = cx.theme();
-    let tooltip: SharedString = tooltip.into();
-    let hover_bg = theme.primary_hover;
-    let hover_fg = theme.primary_foreground;
     let marker = theme.foreground;
     let badge_ring = theme.sidebar;
-    let button = div()
-        .id(id)
-        .size(px(48.))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_pointer()
-        .text_sm()
-        .font_weight(FontWeight::SEMIBOLD)
-        .when(selected, |el| {
-            el.rounded_xl()
-                .bg(theme.primary)
-                .text_color(theme.primary_foreground)
-        })
-        .when(!selected, |el| {
-            el.rounded_full()
-                .bg(theme.secondary)
-                .text_color(theme.secondary_foreground)
-                .hover(move |style| style.rounded_xl().bg(hover_bg).text_color(hover_fg))
-        })
-        .on_click(on_click)
-        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-        .child(content);
+    let button = rail_icon(id, content, tooltip, selected, cx).on_click(on_click);
     // Right-click: e.g. "Mark as read" on servers.
     let button = match menu {
         None => button.into_any_element(),
@@ -9437,6 +9501,105 @@ pub(crate) fn rail_button(
             )
         })
 }
+
+/// A rail button's face, without its click or menu: filled when selected,
+/// else a circle that squares off on hover.
+fn rail_icon(
+    id: impl Into<ElementId>,
+    content: AnyElement,
+    tooltip: impl Into<SharedString>,
+    selected: bool,
+    cx: &App,
+) -> Stateful<Div> {
+    let theme = cx.theme();
+    let tooltip: SharedString = tooltip.into();
+    let hover_bg = theme.primary_hover;
+    let hover_fg = theme.primary_foreground;
+    div()
+        .id(id)
+        .size(px(48.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .text_sm()
+        .font_weight(FontWeight::SEMIBOLD)
+        .when(selected, |el| {
+            el.rounded_xl()
+                .bg(theme.primary)
+                .text_color(theme.primary_foreground)
+        })
+        .when(!selected, |el| {
+            el.rounded_full()
+                .bg(theme.secondary)
+                .text_color(theme.secondary_foreground)
+                .hover(move |style| style.rounded_xl().bg(hover_bg).text_color(hover_fg))
+        })
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .child(content)
+}
+
+/// A rail button whose left click opens a menu (the "+"). A
+/// [`DropdownMenu`] needs a [`Selectable`] trigger, which a `div` isn't;
+/// while the menu is open, the button looks hovered.
+struct RailMenuButton {
+    face: Stateful<Div>,
+    open: bool,
+    open_bg: Hsla,
+    open_fg: Hsla,
+}
+
+impl RailMenuButton {
+    fn new(face: Stateful<Div>, cx: &App) -> Self {
+        Self {
+            face,
+            open: false,
+            open_bg: cx.theme().primary_hover,
+            open_fg: cx.theme().primary_foreground,
+        }
+    }
+}
+
+impl Selectable for RailMenuButton {
+    fn selected(mut self, selected: bool) -> Self {
+        self.open = selected;
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        self.open
+    }
+}
+
+impl Styled for RailMenuButton {
+    fn style(&mut self) -> &mut StyleRefinement {
+        self.face.style()
+    }
+}
+
+impl InteractiveElement for RailMenuButton {
+    fn interactivity(&mut self) -> &mut Interactivity {
+        self.face.interactivity()
+    }
+}
+
+impl IntoElement for RailMenuButton {
+    type Element = Stateful<Div>;
+
+    fn into_element(self) -> Self::Element {
+        if self.open {
+            self.face
+                .rounded_xl()
+                .bg(self.open_bg)
+                .text_color(self.open_fg)
+        } else {
+            self.face
+        }
+    }
+}
+
+impl DropdownMenu for RailMenuButton {}
 
 /// A red pill with an unread-mention count ("99+" past 99).
 pub(crate) fn mention_badge(count: usize, cx: &App) -> Div {

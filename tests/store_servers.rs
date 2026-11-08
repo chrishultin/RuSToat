@@ -1,10 +1,12 @@
-//! Servers joined (`ServerCreate`) and deleted (`ServerDelete`) while the
-//! client runs.
+//! Servers joined or created (`ServerCreate`) and deleted (`ServerDelete`)
+//! while the client runs.
 
 use revolt_permissions::{ChannelPermission, DEFAULT_PERMISSION_SERVER};
 use serde_json::{Value, json};
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
-use stoat_gpui::api::models::{BulkMessageResponse, InviteJoinResponse, Member};
+use stoat_gpui::api::models::{
+    BulkMessageResponse, CreateServerLegacyResponse, InviteJoinResponse, Member,
+};
 use stoat_gpui::store::ChatStore;
 
 const VIEW: u64 = ChannelPermission::ViewChannel as u64;
@@ -187,4 +189,61 @@ fn a_server_create_then_the_join_response_keeps_the_emoji() {
         store.servers().last().map(|s| s.id.as_str()),
         Some("srv-new")
     );
+}
+
+/// What `POST /servers/create` answers: the new server, owned by the
+/// user, with no categories, and its one channel, "General".
+fn created_json() -> Value {
+    json!({
+        "server": {
+            "_id": "srv-mine", "owner": "u-me", "name": "Lounge",
+            "channels": ["ch-general"],
+            "default_permissions": *DEFAULT_PERMISSION_SERVER as i64,
+            "approximate_member_count": 1
+        },
+        "channels": [
+            { "channel_type": "TextChannel", "_id": "ch-general", "server": "srv-mine", "name": "General" }
+        ]
+    })
+}
+
+fn add_created(store: &mut ChatStore) -> bool {
+    let created: CreateServerLegacyResponse = serde_json::from_value(created_json()).unwrap();
+    store.add_server(created.server, created.channels, Vec::new())
+}
+
+/// The `ServerCreate` Stoat sends the creator after the response.
+fn created_event() -> Value {
+    let created = created_json();
+    json!({
+        "type": "ServerCreate", "id": "srv-mine",
+        "server": created["server"], "channels": created["channels"],
+        "emojis": [], "voice_states": []
+    })
+}
+
+#[test]
+fn a_create_response_then_its_server_create_gives_one_server_with_general() {
+    let mut store = store();
+    assert!(add_created(&mut store));
+    assert!(!add(&mut store, created_event()));
+    assert_eq!(rail_count(&store, "srv-mine"), 1);
+    assert_eq!(
+        store.servers().last().map(|s| s.id.as_str()),
+        Some("srv-mine")
+    );
+    assert_eq!(channel_list(&store, "srv-mine"), ["ch-general"]);
+}
+
+#[test]
+fn a_server_create_then_the_create_response_gives_one_server_with_general() {
+    let mut store = store();
+    assert!(add(&mut store, created_event()));
+    assert!(!add_created(&mut store));
+    assert_eq!(rail_count(&store, "srv-mine"), 1);
+    assert_eq!(
+        store.servers().last().map(|s| s.id.as_str()),
+        Some("srv-mine")
+    );
+    assert_eq!(channel_list(&store, "srv-mine"), ["ch-general"]);
 }

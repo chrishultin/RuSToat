@@ -40,6 +40,7 @@ fn set_menus(accounts: &[String], cx: &mut App) {
             name: "Stoat".into(),
             items: vec![
                 MenuItem::action("Add Account…", AddAccount),
+                MenuItem::action("Create Server…", CreateServer),
                 MenuItem::action("Join Server…", JoinServer),
                 MenuItem::action("Log Out", LogOut),
                 MenuItem::separator(),
@@ -147,8 +148,16 @@ fn main() {
         cx.on_action(|_: &LogOut, cx| {
             MainWindow::update(cx, |root, window, cx| root.log_out_current(window, cx));
         });
-        // Join Server… joins as the account on screen; without one (the
-        // login view, or no window) it does nothing.
+        // Create Server… and Join Server… act for the account on screen;
+        // without one (the login view, or no window) they do nothing.
+        cx.on_action(|_: &CreateServer, cx| {
+            MainWindow::update(cx, |root, window, cx| {
+                if let Some((_, chat)) = root.shown_chat() {
+                    window.activate_window();
+                    chat.update(cx, |chat, cx| chat.open_create_server(window, cx));
+                }
+            });
+        });
         cx.on_action(|_: &JoinServer, cx| {
             MainWindow::update(cx, |root, window, cx| {
                 if let Some((_, chat)) = root.shown_chat() {

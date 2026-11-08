@@ -16,6 +16,7 @@ pub mod markup;
 pub mod math;
 pub mod profile_card;
 pub mod profile_editor;
+pub mod server_dialogs;
 pub mod sessions_page;
 pub mod settings;
 pub mod switcher;

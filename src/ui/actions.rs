@@ -17,6 +17,8 @@ actions!(
         OpenSettings,
         /// Open the settings window on the Profile page ("Edit profile…").
         OpenProfileSettings,
+        /// "Create a server" for the account on screen.
+        CreateServer,
         /// "Join a server" for the account on screen.
         JoinServer
     ]

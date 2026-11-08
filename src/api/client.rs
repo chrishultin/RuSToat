@@ -2,11 +2,11 @@ use std::time::Duration;
 
 use reqwest::{Client, Method};
 use revolt_models::v0::{
-    AccountInfo, AllMemberResponse, BulkMessageResponse, Channel, DataChangeEmail,
-    DataChangePassword, DataEditMessage, DataEditSession, DataEditUser, DataLogin, DataMemberEdit,
-    DataMessageSearch, DataMessageSend, DataSendFriendRequest, Emoji, FieldsUser, Invite,
-    InviteJoinResponse, InviteResponse, MFAResponse, MFATicket, Member, Message, MessageSort,
-    MultiFactorStatus, OptionsQueryMessages, Presence, ReplyIntent, ResponseLogin,
+    AccountInfo, AllMemberResponse, BulkMessageResponse, Channel, CreateServerLegacyResponse,
+    DataChangeEmail, DataChangePassword, DataEditMessage, DataEditSession, DataEditUser, DataLogin,
+    DataMemberEdit, DataMessageSearch, DataMessageSend, DataSendFriendRequest, Emoji, FieldsUser,
+    Invite, InviteJoinResponse, InviteResponse, MFAResponse, MFATicket, Member, Message,
+    MessageSort, MultiFactorStatus, OptionsQueryMessages, Presence, ReplyIntent, ResponseLogin,
     ResponseTotpSecret, SessionInfo, User, UserProfile, UserStatus,
 };
 use serde::de::DeserializeOwned;
@@ -827,6 +827,23 @@ impl StoatClient {
             Method::POST,
             &format!("/channels/{channel}/invites"),
             Some(&body),
+        )
+        .await
+    }
+
+    /// `POST /servers/create`: a new server called `name`, owned by the
+    /// user, with one text channel ("General"). Stoat then sends this
+    /// session its `ServerCreate`.
+    pub async fn create_server(&self, name: &str) -> Result<CreateServerLegacyResponse, ApiError> {
+        // `DataCreateServer` would also send `"description": null`.
+        #[derive(Serialize)]
+        struct CreateServer<'a> {
+            name: &'a str,
+        }
+        self.send(
+            Method::POST,
+            "/servers/create",
+            Some(&CreateServer { name }),
         )
         .await
     }
