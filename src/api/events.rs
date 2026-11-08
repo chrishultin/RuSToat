@@ -137,6 +137,11 @@ pub enum ServerEvent {
         data: Box<PartialChannel>,
         clear: Vec<FieldsChannel>,
     },
+    /// A channel was deleted (sent to those who could see it), or a DM
+    /// closed or a group left. Stoat sends no `ServerUpdate` with it.
+    ChannelDelete {
+        id: String,
+    },
     /// Someone joined a server (possibly the user, on another device).
     ServerMemberJoin {
         server: String,
@@ -457,6 +462,15 @@ fn decode(mut value: Value, out: &mut Vec<ServerEvent>) {
                     data: Box::new(u.data),
                     clear: u.clear,
                 }
+            }))
+        }
+        "ChannelDelete" => {
+            #[derive(Deserialize)]
+            struct Delete {
+                id: String,
+            }
+            out.push(decode_as(value, &kind, |d: Delete| {
+                ServerEvent::ChannelDelete { id: d.id }
             }))
         }
         // `id` is the server. Stoat 0.16 sends the whole `member`; older
@@ -1040,6 +1054,7 @@ async fn session(
                         | ServerEvent::ChannelAck { .. }
                         | ServerEvent::ChannelCreate(_)
                         | ServerEvent::ChannelUpdate { .. }
+                        | ServerEvent::ChannelDelete { .. }
                         | ServerEvent::ServerMemberJoin { .. }
                         | ServerEvent::ServerMemberLeave { .. }
                         | ServerEvent::ServerMemberUpdate { .. }
@@ -1496,6 +1511,12 @@ mod tests {
             events.as_slice(),
             [ServerEvent::ServerCreate { channels, emojis, .. }] if channels.is_empty() && emojis.is_empty()
         ));
+    }
+
+    #[test]
+    fn channel_delete_decodes() {
+        let events = parse_frame(r#"{"type":"ChannelDelete","id":"c1"}"#);
+        assert!(matches!(events.as_slice(), [ServerEvent::ChannelDelete { id }] if id == "c1"));
     }
 
     #[test]

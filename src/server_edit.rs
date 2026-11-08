@@ -37,6 +37,15 @@ pub fn create_server_error_text(err: &ApiError) -> String {
     }
 }
 
+/// Why `DELETE /channels/{id}` was refused. (`NotFound` isn't a refusal:
+/// the channel is already gone.)
+pub fn delete_channel_error_text(err: &ApiError) -> String {
+    match err.error_type() {
+        Some(ErrorType::MissingPermission { .. }) => "You can't delete this channel.".into(),
+        _ => error_text(err, "Couldn't delete the channel. Try again."),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,6 +89,28 @@ mod tests {
         assert_eq!(
             create_server_error_text(&api_error(ErrorType::InternalError)),
             "Couldn't create the server. Try again."
+        );
+    }
+
+    #[test]
+    fn delete_channel_refusals_say_why() {
+        let missing = ErrorType::MissingPermission {
+            permission: "ManageChannel".into(),
+        };
+        assert_eq!(
+            delete_channel_error_text(&api_error(missing)),
+            "You can't delete this channel."
+        );
+        let limited = ApiError::RateLimited {
+            retry_after_ms: Some(4200),
+        };
+        assert_eq!(
+            delete_channel_error_text(&limited),
+            "Stoat is limiting changes. Try again in 5 s."
+        );
+        assert_eq!(
+            delete_channel_error_text(&api_error(ErrorType::InternalError)),
+            "Couldn't delete the channel. Try again."
         );
     }
 }

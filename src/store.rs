@@ -2507,6 +2507,12 @@ impl ChatStore {
         crate::permissions::can_invite(self, &self.me, channel)
     }
 
+    /// Whether the user may delete `channel` (see
+    /// [`crate::permissions::can_manage_channel`]).
+    pub fn can_manage_channel(&self, channel: &str) -> bool {
+        crate::permissions::can_manage_channel(self, &self.me, channel)
+    }
+
     /// What a `UserSlowmodes` event says, received at `now_ms`: the user's
     /// cooldowns in the channels it lists (see [`Cooldowns::apply`]).
     pub fn apply_slowmodes(&mut self, slowmodes: &[ChannelSlowmode], now_ms: u64) {
@@ -3022,14 +3028,42 @@ impl ChatStore {
         let mut removed: Vec<String> = server.channels.into_iter().chain(strays).collect();
         removed.retain(|cid| self.channels.remove(cid).is_some());
         for cid in &removed {
-            self.histories.remove(cid);
-            self.read_states.remove(cid);
-            if let Some(gone) = self.pending.remove(cid) {
-                self.release_files(gone);
-            }
+            self.drop_channel_state(cid);
         }
         self.members.retain(|(server, _), _| server != id);
         removed
+    }
+
+    /// Forget a channel that was deleted (`ChannelDelete`, or the user's own
+    /// delete), or a DM closed or a group left: the channel, its ID in its
+    /// server's list and every category, and its history, read state and
+    /// unsent messages. Returns whether it was known; a second call (the
+    /// event after the response, or the reverse) does nothing.
+    pub fn remove_channel(&mut self, id: &str) -> bool {
+        let Some(channel) = self.channels.remove(id) else {
+            return false;
+        };
+        // Stoat leaves a deleted channel in its categories; drop it here.
+        if let Channel::TextChannel { server, .. } = &channel
+            && let Some(server) = self.servers.get_mut(server)
+        {
+            server.channels.retain(|c| c != id);
+            for category in server.categories.iter_mut().flatten() {
+                category.channels.retain(|c| c != id);
+            }
+        }
+        self.drop_channel_state(id);
+        true
+    }
+
+    /// Drop what's held for a channel that's gone: its history, read state
+    /// and unsent messages (their files released).
+    fn drop_channel_state(&mut self, id: &str) {
+        self.histories.remove(id);
+        self.read_states.remove(id);
+        if let Some(gone) = self.pending.remove(id) {
+            self.release_files(gone);
+        }
     }
 
     /// Loaded channels whose rows show `user`: ones with a message by or

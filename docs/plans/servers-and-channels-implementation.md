@@ -58,3 +58,48 @@ Deferred to the batched manual pass. Steps:
 5. The Create button is disabled for an empty or blank name and past 32 characters; the counter shows the count and turns red past 32.
 6. On stoat.chat, the Acceptable Use Policy line shows and its link opens `https://stoat.chat/aup` in the browser. On another instance, it doesn't show.
 7. Light and dark themes: the dialog, the counter and the link are readable.
+
+## Chunk 2: Delete a channel, and follow deletions made elsewhere
+
+### Changes Made
+- `src/api/events.rs`: `ServerEvent::ChannelDelete { id }`, parsed and forwarded, with a parse test.
+- `src/api/client.rs`: `delete_channel(channel)` (`DELETE /channels/{id}`, no body, returns `()`).
+- `src/permissions.rs`: `can_manage_channel(store, user, channel)`: a server channel, and Manage Channels in `channel_permissions`. `src/store.rs`: the `ChatStore::can_manage_channel(channel)` wrapper.
+- `src/store.rs`:
+  - `remove_channel(id) -> bool`, for any kind of channel: takes it out of `channels`, its server's `channels` and every category's `channels` (the server is read from the removed channel), and drops its history, read state and pending messages. `false` if it wasn't known, so the second of the response and the event does nothing.
+  - The per-channel part of `remove_server` is now the private `drop_channel_state(id)`, shared by both.
+- `src/server_edit.rs`: `delete_channel_error_text(&ApiError)`: `MissingPermission` is "You can't delete this channel.", else `profile_edit::error_text` with "Couldn't delete the channel. Try again." One unit test.
+- `src/ui/chat.rs`:
+  - `forget_channel(channel, cx)`: what `leave_server` cleared per channel (pane, loading flags and errors, jump, banner, `pending_ack`). `leave_server` now calls it for each removed channel.
+  - `channel_deleted(channel, cx)`: `store.remove_channel`, then (if it was known) `forget_channel`, `drop_stale_selection`, `remember_places`, `ensure_current_loaded`. The `ChannelDelete` handler and the user's own delete both use it.
+  - "Delete channel…" at the end of `channel_menu`, before Copy channel ID's separator, for server channels where `can_manage_channel`. It's drawn like "Delete message" (danger colour, `Trash` icon).
+  - `confirm_delete_channel(channel, window, cx)`: "Delete {name}?", "Once it's deleted, there's no going back.", Cancel and a Danger "Delete". Shift doesn't skip it.
+  - `delete_channel(channel, window, cx)`: sets `deleting_channel`, so the dialog's buttons are disabled (Delete shows a spinner) and Escape doesn't close it. On 204 or `NotFound` it runs `channel_deleted` and closes the dialog; otherwise the dialog is enabled again and a toast says why.
+- `tests/store_channels.rs` (new, from `ready.json`): deleting a categorised channel takes it out of the server's list, its category, the sidebar and its history, and the category stays; a second removal returns false; other servers, channels and categories are untouched; DMs and groups can be removed too.
+- `tests/api_servers.rs`: `DELETE /channels/c1` with the token and an empty body; a 403 `MissingPermission` stays an `Api` error.
+- `tests/permissions.rs`: `can_manage_channel` is false with the default permissions, true for the owner (even where a channel takes it away), true for a role granting it, false when a channel override denies it to that role, and false in DMs, groups and Saved Notes. The shared test server gains a lowest-ranked `builder` role granting Manage Channels.
+
+### Divergences
+- **The menu item's icon is `Trash`, not `IconName::Delete`,** and it's drawn in the danger colour, as "Delete message" is. That's the app's existing destructive menu item.
+- **The confirmation has its own footer** (Cancel and Delete), like the external-link prompt, rather than `.confirm()`'s default buttons. The default buttons can't be disabled or show a spinner, which Assumption 13 needs. Escape is also off while the request runs, so the dialog can't be closed under it.
+- **A failed delete leaves the confirmation open,** enabled again, beside the toast, as in the web client (which shows the error in the dialog). Cancel closes it.
+- **The title uses the bare channel name** ("Delete general?"), as the web client does.
+- **The store's per-channel helper is `drop_channel_state`,** so it isn't confused with `ChatView::forget_channel`.
+
+### Verification Performed
+- `cargo test --test store_channels`: 4 passed. `--test api_servers`: 4 passed. `--test permissions`: 33 passed. `cargo test --lib server_edit` and the `channel_delete_decodes` events test pass.
+- `cargo test`: 916 passed, 0 failed (906 before).
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt `Diff in` counts:
+  - `src/api/client.rs` 3, `src/api/events.rs` 3, `src/ui/chat.rs` 17 and `src/store.rs` 15: unchanged, after hand-formatting `delete_channel` and the dialog's `busy` check.
+  - `src/permissions.rs`, `src/server_edit.rs`, `tests/api_servers.rs` and `tests/permissions.rs` 0. New file `tests/store_channels.rs` 0.
+
+### Manual Validation
+Deferred to the batched manual pass. Steps:
+1. As a server's owner, right-click a channel: "Delete channel…" is last before Copy channel ID, in red. Choose it: "Delete {name}?" asks. Cancel keeps the channel.
+2. Delete it: Delete shows a spinner while the request runs, then the dialog closes and the channel disappears from the sidebar. If it was open, the sidebar's first channel opens.
+3. Delete the last channel of a category: the category disappears (folded or not) until chunk 3, which shows empty categories. No empty header is left behind.
+4. Delete a channel from the web client: it disappears from RuSToat within a moment, and if it was open there, another channel opens with no pane or spinner left behind.
+5. As a member without Manage Channels, the channel menu has no Delete. DMs and groups never show it.
+6. With a channel open in a second account in RuSToat, delete it from the first: it disappears in both.
+7. Light and dark themes: the red menu item and the dialog are readable.

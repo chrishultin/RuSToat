@@ -1,11 +1,11 @@
 //! Servers and channels against a mock Stoat API: `POST /servers/create`
-//! (create a server).
+//! (create a server) and `DELETE /channels/{id}` (delete a channel).
 
 use revolt_result::ErrorType;
 use serde_json::json;
 use stoat_gpui::api::models::Channel;
 use stoat_gpui::api::{ApiError, StoatClient};
-use wiremock::matchers::{body_json, header, method, path};
+use wiremock::matchers::{body_json, body_string, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn client(server: &MockServer) -> StoatClient {
@@ -61,6 +61,43 @@ async fn too_many_servers_is_an_api_error() {
         matches!(
             err.error_type(),
             Some(ErrorType::TooManyServers { max: 100 })
+        ),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_channel_sends_no_body() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/channels/c1"))
+        .and(header("x-session-token", "tok"))
+        .and(body_string(""))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client(&server).delete_channel("c1").await.unwrap();
+}
+
+#[tokio::test]
+async fn deleting_a_channel_without_permission_is_an_api_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/channels/c1"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "type": "MissingPermission", "permission": "ManageChannel"
+        })))
+        .mount(&server)
+        .await;
+
+    let err = client(&server).delete_channel("c1").await.unwrap_err();
+    assert!(matches!(&err, ApiError::Api(_)), "{err:?}");
+    assert!(
+        matches!(
+            err.error_type(),
+            Some(ErrorType::MissingPermission { permission }) if permission == "ManageChannel"
         ),
         "{err:?}"
     );

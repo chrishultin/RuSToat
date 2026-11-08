@@ -848,6 +848,16 @@ impl StoatClient {
         .await
     }
 
+    /// `DELETE /channels/{channel}`: delete a server channel (Manage
+    /// Channels on it). Stoat takes it out of the server's channel list but
+    /// not its categories, and sends `ChannelDelete` to whoever could see
+    /// it. For a DM or group the same route closes or leaves it.
+    pub async fn delete_channel(&self, channel: &str) -> Result<(), ApiError> {
+        self.send_raw(Method::DELETE, &format!("/channels/{channel}"), None::<&()>)
+            .await
+            .map(|_| ())
+    }
+
     /// `PUT /servers/{server}/ack`: mark every channel in `server` read.
     pub async fn ack_server(&self, server: &str) -> Result<(), ApiError> {
         self.send_raw(Method::PUT, &format!("/servers/{server}/ack"), None::<&()>)

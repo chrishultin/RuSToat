@@ -282,6 +282,9 @@ pub struct ChatView {
     /// The external link the open "External links can be dangerous!" dialog
     /// asks about.
     link_prompt: Option<LinkPrompt>,
+    /// The channel whose "Delete {name}?" confirmation is waiting for Stoat
+    /// to answer: its buttons are disabled until then.
+    deleting_channel: Option<String>,
     /// The age gate's "I am at least 18" box, as the user set it in this
     /// channel. In any other channel it starts as `safety.adult_confirmed`.
     age_gate_tick: Option<(String, bool)>,
@@ -727,6 +730,7 @@ impl ChatView {
             safety_file,
             safety,
             link_prompt: None,
+            deleting_channel: None,
             age_gate_tick: None,
             media,
             web_app: None,
@@ -990,6 +994,10 @@ impl ChatView {
                     self.ensure_current_loaded(cx);
                 }
             }
+            ConnectionEvent::Event(ServerEvent::ChannelDelete { id }) => {
+                log::debug!("live: channel {id} deleted");
+                self.channel_deleted(&id, cx);
+            }
             ConnectionEvent::Event(ServerEvent::ChannelStartTyping { channel, user }) => {
                 self.typing.start(&channel, &user, std::time::Instant::now());
                 self.schedule_typing_tick(cx);
@@ -1198,24 +1206,7 @@ impl ChatView {
         let removed = self.store.remove_server(server);
         log::info!("left server {server} ({} channels)", removed.len());
         for channel in &removed {
-            self.panes.remove(channel);
-            self.loading.remove(channel);
-            self.load_errors.remove(channel);
-            self.loading_older.remove(channel);
-            self.older_errors.remove(channel);
-            self.loading_newer.remove(channel);
-            self.newer_errors.remove(channel);
-            self.jumps.remove(channel);
-            if self.banners.remove(channel).is_some() {
-                cx.dismiss_system_notification(&notify::banner_tag(&self.account_id, channel));
-            }
-        }
-        if self
-            .pending_ack
-            .as_ref()
-            .is_some_and(|(channel, ..)| removed.contains(channel))
-        {
-            self.pending_ack = None;
+            self.forget_channel(channel, cx);
         }
         self.member_fetches.remove(server);
         self.members_loading.remove(server);
@@ -1227,6 +1218,43 @@ impl ChatView {
         self.drop_stale_selection();
         self.remember_places();
         self.ensure_current_loaded(cx);
+    }
+
+    /// A channel was deleted (here or elsewhere): drop it and everything
+    /// loaded for it. If it was open, the sidebar's first channel opens.
+    fn channel_deleted(&mut self, channel: &str, cx: &mut Context<Self>) {
+        if !self.store.remove_channel(channel) {
+            return;
+        }
+        log::debug!("forgot deleted channel {channel}");
+        self.forget_channel(channel, cx);
+        self.drop_stale_selection();
+        self.remember_places();
+        self.ensure_current_loaded(cx);
+    }
+
+    /// Drop what's loaded or shown for a channel that's gone (deleted, or in
+    /// a server the user left): its pane, loading state and errors, jump,
+    /// banner and pending read mark.
+    fn forget_channel(&mut self, channel: &str, cx: &mut Context<Self>) {
+        self.panes.remove(channel);
+        self.loading.remove(channel);
+        self.load_errors.remove(channel);
+        self.loading_older.remove(channel);
+        self.older_errors.remove(channel);
+        self.loading_newer.remove(channel);
+        self.newer_errors.remove(channel);
+        self.jumps.remove(channel);
+        if self.banners.remove(channel).is_some() {
+            cx.dismiss_system_notification(&notify::banner_tag(&self.account_id, channel));
+        }
+        if self
+            .pending_ack
+            .as_ref()
+            .is_some_and(|(pending, ..)| pending == channel)
+        {
+            self.pending_ack = None;
+        }
     }
 
     /// Fetch the user's own membership of a server they just joined: Stoat
@@ -3397,9 +3425,9 @@ impl ChatView {
     /// A channel's, DM's or group's right-click menu: Mute Channel (for how
     /// long), or Unmute Channel and until when it's muted; its
     /// Notifications level, led by its default (the server's level, or
-    /// All for DMs and groups); Copy channel ID. A channel in a muted
-    /// server still offers Mute Channel: the server's mute is what
-    /// silences it.
+    /// All for DMs and groups); Create invite… and Delete channel… where
+    /// allowed; Copy channel ID. A channel in a muted server still offers
+    /// Mute Channel: the server's mute is what silences it.
     fn channel_menu(&self, channel: &ChannelEntry, cx: &Context<Self>) -> MenuBuilder {
         let view = cx.entity().downgrade();
         let channel_id = channel.id.clone();
@@ -3410,6 +3438,7 @@ impl ChatView {
             };
             let store = &this.read(cx).store;
             let invitable = in_server && store.can_invite(&channel_id);
+            let deletable = in_server && store.can_manage_channel(&channel_id);
             let mute = store.channel_mute_until(&channel_id);
             let current = store.notification_settings().channel_override(&channel_id);
             let inherited = store.level_source(&channel_id).label();
@@ -3463,9 +3492,143 @@ impl ChatView {
             } else {
                 menu
             };
+            let menu = if deletable {
+                let (view, channel) = (view.clone(), channel_id.clone());
+                menu.item(
+                    PopupMenuItem::element(|_, cx| {
+                        let danger = cx.theme().danger;
+                        h_flex()
+                            .gap_2()
+                            .text_color(danger)
+                            .child(Icon::new(IconName::Trash).text_color(danger))
+                            .child("Delete channel…")
+                    })
+                    .on_click(move |_, window, cx| {
+                        view.update(cx, |this, cx| {
+                            this.confirm_delete_channel(channel.clone(), window, cx)
+                        })
+                        .ok();
+                    }),
+                )
+            } else {
+                menu
+            };
             menu.separator()
                 .item(copy_id_item("Copy channel ID", channel_id.clone()))
         })
+    }
+
+    /// Ask before deleting a server channel: "Delete {name}?" (always; Shift
+    /// doesn't skip it). Once Delete is chosen, the buttons wait, disabled,
+    /// for Stoat's answer.
+    fn confirm_delete_channel(
+        &mut self,
+        channel: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) = self.store.channel_entry(&channel).map(|entry| entry.name) else {
+            return;
+        };
+        let title: SharedString = format!("Delete {name}?").into();
+        let view = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let busy = view
+                .upgrade()
+                .is_some_and(|view| view.read(cx).deleting_channel.as_ref() == Some(&channel));
+            let delete = {
+                let (view, channel) = (view.clone(), channel.clone());
+                move |window: &mut Window, cx: &mut App| {
+                    view.update(cx, |this, cx| {
+                        this.delete_channel(channel.clone(), window, cx)
+                    })
+                    .ok();
+                }
+            };
+            alert
+                .title(title.clone())
+                .description("Once it's deleted, there's no going back.")
+                .keyboard(!busy)
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("delete-channel-cancel")
+                                .label("Cancel")
+                                .disabled(busy)
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("delete-channel-ok")
+                                .with_variant(ButtonVariant::Danger)
+                                .label("Delete")
+                                .loading(busy)
+                                .disabled(busy)
+                                .on_click({
+                                    let delete = delete.clone();
+                                    move |_, window, cx| delete(window, cx)
+                                }),
+                        ),
+                )
+                .on_ok(move |_, window, cx| {
+                    if !busy {
+                        delete(window, cx);
+                    }
+                    false
+                })
+        });
+    }
+
+    /// Delete a server channel (the confirmation's Delete). On Stoat's
+    /// answer it goes here at once (`ChannelDelete` may come before or
+    /// after) and the confirmation closes; `NotFound` means it's already
+    /// gone. Otherwise the confirmation stays and a toast says why.
+    fn delete_channel(&mut self, channel: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.deleting_channel.is_some() {
+            return;
+        }
+        self.deleting_channel = Some(channel.clone());
+        window.refresh();
+        let request = spawn_io({
+            let (client, channel) = (self.client.clone(), channel.clone());
+            async move { client.delete_channel(&channel).await }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.deleting_channel = None;
+                let error = match result {
+                    Ok(Ok(())) => None,
+                    // Already gone (deleted elsewhere): what we wanted.
+                    Ok(Err(err))
+                        if matches!(err.error_type(), Some(revolt_result::ErrorType::NotFound)) =>
+                    {
+                        None
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't delete channel {channel}: {err:?}");
+                        Some(crate::server_edit::delete_channel_error_text(&err))
+                    }
+                    Err(err) => {
+                        log::warn!("delete channel task failed: {err:?}");
+                        Some("Couldn't delete the channel. Try again.".to_string())
+                    }
+                };
+                match error {
+                    None => {
+                        log::debug!("deleted channel {channel}");
+                        this.channel_deleted(&channel, cx);
+                        window.close_dialog(cx);
+                    }
+                    Some(error) => window.push_notification(Notification::error(error), cx),
+                }
+                window.refresh();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// A server's right-click menu: Mark as read; Edit identity…; Mute Server (for how

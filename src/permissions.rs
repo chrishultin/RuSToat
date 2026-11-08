@@ -144,6 +144,17 @@ pub fn can_invite(store: &ChatStore, user: &str, channel: &str) -> bool {
         )
 }
 
+/// Whether `user` may delete `channel`: only server channels here (closing
+/// DMs and leaving groups need no permission), with Manage Channels on that
+/// channel, as Stoat checks.
+pub fn can_manage_channel(store: &ChatStore, user: &str, channel: &str) -> bool {
+    in_server(store, channel)
+        && has(
+            channel_permissions(store, user, channel),
+            ChannelPermission::ManageChannel,
+        )
+}
+
 /// Whether `user` may send embeds in `channel` (which a GIF is).
 pub fn can_send_embeds(store: &ChatStore, user: &str, channel: &str) -> bool {
     has(

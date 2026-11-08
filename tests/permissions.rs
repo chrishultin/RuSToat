@@ -7,9 +7,9 @@ use revolt_permissions::{
 use serde_json::{Value, json};
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::permissions::{
-    can_bypass_slowmode, can_change_avatar, can_change_nickname, can_invite, can_mention_everyone,
-    can_mention_roles, can_pin, can_send_embeds, can_view, channel_permissions, has,
-    server_permissions,
+    can_bypass_slowmode, can_change_avatar, can_change_nickname, can_invite, can_manage_channel,
+    can_mention_everyone, can_mention_roles, can_pin, can_send_embeds, can_view,
+    channel_permissions, has, server_permissions,
 };
 use stoat_gpui::store::ChatStore;
 
@@ -18,6 +18,7 @@ const SEND: u64 = ChannelPermission::SendMessage as u64;
 const MANAGE: u64 = ChannelPermission::ManageMessages as u64;
 const NICKNAME: u64 = ChannelPermission::ChangeNickname as u64;
 const AVATAR: u64 = ChannelPermission::ChangeAvatar as u64;
+const MANAGE_CHANNEL: u64 = ChannelPermission::ManageChannel as u64;
 
 fn member(user: &str, roles: &[&str], extra: Value) -> Value {
     let mut member = json!({
@@ -45,8 +46,8 @@ fn user(id: &str, extra: Value) -> Value {
 
 /// Roles, from the highest-ranked down: `mod` may manage messages, `staff`
 /// is a rank below, `muted` may not send, `rookie` is denied what `mod`
-/// allows, and `anonymous` (the lowest) may not change their nickname or
-/// avatar.
+/// allows, `anonymous` may not change their nickname or avatar, and
+/// `builder` (the lowest) may manage channels.
 fn server_json() -> Value {
     json!({
         "_id": "srv", "owner": "u-owner", "name": "Test", "channels": ["ch-open", "ch-staff", "ch-no-rookies"],
@@ -57,7 +58,8 @@ fn server_json() -> Value {
             "staff": { "_id": "staff", "name": "Staff", "rank": 2, "permissions": { "a": 0, "d": 0 } },
             "muted": { "_id": "muted", "name": "Muted", "rank": 3, "permissions": { "a": 0, "d": SEND } },
             "rookie": { "_id": "rookie", "name": "Rookie", "rank": 4, "permissions": { "a": 0, "d": MANAGE } },
-            "anonymous": { "_id": "anonymous", "name": "Anonymous", "rank": 5, "permissions": { "a": 0, "d": NICKNAME | AVATAR } }
+            "anonymous": { "_id": "anonymous", "name": "Anonymous", "rank": 5, "permissions": { "a": 0, "d": NICKNAME | AVATAR } },
+            "builder": { "_id": "builder", "name": "Builder", "rank": 6, "permissions": { "a": MANAGE_CHANNEL, "d": 0 } }
         }
     })
 }
@@ -588,4 +590,41 @@ fn invites_to_dms_and_groups_are_not_offered() {
     assert!(!can_invite(&store, "u-me", "dm-friend"));
     assert!(!can_invite(&store, "u-me", "grp-mine"));
     assert!(!can_invite(&store, "u-me", "ch-saved"));
+}
+
+#[test]
+fn deleting_a_channel_takes_manage_channels_on_it() {
+    let channels = json!([
+        { "channel_type": "TextChannel", "_id": "ch-open", "server": "srv", "name": "open" },
+        {
+            "channel_type": "TextChannel", "_id": "ch-locked", "server": "srv", "name": "locked",
+            "role_permissions": { "builder": { "a": 0, "d": MANAGE_CHANNEL } }
+        }
+    ]);
+    let store = store_with(
+        channels,
+        vec![user("u-owner", json!({})), user("u-builder", json!({}))],
+        vec![
+            member("u-me", &[], json!({})),
+            member("u-owner", &[], json!({})),
+            member("u-builder", &["builder"], json!({})),
+        ],
+    );
+    // Stoat's defaults don't include it.
+    assert!(!can_manage_channel(&store, "u-me", "ch-open"));
+    assert!(!store.can_manage_channel("ch-open"));
+    // The owner can do everything.
+    assert!(can_manage_channel(&store, "u-owner", "ch-open"));
+    assert!(can_manage_channel(&store, "u-owner", "ch-locked"));
+    // A role can grant it, and a channel's override take it back.
+    assert!(can_manage_channel(&store, "u-builder", "ch-open"));
+    assert!(!can_manage_channel(&store, "u-builder", "ch-locked"));
+}
+
+#[test]
+fn dms_and_groups_are_not_deleted_as_channels() {
+    let store = conversations();
+    assert!(!can_manage_channel(&store, "u-me", "dm-friend"));
+    assert!(!can_manage_channel(&store, "u-me", "grp-mine"));
+    assert!(!can_manage_channel(&store, "u-me", "ch-saved"));
 }
