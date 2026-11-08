@@ -1,18 +1,22 @@
 //! The profile card: a person's banner, avatar and presence, names,
-//! pronouns, status, roles, join dates and bio, in a small floating card.
-//! What it shows comes from [`crate::profile::profile_card`] and the
-//! fetched profile; `ChatView` decides where it goes and what its buttons do.
+//! pronouns, status, roles, mutual friends, servers and groups, join dates
+//! and bio, in a small floating card, and the full lists of mutuals. What it
+//! shows comes from [`crate::profile::profile_card`], the fetched profile
+//! and [`crate::profile::mutuals`]; `ChatView` decides where it goes and
+//! what its buttons do.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use chrono::{DateTime, Local, Utc};
+use gpui_kit::assets::IconName;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
-use crate::profile::ProfileCard;
+use crate::profile::{MutualFriend, MutualKind, MutualPlace, Mutuals, ProfileCard, overflow_text};
 use crate::store::PresenceKind;
 use crate::ui::chat::{avatar, hex_colour};
 use crate::ui::markup::{MarkupPlugin, code_block_actions};
@@ -26,6 +30,15 @@ const BANNER_HEIGHT: f32 = 110.;
 /// The strip at the top when there's no banner.
 const NO_BANNER_HEIGHT: f32 = 36.;
 const CARD_AVATAR: f32 = 48.;
+/// A mutuals row shows this many icons, then "+N".
+const MUTUALS_SHOWN: usize = 8;
+const MUTUAL_ICON: f32 = 24.;
+
+/// The list of mutuals' width.
+pub const MUTUALS_DIALOG_WIDTH: f32 = 360.;
+/// Tallest the list gets before it scrolls.
+const MUTUALS_LIST_HEIGHT: f32 = 400.;
+const MUTUALS_LIST_ICON: f32 = 32.;
 
 /// Everything the card draws.
 pub struct CardContent {
@@ -33,6 +46,8 @@ pub struct CardContent {
     pub banner_url: Option<String>,
     /// The bio as prepared Markdown, with the key its parse is cached by.
     pub bio: Option<CardBio>,
+    /// What the user shares with them; empty rows aren't shown.
+    pub mutuals: Mutuals,
 }
 
 pub struct CardBio {
@@ -43,12 +58,46 @@ pub struct CardBio {
 /// What a link click in the bio does.
 pub type OnLink = Arc<dyn Fn(&str, &mut Window, &mut App) + Send + Sync>;
 
+/// One of the card's two rows of mutuals, and the list it opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutualList {
+    Friends,
+    Places,
+}
+
+impl MutualList {
+    /// The row's heading and the list's title.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Friends => "Mutual friends",
+            Self::Places => "Mutual servers and groups",
+        }
+    }
+}
+
+/// What clicking a row of mutuals does: open its list.
+pub type OnMutuals = Rc<dyn Fn(MutualList, &mut Window, &mut App)>;
+
+/// Something chosen from a list of mutuals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MutualPick {
+    /// A friend: their card.
+    Friend(String),
+    Server(String),
+    Group(String),
+}
+
+/// What choosing from a list of mutuals does.
+pub type OnMutualPick = Rc<dyn Fn(MutualPick, &mut Window, &mut App)>;
+
 /// The card itself. `actions` go in a row under the names (chunks of the
 /// card that act on the person: Message, friend requests, the menu).
+/// Clicking a row of mutuals calls `on_mutuals`.
 pub fn render_profile_card(
     content: &CardContent,
     actions: Vec<AnyElement>,
     on_link: OnLink,
+    on_mutuals: OnMutuals,
     cx: &App,
 ) -> Div {
     let theme = cx.theme();
@@ -197,6 +246,74 @@ pub fn render_profile_card(
                 .into_any_element(),
         );
     }
+    let mutuals = &content.mutuals;
+    for (list, count) in [
+        (MutualList::Friends, mutuals.friends.len()),
+        (MutualList::Places, mutuals.places.len()),
+    ] {
+        if count == 0 {
+            continue;
+        }
+        let icons: Vec<AnyElement> = match list {
+            MutualList::Friends => mutuals
+                .friends
+                .iter()
+                .take(MUTUALS_SHOWN)
+                .map(|friend| {
+                    named(
+                        format!("card-mutual-{}", friend.user_id),
+                        &friend.name,
+                        friend_icon(friend, "card", MUTUAL_ICON, cx),
+                    )
+                })
+                .collect(),
+            MutualList::Places => mutuals
+                .places
+                .iter()
+                .take(MUTUALS_SHOWN)
+                .map(|place| {
+                    named(
+                        format!("card-mutual-{}", place.id),
+                        &place.name,
+                        place_icon(place, "card", MUTUAL_ICON, cx),
+                    )
+                })
+                .collect(),
+        };
+        let more = count.saturating_sub(MUTUALS_SHOWN);
+        let on_mutuals = on_mutuals.clone();
+        // The whole row opens the list; its hover reaches a little past the
+        // icons, without moving them.
+        sections.push(
+            section(list.title())
+                .id(SharedString::from(format!("profile-card-{list:?}")))
+                .mx_neg_2()
+                .my_neg_1()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|el| el.bg(theme.secondary))
+                .on_click(move |_, window, cx| on_mutuals(list, window, cx))
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .children(icons)
+                        .when(more > 0, |el| {
+                            el.child(
+                                div()
+                                    .pl_1()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(muted)
+                                    .child(overflow_text(more)),
+                            )
+                        }),
+                )
+                .into_any_element(),
+        );
+    }
     let mut since: Vec<(String, DateTime<Utc>)> = Vec::new();
     if let Some(created) = card.created {
         since.push(("Stoat".into(), created));
@@ -263,6 +380,135 @@ pub fn render_profile_card(
                 .gap_3()
                 .children(sections),
         )
+}
+
+/// The whole of one list of mutuals, for its dialog: each friend, server or
+/// group with its icon and name, scrolling past [`MUTUALS_LIST_HEIGHT`].
+/// Choosing one calls `on_pick`.
+pub fn render_mutuals_list(
+    list: MutualList,
+    mutuals: &Mutuals,
+    on_pick: OnMutualPick,
+    cx: &App,
+) -> Stateful<Div> {
+    let theme = cx.theme();
+    let row = |key: String, icon: AnyElement, name: &str, pick: MutualPick| {
+        let on_pick = on_pick.clone();
+        h_flex()
+            .id(SharedString::from(key))
+            .flex_none()
+            .px_2()
+            .py_1()
+            .gap_2()
+            .items_center()
+            .rounded_md()
+            .cursor_pointer()
+            .hover(|el| el.bg(theme.secondary))
+            .on_click(move |_, window, cx| on_pick(pick.clone(), window, cx))
+            .child(icon)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_sm()
+                    .child(name.to_string()),
+            )
+            .into_any_element()
+    };
+    let rows: Vec<AnyElement> = match list {
+        MutualList::Friends => mutuals
+            .friends
+            .iter()
+            .map(|friend| {
+                row(
+                    format!("mutual-friend-{}", friend.user_id),
+                    friend_icon(friend, "list", MUTUALS_LIST_ICON, cx),
+                    &friend.name,
+                    MutualPick::Friend(friend.user_id.clone()),
+                )
+            })
+            .collect(),
+        MutualList::Places => mutuals
+            .places
+            .iter()
+            .map(|place| {
+                let pick = match place.kind {
+                    MutualKind::Server => MutualPick::Server(place.id.clone()),
+                    MutualKind::Group => MutualPick::Group(place.id.clone()),
+                };
+                row(
+                    format!("mutual-place-{}", place.id),
+                    place_icon(place, "list", MUTUALS_LIST_ICON, cx),
+                    &place.name,
+                    pick,
+                )
+            })
+            .collect(),
+    };
+    v_flex()
+        .id("mutuals-list")
+        .max_h(px(MUTUALS_LIST_HEIGHT))
+        .overflow_y_scroll()
+        .children(rows)
+}
+
+/// A friend's avatar. `key` keeps its loading state apart from the same
+/// avatar elsewhere on screen.
+fn friend_icon(friend: &MutualFriend, key: &str, size: f32, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    avatar(
+        format!("mutual-{key}-{}", friend.user_id),
+        Some(friend.avatar_url.clone()),
+        &friend.name,
+        size,
+        theme.secondary,
+        theme.secondary_foreground,
+    )
+}
+
+/// A server's or group's icon, round. Without one, a server shows its
+/// initial and a group the group glyph, as in Home's list.
+fn place_icon(place: &MutualPlace, key: &str, size: f32, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let glyph = Icon::new(IconName::Users);
+    let glyph = if size < MUTUALS_LIST_ICON {
+        glyph.xsmall()
+    } else {
+        glyph.small()
+    };
+    match (&place.icon_url, place.kind) {
+        (None, MutualKind::Group) => div()
+            .size(px(size))
+            .flex_none()
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme.secondary)
+            .text_color(theme.secondary_foreground)
+            .child(glyph)
+            .into_any_element(),
+        (url, _) => avatar(
+            format!("mutual-{key}-{}", place.id),
+            url.clone(),
+            &place.name,
+            size,
+            theme.secondary,
+            theme.secondary_foreground,
+        ),
+    }
+}
+
+/// `icon` with `name` as its tooltip.
+fn named(id: String, name: &str, icon: AnyElement) -> AnyElement {
+    let name = SharedString::from(name.to_string());
+    div()
+        .id(SharedString::from(id))
+        .flex_none()
+        .tooltip(move |window, cx| Tooltip::new(name.clone()).build(window, cx))
+        .child(icon)
+        .into_any_element()
 }
 
 /// "5 Nov 2026", in local time.

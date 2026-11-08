@@ -35,7 +35,8 @@ use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
 use crate::api::gifbox::GifboxClient;
 use crate::api::models::{
     BulkMessageResponse, Category, Channel, CreateServerLegacyResponse, FieldsMessage,
-    InviteJoinResponse, MessageSort, Presence, ReplyIntent, Server, SystemMessage, UserProfile,
+    InviteJoinResponse, MessageSort, MutualResponse, Presence, ReplyIntent, Server, SystemMessage,
+    UserProfile,
 };
 use crate::attachment::{AttachmentView, fit_into};
 use crate::complete::{Query, QueryKind, Suggestion, TokenRef, rank, rank_mentions};
@@ -82,7 +83,10 @@ use crate::ui::markup::{
     code_block_actions,
 };
 use crate::ui::math::MathPlugin;
-use crate::ui::profile_card::{CardBio, CardContent, OnLink, render_profile_card};
+use crate::ui::profile_card::{
+    CardBio, CardContent, MUTUALS_DIALOG_WIDTH, MutualList, MutualPick, OnLink, OnMutualPick,
+    OnMutuals, render_mutuals_list, render_profile_card,
+};
 use crate::ui::server_dialogs::{
     CREATE_CHANNEL_DIALOG_WIDTH, CREATE_SERVER_DIALOG_WIDTH, CreateChannelDialog,
     CreateServerDialog, INFO_DIALOG_WIDTH, InfoContent, InfoPlaceholder, NAME_DIALOG_WIDTH,
@@ -370,6 +374,9 @@ pub struct ChatView {
     /// Profiles fetched this session, by user ID, shown while the card
     /// fetches them again. `None`: Stoat won't show this one.
     profiles: HashMap<String, Option<UserProfile>>,
+    /// What the user shares with each person whose card was opened this
+    /// session, fetched again with the profile. `None`: Stoat won't say.
+    mutuals: HashMap<String, Option<MutualResponse>>,
     /// Invites seen in messages this session, by code: what each leads to,
     /// for its card.
     invites: HashMap<String, InviteLookup>,
@@ -786,6 +793,7 @@ impl ChatView {
             card: None,
             card_focus: cx.focus_handle(),
             profiles: HashMap::new(),
+            mutuals: HashMap::new(),
             invites: HashMap::new(),
             invite_queue: VecDeque::new(),
             invite_loading: false,
@@ -3179,8 +3187,8 @@ impl ChatView {
     }
 
     /// Open `user`'s profile card at `position`, as seen from the open
-    /// channel, and fetch their profile (bio and banner) again. The last one
-    /// fetched shows meanwhile.
+    /// channel, and fetch their profile (bio and banner) and mutuals again.
+    /// The last ones fetched show meanwhile.
     fn open_card(
         &mut self,
         user: String,
@@ -3198,6 +3206,9 @@ impl ChatView {
             closing: false,
         });
         window.focus(&self.card_focus, cx);
+        if crate::profile::shows_mutuals(&self.store, &user) {
+            self.fetch_mutuals(user.clone(), cx);
+        }
         let request = spawn_io({
             let (client, user) = (self.client.clone(), user.clone());
             async move { client.fetch_profile(&user).await }
@@ -3227,6 +3238,83 @@ impl ChatView {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Fetch what the user shares with `user`, for their card. A refusal
+    /// to say (blocked, say) hides both rows; anything else (rate limits
+    /// included) keeps what was fetched before.
+    fn fetch_mutuals(&mut self, user: String, cx: &mut Context<Self>) {
+        let request = spawn_io({
+            let (client, user) = (self.client.clone(), user.clone());
+            async move { client.fetch_mutual(&user).await }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = request.await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(Ok(mutual)) => {
+                        this.mutuals.insert(user, Some(mutual));
+                    }
+                    Ok(Err(err))
+                        if matches!(
+                            err.error_type(),
+                            Some(revolt_result::ErrorType::MissingPermission { .. })
+                        ) =>
+                    {
+                        this.mutuals.insert(user, None);
+                    }
+                    Ok(Err(err)) => log::warn!("couldn't load the mutuals of {user}: {err}"),
+                    Err(err) => log::warn!("mutuals task failed: {err:?}"),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// What `user`'s card shows they share with the user, from the last
+    /// fetch and the store as it is now. Empty before the first fetch, if
+    /// Stoat wouldn't say, and on the user's own card or a bot's.
+    fn card_mutuals(&self, user: &str) -> crate::profile::Mutuals {
+        match self.mutuals.get(user) {
+            Some(Some(mutual)) if crate::profile::shows_mutuals(&self.store, user) => {
+                crate::profile::mutuals(&self.store, mutual)
+            }
+            _ => crate::profile::Mutuals::default(),
+        }
+    }
+
+    /// A row of mutuals on `user`'s card was clicked: close the card and
+    /// list them all.
+    fn open_mutuals(
+        &mut self,
+        user: String,
+        list: MutualList,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The message box takes the focus back, so it has it again once the
+        // list closes.
+        self.close_card(true, window, cx);
+        open_mutuals_dialog(cx.entity().downgrade(), user, list, window, cx);
+    }
+
+    /// Something was chosen from a list of mutuals: the list closes, and a
+    /// friend's card opens where the mouse is, or the server or group opens.
+    fn mutual_picked(&mut self, pick: MutualPick, window: &mut Window, cx: &mut Context<Self>) {
+        window.close_dialog(cx);
+        match pick {
+            MutualPick::Friend(user) => {
+                self.open_card(user, window.mouse_position(), window, cx);
+            }
+            MutualPick::Server(server) => {
+                if self.store.server(&server).is_some() {
+                    self.select_place(Place::Server(server), cx);
+                }
+            }
+            MutualPick::Group(group) => self.open_channel(&group, cx),
+        }
     }
 
     /// Change how the user relates to `user` (a friend request, a block).
@@ -5086,9 +5174,19 @@ impl ChatView {
             card,
             banner_url,
             bio,
+            mutuals: self.card_mutuals(&open.user),
         };
         let actions = self.card_actions(&open.user, &people, cx);
-        let element = render_profile_card(&content, actions, on_link, cx)
+        let on_mutuals: OnMutuals = {
+            let (view, user) = (cx.entity().downgrade(), open.user.clone());
+            Rc::new(move |list, window, cx| {
+                view.update(cx, |this, cx| {
+                    this.open_mutuals(user.clone(), list, window, cx)
+                })
+                .ok();
+            })
+        };
+        let element = render_profile_card(&content, actions, on_link, on_mutuals, cx)
             .id("profile-card")
             .track_focus(&self.card_focus)
             .occlude()
@@ -11252,6 +11350,44 @@ fn open_info_dialog(view: WeakEntity<ChatView>, info: Info, window: &mut Window,
             hosts,
         };
         modal.child(render_info(&content, people.link_handler(), cx))
+    });
+}
+
+/// Open the list of everyone (or every server and group) the user shares
+/// with `user`. It's drawn from the store each time, and closes itself if
+/// there's nothing left in it.
+fn open_mutuals_dialog(
+    view: WeakEntity<ChatView>,
+    user: String,
+    list: MutualList,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let closing = std::cell::Cell::new(false);
+    let on_pick: OnMutualPick = {
+        let view = view.clone();
+        Rc::new(move |pick, window, cx| {
+            view.update(cx, |this, cx| this.mutual_picked(pick, window, cx))
+                .ok();
+        })
+    };
+    window.open_dialog(cx, move |modal, window, cx| {
+        let modal = modal.title(list.title()).w(px(MUTUALS_DIALOG_WIDTH));
+        let mutuals = view
+            .upgrade()
+            .map(|chat| chat.read(cx).card_mutuals(&user))
+            .unwrap_or_default();
+        let empty = match list {
+            MutualList::Friends => mutuals.friends.is_empty(),
+            MutualList::Places => mutuals.places.is_empty(),
+        };
+        if empty {
+            if !closing.replace(true) {
+                window.defer(cx, |window, cx| window.close_dialog(cx));
+            }
+            return modal;
+        }
+        modal.child(render_mutuals_list(list, &mutuals, on_pick.clone(), cx))
     });
 }
 

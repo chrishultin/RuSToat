@@ -119,6 +119,45 @@ async fn a_profile_without_a_connection_is_missing_permission() {
 }
 
 #[tokio::test]
+async fn fetching_mutuals_gets_the_friends_servers_and_channels() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/users/u1/mutual"))
+        .and(header("x-session-token", "tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "users": ["u-ada", "u-bob"],
+            "servers": ["srv"],
+            "channels": ["grp", "dm"]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mutual = client(&server).fetch_mutual("u1").await.unwrap();
+    assert_eq!(mutual.users, ["u-ada", "u-bob"]);
+    assert_eq!(mutual.servers, ["srv"]);
+    assert_eq!(mutual.channels, ["grp", "dm"]);
+}
+
+#[tokio::test]
+async fn mutuals_without_a_connection_are_missing_permission() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/users/u-blocked/mutual"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "type": "MissingPermission", "permission": "ViewProfile", "location": "x"
+        })))
+        .mount(&server)
+        .await;
+
+    let err = client(&server).fetch_mutual("u-blocked").await.unwrap_err();
+    assert!(
+        matches!(err.error_type(), Some(ErrorType::MissingPermission { .. })),
+        "got {err:?}"
+    );
+}
+
+#[tokio::test]
 async fn opening_a_dm_gets_the_channel() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

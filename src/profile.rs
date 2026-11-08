@@ -4,7 +4,7 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 
-use crate::api::models::{Channel, RelationshipStatus};
+use crate::api::models::{Channel, MutualResponse, RelationshipStatus};
 use crate::store::{ChatStore, PresenceKind, display_name, presence_kind, solid_colour};
 
 /// A person, as their profile card shows them.
@@ -148,6 +148,99 @@ pub fn can_message(store: &ChatStore, user: &str) -> bool {
         person.relationship == RelationshipStatus::Friend || person.bot.is_some()
     });
     friend_or_bot || dm_with(store, user).is_some()
+}
+
+/// Whether `user`'s card shows what the user shares with them: not on the
+/// user's own card (Stoat refuses it) or a bot's (as the web client), nor
+/// for someone unknown.
+pub fn shows_mutuals(store: &ChatStore, user: &str) -> bool {
+    user != store.me() && store.user(user).is_some_and(|person| person.bot.is_none())
+}
+
+/// What the user shares with someone, as their card shows it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Mutuals {
+    /// Friends of both, in Stoat's order.
+    pub friends: Vec<MutualFriend>,
+    /// The servers both are in, then the groups (not DMs).
+    pub places: Vec<MutualPlace>,
+}
+
+/// A friend both have.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutualFriend {
+    pub user_id: String,
+    /// Their display name, else username.
+    pub name: String,
+    pub avatar_url: String,
+}
+
+/// A server or group both are in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutualPlace {
+    pub id: String,
+    pub name: String,
+    /// The uploaded icon, if there's one.
+    pub icon_url: Option<String>,
+    pub kind: MutualKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutualKind {
+    Server,
+    Group,
+}
+
+/// `mutual` (Stoat's IDs) as the card shows it: friends, then servers and
+/// groups, each looked up in the store. Ones it doesn't know (a server
+/// left since) are left out, and so are DMs. Nothing is capped; the card
+/// shows the first few.
+pub fn mutuals(store: &ChatStore, mutual: &MutualResponse) -> Mutuals {
+    let friends = mutual
+        .users
+        .iter()
+        .filter_map(|id| {
+            let person = store.user(id)?;
+            Some(MutualFriend {
+                user_id: id.clone(),
+                name: display_name(person).to_string(),
+                avatar_url: store.user_avatar_url(id),
+            })
+        })
+        .collect();
+    let servers = mutual.servers.iter().filter_map(|id| {
+        let server = store.server(id)?;
+        Some(MutualPlace {
+            id: id.clone(),
+            name: server.name.clone(),
+            icon_url: server
+                .icon
+                .as_ref()
+                .and_then(|icon| store.media().file(icon)),
+            kind: MutualKind::Server,
+        })
+    });
+    let groups = mutual
+        .channels
+        .iter()
+        .filter_map(|id| match store.channel(id)? {
+            Channel::Group { name, icon, .. } => Some(MutualPlace {
+                id: id.clone(),
+                name: name.clone(),
+                icon_url: icon.as_ref().and_then(|icon| store.media().file(icon)),
+                kind: MutualKind::Group,
+            }),
+            _ => None,
+        });
+    Mutuals {
+        friends,
+        places: servers.chain(groups).collect(),
+    }
+}
+
+/// What follows the icons a row has room for: "+3" for three more.
+pub fn overflow_text(more: usize) -> String {
+    format!("+{more}")
 }
 
 /// An entry in the menu of things to do with a person (right-click, or

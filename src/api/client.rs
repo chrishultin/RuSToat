@@ -6,9 +6,9 @@ use revolt_models::v0::{
     CreateServerLegacyResponse, DataChangeEmail, DataChangePassword, DataEditMessage,
     DataEditSession, DataEditUser, DataLogin, DataMemberEdit, DataMessageSearch, DataMessageSend,
     DataSendFriendRequest, Emoji, FieldsUser, Invite, InviteJoinResponse, InviteResponse,
-    MFAResponse, MFATicket, Member, Message, MessageSort, MultiFactorStatus, OptionsQueryMessages,
-    Presence, ReplyIntent, ResponseLogin, ResponseTotpSecret, SessionInfo, User, UserProfile,
-    UserStatus,
+    MFAResponse, MFATicket, Member, Message, MessageSort, MultiFactorStatus, MutualResponse,
+    OptionsQueryMessages, Presence, ReplyIntent, ResponseLogin, ResponseTotpSecret, SessionInfo,
+    User, UserProfile, UserStatus,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -616,6 +616,15 @@ impl StoatClient {
     /// it's `MissingPermission`.
     pub async fn fetch_profile(&self, id: &str) -> Result<UserProfile, ApiError> {
         self.send(Method::GET, &format!("/users/{id}/profile"), None::<&()>)
+            .await
+    }
+
+    /// `GET /users/{id}/mutual`: the friends, servers, and groups and DMs
+    /// the user shares with `id`, as IDs. For the user themselves it's
+    /// `InvalidOperation`; without a connection to them (blocked, say) it's
+    /// `MissingPermission`.
+    pub async fn fetch_mutual(&self, id: &str) -> Result<MutualResponse, ApiError> {
+        self.send(Method::GET, &format!("/users/{id}/mutual"), None::<&()>)
             .await
     }
 

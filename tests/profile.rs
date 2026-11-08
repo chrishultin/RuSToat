@@ -4,10 +4,10 @@ use chrono::{TimeZone, Utc};
 use revolt_permissions::DEFAULT_PERMISSION_SERVER;
 use serde_json::{Value, json};
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
-use stoat_gpui::api::models::RelationshipStatus;
+use stoat_gpui::api::models::{MutualResponse, RelationshipStatus};
 use stoat_gpui::profile::{
-    CardRole, RelationshipAction, UserMenuItem, can_message, dm_with, friend_buttons, profile_card,
-    user_menu,
+    CardRole, MutualKind, RelationshipAction, UserMenuItem, can_message, dm_with, friend_buttons,
+    mutuals, overflow_text, profile_card, shows_mutuals, user_menu,
 };
 use stoat_gpui::store::{ChatStore, PresenceKind};
 
@@ -457,4 +457,82 @@ mod menu {
         .collect();
         assert_eq!(confirmed, [RemoveFriend, Block]);
     }
+}
+
+fn mutual(users: &[&str], servers: &[&str], channels: &[&str]) -> MutualResponse {
+    let owned = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect();
+    MutualResponse {
+        users: owned(users),
+        servers: owned(servers),
+        channels: owned(channels),
+    }
+}
+
+#[test]
+fn mutuals_are_friends_then_servers_then_groups() {
+    let store = store();
+    let shared = mutuals(&store, &mutual(&["u-bob", ADA], &["srv"], &["dm", "grp"]));
+    let friends: Vec<_> = shared
+        .friends
+        .iter()
+        .map(|f| (f.user_id.as_str(), f.name.as_str()))
+        .collect();
+    assert_eq!(friends, [("u-bob", "bob"), (ADA, "Ada Lovelace")]);
+    assert_eq!(shared.friends[1].avatar_url, store.user_avatar_url(ADA));
+    let places: Vec<_> = shared
+        .places
+        .iter()
+        .map(|p| (p.id.as_str(), p.name.as_str(), p.kind, p.icon_url.clone()))
+        .collect();
+    assert_eq!(
+        places,
+        [
+            ("srv", "Test Server", MutualKind::Server, None),
+            ("grp", "Group", MutualKind::Group, None)
+        ]
+    );
+}
+
+#[test]
+fn mutuals_leave_out_dms_server_channels_and_what_isnt_known() {
+    let store = store();
+    let shared = mutuals(
+        &store,
+        &mutual(
+            &["u-gone", "u-bob"],
+            &["srv-gone", "srv"],
+            &["dm", "ch", "grp-gone", "grp"],
+        ),
+    );
+    let friends: Vec<_> = shared.friends.iter().map(|f| f.user_id.as_str()).collect();
+    assert_eq!(friends, ["u-bob"]);
+    let places: Vec<_> = shared.places.iter().map(|p| p.id.as_str()).collect();
+    assert_eq!(places, ["srv", "grp"]);
+    assert_eq!(
+        mutuals(&store, &mutual(&[], &[], &["dm"])),
+        Default::default()
+    );
+}
+
+#[test]
+fn mutuals_are_not_capped() {
+    let store = store();
+    let shared = mutuals(&store, &mutual(&["u-bob"; 12], &["srv"; 9], &[]));
+    assert_eq!((shared.friends.len(), shared.places.len()), (12, 9));
+}
+
+#[test]
+fn the_overflow_counts_the_rest() {
+    assert_eq!(overflow_text(3), "+3");
+    assert_eq!(overflow_text(42), "+42");
+}
+
+#[test]
+fn mutuals_show_for_others_but_not_yourself_bots_or_strangers() {
+    let store = store();
+    assert!(shows_mutuals(&store, ADA));
+    assert!(shows_mutuals(&store, "u-blocked"));
+    assert!(!shows_mutuals(&store, "u-me"));
+    assert!(!shows_mutuals(&store, "u-bot"));
+    assert!(!shows_mutuals(&store, "u-unknown"));
 }

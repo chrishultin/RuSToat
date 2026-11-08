@@ -204,3 +204,159 @@ Deferred to the batched manual pass. Steps:
 2. Close the DM that's open: Home's first conversation opens.
 3. Message them from their card (and from the Friends page's Message): the DM comes back with its history.
 4. Cancel and Escape keep the DM; while Stoat answers, both buttons are disabled and Escape does nothing.
+
+## Chunk 6: Mutuals on profile cards
+
+### Changes Made
+- `src/api/client.rs`: `fetch_mutual(user) -> MutualResponse` (`GET /users/{id}/mutual`).
+- `src/profile.rs`:
+  - `shows_mutuals(store, user)`: not on the user's own card (Stoat refuses it), a bot's (as the web client) or an unknown user's.
+  - `Mutuals { friends: Vec<MutualFriend>, places: Vec<MutualPlace> }` and `mutuals(store, &MutualResponse)` (Assumption 10): friends (ID, display name, avatar), then servers, then groups (ID, name, icon, `MutualKind`), each looked up in the store; unknown IDs, DMs and anything that isn't a group are left out; nothing is capped.
+  - `overflow_text(n)`: "+{n}".
+- `src/ui/profile_card.rs`:
+  - `CardContent.mutuals`, and `render_profile_card` takes an `OnMutuals`. After Roles, "Mutual friends" and "Mutual servers and groups" (in the card's upper-case section headings) show up to 8 round 24 px icons each, then "+N"; each icon has its name as a tooltip, and an empty row isn't drawn. The whole row is clickable, with a hover background that reaches a little past the icons without moving them.
+  - `MutualList` (`Friends`, `Places`, with their titles), `MutualPick` (`Friend`, `Server`, `Group`) and `render_mutuals_list(list, mutuals, on_pick, cx)`: every entry with a 32 px icon and its name, scrolling past 400 px. `MUTUALS_DIALOG_WIDTH` 360 px.
+  - Servers without an icon show their initial (`avatar`'s placeholder); groups without one show the group glyph, as in Home's list.
+- `src/ui/chat.rs`:
+  - `mutuals: HashMap<String, Option<MutualResponse>>`, beside `profiles`. `open_card` fetches them (`fetch_mutuals`) alongside the profile when `shows_mutuals`; the last answer shows meanwhile. `MissingPermission` stores `None`, hiding both rows; other failures (a `RateLimited` included) are logged and keep what was there.
+  - `card_mutuals(user)`: the cached answer through `profile::mutuals`, so a server left since drops out at once.
+  - `open_mutuals(user, list)`: closes the card (focus back to the message box) and opens `open_mutuals_dialog`, titled with the row's heading, drawn from the store each time and closing itself if its list empties.
+  - `mutual_picked`: the list closes; a friend's card opens where the mouse is; a server (if still known) is selected with `select_place`; a group opens with `open_channel`.
+- Tests: `tests/api_users.rs` (`GET /users/u1/mutual` parses all three lists; `MissingPermission` stays an `Api` error); `tests/profile.rs` (friends then servers then groups, with names, avatars and kinds; DMs, server channels and unknown users, servers and groups left out; nothing capped; `overflow_text`; `shows_mutuals` for others, not yourself, bots or strangers).
+
+### Divergences
+- **Mutuals are fetched every time a card opens,** as profiles are, rather than once per session; the cached answer shows while the new one comes, so the rows don't flicker. Each card open is two requests on the shared `/users` bucket; a refusal for rate limits keeps the rows from before.
+- **Clicking a row closes the card** before the list opens, and **choosing a friend closes the list** before their card opens: the card floats in the chat view, under a dialog's focus trap and Escape, so the two aren't shown together.
+- **The rows sit after Roles, before Member since.**
+- **The `Mutuals` tests are in `tests/profile.rs`,** where `profile.rs`'s tests already live, not unit tests in `src/profile.rs`; the API test also checks `MissingPermission`.
+- **`shows_mutuals` also skips users the store doesn't know** (their card can't open anyway).
+- **Lists keep Stoat's order,** not sorted by name.
+- **Each icon on the card has its name as a tooltip,** and the list dialog has the dialog's own title and ✕, with no Close button of its own.
+- **Without an icon,** a server shows its first initial (as other avatars) rather than the rail's two-letter initials, which don't fit 24 px.
+
+### Verification Performed
+- `cargo test --test profile mutual`: 4 passed (and `the_overflow_counts_the_rest`). `cargo test --test api_users mutual`: 2 passed.
+- `cargo test`: 1000 passed, 0 failed (993 before).
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt `Diff in` counts: `src/api/client.rs` 3 and `src/ui/chat.rs` 17, unchanged (hand-formatted). `src/profile.rs`, `src/ui/profile_card.rs`, `tests/profile.rs` and `tests/api_users.rs` 0.
+
+### Manual Validation
+Deferred to the batched manual pass. Steps:
+1. Open the card of a friend who shares a server and a group with you: once it has loaded, "MUTUAL FRIENDS" and "MUTUAL SERVERS AND GROUPS" show after Roles (or where Roles would be), with their icons; hovering an icon names it. With more than 8 in a row, 8 show and then "+N".
+2. Hovering a row highlights it. Click it: the card closes and "Mutual friends" (or "Mutual servers and groups") lists every one, scrolling if long.
+3. In the list, click a friend: the list closes and their card opens where the mouse was. Click a server: it opens. Click a group: it opens in Home.
+4. Your own card, a bot's, and a blocked user's show neither row; someone with nothing in common shows neither.
+5. Open a card near the bottom of the window: when the rows arrive, the card grows and stays inside the window.
+6. Leave a shared server, then open the card again: it's gone from the row at once.
+
+## Summary
+
+_Completed: 2026-11-08_
+
+### Chunks Completed
+1. Group members and owners follow `ChannelGroupJoin`, `ChannelGroupLeave` and ownership messages live; a group you're removed from leaves Home.
+2. Create a group from the Friends page's "New group", Home's "+" or a friend's "Create group with…", with a searchable friend picker, and open it.
+3. Add friends to a group from its header, remove members as its owner, and invite people to groups.
+4. Leave a group, silently if you like, choosing the next owner if it's yours; make another member owner.
+5. Close a DM from its menu; messaging the person reopens it.
+6. Mutual friends, and mutual servers and groups, on profile cards, with full lists.
+
+### Divergences
+- Chunk 1:
+  - The handlers also call `refresh_suggestions`, as server member joins and leaves do.
+  - No owner crown changes, since RuSToat's member list doesn't draw one; the owner change shows in the owner-only menu items.
+- Chunk 2:
+  - `group_error_text` takes a `fallback` as well as the name; callers match `MissingPermission` first.
+  - The picker's limit is `min(49, group_size - 1)`, so a smaller instance is respected.
+  - The search placeholder is "Search for users…"; the field label is "Group name" (sentence case).
+  - "Create group with…" sits after Message in a friend's menu.
+  - Picker rows show the display name only; the search matches usernames too.
+- Chunk 3:
+  - The adding loop is `AddMembersDialog::add`, not `ChatView::add_members`, so the dialog keeps the error and the remaining picks.
+  - Added people are applied locally at once, like removals.
+  - The add picker's limit is the group's room (`group_size` minus its members), not 49; a full group shows "This group is full."
+  - Remove from group is only offered for people in the group; `NotInGroup` counts as done.
+  - Removing has its own Missing Permission text, "Only the group's owner can remove members."
+  - Remove from group is a plain (not red) item, in its own section after Mention.
+  - Create invite… in the channel menu keeps `UserPlus`; only the header's button is a `Link` on groups.
+- Chunk 4:
+  - One leave confirmation (`LeavePrompt` with a `LeaveTarget`) serves servers and groups.
+  - The handover is only sent when the owner picks someone other than Stoat's choice.
+  - The dialog follows the group live (a departed pick falls back; everyone leaving turns it into "Delete group").
+  - No silent checkbox for the only member.
+  - A new `ChatStore::set_group_owner` applies the PATCH response and ownership messages.
+  - Make owner is a primary button with no success toast; its icon is `Crown`, newly bundled.
+  - Handing over has its own Missing Permission text.
+  - A member the store doesn't know is listed in the New owner picker by ID.
+- Chunk 5:
+  - `delete_channel`, not `leave_channel(id, false)`, as the web client sends.
+  - "Close conversation…" is red, with `IconName::Close`.
+  - No toast on success; refusals say "Couldn't close the conversation. Try again."
+  - `dm_closed` always runs `remember_places` and `ensure_current_loaded`.
+  - The test sits in `tests/store_live.rs` and also checks history and `dm_with`.
+- Chunk 6:
+  - Mutuals are fetched every time a card opens (as profiles are), the last answer showing meanwhile; rate-limit refusals keep it.
+  - Clicking a row closes the card before the list opens; choosing a friend closes the list before their card opens.
+  - The rows sit after Roles, before Member since.
+  - The `Mutuals` tests are in `tests/profile.rs`; the API test also checks `MissingPermission`.
+  - `shows_mutuals` also skips unknown users.
+  - Lists keep Stoat's order.
+  - Card icons have their names as tooltips; the list dialog has no Close button of its own.
+  - A server without an icon shows one initial, not the rail's two.
+
+### Definition of Done
+- [ ] `ChannelGroupJoin` and `ChannelGroupLeave` update members live; being removed drops the group; owners update from transfers and from `channel_ownership_changed`. (Manual pass pending. The parse, adding and removing recipients, a removed group leaving Home, live-only ownership messages and `set_group_owner` are test-verified.)
+- [ ] Groups can be created from the Friends page, the Home "+", and a friend's menu, with a searchable friend picker capped at 49, and open when created. (Manual pass pending. The request body, a group of one, filtering, picks and the limit, the error texts and "Create group with…" for friends only are test-verified.)
+- [ ] "Add friends to group" adds people one by one with named errors; "Remove from group…" is owner-only and confirmed. (Manual pass pending. The requests, `add_limit`, the named error texts and the menu item's visibility are test-verified.)
+- [ ] Groups get invites from their menu and header; DMs don't. (Manual pass pending. `can_invite` and `can_add_to_group` for groups, DMs and Saved Notes are test-verified.)
+- [ ] "Leave group…" has the silent checkbox; owners pick the next owner (default Stoat's choice); the last member is told leaving deletes it. (Manual pass pending. Both `leave_silently` values, `default_next_owner` and the leaving error texts are test-verified.)
+- [ ] "Make group owner…" transfers ownership after confirmation. (Manual pass pending. The PATCH body, the menu item's visibility before and after a handover, and `set_group_owner` are test-verified.)
+- [ ] "Close conversation…" closes a DM; messaging the person reopens it. (Manual pass pending. `deactivate_dm`, `activate_dm` bringing it back with its history, and `dm_with` finding the closed DM are test-verified.)
+- [ ] Profile cards show mutual friends and mutual servers and groups (up to 8, then "+N"), with full lists. (Manual pass pending. The request, `mutuals`, `overflow_text` and `shows_mutuals` are test-verified.)
+- [x] `cargo test` (1000 passed) and `cargo clippy --all-targets -- -D warnings` pass, and no touched file's rustfmt drift grows.
+- [ ] Every chunk's manual check is recorded in `docs/plans/groups-and-dms-implementation.md`. (Manual pass pending. The steps are in each chunk's section and consolidated below.)
+
+### Remaining Manual Steps
+One sitting, in this order. You need three accounts on `api.stoat.chat`, all friends with each other: **A** (you, in RuSToat), **B** (in the web client, in a browser) and **C** (signed in to RuSToat as a second account). A, B and C should share a server (create one and invite them if needed). Sign in to the web client as A too, in a private window, for step 8.
+
+**Create groups (chunk 2)**
+1. As A, on the Friends page click "New group": "Create a new group" opens with "Group name" (0/32) focused, "Select members to add", and the picker. Search narrows it by display name and by username; picks stay picked while hidden; clicking rows doesn't take the focus from the search field. Create is disabled with a blank name or one over 32 characters.
+2. Name it "M20 One", pick B and C, and press Enter in the name: it opens, appears in Home, and B's web client shows it.
+3. Click the "+" at the right of "Direct Messages" (tooltip "Create a group"); it doesn't move when Home's list scrolls. Create "Solo" with nobody picked: a group of one opens.
+4. Right-click B on the Friends page: "Create group with…" opens the dialog with B picked ("1 selected"). Close it. Open B's card, its "…", and "Create group with…" again: B is picked. Create "M20 Two" with just B.
+
+**Follow membership live (chunk 1)**
+5. As B in the web client, create "B's Group" with A and C (in that order): it appears in A's Home.
+6. Open B's Group in RuSToat with the member list showing. As B, add a friend of B's whom A doesn't know: they appear in the member list. As B, remove them: they disappear.
+7. As B, remove A from B's Group while it's open in RuSToat: it disappears from Home and Home's first conversation opens. As B, add A back: it reappears.
+8. As A in the private web client window, leave B's Group: it disappears from RuSToat too. As B, add A back again.
+9. As B, leave B's Group (B owns it): the "gave ownership to" message names the first other member in the group's order (C, since A was added back last). Switch RuSToat to C: right-click A in B's Group's member list, and "Remove from group…" and "Make group owner…" are offered. As C, make A the owner (chunk 4's confirmation), and switch back to A.
+
+**Add, remove and invite (chunk 3)**
+10. Open M20 Two: the header shows "Add friends to group" (person with a plus) and Create invite (a link). The picker leaves out B. Add C and another friend: both appear in the member list at once, and the group shows the "added" messages.
+11. Make one add fail (for example, have a friend unfriend A while the dialog is open): the error names them, anyone added before stays added and leaves the list, the rest stay picked.
+12. In M20 Two, right-click C in the member list and on one of C's messages: "Remove from group…" asks "Remove C?" with "Are you sure you want to remove C from M20 Two?". While Stoat answers, both buttons are disabled and Escape does nothing. Remove: C disappears, and B's web client shows the removal. It isn't offered on A, in a group A doesn't own, or for C in another channel.
+13. Create an invite for M20 Two from its header, and again from its right-click menu: the title is "Invite people to M20 Two" with no "To #…" line. As C (switch accounts in RuSToat), join with the link: M20 Two appears for C.
+14. A DM and Saved Notes offer neither header button nor Create invite….
+
+**Leave and hand over (chunk 4)**
+15. As A, right-click B in M20 Two's member list (and on one of B's messages): "Make group owner…" asks "Make B the owner?" with "You'll stay in the group, but only B will be able to remove members or hand ownership on." Make owner: the "gave ownership" message shows, and A is no longer offered "Remove from group…" or "Make group owner…". Neither shows for a plain member or on yourself.
+16. As A (now a plain member), right-click M20 Two in Home: "Leave group…" (red) asks "Leave M20 Two?" with "You won't be able to rejoin unless you are re-invited." and "Don't notify others that you've left". Tick it and Leave: it leaves Home, the toast says "Left M20 Two.", and B's web client shows no "left" message.
+17. Leave B's Group (A owns it now, with C): "New owner" shows C. Untick the box and Leave: C becomes owner, and the web client shows the "left" message.
+18. Open "Leave group…" on M20 One (A owns it, with B and C): "New owner" shows B (the first other member). Pick C and leave: C becomes owner (the "gave ownership" message names C).
+19. Open "Leave group…" on Solo: "You're the only member, so leaving deletes the group.", no checkbox, and the button says "Delete group". Delete it: it's gone.
+
+**Close a DM (chunk 5)**
+20. Right-click A's DM with B in Home: "Close conversation…" (red) asks "Close conversation with B?" with "You can re-open it later, but it will disappear on both sides." Cancel and Escape keep it. Groups and Saved Notes don't offer it.
+21. Open the DM and close it: it leaves Home here and in B's web client, and Home's first conversation opens. While Stoat answers, both buttons are disabled and Escape does nothing.
+22. Open B's card and Message: the DM comes back with its history. Close it again and use the Friends page's Message: it comes back again.
+
+**Mutuals (chunk 6)**
+23. Create a group with B and C again, and make sure A and B share a server. Open B's card: once it has loaded, "MUTUAL FRIENDS" (C) and "MUTUAL SERVERS AND GROUPS" (the server, then the group) show after Roles; hovering an icon names it. With more than 8 in a row, 8 show and then "+N".
+24. Hover a row: it highlights. Click it: the card closes and the list opens, titled "Mutual friends" or "Mutual servers and groups", scrolling if long. Click C: the list closes and C's card opens where the mouse was. In the other list, click the server: it opens; click the group: it opens in Home.
+25. A's own card, a bot's card and a blocked user's card show neither row.
+26. Open a card near the bottom of the window: when the rows arrive, the card grows and stays inside it. Leave a shared server and reopen the card: the server is gone from the row.
+
+**Two accounts and themes (plan Manual Tests 2 and 3)**
+27. With A and C both signed in, switch between them: New group, the Home "+", Create group with…, Add friends to group, Remove, Make owner, Leave, Close conversation, Create invite and the mutuals lists each act for the account on screen.
+28. In light and dark themes: the friend picker's rows, checkboxes and hover, Create a new group, Add friends to group, the Remove, Make owner, Leave (with its New owner dropdown and checkbox) and Close conversation dialogs, the red menu items, the card's mutual rows and their hover, and the mutuals list are readable.
