@@ -53,6 +53,11 @@ pub enum VoiceEvent {
     /// Who's speaking now, by user ID (LiveKit identities are Stoat user
     /// IDs), the user included. Empty when nobody is.
     Speaking(Vec<String>),
+    /// Someone joined the call. (Those already in it when the user joins
+    /// aren't reported.)
+    ParticipantJoined,
+    /// Someone left the call.
+    ParticipantLeft,
     /// The call ended without the user leaving it: LiveKit lost the
     /// connection for good, or the user was removed (by joining on another
     /// device, say).
@@ -341,9 +346,11 @@ async fn read_events(
         match event {
             RoomEvent::ParticipantConnected(participant) => {
                 log::info!("voice: {} joined {channel}", participant.identity().0);
+                let _ = tx.unbounded_send(VoiceEvent::ParticipantJoined);
             }
             RoomEvent::ParticipantDisconnected(participant) => {
                 log::info!("voice: {} left {channel}", participant.identity().0);
+                let _ = tx.unbounded_send(VoiceEvent::ParticipantLeft);
             }
             RoomEvent::TrackPublished {
                 publication,

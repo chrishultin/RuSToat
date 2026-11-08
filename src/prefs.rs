@@ -180,6 +180,9 @@ pub struct Prefs {
     /// A message notice plays a sound (see [`crate::sound`]). On unless
     /// turned off. Not synced: it's this Mac's.
     pub notification_sounds: bool,
+    /// A voice call plays sounds: joining and leaving (the user's and
+    /// others'), mute and deafen. On unless turned off. This Mac's.
+    pub call_sounds: bool,
     /// The user muted their microphone in a call. Kept for the next call,
     /// in any account, as the web client does.
     pub voice_muted: bool,
@@ -197,6 +200,7 @@ impl Default for Prefs {
             appearance: Appearance::default(),
             keep_running: true,
             notification_sounds: true,
+            call_sounds: true,
             voice_muted: false,
             voice_deafened: false,
         }
@@ -280,6 +284,7 @@ mod tests {
             appearance: Appearance::Dark,
             keep_running: false,
             notification_sounds: false,
+            call_sounds: false,
             voice_muted: true,
             voice_deafened: true,
         };
@@ -388,6 +393,7 @@ mod tests {
         std::fs::write(&path, br#"{"notification_sounds":false}"#).unwrap();
         let old = PrefsFile::at(&path).load();
         assert!(!old.voice_muted && !old.voice_deafened);
+        assert!(old.call_sounds, "call sounds are on by default");
         assert!(!old.notification_sounds);
         let muted = Prefs {
             voice_muted: true,

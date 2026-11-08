@@ -142,3 +142,22 @@ Pending, in the end-of-milestone pass: mute → the web client shows RuSToat's u
 
 ### Manual Validation
 Pending, in the end-of-milestone pass: talking on the web client rings their avatar, talking in RuSToat rings the user's; the ring clears when talking stops; `voice: speaking [...]` lines appear at debug; CPU in a talking call recorded next to the silent figure.
+
+## Chunk 6: Call sounds
+
+### Changes Made
+- `src/sound.rs`: `CallSound` (`Join` Pop, `Leave` Bottle, `OtherJoin` Tink, `OtherLeave` Purr, `Mute` Morse, `Unmute` Tink: all in `/System/Library/Sounds`), `should_play_call(sounds_on, sound, others_throttle, now)` (nothing with sounds off; others' join/leave share one `Throttle`, one a second; the user's own always play), and `play_call_sound(sound, sounds_on)` with its own app-wide throttle, separate from the message sound's. Tests: each sound maps to a system sound, the others-throttle, and sounds off.
+- `src/prefs.rs`: `call_sounds: bool` (default `true`; an older file loads it as `true`); round-trip test covers it.
+- `src/ui/settings.rs`: a "Call sounds" switch under "Notification sounds" in Notifications → Sounds.
+- `src/voice.rs`: `VoiceEvent::ParticipantJoined` / `ParticipantLeft` from LiveKit's `ParticipantConnected` / `ParticipantDisconnected` (only this call's people).
+- `src/ui/chat.rs`: `play_call_sound(sound, cx)` reads `AppPrefs.call_sounds`. Join on connecting; Leave when leaving a connected call (so taking over from another account plays it once, from the account that leaves) and when the call drops; OtherJoin/OtherLeave from the call's events; Mute/Unmute from `change_mute` (deafen's change decides when both change, so muting while deafened plays Unmute, the undeafen). The call task's loop now handles all four event kinds and stops if the view is gone.
+
+### Divergences
+- None.
+
+### Verification Performed
+- `cargo test`: 1083 passed, 0 failed, 5 ignored (+3 sound tests). `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt: `src/sound.rs` formatted (was clean); `src/ui/chat.rs` 17 (was 17); `src/voice.rs`, `src/prefs.rs`, `src/ui/settings.rs` 0.
+
+### Manual Validation
+Pending, in the end-of-milestone pass: each sound at its moment and the switch silencing them all; quick join/leave on the web client plays at most one sound a second; joining a busy call doesn't play a burst (LiveKit shouldn't report people already there as `ParticipantConnected`); whether others hear the sounds through the user's mic (echo cancellation can't remove `NSSound`).

@@ -385,7 +385,8 @@ fn appearance_page(_: &SettingsView, _: &mut App) -> SettingPage {
         )
 }
 
-/// Notifications: whether a message notice plays a sound, with a preview.
+/// Notifications: whether a message notice plays a sound (with a preview),
+/// and whether calls play theirs.
 fn notifications_page(_: &SettingsView, _: &mut App) -> SettingPage {
     SettingPage::new("Notifications")
         .icon(IconName::Bell)
@@ -402,6 +403,20 @@ fn notifications_page(_: &SettingsView, _: &mut App) -> SettingPage {
                         .default_value(true),
                     )
                     .description("Play a sound when a message notifies you."),
+                )
+                .item(
+                    SettingItem::new(
+                        "Call sounds",
+                        SettingField::switch(
+                            |cx| AppPrefs::get(cx).call_sounds,
+                            |on, cx| AppPrefs::update(cx, |prefs| prefs.call_sounds = on),
+                        )
+                        .default_value(true),
+                    )
+                    .description(
+                        "Play a sound when you or others join or leave your call, \
+                         and when you mute or deafen.",
+                    ),
                 )
                 .item(
                     SettingItem::new(

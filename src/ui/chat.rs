@@ -60,6 +60,7 @@ use crate::search::{
     next_cursor, page_limit,
 };
 use crate::server_edit::first_line;
+use crate::sound::CallSound;
 use crate::status::{PRESENCES, STATUS_TEXT_MAX, StatusCheck, check_status_text};
 use crate::store::{
     ChannelEntry, ChannelKind, ChannelSection, ChatStore, MemberList, MemberListRow, MessageRow,
@@ -532,6 +533,11 @@ enum CallState {
     Joining,
     /// Dropping the call leaves it.
     Connected(VoiceCall),
+}
+
+/// Play a call's `sound`, unless call sounds are off.
+fn play_call_sound(sound: CallSound, cx: &App) {
+    crate::sound::play_call_sound(sound, AppPrefs::get(cx).call_sounds);
 }
 
 /// The user's saved mute and deafen, for any call in the app.
@@ -6088,6 +6094,7 @@ impl ChatView {
                             if let Some(active) = &mut this.voice {
                                 active.state = CallState::Connected(call);
                             }
+                            play_call_sound(CallSound::Join, cx);
                             Some(events)
                         }
                         Err(text) => {
@@ -6105,12 +6112,26 @@ impl ChatView {
             };
             // Only a call that ends by itself gets past this loop: leaving
             // drops this task first.
-            while let Some(VoiceEvent::Speaking(speakers)) = events.next().await {
-                this.update(cx, |this, cx| this.set_speaking(speakers, cx))
-                    .ok();
+            loop {
+                let update = match events.next().await {
+                    Some(VoiceEvent::Speaking(speakers)) => {
+                        this.update(cx, |this, cx| this.set_speaking(speakers, cx))
+                    }
+                    Some(VoiceEvent::ParticipantJoined) => {
+                        this.update(cx, |_, cx| play_call_sound(CallSound::OtherJoin, cx))
+                    }
+                    Some(VoiceEvent::ParticipantLeft) => {
+                        this.update(cx, |_, cx| play_call_sound(CallSound::OtherLeave, cx))
+                    }
+                    Some(VoiceEvent::Disconnected) | None => break,
+                };
+                if update.is_err() {
+                    return;
+                }
             }
             this.update_in(cx, |this, window, cx| {
                 this.voice_ended(cx);
+                play_call_sound(CallSound::Leave, cx);
                 window.push_notification(Notification::error("Disconnected from voice."), cx);
                 cx.notify();
             })
@@ -6132,7 +6153,10 @@ impl ChatView {
         };
         ActiveVoice::clear(&cx.entity().downgrade(), cx);
         match active.state {
-            CallState::Connected(call) => call.leave(),
+            CallState::Connected(call) => {
+                call.leave();
+                play_call_sound(CallSound::Leave, cx);
+            }
             CallState::Joining => log::info!("voice: stopped joining {}", active.channel),
         }
         cx.notify();
@@ -6141,7 +6165,22 @@ impl ChatView {
     /// The panel's Mute or Deafen: `change` the saved state, and apply it
     /// to the call if there is one.
     fn change_mute(&mut self, change: fn(MuteState) -> MuteState, cx: &mut Context<Self>) {
-        let mute = change(mute_state(cx));
+        let before = mute_state(cx);
+        let mute = change(before);
+        // Deafen's sound wins when both change (muting while deafened).
+        let silenced = if mute.deafened != before.deafened {
+            mute.deafened
+        } else {
+            mute.muted
+        };
+        play_call_sound(
+            if silenced {
+                CallSound::Mute
+            } else {
+                CallSound::Unmute
+            },
+            cx,
+        );
         AppPrefs::update(cx, |prefs| {
             prefs.voice_muted = mute.muted;
             prefs.voice_deafened = mute.deafened;
