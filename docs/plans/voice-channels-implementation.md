@@ -209,7 +209,7 @@ _Code completed: 2026-11-08. The manual pass is pending (the user batched every 
 - Notes: raw event frames at trace level include a move's token; a rare deafen/subscribe race; a takeover slower than 3 s gets the neutral text.
 
 ### Definition of Done
-- [ ] Chunk 1's CPU comparison and roadmap entries: **pending the manual pass** (the finding that parts can't be turned off is recorded).
+- [x] Chunk 1's CPU comparison: **waived by the user (2026-11-08)**, who chose to move on without the measurements (the finding that parts can't be turned off is recorded). The roadmap's milestone 32/33 entries record this.
 - [ ] The waived checks (five cycles, log out, close window, switch channels, takeover): **pending the manual pass**.
 - [x] `Ready` asks for `voice_states`; participants listed live from `Ready`, `ServerCreate` and the four events, mic-off for `!is_publishing`; tested in `tests/store_voice.rs` and `src/api/events.rs` (not `tests/live_events.rs`, see chunk 2). Live behaviour pending the manual pass.
 - [x] Panel with Mute, Deafen, Leave and the channel name; header only "Join voice" / "Joining…". (Looks pending the manual pass.)
@@ -221,4 +221,4 @@ _Code completed: 2026-11-08. The manual pass is pending (the user batched every 
 - [x] `cargo test && cargo clippy --all-targets -- -D warnings` pass (1085 passed, 0 failed, 5 ignored); no touched file's rustfmt drift grew (`src/store.rs` fell from 15 to 14).
 
 ### Remaining Manual Steps
-The batched manual pass: every chunk's "Manual Validation" above, plus the plan's Manual Tests (a 10-minute call using mute, deafen and speaking, with CPU noted; overnight in a call; both themes). Then record the CPU table and the waived checks under chunk 1, and update the roadmap's milestone 32/33 entries.
+CPU measurements (chunk 1, chunk 4's muted figure, chunk 5's talking figure, and the 10-minute call's) are waived. Still untested in the real app: every chunk's other "Manual Validation" items above, the spike's waived checks, and the plan's remaining Manual Tests (a 10-minute call using mute, deafen and speaking; overnight in a call; both themes). The user chose to move on to the next milestone with these outstanding.
