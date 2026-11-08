@@ -33,6 +33,7 @@ gpui_kit::assets::icon_assets!(
         LogOut,
         Mail,
         MessageCircle,
+        MicOff,
         Monitor,
         MonitorSmartphone,
         Paperclip,
@@ -87,6 +88,7 @@ mod tests {
         for path in [
             IconName::Hash.path(),
             IconName::Volume2.path(),
+            IconName::MicOff.path(),
             IconName::FileImage.path(),
             IconName::Download.path(),
         ] {

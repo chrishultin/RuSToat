@@ -6,10 +6,12 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::api::events::Ready;
 use crate::api::models::{
-    AllMemberResponse, BulkMessageResponse, Category, Channel, ChannelSlowmode, Embed, Emoji, EmojiParent, FieldsChannel, FieldsMember,
-    FieldsMessage, FieldsRole, FieldsServer, FieldsUser, File, Member, MemberCompositeKey, Message,
-    MessageFlags, PartialChannel, PartialMember, PartialMessage, PartialRole, PartialServer, PartialUser,
-    Presence, ReplyIntent, Role, Server, SystemMessage, User, UserStatus,
+    AllMemberResponse, BulkMessageResponse, Category, Channel, ChannelSlowmode, ChannelVoiceState,
+    Embed, Emoji, EmojiParent, FieldsChannel, FieldsMember, FieldsMessage, FieldsRole,
+    FieldsServer, FieldsUser, File, Member, MemberCompositeKey, Message, MessageFlags,
+    PartialChannel, PartialMember, PartialMessage, PartialRole, PartialServer, PartialUser,
+    PartialUserVoiceState, Presence, ReplyIntent, Role, Server, SystemMessage, User, UserStatus,
+    UserVoiceState,
 };
 use crate::attachment::AttachmentView;
 use crate::complete::{Candidate, RoleCandidate, TokenRef};
@@ -74,6 +76,19 @@ pub fn fold_sections(
         }
     }
     sections
+}
+
+/// Someone in a voice channel's call, as the channel list shows them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoiceParticipant {
+    pub user_id: String,
+    /// Their nickname in the channel's server, else their display name.
+    /// For someone not loaded yet, the start of their ID.
+    pub name: String,
+    /// Their server avatar, else their own, else the generated default.
+    pub avatar_url: String,
+    /// Not sending their microphone (muted, or no Speak).
+    pub muted: bool,
 }
 
 /// A channel's loaded messages, oldest first.
@@ -585,6 +600,9 @@ pub struct ChatStore {
     /// The user's slowmode cooldowns. Kept across a new `Ready`: Stoat sends
     /// the running ones again after it.
     cooldowns: Cooldowns,
+    /// Who's in each voice channel's call, by channel ID, in `joined_at`
+    /// order. Channels with nobody in them aren't kept.
+    voice: HashMap<String, Vec<UserVoiceState>>,
 }
 
 impl ChatStore {
@@ -660,6 +678,11 @@ impl ChatStore {
 
         self.ready_order = ready_order;
         (self.ordering_updated, self.ordering) = ready.ordering.unwrap_or_default();
+        // Replaces everything, so leaves missed while offline don't linger.
+        self.voice.clear();
+        for state in ready.voice_states {
+            self.set_voice_channel(state);
+        }
     }
 
     /// Store a freshly fetched page of the latest messages for `channel`,
@@ -3147,6 +3170,135 @@ impl ChatStore {
         new
     }
 
+    /// Who's in `server`'s voice channels, from its `ServerCreate`:
+    /// replaces what was held for its channels.
+    pub fn set_server_voice(&mut self, server: &str, states: Vec<ChannelVoiceState>) {
+        let channels: Vec<String> = self
+            .server(server)
+            .map(|s| s.channels.clone())
+            .unwrap_or_default();
+        for channel in &channels {
+            self.voice.remove(channel);
+        }
+        for state in states {
+            self.set_voice_channel(state);
+        }
+    }
+
+    /// Hold one channel's participants, in `joined_at` order.
+    fn set_voice_channel(&mut self, state: ChannelVoiceState) {
+        let mut participants = state.participants;
+        if participants.is_empty() {
+            self.voice.remove(&state.id);
+            return;
+        }
+        participants.sort_by_key(|p| p.joined_at);
+        self.voice.insert(state.id, participants);
+    }
+
+    /// Someone joined `channel`'s call (`VoiceChannelJoin`). They're taken
+    /// out of any other channel first: a user is in one call at a time.
+    pub fn apply_voice_join(&mut self, channel: &str, state: UserVoiceState) {
+        self.remove_from_voice(&state.id);
+        let participants = self.voice.entry(channel.to_string()).or_default();
+        let at = participants.partition_point(|p| p.joined_at <= state.joined_at);
+        participants.insert(at, state);
+    }
+
+    /// `user` left `channel`'s call (`VoiceChannelLeave`). Returns whether
+    /// they were listed there.
+    pub fn apply_voice_leave(&mut self, channel: &str, user: &str) -> bool {
+        let Some(participants) = self.voice.get_mut(channel) else {
+            return false;
+        };
+        let before = participants.len();
+        participants.retain(|p| p.id != user);
+        let left = participants.len() != before;
+        if participants.is_empty() {
+            self.voice.remove(channel);
+        }
+        left
+    }
+
+    /// A moderator moved `state.id` from `from` to `to` (`VoiceChannelMove`).
+    pub fn apply_voice_move(&mut self, from: &str, to: &str, state: UserVoiceState) {
+        self.apply_voice_leave(from, &state.id);
+        self.apply_voice_join(to, state);
+    }
+
+    /// `user`'s state in `channel`'s call changed (`UserVoiceStateUpdate`):
+    /// merge the fields sent. Returns whether they were listed there.
+    pub fn apply_voice_update(
+        &mut self,
+        channel: &str,
+        user: &str,
+        data: PartialUserVoiceState,
+    ) -> bool {
+        let Some(state) = self
+            .voice
+            .get_mut(channel)
+            .and_then(|participants| participants.iter_mut().find(|p| p.id == user))
+        else {
+            return false;
+        };
+        state.apply_options(data);
+        true
+    }
+
+    /// Take `user` out of whichever call they're listed in.
+    fn remove_from_voice(&mut self, user: &str) {
+        for participants in self.voice.values_mut() {
+            participants.retain(|p| p.id != user);
+        }
+        self.voice
+            .retain(|_, participants| !participants.is_empty());
+    }
+
+    /// Who's in `channel`'s call, in the order they joined.
+    pub fn voice_participants(&self, channel: &str) -> &[UserVoiceState] {
+        self.voice
+            .get(channel)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// `channel`'s participants as the channel list shows them, in the
+    /// order they joined.
+    pub fn voice_rows(&self, channel: &str) -> Vec<VoiceParticipant> {
+        let server = self.server_of(channel);
+        self.voice_participants(channel)
+            .iter()
+            .map(|state| {
+                let member = server.and_then(|server| self.member(server, &state.id));
+                VoiceParticipant {
+                    user_id: state.id.clone(),
+                    name: self
+                        .known_name_in(channel, &state.id)
+                        .unwrap_or_else(|| state.id.chars().take(8).collect()),
+                    avatar_url: member
+                        .and_then(|m| m.avatar.as_ref())
+                        .and_then(|file| self.media.file(file))
+                        .unwrap_or_else(|| self.user_avatar_url(&state.id)),
+                    muted: !state.is_publishing,
+                }
+            })
+            .collect()
+    }
+
+    /// People in a call this client hasn't loaded, to fetch.
+    pub fn unknown_voice_users(&self) -> Vec<String> {
+        let mut unknown: Vec<String> = self
+            .voice
+            .values()
+            .flatten()
+            .filter(|state| !self.users.contains_key(&state.id))
+            .map(|state| state.id.clone())
+            .collect();
+        unknown.sort();
+        unknown.dedup();
+        unknown
+    }
+
     /// Forget a server the user left or was removed from: the server, its
     /// channels (and their history) and its members. Returns the IDs of the
     /// channels removed.
@@ -3199,11 +3351,12 @@ impl ChatStore {
         true
     }
 
-    /// Drop what's held for a channel that's gone: its history, read state
-    /// and unsent messages (their files released).
+    /// Drop what's held for a channel that's gone: its history, read state,
+    /// unsent messages (their files released) and who's in its call.
     fn drop_channel_state(&mut self, id: &str) {
         self.histories.remove(id);
         self.read_states.remove(id);
+        self.voice.remove(id);
         if let Some(gone) = self.pending.remove(id) {
             self.release_files(gone);
         }

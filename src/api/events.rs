@@ -12,10 +12,10 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
 use revolt_models::v0::{
-    Channel, ChannelSlowmode, ChannelUnread, Embed, Emoji, FieldsChannel, FieldsMember,
-    FieldsMessage, FieldsRole, FieldsServer, FieldsUser, Member, MemberCompositeKey, Message,
-    PartialChannel, PartialMember, PartialMessage, PartialRole, PartialServer, PartialUser, Server,
-    User,
+    Channel, ChannelSlowmode, ChannelUnread, ChannelVoiceState, Embed, Emoji, FieldsChannel,
+    FieldsMember, FieldsMessage, FieldsRole, FieldsServer, FieldsUser, Member, MemberCompositeKey,
+    Message, PartialChannel, PartialMember, PartialMessage, PartialRole, PartialServer,
+    PartialUser, PartialUserVoiceState, Server, User, UserVoiceState,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -34,14 +34,15 @@ const PONG_TIMEOUT: Duration = Duration::from_secs(65);
 const BACKOFF_START: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
 
-/// `Ready` fields to request. Everything else (emojis, unreads, voice states…)
-/// is skipped to keep the initial payload small.
+/// `Ready` fields to request. Everything else (policy changes, most user
+/// settings…) is skipped to keep the initial payload small.
 const READY_FIELDS: &[&str] = &[
     "users",
     "servers",
     "channels",
     "members",
     "emojis",
+    "voice_states",
     "channel_unreads",
     "user_settings[ordering]",
     "user_settings[notifications]",
@@ -216,6 +217,8 @@ pub enum ServerEvent {
         server: Box<Server>,
         channels: Vec<Channel>,
         emojis: Vec<Emoji>,
+        /// Who's in its voice channels.
+        voice_states: Vec<ChannelVoiceState>,
     },
     /// The owner deleted a server. (Leaving one is `ServerMemberLeave`.)
     ServerDelete {
@@ -230,8 +233,57 @@ pub enum ServerEvent {
     /// the user sends in a slowmode channel (from any client), and again on
     /// every (re)connect. `retry_after` is in seconds.
     UserSlowmodes(Vec<ChannelSlowmode>),
+    /// Someone joined the voice channel `channel`'s call.
+    VoiceChannelJoin {
+        channel: String,
+        state: Box<UserVoiceState>,
+    },
+    /// `user` left the voice channel `channel`'s call.
+    VoiceChannelLeave {
+        channel: String,
+        user: String,
+    },
+    /// A moderator moved `user` from one voice channel's call to another.
+    VoiceChannelMove {
+        user: String,
+        from: String,
+        to: String,
+        state: Box<UserVoiceState>,
+    },
+    /// `user`'s state in `channel`'s call changed (muted, say): merge `data`.
+    UserVoiceStateUpdate {
+        user: String,
+        channel: String,
+        data: Box<PartialUserVoiceState>,
+    },
+    /// A moderator moved the user (this account, in whichever client is in
+    /// the call) from `from` to `to`, on the LiveKit node `node`. `token`
+    /// joins the new room, and lasts 10 seconds.
+    UserMoveVoiceChannel(Box<VoiceMove>),
     /// An event type this client doesn't handle (yet). Holds the `type` tag.
     Unknown(String),
+}
+
+/// A moderator's move of the user to another voice channel
+/// ([`ServerEvent::UserMoveVoiceChannel`]). `Debug` leaves the token out:
+/// events are logged.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+pub struct VoiceMove {
+    pub node: String,
+    pub from: String,
+    pub to: String,
+    pub token: String,
+}
+
+impl std::fmt::Debug for VoiceMove {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VoiceMove")
+            .field("node", &self.node)
+            .field("from", &self.from)
+            .field("to", &self.to)
+            .field("token", &"…")
+            .finish()
+    }
 }
 
 /// The initial state the server sends after authenticating.
@@ -246,6 +298,8 @@ pub struct Ready {
     pub emojis: Vec<Emoji>,
     /// The user's read position (and unread mentions) per channel.
     pub unreads: Vec<ChannelUnread>,
+    /// Who's in each voice channel (only channels with someone in them).
+    pub voice_states: Vec<ChannelVoiceState>,
     /// The `ordering` user setting (the rail's order), with when it was
     /// written (ms since the epoch), if the user has one. `server-folders`
     /// can't be asked for in `Ready`; it's fetched after.
@@ -653,9 +707,8 @@ fn decode(mut value: Value, out: &mut Vec<ServerEvent>) {
                 }
             }))
         }
-        // Channels and emoji one by one, so one this client can't parse (a
-        // new channel type) costs that one, not the server. Voice states
-        // aren't used.
+        // Channels, emoji and voice states one by one, so one this client
+        // can't parse (a new channel type) costs that one, not the server.
         "ServerCreate" => {
             #[derive(Deserialize)]
             struct Create {
@@ -664,6 +717,8 @@ fn decode(mut value: Value, out: &mut Vec<ServerEvent>) {
                 channels: Value,
                 #[serde(default)]
                 emojis: Value,
+                #[serde(default)]
+                voice_states: Value,
             }
             out.push(decode_as(value, &kind, |c: Create| {
                 let mut skipped = 0;
@@ -675,6 +730,11 @@ fn decode(mut value: Value, out: &mut Vec<ServerEvent>) {
                         &mut skipped,
                     ),
                     emojis: lenient_list(Some(c.emojis), "emoji in ServerCreate", &mut skipped),
+                    voice_states: lenient_list(
+                        Some(c.voice_states),
+                        "voice state in ServerCreate",
+                        &mut skipped,
+                    ),
                 }
             }))
         }
@@ -709,6 +769,70 @@ fn decode(mut value: Value, out: &mut Vec<ServerEvent>) {
                 ServerEvent::UserSlowmodes(s.slowmodes)
             }))
         }
+        // `id` is the channel.
+        "VoiceChannelJoin" => {
+            #[derive(Deserialize)]
+            struct Join {
+                id: String,
+                state: UserVoiceState,
+            }
+            out.push(decode_as(value, &kind, |j: Join| {
+                ServerEvent::VoiceChannelJoin {
+                    channel: j.id,
+                    state: Box::new(j.state),
+                }
+            }))
+        }
+        // `id` is the channel.
+        "VoiceChannelLeave" => {
+            #[derive(Deserialize)]
+            struct Leave {
+                id: String,
+                user: String,
+            }
+            out.push(decode_as(value, &kind, |l: Leave| {
+                ServerEvent::VoiceChannelLeave {
+                    channel: l.id,
+                    user: l.user,
+                }
+            }))
+        }
+        "VoiceChannelMove" => {
+            #[derive(Deserialize)]
+            struct Move {
+                user: String,
+                from: String,
+                to: String,
+                state: UserVoiceState,
+            }
+            out.push(decode_as(value, &kind, |m: Move| {
+                ServerEvent::VoiceChannelMove {
+                    user: m.user,
+                    from: m.from,
+                    to: m.to,
+                    state: Box::new(m.state),
+                }
+            }))
+        }
+        // `id` is the user, unlike the other voice events.
+        "UserVoiceStateUpdate" => {
+            #[derive(Deserialize)]
+            struct Update {
+                id: String,
+                channel_id: String,
+                data: PartialUserVoiceState,
+            }
+            out.push(decode_as(value, &kind, |u: Update| {
+                ServerEvent::UserVoiceStateUpdate {
+                    user: u.id,
+                    channel: u.channel_id,
+                    data: Box::new(u.data),
+                }
+            }))
+        }
+        "UserMoveVoiceChannel" => out.push(decode_as(value, &kind, |m: VoiceMove| {
+            ServerEvent::UserMoveVoiceChannel(Box::new(m))
+        })),
         other => out.push(ServerEvent::Unknown(other.to_string())),
     }
 }
@@ -742,6 +866,7 @@ impl Ready {
             "channel unread in Ready",
             &mut skipped,
         );
+        let voice_states = lenient_list(take("voice_states"), "voice state in Ready", &mut skipped);
         let mut settings = user_settings(take("user_settings"));
         let ordering = parse_setting(&mut settings, rail::ORDERING_KEY, Ordering::parse);
         let notifications =
@@ -753,6 +878,7 @@ impl Ready {
             members,
             emojis,
             unreads,
+            voice_states,
             ordering,
             notifications,
             skipped,
@@ -1069,12 +1195,13 @@ async fn session(
                         }
                         ServerEvent::Ready(ready) => {
                             log::info!(
-                                "events: Ready ({} servers, {} channels, {} users, {} emoji, {} unreads, {} skipped)",
+                                "events: Ready ({} servers, {} channels, {} users, {} emoji, {} unreads, {} voice channels in use, {} skipped)",
                                 ready.servers.len(),
                                 ready.channels.len(),
                                 ready.users.len(),
                                 ready.emojis.len(),
                                 ready.unreads.len(),
+                                ready.voice_states.len(),
                                 ready.skipped,
                             );
                             Some(ConnectionEvent::Event(ServerEvent::Ready(ready)))
@@ -1113,7 +1240,12 @@ async fn session(
                         | ServerEvent::ServerCreate { .. }
                         | ServerEvent::ServerDelete { .. }
                         | ServerEvent::UserRelationship { .. }
-                        | ServerEvent::UserSlowmodes(_)) => {
+                        | ServerEvent::UserSlowmodes(_)
+                        | ServerEvent::VoiceChannelJoin { .. }
+                        | ServerEvent::VoiceChannelLeave { .. }
+                        | ServerEvent::VoiceChannelMove { .. }
+                        | ServerEvent::UserVoiceStateUpdate { .. }
+                        | ServerEvent::UserMoveVoiceChannel(_)) => {
                             Some(ConnectionEvent::Event(message_event))
                         }
                     };
@@ -1149,7 +1281,8 @@ mod tests {
         assert_eq!(
             events_url("wss://events.stoat.chat"),
             "wss://events.stoat.chat/?version=1&format=json&ready=users&ready=servers\
-             &ready=channels&ready=members&ready=emojis&ready=channel_unreads\
+             &ready=channels&ready=members&ready=emojis&ready=voice_states\
+             &ready=channel_unreads\
              &ready=user_settings[ordering]&ready=user_settings[notifications]"
         );
     }
@@ -1572,13 +1705,14 @@ mod tests {
                     {"channel_type":"FancyNewChannel","_id":"ch-b","server":"srv-new"}
                 ],
                 "emojis":[{"_id":"01ARYZ6S41TSV4RRFFQ69G5FAV","parent":{"type":"Server","id":"srv-new"},"creator_id":"u-me","name":"stoat"}],
-                "voice_states":[{"id":"ch-a","participants":[]}]}"#,
+                "voice_states":[{"id":"ch-a","participants":[]},{"id":"ch-b"}]}"#,
         );
         let [
             ServerEvent::ServerCreate {
                 server,
                 channels,
                 emojis,
+                voice_states,
             },
         ] = events.as_slice()
         else {
@@ -1588,14 +1722,101 @@ mod tests {
         assert_eq!(server.roles["r"].name, "Role");
         assert_eq!(channels.len(), 1);
         assert_eq!(emojis[0].name, "stoat");
+        assert_eq!(
+            voice_states.len(),
+            1,
+            "the one without participants is skipped"
+        );
+        assert_eq!(voice_states[0].id, "ch-a");
         // Without the lists at all.
         let events = parse_frame(
             r#"{"type":"ServerCreate","id":"s","server":{"_id":"s","owner":"u","name":"S","channels":[],"default_permissions":0,"approximate_member_count":1}}"#,
         );
         assert!(matches!(
             events.as_slice(),
-            [ServerEvent::ServerCreate { channels, emojis, .. }] if channels.is_empty() && emojis.is_empty()
+            [ServerEvent::ServerCreate { channels, emojis, voice_states, .. }]
+                if channels.is_empty() && emojis.is_empty() && voice_states.is_empty()
         ));
+    }
+
+    const VOICE_STATE: &str = r#"{"id":"u-ada","joined_at":"2026-11-08T12:00:00.000Z",
+        "is_receiving":true,"is_publishing":true,"screensharing":false,"camera":false}"#;
+
+    #[test]
+    fn voice_join_leave_and_move_decode() {
+        let events = parse_frame(&format!(
+            r#"{{"type":"Bulk","v":[
+                {{"type":"VoiceChannelJoin","id":"ch-voice","state":{VOICE_STATE}}},
+                {{"type":"VoiceChannelLeave","id":"ch-voice","user":"u-ada"}},
+                {{"type":"VoiceChannelMove","user":"u-ada","from":"ch-voice","to":"ch-other",
+                  "state":{VOICE_STATE}}}
+            ]}}"#
+        ));
+        assert!(matches!(
+            events.as_slice(),
+            [
+                ServerEvent::VoiceChannelJoin { channel: joined, state },
+                ServerEvent::VoiceChannelLeave { channel: left, user },
+                ServerEvent::VoiceChannelMove { user: moved, from, to, .. },
+            ] if joined == "ch-voice" && state.id == "u-ada" && state.is_publishing
+                && left == "ch-voice" && user == "u-ada"
+                && moved == "u-ada" && from == "ch-voice" && to == "ch-other"
+        ));
+    }
+
+    #[test]
+    fn a_voice_state_update_carries_only_what_changed() {
+        let events = parse_frame(
+            r#"{"type":"UserVoiceStateUpdate","id":"u-ada","channel_id":"ch-voice",
+                "data":{"is_publishing":false}}"#,
+        );
+        let [
+            ServerEvent::UserVoiceStateUpdate {
+                user,
+                channel,
+                data,
+            },
+        ] = events.as_slice()
+        else {
+            panic!("got {events:?}");
+        };
+        assert_eq!((user.as_str(), channel.as_str()), ("u-ada", "ch-voice"));
+        assert_eq!(data.is_publishing, Some(false));
+        assert_eq!(data.is_receiving, None);
+        assert_eq!(data.camera, None);
+    }
+
+    #[test]
+    fn a_move_of_the_user_decodes_and_keeps_its_token_out_of_logs() {
+        let events = parse_frame(
+            r#"{"type":"UserMoveVoiceChannel","node":"hel1","from":"ch-voice","to":"ch-other",
+                "token":"secret-token"}"#,
+        );
+        let [ServerEvent::UserMoveVoiceChannel(moved)] = events.as_slice() else {
+            panic!("got {events:?}");
+        };
+        assert_eq!(
+            (moved.node.as_str(), moved.from.as_str(), moved.to.as_str()),
+            ("hel1", "ch-voice", "ch-other")
+        );
+        assert_eq!(moved.token, "secret-token");
+        assert!(!format!("{events:?}").contains("secret-token"));
+    }
+
+    #[test]
+    fn ready_brings_voice_states_and_skips_bad_ones() {
+        let events = parse_frame(&format!(
+            r#"{{"type":"Ready","voice_states":[
+                {{"id":"ch-voice","participants":[{VOICE_STATE}]}},
+                {{"id":"ch-bad","participants":[{{"id":"u-x"}}]}}
+            ]}}"#
+        ));
+        let [ServerEvent::Ready(ready)] = events.as_slice() else {
+            panic!("got {events:?}");
+        };
+        assert_eq!(ready.voice_states.len(), 1);
+        assert_eq!(ready.voice_states[0].participants[0].id, "u-ada");
+        assert_eq!(ready.skipped, 1);
     }
 
     #[test]

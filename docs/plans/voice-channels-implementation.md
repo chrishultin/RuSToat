@@ -35,3 +35,37 @@ Pending, in the end-of-milestone pass:
 - The silent-call CPU table: RuSToat (release bundle via `open`) and the web client on this Mac in the same call, each with the `top` mean (13 × 5 s, first dropped) and the `ps` CPU-time delta over 60 s; both idle.
 - The spike's waived checks, each with log evidence: five Join → Leave cycles in one process; join then log out; join then close the window (Keep running off, then on); join one voice channel then another; join in the web client with RuSToat's account, then join from RuSToat.
 - Then the roadmap's milestone 32/33 entries record the outcome.
+
+## Chunk 2: Who's in each voice channel
+
+### Changes Made
+- `src/api/events.rs`:
+  - `"voice_states"` added to `READY_FIELDS` (the comment above it updated); `Ready.voice_states: Vec<ChannelVoiceState>`, parsed leniently (bad items count in `skipped`). The `events: Ready (…)` log line gains "N voice channels in use".
+  - `ServerCreate` gains `voice_states` (lenient too).
+  - New `ServerEvent` variants: `VoiceChannelJoin { channel, state }`, `VoiceChannelLeave { channel, user }`, `VoiceChannelMove { user, from, to, state }`, `UserVoiceStateUpdate { user, channel, data }` (Stoat's `id` is the user and `channel_id` the channel here), and `UserMoveVoiceChannel(Box<VoiceMove>)`. `VoiceMove { node, from, to, token }` has a hand-written `Debug` that prints the token as `…`. All five are forwarded to the UI.
+  - Unit tests: join/leave/move in one `Bulk`, an update with only `is_publishing`, the move's token kept out of `Debug`, `Ready` with a bad voice state skipped, `ServerCreate`'s voice states (and their absence); the `events_url` test lists `voice_states`.
+- `src/store.rs`:
+  - `ChatStore.voice: HashMap<String, Vec<UserVoiceState>>` (channel → participants by `joined_at`; empty channels not kept). Replaced wholesale by `apply_ready`.
+  - `set_server_voice(server, states)` (replaces that server's channels' lists, for `ServerCreate`), `apply_voice_join` (removes the user from any other channel first, inserts in `joined_at` order), `apply_voice_leave`, `apply_voice_move`, `apply_voice_update` (`UserVoiceState::apply_options`), `voice_participants(channel)`.
+  - `VoiceParticipant { user_id, name, avatar_url, muted }` and `voice_rows(channel)`: nickname, else display name, else the ID's first 8 characters; member avatar, else user avatar, else the generated default; `muted = !is_publishing`. `unknown_voice_users()` lists participants not loaded.
+  - `drop_channel_state` also drops the channel's list, so a deleted channel or a left server clears it.
+- `src/ui/chat.rs`:
+  - Handles the four voice events (re-rendering only if something changed for leave/update); `Ready`, `ServerCreate`, join and move call `fetch_voice_users`, which fetches each unknown participant once (`voice_user_fetches`).
+  - `render_channel_row` puts `render_voice_participant` rows under a voice channel with anyone in it: 18 px avatar lined up under the channel name, name, and `MicOff` when muted.
+- `src/assets.rs`: `MicOff` in `ExtraIcons` and the "icons load" test.
+- `tests/store_voice.rs` (new): `Ready` fills in `joined_at` order; rows' names (nickname for the user, display name, ID start for an unknown) and mute; join order; a join elsewhere moves; leave (and a repeat); move; update merges only what's sent; a new `Ready` replaces; `ServerCreate` adds and replaces its channels only; channel deletion and leaving the server drop the list.
+- `tests/store_servers.rs`: the `ServerCreate` pattern gains `..`.
+
+### Divergences
+- **Minor: where the parsing tests live.** The plan put them in `tests/live_events.rs`, but that file holds only opt-in checks against the live service. They're unit tests in `src/api/events.rs` (beside the other events' tests), and `tests/store_voice.rs` parses every frame it applies.
+- **Minor: `ServerCreate`'s voice states go through `set_server_voice`,** not a new `add_server` parameter, so `add_server`'s other callers (create/join responses, tests) are unchanged.
+- **Minor: unknown participants are named by their ID's first 8 characters** (the plan said "first characters"); their avatar is the generated default `user_avatar_url` already gives.
+- **Note:** `log::trace!("events: frame {text}")` (existing) logs raw frames, so a `UserMoveVoiceChannel`'s token appears at trace level. Debug and above never show it. Left as is: trace is off in every documented run, and the token lasts 10 s.
+- Look-ahead: no later chunk affected. Chunk 7 uses `ServerEvent::UserMoveVoiceChannel(Box<VoiceMove>)` rather than a struct variant.
+
+### Verification Performed
+- `cargo test`: 1077 passed, 0 failed, 5 ignored (72 suites; +16 tests). `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt drift (`Diff in` count): `src/api/events.rs` 3 (was 3), `src/store.rs` 14 (was 15: the import block it touched is now formatted), `src/ui/chat.rs` 17 (was 17), `src/assets.rs` 0, `tests/store_voice.rs` 0 (new, `rustfmt`ed), `tests/store_servers.rs` 0.
+
+### Manual Validation
+Pending, in the end-of-milestone pass: someone in a voice channel on the web client is listed under it at launch; their leave removes the row; their mute shows the mic-off icon within about a second; an empty channel shows nothing extra; `Ready`'s `skipped` stays 0 on the live account; each voice event's JSON checked against a frame captured live (`RUST_LOG=stoat_gpui::api::events=trace`).

@@ -59,6 +59,7 @@ fn add(store: &mut ChatStore, event: Value) -> bool {
         server,
         channels,
         emojis,
+        ..
     }) = parse_frame(&event.to_string()).pop()
     else {
         panic!("ServerCreate");

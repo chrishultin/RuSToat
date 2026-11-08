@@ -64,8 +64,8 @@ use crate::status::{PRESENCES, STATUS_TEXT_MAX, StatusCheck, check_status_text};
 use crate::store::{
     ChannelEntry, ChannelKind, ChannelSection, ChatStore, MemberList, MemberListRow, MessageRow,
     PendingAttachment, PendingMessage, PendingState, PickerEmoji, PresenceKind, ReactionEmoji,
-    ReplyPreview, ReplyState, RowOp, ServerEntry, TimelineRow, diff_rows, display_name,
-    fold_sections, with_unread_divider,
+    ReplyPreview, ReplyState, RowOp, ServerEntry, TimelineRow, VoiceParticipant, diff_rows,
+    display_name, fold_sections, with_unread_divider,
 };
 use crate::time::{format_countdown, format_duration_short, ulid_millis};
 use crate::typing::{OutgoingTyping, TypingSignal, TypingState, typing_label};
@@ -402,6 +402,9 @@ pub struct ChatView {
     voice_node: Option<String>,
     /// The voice call this account is in, or joining. One at a time.
     voice: Option<ActiveCall>,
+    /// People in a call who weren't loaded and were asked for, so each is
+    /// fetched once.
+    voice_user_fetches: HashSet<String>,
     /// The person whose DM is being asked for ("Message" on their card).
     dm_opening: Option<String>,
     /// People whose friend request or block is on its way to Stoat.
@@ -850,6 +853,7 @@ impl ChatView {
             group_size: None,
             voice_node: None,
             voice: None,
+            voice_user_fetches: HashSet::new(),
             image_limits: ImageLimits::default(),
             window: window.window_handle(),
             dm_opening: None,
@@ -915,6 +919,7 @@ impl ChatView {
             ConnectionEvent::Event(ServerEvent::Ready(ready)) => {
                 let reconnect = self.has_ready;
                 self.store.apply_ready(*ready);
+                self.fetch_voice_users(cx);
                 self.fetch_rail_settings(cx);
                 self.schedule_mute_tick(cx);
                 self.card = None;
@@ -1240,10 +1245,13 @@ impl ChatView {
                 server,
                 channels,
                 emojis,
+                voice_states,
             }) => {
                 let id = server.id.clone();
                 log::info!("live: joined server {id} ({} channels)", channels.len());
                 self.store.add_server(*server, channels, emojis);
+                self.store.set_server_voice(&id, voice_states);
+                self.fetch_voice_users(cx);
                 // Its channels aren't filtered until the membership arrives.
                 if self.store.member(&id, self.store.me()).is_none() {
                     self.fetch_own_member(id, cx);
@@ -1278,6 +1286,37 @@ impl ChatView {
                         Delivery::Banner => self.show_friend_banner(notice, cx),
                         Delivery::Toast => self.show_toast(notice, window, cx),
                     }
+                }
+            }
+            ConnectionEvent::Event(ServerEvent::VoiceChannelJoin { channel, state }) => {
+                log::debug!("live: {} joined {channel}'s call", state.id);
+                self.store.apply_voice_join(&channel, *state);
+                self.fetch_voice_users(cx);
+            }
+            ConnectionEvent::Event(ServerEvent::VoiceChannelLeave { channel, user }) => {
+                log::debug!("live: {user} left {channel}'s call");
+                if !self.store.apply_voice_leave(&channel, &user) {
+                    return;
+                }
+            }
+            ConnectionEvent::Event(ServerEvent::VoiceChannelMove {
+                user,
+                from,
+                to,
+                state,
+            }) => {
+                log::debug!("live: {user} was moved from {from}'s call to {to}'s");
+                self.store.apply_voice_move(&from, &to, *state);
+                self.fetch_voice_users(cx);
+            }
+            ConnectionEvent::Event(ServerEvent::UserVoiceStateUpdate {
+                user,
+                channel,
+                data,
+            }) => {
+                log::debug!("live: {user}'s state in {channel}'s call changed");
+                if !self.store.apply_voice_update(&channel, &user, *data) {
+                    return;
                 }
             }
             ConnectionEvent::Event(ServerEvent::UserSlowmodes(slowmodes)) => {
@@ -1418,6 +1457,16 @@ impl ChatView {
             .ok();
         })
         .detach();
+    }
+
+    /// Fetch the people in calls who aren't loaded, so the channel list can
+    /// name them. Each is asked for once.
+    fn fetch_voice_users(&mut self, cx: &mut Context<Self>) {
+        for user in self.store.unknown_voice_users() {
+            if self.voice_user_fetches.insert(user.clone()) {
+                self.fetch_user(user, cx);
+            }
+        }
     }
 
     /// Fetch one user the client doesn't know yet (someone who just joined),
@@ -8412,7 +8461,11 @@ impl ChatView {
         let in_call = matches!(self.voice_state(&channel.id), Some(CallState::Connected(_)));
         let accent = theme.primary;
         let menu = self.channel_menu(&channel, cx);
-        h_flex()
+        let participants = match channel.kind {
+            ChannelKind::Text { voice: true } => self.store.voice_rows(&channel.id),
+            _ => Vec::new(),
+        };
+        let row = h_flex()
             .id(SharedString::from(format!("channel-{}", channel.id)))
             .gap_2()
             .px_2()
@@ -8458,7 +8511,53 @@ impl ChatView {
             )
             .child(div().flex_1().min_w_0().truncate().child(channel.name))
             .when(mentions > 0, |el| el.child(mention_badge(mentions, cx)))
-            .context_menu(move |popup, window, cx| menu(popup, window, cx))
+            .context_menu(move |popup, window, cx| menu(popup, window, cx));
+        if participants.is_empty() {
+            return row.into_any_element();
+        }
+        v_flex()
+            .gap_0p5()
+            .child(row)
+            .children(
+                participants
+                    .into_iter()
+                    .map(|participant| self.render_voice_participant(participant, cx)),
+            )
+            .into_any_element()
+    }
+
+    /// Someone in a voice channel's call, under the channel's row.
+    fn render_voice_participant(
+        &self,
+        participant: VoiceParticipant,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        h_flex()
+            .id(SharedString::from(format!("voice-{}", participant.user_id)))
+            .gap_2()
+            // Lines the avatar up under the channel's name.
+            .pl(px(32.))
+            .pr_2()
+            .py_0p5()
+            .text_sm()
+            .text_color(theme.muted_foreground)
+            .child(avatar(
+                format!("voice-avatar-{}", participant.user_id),
+                Some(participant.avatar_url),
+                &participant.name,
+                18.,
+                theme.secondary,
+                theme.secondary_foreground,
+            ))
+            .child(div().flex_1().min_w_0().truncate().child(participant.name))
+            .when(participant.muted, |el| {
+                el.child(
+                    Icon::new(IconName::MicOff)
+                        .xsmall()
+                        .text_color(theme.muted_foreground),
+                )
+            })
             .into_any_element()
     }
 
