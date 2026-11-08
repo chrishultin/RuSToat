@@ -8,8 +8,8 @@ use serde_json::{Value, json};
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::permissions::{
     can_bypass_slowmode, can_change_avatar, can_change_nickname, can_invite, can_manage_channel,
-    can_mention_everyone, can_mention_roles, can_pin, can_send_embeds, can_view,
-    channel_permissions, has, server_permissions,
+    can_manage_channels, can_mention_everyone, can_mention_roles, can_pin, can_send_embeds,
+    can_view, channel_permissions, has, server_permissions,
 };
 use stoat_gpui::store::ChatStore;
 
@@ -627,4 +627,41 @@ fn dms_and_groups_are_not_deleted_as_channels() {
     assert!(!can_manage_channel(&store, "u-me", "dm-friend"));
     assert!(!can_manage_channel(&store, "u-me", "grp-mine"));
     assert!(!can_manage_channel(&store, "u-me", "ch-saved"));
+}
+
+#[test]
+fn creating_channels_takes_manage_channels_across_the_server() {
+    let channels = json!([
+        {
+            "channel_type": "TextChannel", "_id": "ch-locked", "server": "srv", "name": "locked",
+            "role_permissions": { "builder": { "a": 0, "d": MANAGE_CHANNEL } }
+        }
+    ]);
+    let store = store_with(
+        channels,
+        vec![user("u-owner", json!({})), user("u-builder", json!({}))],
+        vec![
+            member("u-me", &[], json!({})),
+            member("u-owner", &[], json!({})),
+            member("u-builder", &["builder"], json!({})),
+        ],
+    );
+    // Stoat's defaults don't include it.
+    assert!(!can_manage_channels(&store, "u-me", "srv"));
+    assert!(!store.can_manage_channels("srv"));
+    assert!(can_manage_channels(&store, "u-owner", "srv"));
+    // A role grants it; a channel's override doesn't take it away here.
+    assert!(can_manage_channels(&store, "u-builder", "srv"));
+    assert!(!can_manage_channels(&store, "u-builder", "srv-unknown"));
+}
+
+#[test]
+fn nobody_creates_channels_before_their_membership_is_known() {
+    let store = store_with(
+        json!([]),
+        vec![user("u-owner", json!({}))],
+        vec![member("u-me", &[], json!({}))],
+    );
+    // Even the owner, whose permissions would be complete.
+    assert!(!can_manage_channels(&store, "u-owner", "srv"));
 }

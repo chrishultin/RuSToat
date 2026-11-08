@@ -1,10 +1,11 @@
-//! Making and changing servers: Stoat's rules for a name, and why a
-//! request was refused, in words. Plain data with no GPUI, so it's
-//! unit-testable.
+//! Making and changing servers: Stoat's rules for a name, edits to a
+//! server's categories, and why a request was refused, in words. Plain
+//! data with no GPUI, so it's unit-testable.
 
 use revolt_result::ErrorType;
 
 use crate::api::ApiError;
+use crate::api::models::Category;
 use crate::profile_edit::error_text;
 
 /// Server, channel and category names: 1 to 32 characters, as Stoat
@@ -24,6 +25,27 @@ pub fn valid_name(text: &str) -> Option<String> {
         .then(|| name.to_string())
 }
 
+/// `categories` with `channel` moved to the end of category `category`,
+/// and out of any other (each channel is listed once: Stoat refuses a
+/// list with one twice). `None` if there's no such category any more.
+pub fn with_channel_in(
+    categories: &[Category],
+    channel: &str,
+    category: &str,
+) -> Option<Vec<Category>> {
+    if !categories.iter().any(|c| c.id == category) {
+        return None;
+    }
+    let mut edited = categories.to_vec();
+    for c in &mut edited {
+        c.channels.retain(|id| id != channel);
+        if c.id == category {
+            c.channels.push(channel.to_string());
+        }
+    }
+    Some(edited)
+}
+
 /// Why `POST /servers/create` was refused.
 pub fn create_server_error_text(err: &ApiError) -> String {
     match err.error_type() {
@@ -34,6 +56,33 @@ pub fn create_server_error_text(err: &ApiError) -> String {
             "This Stoat instance doesn't let you create servers.".into()
         }
         _ => error_text(err, "Couldn't create the server. Try again."),
+    }
+}
+
+/// Why `POST /servers/{id}/channels` was refused.
+pub fn create_channel_error_text(err: &ApiError) -> String {
+    match err.error_type() {
+        Some(ErrorType::TooManyChannels { max }) => {
+            format!("This server already has {max} channels, the most Stoat allows.")
+        }
+        Some(ErrorType::MissingPermission { .. }) => {
+            "You can't create channels in this server.".into()
+        }
+        _ => error_text(err, "Couldn't create the channel. Try again."),
+    }
+}
+
+/// Why a change to a server's categories (`PATCH /servers/{id}`) was
+/// refused.
+pub fn categories_error_text(err: &ApiError) -> String {
+    match err.error_type() {
+        Some(ErrorType::MissingPermission { .. }) => {
+            "You can't manage channels in this server.".into()
+        }
+        Some(ErrorType::InvalidOperation) => {
+            "Stoat refused that change to the categories. Try again.".into()
+        }
+        _ => error_text(err, "Couldn't change the categories. Try again."),
     }
 }
 
@@ -55,6 +104,14 @@ mod tests {
             error_type,
             location: None,
         })
+    }
+
+    fn category(id: &str, channels: &[&str]) -> Category {
+        Category {
+            id: id.into(),
+            title: id.to_uppercase(),
+            channels: channels.iter().map(|c| c.to_string()).collect(),
+        }
     }
 
     #[test]
@@ -111,6 +168,89 @@ mod tests {
         assert_eq!(
             delete_channel_error_text(&api_error(ErrorType::InternalError)),
             "Couldn't delete the channel. Try again."
+        );
+    }
+
+    #[test]
+    fn a_channel_moves_to_the_end_of_its_new_category() {
+        let categories = [category("k1", &["c1", "c2"]), category("k2", &["c3"])];
+        assert_eq!(
+            with_channel_in(&categories, "c1", "k2").unwrap(),
+            [category("k1", &["c2"]), category("k2", &["c3", "c1"])]
+        );
+    }
+
+    #[test]
+    fn a_new_channel_is_added_at_the_end_of_its_category() {
+        let categories = [category("k1", &["c1"]), category("k2", &[])];
+        assert_eq!(
+            with_channel_in(&categories, "c9", "k1").unwrap(),
+            [category("k1", &["c1", "c9"]), category("k2", &[])]
+        );
+        assert_eq!(
+            with_channel_in(&categories, "c9", "k2").unwrap(),
+            [category("k1", &["c1"]), category("k2", &["c9"])]
+        );
+    }
+
+    #[test]
+    fn a_channel_is_listed_once_however_often_it_was() {
+        let categories = [category("k1", &["c1", "c2", "c1"]), category("k2", &["c1"])];
+        assert_eq!(
+            with_channel_in(&categories, "c1", "k1").unwrap(),
+            [category("k1", &["c2", "c1"]), category("k2", &[])]
+        );
+    }
+
+    #[test]
+    fn a_missing_category_gives_nothing_to_send() {
+        let categories = [category("k1", &["c1"])];
+        assert_eq!(with_channel_in(&categories, "c1", "k-gone"), None);
+        assert_eq!(with_channel_in(&[], "c1", "k1"), None);
+    }
+
+    #[test]
+    fn create_channel_refusals_say_why() {
+        assert_eq!(
+            create_channel_error_text(&api_error(ErrorType::TooManyChannels { max: 200 })),
+            "This server already has 200 channels, the most Stoat allows."
+        );
+        let missing = ErrorType::MissingPermission {
+            permission: "ManageChannel".into(),
+        };
+        assert_eq!(
+            create_channel_error_text(&api_error(missing)),
+            "You can't create channels in this server."
+        );
+        let limited = ApiError::RateLimited {
+            retry_after_ms: Some(4200),
+        };
+        assert_eq!(
+            create_channel_error_text(&limited),
+            "Stoat is limiting changes. Try again in 5 s."
+        );
+        assert_eq!(
+            create_channel_error_text(&api_error(ErrorType::InternalError)),
+            "Couldn't create the channel. Try again."
+        );
+    }
+
+    #[test]
+    fn category_refusals_say_why() {
+        let missing = ErrorType::MissingPermission {
+            permission: "ManageChannel".into(),
+        };
+        assert_eq!(
+            categories_error_text(&api_error(missing)),
+            "You can't manage channels in this server."
+        );
+        assert_eq!(
+            categories_error_text(&api_error(ErrorType::InvalidOperation)),
+            "Stoat refused that change to the categories. Try again."
+        );
+        assert_eq!(
+            categories_error_text(&api_error(ErrorType::InternalError)),
+            "Couldn't change the categories. Try again."
         );
     }
 }

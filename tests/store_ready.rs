@@ -99,7 +99,9 @@ fn server_channels_are_grouped_uncategorized_first() {
             // `ch-secret` is likewise hidden; the category itself stays.
             (Some("Chat"), Some("cat-chat"), vec!["general", "random"]),
             (Some("Voice"), Some("cat-voice"), vec!["hangout"]),
-            // "Archive" only references a missing channel, so it's omitted.
+            // "Archive" only lists a channel that's no longer on the server
+            // (deleted), so it shows, empty.
+            (Some("Archive"), Some("cat-archive"), vec![]),
         ]
     );
 }
@@ -139,7 +141,8 @@ fn folded_categories_keep_the_open_channel_and_mentions() {
         [
             s(None, &["welcome"]),
             s(Some("Chat"), &["general", "random"]),
-            s(Some("Voice"), &["hangout"])
+            s(Some("Voice"), &["hangout"]),
+            s(Some("Archive"), &[])
         ]
     );
     // Something else open: only the mention. Voice folded empties, but its
@@ -149,7 +152,82 @@ fn folded_categories_keep_the_open_channel_and_mentions() {
         [
             s(None, &["welcome"]),
             s(Some("Chat"), &["random"]),
-            s(Some("Voice"), &[])
+            s(Some("Voice"), &[]),
+            s(Some("Archive"), &[])
+        ]
+    );
+}
+
+/// `srv-alpha`'s sidebar from a `Ready` whose categories are `categories`:
+/// each section's category ID and channel names.
+fn sidebar_with(categories: serde_json::Value) -> Vec<(Option<String>, Vec<String>)> {
+    let mut ready = ready();
+    let alpha = ready
+        .servers
+        .iter_mut()
+        .find(|s| s.id == "srv-alpha")
+        .unwrap();
+    alpha.categories = Some(serde_json::from_value(categories).unwrap());
+    let mut store = ChatStore::new("u-me");
+    store.apply_ready(ready);
+    store
+        .server_channels("srv-alpha")
+        .into_iter()
+        .map(|s| {
+            let names = names(&s.channels).into_iter().map(String::from).collect();
+            (s.id, names)
+        })
+        .collect()
+}
+
+#[test]
+fn a_category_with_no_channels_shows_empty() {
+    let sidebar = sidebar_with(serde_json::json!([
+        { "id": "cat-chat", "title": "Chat", "channels": ["ch-general"] },
+        { "id": "cat-new", "title": "New", "channels": [] }
+    ]));
+    assert_eq!(
+        sidebar,
+        [
+            (
+                None,
+                vec!["welcome".into(), "random".into(), "hangout".into()]
+            ),
+            (Some("cat-chat".into()), vec!["general".into()]),
+            (Some("cat-new".into()), vec![]),
+        ]
+    );
+}
+
+#[test]
+fn a_category_whose_channels_were_deleted_shows_empty() {
+    let mut store = store();
+    assert!(store.remove_channel("ch-voice"));
+    let sections = store.server_channels("srv-alpha");
+    let voice = sections
+        .iter()
+        .find(|s| s.id.as_deref() == Some("cat-voice"))
+        .expect("Voice stays");
+    assert!(voice.channels.is_empty());
+}
+
+#[test]
+fn a_category_of_channels_you_cannot_see_stays_hidden() {
+    // `ch-no-access` is on the server but missing from `Ready`: the user
+    // can't see it, so neither its category.
+    let sidebar = sidebar_with(serde_json::json!([
+        { "id": "cat-private", "title": "Private", "channels": ["ch-no-access"] },
+        { "id": "cat-mixed", "title": "Mixed", "channels": ["ch-no-access", "ch-gone"] },
+        { "id": "cat-chat", "title": "Chat", "channels": ["ch-general", "ch-random", "ch-voice"] }
+    ]));
+    assert_eq!(
+        sidebar,
+        [
+            (None, vec!["welcome".into()]),
+            (
+                Some("cat-chat".into()),
+                vec!["general".into(), "random".into(), "hangout".into()]
+            ),
         ]
     );
 }

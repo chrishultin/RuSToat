@@ -79,7 +79,10 @@ use crate::ui::markup::{
 };
 use crate::ui::math::MathPlugin;
 use crate::ui::profile_card::{CardBio, CardContent, OnLink, render_profile_card};
-use crate::ui::server_dialogs::{CREATE_SERVER_DIALOG_WIDTH, CreateServerDialog};
+use crate::ui::server_dialogs::{
+    CREATE_CHANNEL_DIALOG_WIDTH, CREATE_SERVER_DIALOG_WIDTH, CreateChannelDialog,
+    CreateServerDialog,
+};
 
 actions!(
     chat,
@@ -3425,9 +3428,10 @@ impl ChatView {
     /// A channel's, DM's or group's right-click menu: Mute Channel (for how
     /// long), or Unmute Channel and until when it's muted; its
     /// Notifications level, led by its default (the server's level, or
-    /// All for DMs and groups); Create invite… and Delete channel… where
-    /// allowed; Copy channel ID. A channel in a muted server still offers
-    /// Mute Channel: the server's mute is what silences it.
+    /// All for DMs and groups); Create invite…, Create channel… (in this
+    /// channel's category) and Delete channel… where allowed; Copy channel
+    /// ID. A channel in a muted server still offers Mute Channel: the
+    /// server's mute is what silences it.
     fn channel_menu(&self, channel: &ChannelEntry, cx: &Context<Self>) -> MenuBuilder {
         let view = cx.entity().downgrade();
         let channel_id = channel.id.clone();
@@ -3439,6 +3443,14 @@ impl ChatView {
             let store = &this.read(cx).store;
             let invitable = in_server && store.can_invite(&channel_id);
             let deletable = in_server && store.can_manage_channel(&channel_id);
+            // Creating takes Manage Channels across the server, not on this
+            // channel.
+            let create_in = match store.channel(&channel_id) {
+                Some(Channel::TextChannel { server, .. }) if store.can_manage_channels(server) => {
+                    Some((server.clone(), store.category_of(server, &channel_id)))
+                }
+                _ => None,
+            };
             let mute = store.channel_mute_until(&channel_id);
             let current = store.notification_settings().channel_override(&channel_id);
             let inherited = store.level_source(&channel_id).label();
@@ -3491,6 +3503,10 @@ impl ChatView {
                 )
             } else {
                 menu
+            };
+            let menu = match create_in {
+                Some((server, category)) => menu.item(create_channel_item(&view, server, category)),
+                None => menu,
             };
             let menu = if deletable {
                 let (view, channel) = (view.clone(), channel_id.clone());
@@ -3629,6 +3645,46 @@ impl ChatView {
             .ok();
         })
         .detach();
+    }
+
+    /// A category heading's right-click menu: Create channel… (in it) where
+    /// allowed; Copy category ID.
+    fn category_menu(&self, server: &str, category: &str, cx: &Context<Self>) -> MenuBuilder {
+        let view = cx.entity().downgrade();
+        let (server, category) = (server.to_string(), category.to_string());
+        Rc::new(move |menu, _, cx| {
+            let Some(this) = view.upgrade() else {
+                return menu;
+            };
+            let menu = if this.read(cx).store.can_manage_channels(&server) {
+                menu.item(create_channel_item(
+                    &view,
+                    server.clone(),
+                    Some(category.clone()),
+                ))
+                .separator()
+            } else {
+                menu
+            };
+            menu.item(copy_id_item("Copy category ID", category.clone()))
+        })
+    }
+
+    /// The right-click menu of the channel list's empty space, for those
+    /// who may manage `server`'s channels: Create channel… (uncategorized).
+    fn channel_list_menu(&self, server: &str, cx: &Context<Self>) -> MenuBuilder {
+        let view = cx.entity().downgrade();
+        let server = server.to_string();
+        Rc::new(move |menu, _, cx| {
+            let Some(this) = view.upgrade() else {
+                return menu;
+            };
+            if this.read(cx).store.can_manage_channels(&server) {
+                menu.item(create_channel_item(&view, server.clone(), None))
+            } else {
+                menu
+            }
+        })
     }
 
     /// A server's right-click menu: Mark as read; Edit identity…; Mute Server (for how
@@ -4579,6 +4635,110 @@ impl ChatView {
             Some(channel) => self.open_channel(&channel, cx),
             None => self.select_place(Place::Server(id), cx),
         }
+    }
+
+    /// "Create channel" in `server`, put in `category` when it's asked for
+    /// from one (its heading's menu, or the menu of a channel in it).
+    pub fn open_create_channel(
+        &mut self,
+        server: String,
+        category: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let category = category.and_then(|id| {
+            let server = self.store.server(&server)?;
+            let category = server.categories.iter().flatten().find(|c| c.id == id)?;
+            Some((id, category.title.clone()))
+        });
+        let weak = cx.entity().downgrade();
+        let dialog =
+            cx.new(|cx| CreateChannelDialog::new(self, weak, server, category, window, cx));
+        let first_build = std::cell::Cell::new(true);
+        window.open_dialog(cx, move |modal, window, cx| {
+            if first_build.replace(false) {
+                let input = dialog.read(cx).input().read(cx).focus_handle(cx);
+                window.focus(&input, cx);
+            }
+            modal
+                .title("Create channel")
+                .w(px(CREATE_CHANNEL_DIALOG_WIDTH))
+                .child(dialog.clone())
+        });
+    }
+
+    /// The user created `channel`: add it at once (its `ChannelCreate` may
+    /// come before or after), move it into `category` (ID and title) if it
+    /// was asked for in one, and open it.
+    pub fn channel_created(
+        &mut self,
+        channel: Channel,
+        category: Option<(String, String)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Channel::TextChannel {
+            id, server, name, ..
+        } = &channel
+        else {
+            return;
+        };
+        let (id, server, name) = (id.clone(), server.clone(), name.clone());
+        log::debug!("created channel {id} in server {server}");
+        self.store.add_channel(channel);
+        if let Some(category) = category {
+            self.move_into_category(server, id.clone(), name, category, window, cx);
+        }
+        self.open_channel(&id, cx);
+    }
+
+    /// Put the new `channel` (called `name`) into `category` (ID and title)
+    /// of `server`: Stoat creates channels in no category, so the
+    /// categories are sent again with it added. Skipped if the category has
+    /// gone since. If Stoat refuses, the channel stays uncategorized and a
+    /// toast says so.
+    fn move_into_category(
+        &mut self,
+        server: String,
+        channel: String,
+        name: String,
+        (category, title): (String, String),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let categories = self
+            .store
+            .server(&server)
+            .and_then(|s| s.categories.as_deref())
+            .unwrap_or_default();
+        let Some(edited) = crate::server_edit::with_channel_in(categories, &channel, &category)
+        else {
+            log::debug!("category {category} of {server} is gone; {channel} stays uncategorized");
+            return;
+        };
+        let request = spawn_io({
+            let (client, server) = (self.client.clone(), server.clone());
+            async move { client.edit_categories(&server, &edited).await }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(Ok(categories)) => {
+                        log::debug!("moved channel {channel} into category {category}");
+                        this.store.set_categories(&server, categories);
+                    }
+                    failed => {
+                        log::warn!("couldn't move {channel} into {category}: {failed:?}");
+                        let error = format!("Created #{name}, but couldn't move it into {title}.");
+                        window.push_notification(Notification::error(error), cx);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// "Change identity on {server}": the user's nickname, avatar and
@@ -5885,11 +6045,19 @@ impl ChatView {
                 .into(),
         };
         let current = self.current_channel().map(|c| c.id);
-        // Folded channels still count: a fully folded server isn't empty.
-        let empty = self
-            .sections()
-            .iter()
-            .all(|section| section.channels.is_empty());
+        // Folded channels and empty categories still count: only a server
+        // with neither channels nor categories is empty.
+        let empty = self.sections().is_empty();
+        let server = match &self.place {
+            Place::Server(id) => Some(id.clone()),
+            Place::Home => None,
+        };
+        // Only for those it would offer something to: an empty menu would
+        // still take the focus.
+        let list_menu = server
+            .as_deref()
+            .filter(|id| self.store.can_manage_channels(id))
+            .map(|id| self.channel_list_menu(id, cx));
         let theme = cx.theme();
         let (muted, hover_fg) = (theme.muted_foreground, theme.sidebar_foreground);
 
@@ -5909,6 +6077,7 @@ impl ChatView {
                         let id = id.clone();
                         cx.listener(move |this, _, _, cx| this.toggle_category(id.clone(), cx))
                     };
+                    let menu = self.category_menu(server.as_deref().unwrap_or_default(), &id, cx);
                     h_flex()
                         .id(SharedString::from(format!("category-{id}")))
                         .gap_1()
@@ -5923,9 +6092,7 @@ impl ChatView {
                         .on_click(toggle)
                         .child(Icon::new(chevron).xsmall())
                         .child(div().truncate().child(title.to_uppercase()))
-                        .context_menu(move |menu, _, _| {
-                            menu.item(copy_id_item("Copy category ID", id.clone()))
-                        })
+                        .context_menu(move |popup, window, cx| menu(popup, window, cx))
                 });
                 v_flex()
                     .gap_0p5()
@@ -5939,6 +6106,35 @@ impl ChatView {
 
         let friends =
             (self.place == Place::Home && self.has_ready).then(|| self.render_friends_row(cx));
+
+        let list = v_flex()
+            .id("channel-list")
+            .flex_1()
+            .overflow_y_scroll()
+            .p_2()
+            .gap_0p5()
+            .when(!self.has_ready, |el| {
+                el.child(div().p_2().text_sm().text_color(muted).child("Loading…"))
+            })
+            .children(friends)
+            .when(self.has_ready && empty && self.place != Place::Home, |el| {
+                el.child(
+                    div()
+                        .p_2()
+                        .text_sm()
+                        .text_color(muted)
+                        .child("Nothing here yet."),
+                )
+            })
+            .children(rows);
+        // Right-click on the empty space below (and between) the rows: rows
+        // and headers open their own menus first.
+        let list = match list_menu {
+            Some(menu) => list
+                .context_menu(move |popup, window, cx| menu(popup, window, cx))
+                .into_any_element(),
+            None => list.into_any_element(),
+        };
 
         let theme = cx.theme();
         v_flex()
@@ -5959,28 +6155,7 @@ impl ChatView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(div().truncate().child(title)),
             )
-            .child(
-                v_flex()
-                    .id("channel-list")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .p_2()
-                    .gap_0p5()
-                    .when(!self.has_ready, |el| {
-                        el.child(div().p_2().text_sm().text_color(muted).child("Loading…"))
-                    })
-                    .children(friends)
-                    .when(self.has_ready && empty && self.place != Place::Home, |el| {
-                        el.child(
-                            div()
-                                .p_2()
-                                .text_sm()
-                                .text_color(muted)
-                                .child("Nothing here yet."),
-                        )
-                    })
-                    .children(rows),
-            )
+            .child(list)
             .child(self.render_user_panel(cx))
     }
 
@@ -9529,6 +9704,23 @@ fn copy_id_item(label: &'static str, id: String) -> PopupMenuItem {
     PopupMenuItem::new(label)
         .icon(IconName::IdCard)
         .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(id.clone())))
+}
+
+/// "Create channel…" in `server`, put in `category` (`None`: uncategorized).
+fn create_channel_item(
+    view: &WeakEntity<ChatView>,
+    server: String,
+    category: Option<String>,
+) -> PopupMenuItem {
+    let view = view.clone();
+    PopupMenuItem::new("Create channel…")
+        .icon(IconName::Plus)
+        .on_click(move |_, window, cx| {
+            view.update(cx, |this, cx| {
+                this.open_create_channel(server.clone(), category.clone(), window, cx)
+            })
+            .ok();
+        })
 }
 
 /// Builds a right-click menu when it opens.

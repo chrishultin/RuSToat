@@ -155,6 +155,17 @@ pub fn can_manage_channel(store: &ChatStore, user: &str, channel: &str) -> bool 
         )
 }
 
+/// Whether `user` may create channels and edit the categories of `server`:
+/// Manage Channels across the server (no channel's overrides), as Stoat
+/// checks. Nothing until their membership is known.
+pub fn can_manage_channels(store: &ChatStore, user: &str, server: &str) -> bool {
+    store.member(server, user).is_some()
+        && has(
+            server_permissions(store, user, server),
+            ChannelPermission::ManageChannel,
+        )
+}
+
 /// Whether `user` may send embeds in `channel` (which a GIF is).
 pub fn can_send_embeds(store: &ChatStore, user: &str, channel: &str) -> bool {
     has(

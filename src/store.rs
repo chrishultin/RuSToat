@@ -6,7 +6,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::api::events::Ready;
 use crate::api::models::{
-    AllMemberResponse, BulkMessageResponse, Channel, ChannelSlowmode, Embed, Emoji, EmojiParent, FieldsChannel, FieldsMember,
+    AllMemberResponse, BulkMessageResponse, Category, Channel, ChannelSlowmode, Embed, Emoji, EmojiParent, FieldsChannel, FieldsMember,
     FieldsMessage, FieldsRole, FieldsServer, FieldsUser, File, Member, MemberCompositeKey, Message,
     MessageFlags, PartialChannel, PartialMember, PartialMessage, PartialRole, PartialServer, PartialUser,
     Presence, ReplyIntent, Role, Server, SystemMessage, User, UserStatus,
@@ -2513,6 +2513,12 @@ impl ChatStore {
         crate::permissions::can_manage_channel(self, &self.me, channel)
     }
 
+    /// Whether the user may create channels and categories in `server` (see
+    /// [`crate::permissions::can_manage_channels`]).
+    pub fn can_manage_channels(&self, server: &str) -> bool {
+        crate::permissions::can_manage_channels(self, &self.me, server)
+    }
+
     /// What a `UserSlowmodes` event says, received at `now_ms`: the user's
     /// cooldowns in the channels it lists (see [`Cooldowns::apply`]).
     pub fn apply_slowmodes(&mut self, slowmodes: &[ChannelSlowmode], now_ms: u64) {
@@ -2860,6 +2866,15 @@ impl ChatStore {
             }
         }
         true
+    }
+
+    /// `server`'s categories are now `categories`: Stoat's answer to the
+    /// user's own edit, applied before its `ServerUpdate` (which carries the
+    /// same list). Unknown servers are ignored.
+    pub fn set_categories(&mut self, server: &str, categories: Vec<Category>) {
+        if let Some(server) = self.servers.get_mut(server) {
+            server.categories = Some(categories);
+        }
     }
 
     /// A role changed or was created (`ServerRoleUpdate`). A known role is
@@ -3268,8 +3283,9 @@ impl ChatStore {
 
     /// A server's text channels: uncategorized ones first (in the server's
     /// order), then each category in order. Channels we can't see (missing
-    /// from `Ready`, or hidden since: see [`Self::shows_channel`]) and empty
-    /// categories are left out.
+    /// from `Ready`, or hidden since: see [`Self::shows_channel`]) are left
+    /// out, and so is a category of only such channels. A category with no
+    /// channels on the server (new, or its channels deleted) shows empty.
     pub fn server_channels(&self, server_id: &str) -> Vec<ChannelSection> {
         let Some(server) = self.servers.get(server_id) else {
             return Vec::new();
@@ -3302,7 +3318,14 @@ impl ChatStore {
                 .filter(|id| self.shows_channel(id))
                 .filter_map(|id| self.channel_entry(id))
                 .collect();
-            if !channels.is_empty() {
+            // Stoat leaves deleted channels' IDs in categories: only
+            // channels still on the server can make a category hidden.
+            let hidden = channels.is_empty()
+                && category
+                    .channels
+                    .iter()
+                    .any(|id| server.channels.contains(id));
+            if !hidden {
                 sections.push(ChannelSection {
                     title: Some(category.title.clone()),
                     id: Some(category.id.clone()),
@@ -3311,6 +3334,17 @@ impl ChatStore {
             }
         }
         sections
+    }
+
+    /// The category of `server` that lists `channel`, if any.
+    pub fn category_of(&self, server: &str, channel: &str) -> Option<String> {
+        self.servers
+            .get(server)?
+            .categories
+            .iter()
+            .flatten()
+            .find(|category| category.channels.iter().any(|id| id == channel))
+            .map(|category| category.id.clone())
     }
 
     /// Whether any server has a category with this ID.

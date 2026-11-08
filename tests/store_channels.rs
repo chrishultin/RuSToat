@@ -1,10 +1,12 @@
 //! Channels coming and going in the store: a deleted channel leaves its
 //! server's list, its category and the sidebar, with everything loaded for
-//! it. Built on the `Ready` fixture.
+//! it; a created one shows once, whichever of the response and its
+//! `ChannelCreate` comes first, and moves with the categories. Built on the
+//! `Ready` fixture.
 
 use serde_json::json;
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
-use stoat_gpui::api::models::BulkMessageResponse;
+use stoat_gpui::api::models::{BulkMessageResponse, Category, Channel};
 use stoat_gpui::store::ChatStore;
 
 fn store() -> ChatStore {
@@ -65,6 +67,8 @@ fn a_deleted_channel_leaves_its_server_category_and_history() {
             (None, vec!["ch-welcome".to_string()]),
             (Some("cat-chat".into()), vec!["ch-random".into()]),
             (Some("cat-voice".into()), vec!["ch-voice".into()]),
+            // Empty: it only lists a channel deleted before.
+            (Some("cat-archive".into()), vec![]),
         ]
     );
     assert!(!store.shows_channel("ch-general"));
@@ -103,4 +107,96 @@ fn any_kind_of_channel_can_be_removed() {
     assert!(store.channel("dm-ada").is_none());
     assert!(store.remove_channel("grp-weekend"));
     assert!(store.channel("grp-weekend").is_none());
+}
+
+/// `ch-new` in `srv-alpha`, as `POST /servers/srv-alpha/channels` answers.
+fn created() -> Channel {
+    serde_json::from_value(json!({
+        "channel_type": "TextChannel", "_id": "ch-new", "server": "srv-alpha", "name": "new"
+    }))
+    .unwrap()
+}
+
+/// `ch-new`'s `ChannelCreate`, as the events connection delivers it.
+fn channel_create() -> Channel {
+    let frame = json!({
+        "type": "ChannelCreate", "channel_type": "TextChannel", "_id": "ch-new",
+        "server": "srv-alpha", "name": "new"
+    });
+    let Some(ServerEvent::ChannelCreate(channel)) = parse_frame(&frame.to_string()).pop() else {
+        panic!("ChannelCreate");
+    };
+    *channel
+}
+
+/// The sidebar with `ch-new` once, last of the uncategorized channels.
+fn with_new_channel() -> Vec<(Option<String>, Vec<String>)> {
+    vec![
+        (None, vec!["ch-welcome".into(), "ch-new".into()]),
+        (
+            Some("cat-chat".into()),
+            vec!["ch-general".into(), "ch-random".into()],
+        ),
+        (Some("cat-voice".into()), vec!["ch-voice".into()]),
+        (Some("cat-archive".into()), vec![]),
+    ]
+}
+
+#[test]
+fn a_created_channel_shows_once_when_its_event_comes_first() {
+    let mut store = store();
+    store.add_channel(channel_create());
+    store.add_channel(created());
+    assert_eq!(sidebar(&store), with_new_channel());
+    let server = store.server("srv-alpha").unwrap();
+    assert_eq!(server.channels.iter().filter(|c| *c == "ch-new").count(), 1);
+}
+
+#[test]
+fn a_created_channel_shows_once_when_its_event_comes_last() {
+    let mut store = store();
+    store.add_channel(created());
+    store.add_channel(channel_create());
+    assert_eq!(sidebar(&store), with_new_channel());
+    let server = store.server("srv-alpha").unwrap();
+    assert_eq!(server.channels.iter().filter(|c| *c == "ch-new").count(), 1);
+}
+
+#[test]
+fn new_categories_move_the_rows() {
+    let mut store = store();
+    store.add_channel(created());
+    let categories: Vec<Category> = serde_json::from_value(json!([
+        { "id": "cat-chat", "title": "Chat", "channels": ["ch-general", "ch-random", "ch-new"] },
+        { "id": "cat-voice", "title": "Voice", "channels": [] },
+        { "id": "cat-archive", "title": "Archive", "channels": ["ch-voice"] }
+    ]))
+    .unwrap();
+    store.set_categories("srv-alpha", categories);
+    assert_eq!(
+        sidebar(&store),
+        [
+            (None, vec!["ch-welcome".to_string()]),
+            (
+                Some("cat-chat".into()),
+                vec!["ch-general".into(), "ch-random".into(), "ch-new".into()]
+            ),
+            (Some("cat-voice".into()), vec![]),
+            (Some("cat-archive".into()), vec!["ch-voice".into()]),
+        ]
+    );
+    assert_eq!(
+        store.category_of("srv-alpha", "ch-new").as_deref(),
+        Some("cat-chat")
+    );
+    assert_eq!(store.category_of("srv-alpha", "ch-welcome"), None);
+    assert_eq!(store.category_of("srv-unknown", "ch-new"), None);
+}
+
+#[test]
+fn categories_of_an_unknown_server_are_ignored() {
+    let mut store = store();
+    let before = sidebar(&store);
+    store.set_categories("srv-unknown", Vec::new());
+    assert_eq!(sidebar(&store), before);
 }

@@ -2,12 +2,13 @@ use std::time::Duration;
 
 use reqwest::{Client, Method};
 use revolt_models::v0::{
-    AccountInfo, AllMemberResponse, BulkMessageResponse, Channel, CreateServerLegacyResponse,
-    DataChangeEmail, DataChangePassword, DataEditMessage, DataEditSession, DataEditUser, DataLogin,
-    DataMemberEdit, DataMessageSearch, DataMessageSend, DataSendFriendRequest, Emoji, FieldsUser,
-    Invite, InviteJoinResponse, InviteResponse, MFAResponse, MFATicket, Member, Message,
-    MessageSort, MultiFactorStatus, OptionsQueryMessages, Presence, ReplyIntent, ResponseLogin,
-    ResponseTotpSecret, SessionInfo, User, UserProfile, UserStatus,
+    AccountInfo, AllMemberResponse, BulkMessageResponse, Category, Channel,
+    CreateServerLegacyResponse, DataChangeEmail, DataChangePassword, DataEditMessage,
+    DataEditSession, DataEditUser, DataLogin, DataMemberEdit, DataMessageSearch, DataMessageSend,
+    DataSendFriendRequest, Emoji, FieldsUser, Invite, InviteJoinResponse, InviteResponse,
+    MFAResponse, MFATicket, Member, Message, MessageSort, MultiFactorStatus, OptionsQueryMessages,
+    Presence, ReplyIntent, ResponseLogin, ResponseTotpSecret, SessionInfo, User, UserProfile,
+    UserStatus,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -846,6 +847,62 @@ impl StoatClient {
             Some(&CreateServer { name }),
         )
         .await
+    }
+
+    /// `POST /servers/{server}/channels`: a new text channel called `name`
+    /// (a voice channel if `voice`), needing Manage Channels across the
+    /// server. Stoat adds it at the end of the server's list, in no
+    /// category, and sends `ServerUpdate` (the list) then `ChannelCreate`.
+    pub async fn create_channel(
+        &self,
+        server: &str,
+        name: &str,
+        voice: bool,
+    ) -> Result<Channel, ApiError> {
+        // `DataCreateServerChannel` would also send `"description": null`.
+        #[derive(Serialize)]
+        struct CreateChannel<'a> {
+            #[serde(rename = "type")]
+            kind: &'static str,
+            name: &'a str,
+        }
+        let kind = if voice { "Voice" } else { "Text" };
+        self.send(
+            Method::POST,
+            &format!("/servers/{server}/channels"),
+            Some(&CreateChannel { kind, name }),
+        )
+        .await
+    }
+
+    /// `PATCH /servers/{server}`: replace the server's categories with
+    /// `categories`, sent whole (Manage Channels). An empty list clears
+    /// them. Returns the categories Stoat kept (it drops unknown channel
+    /// IDs); `ServerUpdate` brings the same to everyone.
+    pub async fn edit_categories(
+        &self,
+        server: &str,
+        categories: &[Category],
+    ) -> Result<Vec<Category>, ApiError> {
+        #[derive(Serialize)]
+        struct EditCategories<'a> {
+            categories: &'a [Category],
+        }
+        // The answer is the whole server; only its categories are wanted,
+        // so nothing else in it can fail the edit.
+        #[derive(Deserialize)]
+        struct Edited {
+            #[serde(default)]
+            categories: Vec<Category>,
+        }
+        let edited: Edited = self
+            .send(
+                Method::PATCH,
+                &format!("/servers/{server}"),
+                Some(&EditCategories { categories }),
+            )
+            .await?;
+        Ok(edited.categories)
     }
 
     /// `DELETE /channels/{channel}`: delete a server channel (Manage

@@ -103,3 +103,63 @@ Deferred to the batched manual pass. Steps:
 5. As a member without Manage Channels, the channel menu has no Delete. DMs and groups never show it.
 6. With a channel open in a second account in RuSToat, delete it from the first: it disappears in both.
 7. Light and dark themes: the red menu item and the dialog are readable.
+
+## Chunk 3: Create a channel, and show empty categories
+
+### Changes Made
+- `src/api/client.rs`:
+  - `create_channel(server, name, voice) -> Channel` (`POST /servers/{id}/channels`), with a private body of exactly `{"type":"Text"|"Voice","name":…}` (`DataCreateServerChannel` would send `"description": null`).
+  - `edit_categories(server, categories) -> Vec<Category>` (`PATCH /servers/{id}`), sending exactly `{"categories":[…]}` and returning the categories from Stoat's answer (none if it has no `categories` key). `Category` added to the hand-formatted import list.
+- `src/server_edit.rs`:
+  - `with_channel_in(categories, channel, category) -> Option<Vec<Category>>`: the channel taken out of every category (every copy) and appended to `category`; `None` if that category is gone.
+  - `create_channel_error_text` (`TooManyChannels`, `MissingPermission`, else "Couldn't create the channel. Try again.") and `categories_error_text` (`MissingPermission`, `InvalidOperation`, else "Couldn't change the categories. Try again."), worded as in Assumption 14.
+  - 6 unit tests.
+- `src/permissions.rs`: `can_manage_channels(store, user, server)`: the membership is known, and Manage Channels in `server_permissions`. `src/store.rs`: the `ChatStore::can_manage_channels(server)` wrapper.
+- `src/store.rs`:
+  - `server_channels` shows empty categories (Assumption 1): a category is left out only when it has no visible channels and lists at least one channel that's still in `server.channels`. So a new category, or one listing only deleted channels, shows with no rows; one of channels the user can't see stays hidden.
+  - `set_categories(server, categories)` (Assumption 6; unknown servers ignored) and `category_of(server, channel) -> Option<String>`.
+- `src/ui/server_dialogs.rs`:
+  - `CreateChannelDialog` and `CREATE_CHANNEL_DIALOG_WIDTH` (420): "in {CATEGORY}" (uppercase, as the sidebar heading) when there's a category, a "Channel name" field with the "{n}/32" counter and the error line, a "Channel type" `RadioGroup` (Text Channel, the default, and Voice Channel), Close and Create (`loading` while creating, disabled until the name is valid). Enter creates. Success hands the channel to `ChatView::channel_created` and closes the dialog; a refusal shows in the dialog.
+  - The name field (label, input, counter, error) is now the private `name_field(label, input, busy, error, cx)`, with `field_label(label, cx)`, shared with `CreateServerDialog`, whose look is unchanged.
+- `src/ui/chat.rs`:
+  - `open_create_channel(server, category: Option<String>, window, cx)`: looks up the category's title (dropping a category that's gone) and opens "Create channel", the field focused.
+  - `channel_created(channel, category: Option<(id, title)>, window, cx)`: `add_channel`, then `move_into_category` if there's a category, then `open_channel`.
+  - `move_into_category(server, channel, name, (id, title), window, cx)`: `with_channel_in` over the store's categories; skipped if the category is gone; otherwise `edit_categories`, whose answer goes into the store with `set_categories`. On failure the channel stays uncategorized and a toast says "Created #{name}, but couldn't move it into {title}."
+  - "Create channel…" (`Plus` icon), through the free `create_channel_item(view, server, category)`, each where `can_manage_channels` (checked when the menu opens):
+    - in the category heading's menu, which is now the lazy `category_menu(server, category, cx)`: "Create channel…" (into that category), a separator, then Copy category ID
+    - in `channel_menu`, for server channels, after Create invite… and before Delete channel…, into the channel's category (`category_of`) or uncategorized
+    - in `channel_list_menu(server, cx)`, a new right-click menu on `channel-list` (uncategorized). It's attached only when the server is shown and the user may manage its channels, since an empty context menu would still take the focus. Rows and headers have their own menus, which handle a right-click first and stop it, so the list's opens only on the space around and below them.
+  - "Nothing here yet." only when the server has no sections at all.
+- Tests:
+  - `tests/api_servers.rs`: a voice channel sends exactly `{"type":"Voice","name":"Lobby"}` with the token and parses a `TextChannel` with `voice: {}`; a text channel sends `"type":"Text"`; a 400 `TooManyChannels { max: 200 }` stays an `Api` error; the PATCH sends exactly `{"categories":[{"id":"k1","title":"Chat","channels":["c1"]}]}` and returns its categories; an answer without `categories` gives none.
+  - `tests/store_ready.rs`: a category with no channels and one whose only channel was deleted show as empty sections; categories of only channels the user can't see stay hidden (also when they list a deleted channel besides). The fixture's "Archive" (which lists only a channel no longer on the server) now shows, empty, in the sidebar and fold tests.
+  - `tests/store_channels.rs`: `ChannelCreate` then the create response, and the reverse, give one row (last uncategorized) and one ID in the server's list; `set_categories` moves rows and `category_of` follows; an unknown server's categories are ignored. The deletion test now expects the empty "Archive".
+  - `tests/permissions.rs`: `can_manage_channels` is false with Stoat's defaults, true for the owner, true for a role granting it (a channel override doesn't matter), false for an unknown server, and false for everyone, the owner too, before their membership is known.
+
+### Divergences
+- **`edit_categories` returns `Vec<Category>`, not `Server`.** Only the categories are used (Assumption 6), and parsing the whole server would turn a successful edit into an error if any required field were missing (`revolt-models`' `Server` requires `approximate_member_count`, for instance). Stoat leaves out `categories` when there are none, which gives an empty list.
+- **`channel_created` takes the channel and `(id, title)`, not a separate server, and a `window`.** The server is in the channel, and the window is needed for the failure toast.
+- **The category's title for the dialog and the toast is read when the dialog opens.** A rename while it's open isn't reflected (chunk 4 adds renames; the move itself is by ID).
+- **"Channel type" is labelled** above the radios; the web client's dialog has the two radios under the name with no label of their own.
+- **Labels are in sentence case** ("Channel name"), as chunk 1's "Server name".
+- **The background menu is only attached** when the user may manage the server's channels, as an empty context menu would still take the focus (gpui-component focuses it even when it draws nothing).
+
+### Verification Performed
+- `cargo test --lib server_edit`: 9 passed (6 new). `cargo test --test api_servers`: 9 passed (5 new). `--test store_ready`: 14 passed (3 new, 2 updated). `--test store_channels`: 8 passed (4 new, 1 updated). `--test permissions`: 35 passed (2 new).
+- `cargo test`: 936 passed, 0 failed (916 before).
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt `Diff in` counts:
+  - `src/api/client.rs` 3, `src/ui/chat.rs` 17 and `src/store.rs` 15: unchanged, after hand-formatting the new imports (`Category` went into `store.rs`'s already-drifted import list).
+  - `src/permissions.rs`, `src/server_edit.rs`, `src/ui/server_dialogs.rs`, `tests/api_servers.rs`, `tests/store_channels.rs`, `tests/store_ready.rs` and `tests/permissions.rs` 0.
+
+### Manual Validation
+Deferred to the batched manual pass. Steps:
+1. As a server's owner, right-click a category heading: "Create channel…", a separator, then Copy category ID. Create a text channel: the dialog says "in {CATEGORY}", the channel appears at the end of that category and opens.
+2. Right-click a channel in another category: "Create channel…" is after Create invite… and before Delete channel…. Create a voice channel: it lands at the end of that category with the voice icon and opens.
+3. Right-click the channel list's empty space below the last row: "Create channel…" only. The channel is uncategorized, at the bottom of the top group. Right-clicking a row or a heading opens only its own menu.
+4. The web client shows the same placement for all three.
+5. The Create button is disabled for an empty or blank name and past 32 characters; the counter shows it. Text Channel is chosen at first; the radios switch.
+6. A category with no channels (make one in the web client, or delete its last channel) shows as a heading with no rows, folds and unfolds, and its menu still works.
+7. As a member without Manage Channels, none of the three menus offers Create channel…, and right-clicking the empty space does nothing.
+8. With a category deleted in the web client while the dialog is open, Create still makes the channel, uncategorized, with no toast.
+9. Light and dark themes: the dialog, the "in {CATEGORY}" line and the radios are readable.
