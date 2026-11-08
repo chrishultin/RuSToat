@@ -35,7 +35,7 @@ use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
 use crate::api::gifbox::GifboxClient;
 use crate::api::models::{
     BulkMessageResponse, Category, Channel, CreateServerLegacyResponse, FieldsMessage,
-    InviteJoinResponse, MessageSort, Presence, ReplyIntent, Server, UserProfile,
+    InviteJoinResponse, MessageSort, Presence, ReplyIntent, Server, SystemMessage, UserProfile,
 };
 use crate::attachment::{AttachmentView, fit_into};
 use crate::complete::{Query, QueryKind, Suggestion, TokenRef, rank, rank_mentions};
@@ -880,8 +880,16 @@ impl ChatView {
                 let notice =
                     notify::should_notify(&self.store, &message, viewing, notify::now_ms());
                 let message_id = message.id.clone();
+                // The store hands the group on; its member list follows.
+                let handover = matches!(
+                    message.system,
+                    Some(SystemMessage::ChannelOwnershipChanged { .. })
+                );
                 if self.store.apply_message(*message) {
                     self.sync_pane(&channel, cx);
+                }
+                if handover {
+                    self.forget_member_lists();
                 }
                 if let Some(notice) = notice {
                     // Banner or toast, a message notice plays the sound.
@@ -1009,6 +1017,30 @@ impl ChatView {
             ConnectionEvent::Event(ServerEvent::ChannelDelete { id }) => {
                 log::debug!("live: channel {id} deleted");
                 self.channel_deleted(&id, cx);
+            }
+            ConnectionEvent::Event(ServerEvent::ChannelGroupJoin { channel, user }) => {
+                log::debug!("live: {user} added to group {channel}");
+                if !self.store.add_recipient(&channel, &user) {
+                    return;
+                }
+                // Members already in the group get no user object for them.
+                if !self.store.knows_user(&user) {
+                    self.fetch_user(user, cx);
+                }
+                self.refresh_suggestions(cx);
+                self.forget_member_lists();
+            }
+            ConnectionEvent::Event(ServerEvent::ChannelGroupLeave { channel, user }) => {
+                log::debug!("live: {user} left group {channel}");
+                if user == self.store.me() {
+                    // Removed, or left on another device: Stoat sends no
+                    // `ChannelDelete` for it.
+                    self.channel_deleted(&channel, cx);
+                } else if !self.store.remove_recipient(&channel, &user) {
+                    return;
+                }
+                self.refresh_suggestions(cx);
+                self.forget_member_lists();
             }
             ConnectionEvent::Event(ServerEvent::ChannelStartTyping { channel, user }) => {
                 self.typing.start(&channel, &user, std::time::Instant::now());

@@ -142,6 +142,18 @@ pub enum ServerEvent {
     ChannelDelete {
         id: String,
     },
+    /// `user` was added to the group `channel`. Members already in it get no
+    /// user object for the newcomer.
+    ChannelGroupJoin {
+        channel: String,
+        user: String,
+    },
+    /// `user` left the group `channel`, or was removed from it. When `user`
+    /// is the user, Stoat sends no `ChannelDelete`.
+    ChannelGroupLeave {
+        channel: String,
+        user: String,
+    },
     /// Someone joined a server (possibly the user, on another device).
     ServerMemberJoin {
         server: String,
@@ -471,6 +483,28 @@ fn decode(mut value: Value, out: &mut Vec<ServerEvent>) {
             }
             out.push(decode_as(value, &kind, |d: Delete| {
                 ServerEvent::ChannelDelete { id: d.id }
+            }))
+        }
+        // `id` is the group.
+        "ChannelGroupJoin" | "ChannelGroupLeave" => {
+            #[derive(Deserialize)]
+            struct Membership {
+                id: String,
+                user: String,
+            }
+            let joined = kind == "ChannelGroupJoin";
+            out.push(decode_as(value, &kind, |m: Membership| {
+                if joined {
+                    ServerEvent::ChannelGroupJoin {
+                        channel: m.id,
+                        user: m.user,
+                    }
+                } else {
+                    ServerEvent::ChannelGroupLeave {
+                        channel: m.id,
+                        user: m.user,
+                    }
+                }
             }))
         }
         // `id` is the server. Stoat 0.16 sends the whole `member`; older
@@ -1055,6 +1089,8 @@ async fn session(
                         | ServerEvent::ChannelCreate(_)
                         | ServerEvent::ChannelUpdate { .. }
                         | ServerEvent::ChannelDelete { .. }
+                        | ServerEvent::ChannelGroupJoin { .. }
+                        | ServerEvent::ChannelGroupLeave { .. }
                         | ServerEvent::ServerMemberJoin { .. }
                         | ServerEvent::ServerMemberLeave { .. }
                         | ServerEvent::ServerMemberUpdate { .. }
@@ -1517,6 +1553,23 @@ mod tests {
     fn channel_delete_decodes() {
         let events = parse_frame(r#"{"type":"ChannelDelete","id":"c1"}"#);
         assert!(matches!(events.as_slice(), [ServerEvent::ChannelDelete { id }] if id == "c1"));
+    }
+
+    #[test]
+    fn group_membership_events_decode() {
+        let events = parse_frame(
+            r#"{"type":"Bulk","v":[
+                {"type":"ChannelGroupJoin","id":"g1","user":"u-ada"},
+                {"type":"ChannelGroupLeave","id":"g1","user":"u-bo"}
+            ]}"#,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [
+                ServerEvent::ChannelGroupJoin { channel: joined, user: ada },
+                ServerEvent::ChannelGroupLeave { channel: left, user: bo },
+            ] if joined == "g1" && ada == "u-ada" && left == "g1" && bo == "u-bo"
+        ));
     }
 
     #[test]

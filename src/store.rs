@@ -1124,6 +1124,14 @@ impl ChatStore {
                 .entry((member.id.server.clone(), member.id.user.clone()))
                 .or_insert_with(|| member.clone());
         }
+        // An owner leaving a group hands it on with only this message, no
+        // `ChannelUpdate`. Live messages only: an old one in a history page
+        // could undo a later handover.
+        if let Some(SystemMessage::ChannelOwnershipChanged { to, .. }) = &message.system
+            && let Some(Channel::Group { owner, .. }) = self.channels.get_mut(&message.channel)
+        {
+            owner.clone_from(to);
+        }
         let Some(history) = self.histories.get_mut(&message.channel) else {
             return false;
         };
@@ -1947,6 +1955,29 @@ impl ChatStore {
             server.channels.push(id.clone());
         }
         self.channels.insert(id, channel);
+    }
+
+    /// `user` was added to the group `channel` (`ChannelGroupJoin`). Returns
+    /// whether they're new to it; a repeat does nothing.
+    pub fn add_recipient(&mut self, channel: &str, user: &str) -> bool {
+        match self.channels.get_mut(channel) {
+            Some(Channel::Group { recipients, .. }) if !recipients.iter().any(|id| id == user) => {
+                recipients.push(user.to_string());
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// `user` left the group `channel`, or was removed from it
+    /// (`ChannelGroupLeave`). Returns whether they were in it.
+    pub fn remove_recipient(&mut self, channel: &str, user: &str) -> bool {
+        let Some(Channel::Group { recipients, .. }) = self.channels.get_mut(channel) else {
+            return false;
+        };
+        let before = recipients.len();
+        recipients.retain(|id| id != user);
+        recipients.len() != before
     }
 
     /// A channel changed (`ChannelUpdate`): merge what's in `data`, then clear
@@ -3205,6 +3236,15 @@ impl ChatStore {
         self.servers
             .get(server)
             .is_some_and(|server| server.owner == self.me)
+    }
+
+    /// Whether the user owns the group `channel` (false for anything else).
+    /// Only the owner can remove members or hand the group on.
+    pub fn is_group_owner(&self, channel: &str) -> bool {
+        matches!(
+            self.channels.get(channel),
+            Some(Channel::Group { owner, .. }) if *owner == self.me
+        )
     }
 
     pub fn member(&self, server: &str, user: &str) -> Option<&Member> {
