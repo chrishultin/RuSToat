@@ -62,9 +62,25 @@ fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("stoat_gpui=info"))
         .init();
 
+    // rustls has two crypto providers in this build (reqwest's aws-lc-rs and
+    // livekit's ring), so it won't pick one by itself, and the first TLS
+    // connection would panic. Use aws-lc-rs, as before livekit came along.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     // Start the IO runtime up front so a failure shows up at launch, not on
     // the first network call.
     runtime::runtime();
+
+    // Voice spike: check that WebRTC links and starts, and name the audio
+    // devices it sees. Off the main thread; only when debug logging is on.
+    if log::log_enabled!(log::Level::Debug) {
+        runtime::runtime().spawn_blocking(|| match stoat_gpui::voice::webrtc_ready() {
+            Ok((inputs, outputs)) => {
+                log::debug!("webrtc ready: inputs {inputs:?}, outputs {outputs:?}")
+            }
+            Err(err) => log::warn!("webrtc audio didn't start: {err}"),
+        });
+    }
 
     // Pasted images left behind by RuSToat processes that have since quit
     // (a day without changes); in the background, so launch isn't held up.

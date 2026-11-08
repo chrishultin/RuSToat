@@ -60,6 +60,16 @@ markdown = "1"
 # New category IDs (src/server_edit.rs), as the web client makes them. Its
 # `rand` is already in the tree.
 ulid = "3"
+# Voice calls (src/voice.rs): LiveKit's Rust SDK, the server Stoat's voice
+# runs on. Pinned like the revolt crates; upstream, not Zed's fork. Its build
+# downloads a prebuilt WebRTC (~264 MB) into the target directory, and the
+# app binary needs `-ObjC` (see build.rs). rustls with the macOS trust store,
+# matching tokio-tungstenite.
+livekit = { version = "=0.10.1", features = ["rustls-tls-native-roots"] }
+# Picking rustls's crypto provider at startup (src/main.rs): livekit brings
+# `ring` alongside reqwest's `aws-lc-rs`, and with both rustls won't choose.
+# The version already in the tree.
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Dock badge (AppKit's NSDockTile), checking whether banners can be posted
