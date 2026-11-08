@@ -328,6 +328,23 @@ impl IdentityForm {
         }
         edit
     }
+
+    /// The `PATCH /servers/{server}/members/{user}` a moderator sends to
+    /// turn someone else's `loaded` identity into `edited`: their nickname,
+    /// and removing their server avatar. Stoat refuses anything else from
+    /// another member (pronouns, or setting an avatar), so it's never sent.
+    pub fn changes_for_other(loaded: &IdentityForm, edited: &IdentityForm) -> DataMemberEdit {
+        let mut edit = empty_member_edit();
+        match changed(check_nickname, &loaded.nickname, &edited.nickname) {
+            Some(Some(nickname)) => edit.nickname = Some(nickname),
+            Some(None) => edit.remove.push(FieldsMember::Nickname),
+            None => {}
+        }
+        if edited.avatar == ProfileImage::None && loaded.avatar != ProfileImage::None {
+            edit.remove.push(FieldsMember::Avatar);
+        }
+        edit
+    }
 }
 
 /// A `DataMemberEdit` that changes nothing (it has no `Default`).
@@ -782,6 +799,44 @@ mod tests {
                 FieldsMember::Avatar,
                 FieldsMember::Pronouns
             ]
+        );
+    }
+
+    #[test]
+    fn someone_elses_identity_edit_never_sends_pronouns_or_an_avatar() {
+        let loaded = IdentityForm {
+            nickname: "Ada".into(),
+            avatar: ProfileImage::Current("file-1".into()),
+            pronouns: "she/her".into(),
+        };
+        // Changed pronouns and a picked or swapped avatar are left out.
+        for avatar in [
+            ProfileImage::New("/tmp/a.png".into()),
+            ProfileImage::Current("file-2".into()),
+        ] {
+            let edited = IdentityForm {
+                nickname: " Countess ".into(),
+                avatar,
+                pronouns: "they/them".into(),
+            };
+            let edit = IdentityForm::changes_for_other(&loaded, &edited);
+            assert_eq!(edit.nickname.as_deref(), Some("Countess"));
+            assert!(edit.pronouns.is_none() && edit.avatar.is_none());
+            assert!(edit.remove.is_empty());
+        }
+        // Clearing the nickname and removing the avatar are sent as removals.
+        let cleared = IdentityForm {
+            pronouns: String::new(),
+            ..IdentityForm::default()
+        };
+        assert_eq!(
+            IdentityForm::changes_for_other(&loaded, &cleared).remove,
+            [FieldsMember::Nickname, FieldsMember::Avatar]
+        );
+        // Nothing changed, nothing sent.
+        assert_eq!(
+            IdentityForm::changes_for_other(&loaded, &loaded),
+            empty_member_edit()
         );
     }
 

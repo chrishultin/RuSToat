@@ -4,12 +4,12 @@
 
 use revolt_result::ErrorType;
 use serde_json::json;
-use stoat_gpui::api::models::DataBanCreate;
+use stoat_gpui::api::models::{DataBanCreate, DataMemberEdit};
 use stoat_gpui::api::{ApiError, StoatClient};
 use stoat_gpui::moderation::{
     end_timeout_edit, moderation_error_text, timeout_edit, timeout_until,
 };
-use stoat_gpui::profile_edit::{IdentityForm, ProfileImage};
+use stoat_gpui::profile_edit::{IdentityForm, ProfileImage, empty_member_edit};
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -265,4 +265,83 @@ async fn timing_out_a_moderator_says_they_rank_too_high() {
         moderation_error_text(&err, "x"),
         "They rank too high for you to do that."
     );
+}
+
+#[tokio::test]
+async fn a_moderator_renames_someone_and_removes_their_avatar() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/servers/srv/members/u-ada"))
+        .and(body_json(
+            json!({ "nickname": "Countess", "remove": ["Avatar"] }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(member(json!({
+            "_id": { "server": "srv", "user": "u-ada" }, "nickname": "Countess"
+        }))))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let loaded = IdentityForm {
+        nickname: "Ada".into(),
+        avatar: ProfileImage::Current("file-1".into()),
+        pronouns: String::new(),
+    };
+    let edited = IdentityForm {
+        nickname: "Countess".into(),
+        ..IdentityForm::default()
+    };
+    let edit = IdentityForm::changes_for_other(&loaded, &edited);
+    let member = client(&server)
+        .edit_member("srv", "u-ada", &edit)
+        .await
+        .unwrap();
+    assert_eq!(member.nickname.as_deref(), Some("Countess"));
+}
+
+#[tokio::test]
+async fn new_roles_are_sent_whole() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/servers/srv/members/u-ada"))
+        .and(body_json(json!({ "roles": ["mod", "staff"] })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(member(json!({
+            "_id": { "server": "srv", "user": "u-ada" }, "roles": ["mod", "staff"]
+        }))))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let edit = DataMemberEdit {
+        roles: Some(vec!["mod".into(), "staff".into()]),
+        ..empty_member_edit()
+    };
+    let member = client(&server)
+        .edit_member("srv", "u-ada", &edit)
+        .await
+        .unwrap();
+    assert_eq!(member.roles, ["mod", "staff"]);
+}
+
+#[tokio::test]
+async fn taking_every_role_away_sends_an_empty_list() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/servers/srv/members/u-ada"))
+        .and(body_json(json!({ "roles": [] })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(member(json!({
+            "_id": { "server": "srv", "user": "u-ada" }
+        }))))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let edit = DataMemberEdit {
+        roles: Some(Vec::new()),
+        ..empty_member_edit()
+    };
+    client(&server)
+        .edit_member("srv", "u-ada", &edit)
+        .await
+        .unwrap();
 }

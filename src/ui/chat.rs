@@ -80,7 +80,7 @@ use crate::ui::gif_picker::GifCache;
 use crate::ui::group_dialogs::{
     ADD_MEMBERS_DIALOG_WIDTH, AddMembersDialog, CREATE_GROUP_DIALOG_WIDTH, CreateGroupDialog,
 };
-use crate::ui::identity_dialog::{IDENTITY_DIALOG_WIDTH, IdentityEditor};
+use crate::ui::identity_dialog::{IDENTITY_DIALOG_WIDTH, IdentityEditor, MemberIdentityEditor};
 use crate::ui::invites::{CREATE_DIALOG_WIDTH, CreateInviteDialog, JOIN_DIALOG_WIDTH, JoinDialog};
 use crate::ui::markup::{
     ChannelPill, ChannelPills, LookupChannel, MarkupPlugin, OpenChannel, RevealSpoiler,
@@ -88,8 +88,8 @@ use crate::ui::markup::{
 };
 use crate::ui::math::MathPlugin;
 use crate::ui::moderation_dialogs::{
-    MemberActionRequest, confirm_member_action, open_ban_dialog, open_timeout_dialog,
-    run_member_action,
+    MemberActionRequest, confirm_member_action, open_ban_dialog, open_roles_dialog,
+    open_timeout_dialog, run_member_action,
 };
 use crate::ui::profile_card::{
     CardBio, CardContent, MUTUALS_DIALOG_WIDTH, MutualList, MutualPick, OnLink, OnMutualPick,
@@ -5661,6 +5661,18 @@ impl ChatView {
                     self.confirm_make_owner(channel, user, window, cx);
                 }
             }
+            UserMenuItem::EditIdentity => {
+                if let Some(channel) = channel {
+                    self.close_card(false, window, cx);
+                    self.open_member_identity(channel, user, window, cx);
+                }
+            }
+            UserMenuItem::EditRoles => {
+                if let Some(channel) = channel {
+                    self.close_card(false, window, cx);
+                    self.open_roles(channel, user, window, cx);
+                }
+            }
             UserMenuItem::TimeOut => {
                 if let Some(channel) = channel {
                     self.close_card(false, window, cx);
@@ -5775,6 +5787,56 @@ impl ChatView {
             window,
             cx,
         );
+    }
+
+    /// "Change {name}'s identity on {server}": a moderator's edit of
+    /// `user`'s nickname and server avatar, on the server of `channel`.
+    fn open_member_identity(
+        &mut self,
+        channel: String,
+        user: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(server) = self.store.channel_server(&channel).map(str::to_string) else {
+            return;
+        };
+        let Some(server_name) = self.store.server(&server).map(|s| s.name.clone()) else {
+            return;
+        };
+        let name = self.store.name_in(&channel, &user);
+        let chat = cx.entity().downgrade();
+        let (client, store) = (self.client.clone(), &self.store);
+        let editor =
+            cx.new(|cx| MemberIdentityEditor::new(chat, client, store, server, user, window, cx));
+        let title = SharedString::from(format!("Change {name}'s identity on {server_name}"));
+        let first_build = std::cell::Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first_build.replace(false) {
+                let input = editor.read(cx).nickname_input().read(cx).focus_handle(cx);
+                window.focus(&input, cx);
+            }
+            dialog
+                .title(title.clone())
+                .w(px(IDENTITY_DIALOG_WIDTH))
+                .child(editor.clone())
+        });
+    }
+
+    /// Open "Edit {name}'s roles" for `user` on the server of `channel`.
+    fn open_roles(
+        &mut self,
+        channel: String,
+        user: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(server) = self.store.channel_server(&channel).map(str::to_string) else {
+            return;
+        };
+        let name = self.store.name_in(&channel, &user);
+        let weak = cx.entity().downgrade();
+        open_roles_dialog(self, weak, server, user, &name, window, cx);
     }
 
     /// Open "Time out {name}" for `user` on the server of `channel`.
@@ -7206,8 +7268,10 @@ impl ChatView {
         });
     }
 
-    /// The identity dialog saved: show Stoat's answer on that server at
-    /// once (nickname and avatar on messages, pronouns on the card).
+    /// An identity or roles dialog saved, the user's own or someone
+    /// else's: show Stoat's answer on that server at once (nickname and
+    /// avatar on messages, pronouns and roles on the card, the member
+    /// list). `ServerMemberUpdate` repeats it.
     pub fn identity_saved(&mut self, member: crate::api::models::Member, cx: &mut Context<Self>) {
         let (server, user) = (member.id.server.clone(), member.id.user.clone());
         self.store.apply_member(member);
@@ -11103,6 +11167,8 @@ fn user_menu_label(item: UserMenuItem) -> Option<(&'static str, IconName)> {
         UserMenuItem::Mention => ("Mention", IconName::AtSign),
         UserMenuItem::RemoveFromGroup => ("Remove from group…", IconName::UserMinus),
         UserMenuItem::MakeGroupOwner => ("Make group owner…", IconName::Crown),
+        UserMenuItem::EditIdentity => ("Edit identity…", IconName::UserPen),
+        UserMenuItem::EditRoles => ("Edit roles…", IconName::IdCard),
         UserMenuItem::TimeOut => ("Time out…", IconName::Clock),
         UserMenuItem::EndTimeout => ("End timeout…", IconName::Clock),
         UserMenuItem::Kick => ("Kick…", IconName::UserX),

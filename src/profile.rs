@@ -267,6 +267,11 @@ pub enum UserMenuItem {
     /// Make them the owner of the group the menu was opened in (its owner
     /// only, after asking).
     MakeGroupOwner,
+    /// Change their nickname or remove their server avatar on the server
+    /// the menu was opened in.
+    EditIdentity,
+    /// Change their roles on the server the menu was opened in.
+    EditRoles,
     /// Time them out on the server the menu was opened in (a dialog asks
     /// for how long).
     TimeOut,
@@ -351,15 +356,17 @@ fn standing_actions(store: &ChatStore, user: &str) -> Vec<RelationshipAction> {
 
 /// The menu for `user`, as seen from `channel`, in the web client's order:
 /// Profile, Message, Create group with (RuSToat's own, for friends),
-/// Mention; Remove from group and Make group owner; Time out (or End
-/// timeout), Kick and Ban; the friend requests; Remove friend and Block or
-/// Unblock; then the copy items. Message follows [`can_message`]; Mention
-/// is only for others, in server channels and groups (where the message
-/// box can mention them). Remove from group and Make group owner are for
-/// the owner of the group `channel`, on its other members. Time out, Kick
-/// and Ban are for server channels, as [`crate::permissions::moderation`]
-/// allows; End timeout replaces Time out while one runs. Groups are split
-/// by separators.
+/// Mention; Edit identity and Edit roles; Remove from group and Make group
+/// owner; Time out (or End timeout), Kick and Ban; the friend requests;
+/// Remove friend and Block or Unblock; then the copy items. Message
+/// follows [`can_message`]; Mention is only for others, in server channels
+/// and groups (where the message box can mention them). Remove from group
+/// and Make group owner are for the owner of the group `channel`, on its
+/// other members. The server items are for server channels, as
+/// [`crate::permissions::moderation`] allows; the two edits also need the
+/// membership known, and Edit identity something to edit (a nickname, or
+/// an avatar to remove). End timeout replaces Time out while one runs.
+/// Groups are split by separators.
 pub fn user_menu(store: &ChatStore, user: &str, channel: Option<&str>) -> Vec<UserMenuItem> {
     use UserMenuItem::*;
     let me = user == store.me();
@@ -388,9 +395,19 @@ pub fn user_menu(store: &ChatStore, user: &str, channel: Option<&str>) -> Vec<Us
     {
         membership.extend([RemoveFromGroup, MakeGroupOwner]);
     }
+    let mut server_items = Vec::new();
     let mut moderation = Vec::new();
     if let Some(server) = channel.and_then(|channel| store.channel_server(channel)) {
         let allowed = crate::permissions::moderation(store, server, user);
+        // These edit a membership as it is, so it has to be known.
+        if let Some(member) = store.member(server, user) {
+            if allowed.nickname || (allowed.remove_avatar && member.avatar.is_some()) {
+                server_items.push(EditIdentity);
+            }
+            if allowed.roles {
+                server_items.push(EditRoles);
+            }
+        }
         if allowed.timeout {
             let timed_out = store
                 .member(server, user)
@@ -414,6 +431,7 @@ pub fn user_menu(store: &ChatStore, user: &str, channel: Option<&str>) -> Vec<Us
         .collect();
     let groups = [
         people,
+        server_items,
         membership,
         moderation,
         requests,

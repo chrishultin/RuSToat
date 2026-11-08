@@ -1,23 +1,30 @@
 //! Acting on a server's members: a confirmation that runs one request
 //! (Kick, End timeout), "Ban", with a reason and how much of their history
-//! goes, and "Time out", for how long.
+//! goes, "Time out", for how long, and "Edit roles".
 //! The options and error texts are in [`crate::moderation`]; who may do
 //! what is [`crate::permissions::moderation`].
 
+use std::collections::BTreeSet;
+
 use futures::future::BoxFuture;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::radio::{Radio, RadioGroup};
 use gpui_kit::component::{ActiveTheme, Disableable, WindowExt, h_flex, v_flex};
 use gpui_kit::*;
 
-use crate::api::models::DataBanCreate;
+use crate::api::models::{DataBanCreate, DataMemberEdit};
 use crate::api::{ApiError, StoatClient};
 use crate::moderation::{
     BAN_HISTORY, BAN_REASON_MAX, TIMEOUTS, moderation_error_text, timeout_edit, timeout_until,
 };
+use crate::permissions::{RoleLock, assignable_roles};
+use crate::profile_edit::empty_member_edit;
 use crate::runtime::spawn_io;
+use crate::store::solid_colour;
+use crate::ui::chat::{ChatView, hex_colour};
 use crate::ui::server_dialogs::field_label;
 
 /// These dialogs' width.
@@ -503,6 +510,228 @@ impl Render for TimeoutDialog {
                             .loading(self.busy)
                             .disabled(self.busy)
                             .on_click(cx.listener(|this, _, window, cx| this.time_out(window, cx))),
+                    ),
+            )
+    }
+}
+
+/// The tallest the role list grows before it scrolls.
+const ROLES_MAX_HEIGHT: f32 = 320.;
+
+/// One of the server's roles, as Edit roles lists it.
+struct RoleRow {
+    id: String,
+    name: String,
+    /// `#rrggbb`, if it has a colour that can be drawn as a dot.
+    colour: Option<String>,
+    /// Why it can't be added, if it can't.
+    lock: Option<RoleLock>,
+}
+
+/// Edit `user`'s roles on `server`, as `chat`'s store has them: a dialog
+/// lists the server's roles with a checkbox each. `weak` is `chat`, which
+/// is being updated while it opens the dialog.
+pub fn open_roles_dialog(
+    chat: &ChatView,
+    weak: WeakEntity<ChatView>,
+    server: String,
+    user: String,
+    name: &str,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let store = chat.store();
+    let Some(roles) = store.server(&server).map(|server| &server.roles) else {
+        return;
+    };
+    let rows = assignable_roles(store, &server)
+        .into_iter()
+        .filter_map(|(id, lock)| {
+            let role = roles.get(&id)?;
+            Some(RoleRow {
+                name: role.name.clone(),
+                colour: role.colour.as_deref().and_then(solid_colour),
+                id,
+                lock,
+            })
+        })
+        .collect();
+    let held: BTreeSet<String> = store
+        .member(&server, &user)
+        .map(|member| member.roles.iter().cloned().collect())
+        .unwrap_or_default();
+    let title: SharedString = format!("Edit {name}'s roles").into();
+    let client = chat.client().clone();
+    let dialog = cx.new(|_| RolesDialog {
+        chat: weak,
+        client,
+        server,
+        user,
+        rows,
+        loaded: held.clone(),
+        held,
+        saving: false,
+    });
+    window.open_dialog(cx, move |modal, _, _| {
+        modal
+            .title(title.clone())
+            .w(px(MODERATION_DIALOG_WIDTH))
+            .child(dialog.clone())
+    });
+}
+
+/// The Edit roles dialog's content (see [`open_roles_dialog`]).
+pub struct RolesDialog {
+    chat: WeakEntity<ChatView>,
+    client: StoatClient,
+    server: String,
+    user: String,
+    /// The server's roles, highest first.
+    rows: Vec<RoleRow>,
+    /// The member's roles when the dialog opened (deleted ones included,
+    /// which are kept as they are).
+    loaded: BTreeSet<String>,
+    /// Their roles as ticked.
+    held: BTreeSet<String>,
+    saving: bool,
+}
+
+impl RolesDialog {
+    /// The member edit that sets their roles as ticked.
+    fn edit(&self) -> DataMemberEdit {
+        DataMemberEdit {
+            roles: Some(self.held.iter().cloned().collect()),
+            ..empty_member_edit()
+        }
+    }
+
+    fn toggle(&mut self, role: &str, on: bool, cx: &mut Context<Self>) {
+        if on {
+            self.held.insert(role.to_string());
+        } else {
+            self.held.remove(role);
+        }
+        cx.notify();
+    }
+
+    /// Send their roles as ticked. Stoat's answer shows at once and closes
+    /// the dialog; a refusal toasts and keeps it.
+    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.saving || self.held == self.loaded {
+            return;
+        }
+        let edit = self.edit();
+        self.saving = true;
+        cx.notify();
+        let request = spawn_io({
+            let (client, server, user) =
+                (self.client.clone(), self.server.clone(), self.user.clone());
+            async move { client.edit_member(&server, &user, &edit).await }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.saving = false;
+                let text = match result {
+                    Ok(Ok(member)) => {
+                        if let Some(chat) = this.chat.upgrade() {
+                            chat.update(cx, |chat, cx| chat.identity_saved(member, cx));
+                        }
+                        window.close_dialog(cx);
+                        return;
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!(
+                            "couldn't change {}'s roles on {}: {err:?}",
+                            this.user,
+                            this.server
+                        );
+                        moderation_error_text(&err, "Couldn't change their roles. Try again.")
+                    }
+                    Err(err) => {
+                        log::warn!("roles task failed: {err:?}");
+                        "Couldn't reach Stoat. Try again.".into()
+                    }
+                };
+                window.push_notification(Notification::error(text), cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
+impl Render for RolesDialog {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let entity = cx.entity().downgrade();
+        let rows = self.rows.iter().map(|row| {
+            let held = self.held.contains(&row.id);
+            // A role they have can always be taken away.
+            let enabled = row.lock.is_none() || self.loaded.contains(&row.id);
+            let dot = row.colour.as_deref().and_then(hex_colour).unwrap_or(muted);
+            let (entity, role) = (entity.clone(), row.id.clone());
+            let checkbox = Checkbox::new(SharedString::from(format!("role-{}", row.id)))
+                .checked(held)
+                .disabled(!enabled || self.saving)
+                .on_click(move |checked: &bool, _, cx| {
+                    entity
+                        .update(cx, |this, cx| this.toggle(&role, *checked, cx))
+                        .ok();
+                })
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(div().size(px(10.)).flex_none().rounded_full().bg(dot))
+                        .child(div().text_sm().truncate().child(row.name.clone())),
+                );
+            let checkbox = match row.lock.filter(|_| !enabled) {
+                Some(RoleLock::Rank) => checkbox.tooltip("It ranks at or above your highest role."),
+                Some(RoleLock::Managed) => {
+                    checkbox.tooltip("A bot's own role, which can't be given out.")
+                }
+                None => checkbox,
+            };
+            div().py_1().child(checkbox)
+        });
+        let changed = self.held != self.loaded;
+        v_flex()
+            .gap_3()
+            .child(if self.rows.is_empty() {
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child("This server has no roles.")
+                    .into_any_element()
+            } else {
+                v_flex()
+                    .id("roles-list")
+                    .max_h(px(ROLES_MAX_HEIGHT))
+                    .overflow_y_scroll()
+                    .children(rows)
+                    .into_any_element()
+            })
+            .child(
+                h_flex()
+                    .gap_2()
+                    .justify_end()
+                    .child(
+                        Button::new("roles-cancel")
+                            .outline()
+                            .label("Cancel")
+                            .disabled(self.saving)
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("roles-save")
+                            .primary()
+                            .label("Save")
+                            .loading(self.saving)
+                            .disabled(self.saving || !changed)
+                            .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
                     ),
             )
     }

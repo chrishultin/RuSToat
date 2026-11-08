@@ -294,6 +294,41 @@ pub fn moderation(store: &ChatStore, server: &str, target: &str) -> Moderation {
     }
 }
 
+/// Why the user may not add a role to someone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoleLock {
+    /// It ranks at or above the user's best role.
+    Rank,
+    /// A bot's role, which only Stoat hands out.
+    Managed,
+}
+
+/// `server`'s roles, highest-ranked first, each with why the user may not
+/// add it to someone (`None` if they may). Only roles ranked below the
+/// user's own can be added (the owner may add any), and never a bot's.
+/// Removing a role needs only Assign Roles and outranking the member.
+pub fn assignable_roles(store: &ChatStore, server: &str) -> Vec<(String, Option<RoleLock>)> {
+    let Some(roles) = store.server(server).map(|server| &server.roles) else {
+        return Vec::new();
+    };
+    let ours = acting_rank(store, server);
+    let mut roles: Vec<_> = roles.iter().collect();
+    roles.sort_by(|(a_id, a), (b_id, b)| a.rank.cmp(&b.rank).then_with(|| a_id.cmp(b_id)));
+    roles
+        .into_iter()
+        .map(|(id, role)| {
+            let lock = if role.owner.is_some() {
+                Some(RoleLock::Managed)
+            } else if role.rank <= ours {
+                Some(RoleLock::Rank)
+            } else {
+                None
+            };
+            (id.clone(), lock)
+        })
+        .collect()
+}
+
 fn in_server(store: &ChatStore, channel: &str) -> bool {
     matches!(store.channel(channel), Some(Channel::TextChannel { .. }))
 }

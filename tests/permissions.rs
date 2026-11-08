@@ -7,10 +7,10 @@ use revolt_permissions::{
 use serde_json::{Value, json};
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::permissions::{
-    can_add_to_group, can_bypass_slowmode, can_change_avatar, can_change_nickname, can_connect,
-    can_invite, can_listen, can_manage_channel, can_manage_channels, can_mention_everyone,
-    can_mention_roles, can_pin, can_send_embeds, can_speak, can_view, channel_permissions, has,
-    member_rank, moderation, server_permissions,
+    RoleLock, assignable_roles, can_add_to_group, can_bypass_slowmode, can_change_avatar,
+    can_change_nickname, can_connect, can_invite, can_listen, can_manage_channel,
+    can_manage_channels, can_mention_everyone, can_mention_roles, can_pin, can_send_embeds,
+    can_speak, can_view, channel_permissions, has, member_rank, moderation, server_permissions,
 };
 use stoat_gpui::store::ChatStore;
 
@@ -757,7 +757,8 @@ const TIMEOUT: u64 = ChannelPermission::TimeoutMembers as u64;
 /// A server where the user is `me`, with `boss` (rank 0, every moderation
 /// permission), `kicker` (rank 1, Kick and Ban), `peer` (rank 1 too,
 /// nothing extra), `timer` (rank 3, Timeout Members) and `low` (rank 5,
-/// nothing extra). `u-owner` owns it with no roles.
+/// nothing extra), and a bot's managed role (rank 4). `u-owner` owns it
+/// with no roles.
 fn moderation_store(me: &str) -> ChatStore {
     let users: Vec<Value> = [
         "u-owner", "u-boss", "u-kicker", "u-peer", "u-timer", "u-low", "u-plain", "u-gone",
@@ -775,7 +776,8 @@ fn moderation_store(me: &str) -> ChatStore {
                 "kicker": { "_id": "kicker", "name": "Kicker", "rank": 1, "permissions": { "a": KICK | BAN, "d": 0 } },
                 "peer": { "_id": "peer", "name": "Peer", "rank": 1, "permissions": { "a": 0, "d": 0 } },
                 "timer": { "_id": "timer", "name": "Timer", "rank": 3, "permissions": { "a": TIMEOUT, "d": 0 } },
-                "low": { "_id": "low", "name": "Low", "rank": 5, "permissions": { "a": 0, "d": 0 } }
+                "low": { "_id": "low", "name": "Low", "rank": 5, "permissions": { "a": 0, "d": 0 } },
+                "bot": { "_id": "bot", "name": "Bot", "rank": 4, "permissions": { "a": 0, "d": 0 }, "owner": "u-bot" }
             }
         }],
         "channels": [],
@@ -883,4 +885,31 @@ fn an_unknown_membership_is_left_to_stoat() {
     assert!(allowed.kick && allowed.ban);
     // An unknown server gives nothing.
     assert_eq!(moderation(&store, "nowhere", "u-low"), Default::default());
+}
+
+#[test]
+fn only_roles_ranked_below_yours_can_be_added() {
+    let store = moderation_store("u-kicker");
+    assert_eq!(
+        assignable_roles(&store, "srv"),
+        [
+            ("boss".to_string(), Some(RoleLock::Rank)),
+            ("kicker".to_string(), Some(RoleLock::Rank)),
+            ("peer".to_string(), Some(RoleLock::Rank)),
+            ("timer".to_string(), None),
+            ("bot".to_string(), Some(RoleLock::Managed)),
+            ("low".to_string(), None),
+        ]
+    );
+}
+
+#[test]
+fn the_owner_can_add_every_role_but_a_bots() {
+    let store = moderation_store("u-owner");
+    let locks: Vec<_> = assignable_roles(&store, "srv")
+        .into_iter()
+        .filter_map(|(id, lock)| lock.map(|lock| (id, lock)))
+        .collect();
+    assert_eq!(locks, [("bot".to_string(), RoleLock::Managed)]);
+    assert!(assignable_roles(&store, "nowhere").is_empty());
 }

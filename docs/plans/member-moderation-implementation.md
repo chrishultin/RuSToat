@@ -85,3 +85,50 @@ Deferred to the end at the user's request (kick, then ban with 1 hour of history
 
 ### Manual Validation
 Deferred to the end: time out for 1 minute, check the message box and card, then end it early.
+
+## Chunk 3: Edit a member's identity and roles
+
+### Changes Made
+- `src/permissions.rs`:
+  - `RoleLock { Rank, Managed }`.
+  - `assignable_roles(store, server) -> Vec<(role_id, Option<RoleLock>)>`: highest first. A role is locked if it's a bot's (`role.owner`), or ranked at or above the user's `acting_rank`. The owner may add anything but a bot's role.
+- `src/profile_edit.rs`: `IdentityForm::changes_for_other(loaded, edited)` sends the nickname (or its removal) and avatar removal only. Pronouns and setting an avatar are never sent. With a unit test.
+- `src/profile.rs`: `UserMenuItem::{EditIdentity, EditRoles}` in a new server group after the people group.
+  - Edit identity needs Manage Nicknames, or Remove Avatars on someone with a server avatar.
+  - Edit roles needs Assign Roles.
+  - Both also need the membership to be cached.
+- `src/ui/identity_dialog.rs`: a new `MemberIdentityEditor` (title "Change {name}'s identity on {server}").
+  - A nickname field, with their display name as placeholder; it's disabled without Manage Nicknames.
+  - A "Remove their server avatar" checkbox beside their avatar, shown only if they have one and you have Remove Avatars.
+  - Save is enabled only when something changed. Stoat's answer goes through `ChatView::identity_saved`, and a refusal toasts.
+- `src/ui/moderation_dialogs.rs`: `open_roles_dialog` / `RolesDialog` ("Edit {name}'s roles").
+  - The server's roles, highest first, each a checkbox with its colour dot and name, in a list that scrolls past 320 px.
+  - A locked role is disabled with a tooltip, unless the member already has it, so it can still be taken away.
+  - Save sends the whole `roles` list. Ticks start from the member's roles, so ones deleted from the server are kept as they are.
+- `src/ui/chat.rs`:
+  - Labels "Edit identity…" (`UserPen`) and "Edit roles…" (`IdCard`).
+  - `ChatView::open_member_identity` and `ChatView::open_roles`.
+  - `identity_saved`'s doc now covers other members' edits too (it already applied any member).
+- Tests:
+  - `tests/permissions.rs`: the fixture gains a managed `bot` role (rank 4). Two tests: locks for a mid-rank moderator; the owner, where only the bot's role is locked.
+  - `tests/profile.rs`: the exact menus gain `EditIdentity, EditRoles`. A new test covers presence: their own menu, outside a server, an uncached membership, no permission.
+  - `tests/api_members.rs`: nickname plus `remove: ["Avatar"]`; roles sent whole; an empty list clears them.
+
+### Divergences
+- **A separate `MemberIdentityEditor` rather than a generalised `IdentityEditor`** (Assumption 6's fallback). The own-identity editor is built around uploads, pronouns and the user's own permissions.
+- **Edit identity and Edit roles need the target's membership to be cached.** Assumption 1 offers member-only items for uncached memberships and leaves the check to Stoat. But Edit roles sends the whole list, so opening it on an unknown membership would wipe their roles, and the nickname field would start blank. Kick, Ban and Time out still follow Assumption 1.
+- **Managed roles are checked.** `Role.owner` exists in 0.16.2, which matches Stoat's `is_managed`.
+- **`open_roles_dialog` takes `&ChatView` plus its weak handle** (as `CreateChannelDialog::new` does), to stay within clippy's argument limit.
+- Later chunks are unaffected.
+
+### Verification Performed
+- `cargo test`: 1117 passed, 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean, after the argument-count fix above.
+- rustfmt drift is unchanged (`client.rs` 3, `chat.rs` 17, `store.rs` 14). `identity_dialog.rs`, `profile_edit.rs` and the other clean files are still clean.
+
+### Manual Validation
+Deferred to the end:
+- rename the second account (member list, messages and typing update);
+- remove its server avatar;
+- give it a role, then take it away;
+- check that a role above yours is disabled.

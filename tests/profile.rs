@@ -277,6 +277,9 @@ mod menu {
                 CreateGroupWith,
                 Mention,
                 Separator,
+                EditIdentity,
+                EditRoles,
+                Separator,
                 TimeOut,
                 Kick,
                 Ban,
@@ -334,6 +337,9 @@ mod menu {
             [
                 Profile,
                 Mention,
+                Separator,
+                EditIdentity,
+                EditRoles,
                 Separator,
                 TimeOut,
                 Kick,
@@ -443,6 +449,24 @@ mod menu {
             let menu = user_menu(&store, user, Some("ch"));
             assert!(!menu.contains(&Kick) && !menu.contains(&Ban), "{user}");
         }
+    }
+
+    #[test]
+    fn editing_a_members_identity_and_roles_needs_their_membership() {
+        let store = store();
+        let menu = user_menu(&store, ADA, Some("ch"));
+        assert!(menu.contains(&EditIdentity) && menu.contains(&EditRoles));
+        // Not for themselves, outside a server, or without a known membership.
+        assert!(!user_menu(&store, "u-me", Some("ch")).contains(&EditRoles));
+        assert!(!user_menu(&store, ADA, Some("grp")).contains(&EditRoles));
+        let closed = user_menu(&store, "u-closed", Some("ch"));
+        assert!(!closed.contains(&EditIdentity) && !closed.contains(&EditRoles));
+        // Kicking and banning still are: Stoat knows the membership.
+        assert!(closed.contains(&Kick) && closed.contains(&Ban));
+        // A plain member has neither permission.
+        let store = store_owned_by("u-plain");
+        let menu = user_menu(&store, ADA, Some("ch"));
+        assert!(!menu.contains(&EditIdentity) && !menu.contains(&EditRoles));
     }
 
     #[test]

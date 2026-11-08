@@ -5,22 +5,29 @@
 //!
 //! Nickname and avatar need Change Nickname and Change Avatar there; the
 //! pronouns need nothing, as Stoat decides.
+//!
+//! "Change {name}'s identity on {server}" ([`MemberIdentityEditor`]) is a
+//! moderator's: someone else's nickname (Manage Nicknames), and removing
+//! their server avatar (Remove Avatars). Stoat lets nobody set another's
+//! avatar or pronouns.
 
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme, Disableable, WindowExt, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
-use crate::api::ApiError;
+use crate::api::{ApiError, StoatClient};
+use crate::moderation::moderation_error_text;
 use crate::profile_edit::{
     IdentityForm, NICKNAME_MAX, PRONOUNS_MAX, ProfileImage, check_nickname, check_pronouns,
-    identity_error_text,
+    empty_member_edit, identity_error_text,
 };
 use crate::runtime::spawn_io;
 use crate::store::ChatStore;
-use crate::ui::chat::ChatView;
+use crate::ui::chat::{ChatView, avatar};
 use crate::ui::profile_editor::{
     ImageKind, ImageSlot, Preview, avatar_preview, field, prompt_for_image, render_image_row,
     upload_image,
@@ -366,6 +373,240 @@ impl Render for IdentityEditor {
                             })
                             .primary()
                             .loading(saving)
+                            .disabled(!can_save)
+                            .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
+                    ),
+            )
+    }
+}
+
+/// The size of the server avatar beside "Remove their server avatar".
+const MEMBER_AVATAR: f32 = 32.;
+
+/// A moderator's identity form for someone else on one server: their
+/// nickname, and removing their server avatar.
+pub struct MemberIdentityEditor {
+    chat: WeakEntity<ChatView>,
+    client: StoatClient,
+    server: String,
+    user: String,
+    /// Their display name, for the avatar's initial.
+    name: String,
+    nickname: Entity<InputState>,
+    /// Their server avatar's URL, if they have one.
+    avatar_url: Option<String>,
+    remove_avatar: bool,
+    /// What the user may change (Manage Nicknames, Remove Avatars).
+    can_nickname: bool,
+    can_remove_avatar: bool,
+    /// Their membership as it was when the dialog opened.
+    loaded: IdentityForm,
+    saving: bool,
+    _nickname: Subscription,
+}
+
+impl MemberIdentityEditor {
+    /// The form for `user`'s membership of `server`, filled from `store`
+    /// (the account's). The nickname's placeholder is their display name.
+    pub fn new(
+        chat: WeakEntity<ChatView>,
+        client: StoatClient,
+        store: &ChatStore,
+        server: String,
+        user: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let member = store.member(&server, &user);
+        let loaded = IdentityForm {
+            nickname: member.and_then(|m| m.nickname.clone()).unwrap_or_default(),
+            avatar: member
+                .and_then(|m| m.avatar.as_ref())
+                .map_or(ProfileImage::None, |file| {
+                    ProfileImage::Current(file.id.clone())
+                }),
+            pronouns: String::new(),
+        };
+        let avatar_url = member
+            .and_then(|m| m.avatar.as_ref())
+            .and_then(|file| store.media().file(file));
+        let name = store
+            .user(&user)
+            .map(crate::store::display_name)
+            .unwrap_or_default()
+            .to_string();
+        let allowed = crate::permissions::moderation(store, &server, &user);
+        let nickname = cx.new(|cx| {
+            let mut input = InputState::new(window, cx).placeholder(name.clone());
+            input.set_value(loaded.nickname.clone(), window, cx);
+            input
+        });
+        let subscription = cx.subscribe_in(&nickname, window, |this, _, event, window, cx| {
+            if let InputEvent::PressEnter { .. } = event {
+                this.save(window, cx);
+            }
+            cx.notify();
+        });
+        Self {
+            chat,
+            client,
+            server,
+            user,
+            name,
+            nickname,
+            avatar_url,
+            remove_avatar: false,
+            can_nickname: allowed.nickname,
+            can_remove_avatar: allowed.remove_avatar,
+            loaded,
+            saving: false,
+            _nickname: subscription,
+        }
+    }
+
+    /// The nickname field, to focus when the dialog opens.
+    pub fn nickname_input(&self) -> &Entity<InputState> {
+        &self.nickname
+    }
+
+    fn edited(&self, cx: &App) -> IdentityForm {
+        IdentityForm {
+            nickname: self.nickname.read(cx).value().to_string(),
+            avatar: if self.remove_avatar {
+                ProfileImage::None
+            } else {
+                self.loaded.avatar.clone()
+            },
+            pronouns: String::new(),
+        }
+    }
+
+    fn can_save(&self, edited: &IdentityForm) -> bool {
+        !self.saving
+            && check_nickname(&edited.nickname).is_ok()
+            && IdentityForm::changes_for_other(&self.loaded, edited) != empty_member_edit()
+    }
+
+    /// Send what changed. Stoat's answer shows at once and closes the
+    /// dialog; a refusal toasts and keeps it open.
+    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let edited = self.edited(cx);
+        if !self.can_save(&edited) {
+            return;
+        }
+        let edit = IdentityForm::changes_for_other(&self.loaded, &edited);
+        self.saving = true;
+        cx.notify();
+        let request = spawn_io({
+            let (client, server, user) =
+                (self.client.clone(), self.server.clone(), self.user.clone());
+            async move { client.edit_member(&server, &user, &edit).await }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.saving = false;
+                let text = match result {
+                    Ok(Ok(member)) => {
+                        if let Some(chat) = this.chat.upgrade() {
+                            chat.update(cx, |chat, cx| chat.identity_saved(member, cx));
+                        }
+                        window.close_dialog(cx);
+                        return;
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!(
+                            "couldn't change {}'s identity on {}: {err:?}",
+                            this.user,
+                            this.server
+                        );
+                        moderation_error_text(&err, "Couldn't change their identity. Try again.")
+                    }
+                    Err(err) => {
+                        log::warn!("member identity task failed: {err:?}");
+                        "Couldn't reach Stoat. Try again.".into()
+                    }
+                };
+                window.push_notification(Notification::error(text), cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
+impl Render for MemberIdentityEditor {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let edited = self.edited(cx);
+        let can_save = self.can_save(&edited);
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let nickname = field(
+            "Nickname",
+            Input::new(&self.nickname)
+                .disabled(!self.can_nickname || self.saving)
+                .into_any_element(),
+            edited.nickname.trim().chars().count(),
+            NICKNAME_MAX,
+            None,
+            cx,
+        );
+        let avatar = self
+            .avatar_url
+            .clone()
+            .filter(|_| self.can_remove_avatar)
+            .map(|url| {
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .child(avatar(
+                        "member-identity-avatar",
+                        Some(url),
+                        &self.name,
+                        MEMBER_AVATAR,
+                        theme.secondary,
+                        theme.secondary_foreground,
+                    ))
+                    .child(
+                        Checkbox::new("member-identity-remove-avatar")
+                            .label("Remove their server avatar")
+                            .checked(self.remove_avatar)
+                            .disabled(self.saving)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.remove_avatar = *checked;
+                                cx.notify();
+                            })),
+                    )
+            });
+        let note = |text: &'static str| div().text_xs().text_color(muted).child(text);
+
+        v_flex()
+            .gap_4()
+            .children(avatar)
+            .child(nickname)
+            .when(!self.can_nickname, |this| {
+                this.child(note("You can't change their nickname."))
+            })
+            .when(self.can_nickname, |this| {
+                this.child(note("Leave it empty to clear their nickname."))
+            })
+            .child(
+                h_flex()
+                    .gap_2()
+                    .justify_end()
+                    .child(
+                        Button::new("member-identity-cancel")
+                            .label("Cancel")
+                            .outline()
+                            .disabled(self.saving)
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("member-identity-save")
+                            .label("Save")
+                            .primary()
+                            .loading(self.saving)
                             .disabled(!can_save)
                             .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
                     ),
