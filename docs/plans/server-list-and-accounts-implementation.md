@@ -148,3 +148,132 @@ Deferred to the batched manual pass. Steps:
 10. Clicking servers and folders still opens them and toggles folders (including a click with a pixel of movement); right-click menus still open.
 11. With enough servers that the rail scrolls, drags near its ends still drop where shown (no auto-scroll).
 12. Light and dark themes: the line, ring and faded item are visible.
+
+## Chunk 4: Drag accounts in the switcher
+
+### Changes Made
+- `src/accounts.rs`: `AccountList::move_account(id, before: Option<&str>) -> bool`: the account goes just before `before`, or to the end with `None`. Before itself, or where it already is (before the next account, the last to the end), and an unknown account or `before`, change nothing and return false. The active account is untouched. `AccountList`'s doc now says it's in the switcher's order. 3 unit tests.
+- `src/ui/switcher.rs`:
+  - `AccountDrag { id }`, the dragged value (its own type, so the rail ignores account drags and the switcher ignores rail drags).
+  - `SwitcherDrag::{Started(id), Moved(over), Over { hovered, mark }, Dropped, Ended}` and `DragAction`, one callback through which the switcher reports a drag as it goes.
+  - Each account's button is built from `rail_icon` and `rail_slot` (as the rail's servers are) rather than `rail_button`, so it can take `on_drag`: a `DragPreview` of its avatar on `drag_face`; the click and the Log Out menu are as before. Its row fades to `DRAGGED_OPACITY` while dragged and shows `with_drop_mark`'s line above or below (never `Onto`).
+  - Each row's `on_drag_move` reports `Over` when the pointer is inside its own bounds: the top half is above it, the bottom half below. The column's own `on_drag_move` (gpui runs it first, in the capture phase) reports whether the pointer is over the switcher; `on_drop` reports the drop; `on_mouse_up_out` a release off it.
+  - `SwitcherItem` gains `dragged` and `mark`; `render_switcher` takes `on_drag`.
+- `src/ui/app_root.rs`:
+  - `AccountDragState { dragged, target: Option<(id, DropMark)>, over_switcher }` in `AppRoot.account_drag`, read through `account_dragging` (only while gpui has a drag going), and `account_drag_event` following `SwitcherDrag`: a start records the account; leaving the switcher clears the target; over an account (only while over the switcher) the target is beside it, or none over the dragged account itself; between accounts, it stays where it was.
+  - `drop_account`: above an account is before it; below it, before the next one (or the end). `move_account`, then `save_accounts` only if the order changed. The `cx.notify()` makes `MainWindow::sync_menus` run (it observes `AppRoot`), and as `account_names` now gives the new order, the name list differs and the Accounts menu is rebuilt; ⌘1–9 go through `show_account_at`, which reads the same list.
+  - Esc: `AppRoot::new` adds its own keystroke interceptor (`_drag_escape`, as `ChatView`'s), which, while an account drag is going, forgets it, calls `cx.stop_active_drag(window)` and stops the Esc there.
+- `src/ui/chat.rs`: `rail_icon`, `rail_slot` and `DRAGGED_OPACITY` are now `pub(crate)`, for the switcher.
+- `tests/accounts.rs`: a list reordered with `move_account` (the third account to the top) keeps its order and active account through `MemoryAccounts`, and through the file, as across a restart.
+
+### Divergences
+- **The switcher reports the drag through one callback, `SwitcherDrag`,** rather than an `on_reorder(id, before)`: `AppRoot` keeps the drag's state (as `ChatView` does for the rail's) and turns the drop into `move_account` itself.
+- **Accounts' buttons are built from `rail_icon` and `rail_slot`** (now `pub(crate)`) rather than `rail_button`, which can't take `on_drag`; "+" still uses `rail_button`, whose signature is unchanged.
+- **The switcher's new drag types and `render_switcher` are `pub(crate)`,** since `DropMark` is.
+- **The line shows beside the neighbours too** (below the account just above the dragged one, above the one just below it), as the rail's does; dropping there changes nothing and saves nothing. Over the dragged account itself there's no line.
+- **"+" doesn't mean "below the last"** (the rail's Home and "+" do); the last account's bottom half does, and a target set there stays while the pointer moves onto "+".
+- **A dimmed (offline or signed-out) account fades to 35% while dragged,** like any other, rather than staying at its 50%.
+
+### Verification Performed
+- `cargo test --lib accounts::`: 11 passed (3 new): `move_account` to the front, to the end and before a later account (the active account unchanged); before itself, before the next account and the last to the end change nothing; unknown accounts and unknown `before` return false and change nothing.
+- `cargo test --test accounts`: 7 passed (1 new): the reordered list round-trips through `MemoryAccounts` and `FileAccounts`.
+- `MainWindow::sync_menus` (`src/main.rs`) compares the name list in order, so a reorder rebuilds the menu (checked by reading; it isn't unit-testable without the app). With two accounts of the same name swapped, the list is unchanged and the menu isn't rebuilt, but its items are by position (`SwitchAccount1..9`), so it's still right.
+- `cargo test`: 1051 passed, 0 failed (1047 before).
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt `Diff in` counts: `src/ui/chat.rs` 17 (unchanged; hand-formatted, and its `--check` output matches the staged version's), `src/accounts.rs`, `src/ui/switcher.rs`, `src/ui/app_root.rs`, `tests/accounts.rs` 0.
+
+### Manual Validation
+Deferred to the batched manual pass. Steps:
+1. With three accounts, drag the third onto the top half of the first: a line shows above it, its avatar follows the pointer and its slot fades. Drop: it's first. ⌘1 opens it, and the Accounts menu lists it first.
+2. Drag an account onto the bottom half of the last: it goes last. Drop one on itself, or just below the account above it: nothing changes.
+3. Press Esc mid-drag: the drag ends, nothing moves, and the open channel doesn't jump to the present. Drag off the switcher (onto the rail or the chat) and let go: nothing moves, and the rail shows no line.
+4. Clicking an account still switches to it (including a click with a pixel of movement); right-click still offers Log Out.
+5. Quit and restart: the order is kept.
+6. Light and dark themes: the line and the faded account are visible.
+
+## Summary
+
+_Completed: 2026-11-08_
+
+### Chunks Completed
+1. The rail follows the web client's server order (`ordering.serverSidebar`, falling back to `servers`) and `server-folders`, fetched after every `Ready` and updated live; RuSToat's writes keep unknown fields.
+2. Server folders draw closed (a tinted 2×2 preview with badges) and open (a tinted strip), fold in sync, and are made, edited and deleted from the server and folder menus.
+3. Servers and folders can be dragged in the rail to reorder them, fold servers together, and move them into and out of folders.
+4. Accounts can be dragged in the switcher; the order is saved, and the Accounts menu and ⌘1–9 follow.
+
+### Divergences
+- Chunk 1:
+  - `update_rail` took `FnOnce(&mut Ordering, &mut ServerFolders)` (as `update_notifications` does) and writes nothing when the values don't change.
+  - A failed write puts back each key separately, since the two can be overtaken separately.
+  - Settings in `Ready` and `UserSettingsUpdate` are read per key, so one malformed key no longer hides the others.
+  - `to_sidebar` and `Ordering::set_server_sidebar` were added in this chunk.
+  - The legacy `servers` list is written back exactly as stored.
+- Chunk 2:
+  - The structural edits take the rail as drawn and write `serverSidebar` from it first, so a folder stays put when a server above it is added (the web client moves it up).
+  - "Add to folder" lists only folders drawn in the rail, not the server's own; clicking "Add to folder" itself doesn't make a new folder.
+  - The 2×2 preview uses 18 px icons for any number of servers, in a 48 px circle.
+  - The open folder's icon keeps the rail buttons' neutral circle.
+  - "Folder colour" offers a colour set elsewhere as one more swatch.
+- Chunk 3:
+  - `target_for` takes the rail, the dragged ID and the hovered ID; `apply_drop` edits in place and changes nothing for a no-op, rather than returning an `Option`.
+  - Below an open folder's icon drops above its first server, in the folder; below the last server in an open folder stays in it.
+  - A dragged folder over another folder's servers goes below that folder; there's no ring onto a server's own folder.
+  - Leaving the rail cancels (no 80 px margin); Home and "+" (with the space below it) mean first and last.
+  - gpui doesn't cancel a drag on Esc, so `ChatView` intercepts it.
+- Chunk 4:
+  - The switcher reports the drag through one callback (`SwitcherDrag`), with the state in `AppRoot`, rather than an `on_reorder(id, before)`.
+  - Accounts' buttons are built from `rail_icon` and `rail_slot` (now `pub(crate)`) rather than `rail_button`; the switcher's drag types and `render_switcher` are `pub(crate)`.
+  - The line shows beside neighbours too (a no-op drop there saves nothing); "+" doesn't mean "below the last".
+  - A dimmed account fades to 35% while dragged.
+
+### Definition of Done
+- [ ] The rail follows `ordering.serverSidebar` (falling back to `servers`) and `server-folders`, fetched on connect and updated live; unknown fields survive RuSToat's writes. (Manual pass pending. Parsing, `entries`, round-tripping unknown fields, the fetch request, `UserSettingsUpdate` with both keys, and the store's order, folders, older copies and echoes are test-verified.)
+- [ ] Folders draw closed (2×2 preview, tinted, badges) and open (tinted strip); folding syncs. (Manual pass pending. `toggle_folder` (written only when closed), `parse_colour`, the palette and the folder icons loading are test-verified; the drawing isn't.)
+- [ ] The server menu has "Add to folder" (with "New folder") and "Remove from folder"; the folder menu has "Edit folder…" (name and a 12-colour palette plus none) and "Delete folder". (Manual pass pending. Every edit behind them (new folder, add, remove, rename, recolour, delete) is test-verified.)
+- [ ] Servers and folders can be dragged to reorder, fold together, and move into and out of folders; a no-op drop writes nothing. (Manual pass pending. `target_for` and `apply_drop`, including thirteen no-op drops that change nothing, are test-verified.)
+- [ ] ⌘⌥↑/↓ skips servers in closed folders. (Manual pass pending. Not covered by tests: `move_server` is in the view.)
+- [ ] Accounts can be dragged in the switcher; the order persists, and the Accounts menu and ⌘1–9 follow. (Manual pass pending. `move_account` and the order round-tripping through `MemoryAccounts` and the file are test-verified.)
+- [x] `cargo test` (1051 passed) and `cargo clippy --all-targets -- -D warnings` pass, and no touched file's rustfmt drift grows.
+- [ ] Every chunk's manual check is recorded in `docs/plans/server-list-and-accounts-implementation.md`. (Manual pass pending. The steps are in each chunk's section and consolidated below.)
+
+### Remaining Manual Steps
+One sitting, in this order. You need the web client open (in a browser) on the same account as RuSToat's first account, at least five servers on that account (some with icons, one without), a way to make a server unread and to be mentioned in it (a second account, in another browser window, that shares a server with you), and three RuSToat accounts for the last part.
+
+**Server order (chunk 1)**
+1. Reorder servers in the web client: RuSToat's rail follows within a moment.
+2. Quit and restart RuSToat: the rail opens in the web client's order, with no jump once the fetch lands.
+3. Make a folder of two servers in the web client: RuSToat shows it in the folder's place, holding those two servers.
+
+**Folders from menus (chunk 2)**
+4. Right-click a server → Add to folder → New folder: a "New Folder" appears in its place. Add a second server to it from that server's menu. Click the folder to close it: the preview shows both icons (a server without an icon shows its initial).
+5. Right-click the folder → Edit folder…: change its name and colour and Save: the tooltip and tint change, and the web client shows them.
+6. Close and open the folder in the web client: RuSToat follows. Close it in RuSToat: the web client follows.
+7. With the folder closed, make a server inside unread: the folder's pill lights. Be mentioned there: the folder shows the summed badge. Open a server inside: the folder shows the tall marker.
+8. ⌘⌥↑/↓ passes over the servers in the closed folder, and walks those in an open one.
+9. Remove from folder on one of its servers: it lands just below the folder. Make the folder again with two servers, then Delete folder: its servers stay in place, with no confirmation.
+
+**Dragging in the rail (chunk 3)**
+10. Drag a server between two others (top or bottom quarter of a neighbour): a line shows where, the dragged icon fades and its icon follows the pointer; drop: it moves there.
+11. Drag a server onto the middle of another: a ring shows; drop: a "New Folder" appears in the target's place, holding the target then the dragged server.
+12. Drag a server onto a closed folder's middle: it goes to the end of the folder. Onto an open folder's icon: the same; just below the icon: it goes first in the folder.
+13. With a folder open, drag one of its servers above or below another in it: it reorders within the folder. Drag it to the top or bottom quarter of a top-level server: it leaves the folder (the folder goes if it was the last).
+14. Drag a folder (open and closed) above and below servers and other folders: it moves whole; over a server's middle there's no ring.
+15. Drag over Home: the line shows above the first item; over "+" or the space below it: below the last.
+16. Drop where the item already is, or onto itself: nothing changes, no "Couldn't save the server list" toast, and the web client doesn't change.
+17. Press Esc mid-drag: the drag ends, nothing moves, and the open channel doesn't jump to the present. Drag off the rail and let go: nothing moves.
+18. After each drop above, the web client shows the same order and folders.
+19. Clicking servers and folders still opens them and toggles folders (including a click with a pixel of movement); right-click menus still open.
+20. With enough servers that the rail scrolls (shrink the window), drags near its ends still drop where shown (no auto-scroll).
+
+**Both ways (plan Manual Test 2)**
+21. Arrange folders in RuSToat (names, colours, one closed), then in the web client, then in RuSToat again: each follows the other, and nothing is lost (names, colours, collapsed state).
+
+**Dragging accounts (chunk 4)**
+22. With three accounts signed in, drag the third onto the top half of the first: a line shows above it, its avatar follows the pointer and its slot fades. Drop: it's first. ⌘1 opens it, and the Accounts menu lists it first.
+23. Drag an account onto the bottom half of the last: it goes last. Drop one on itself, or just below the account above it: nothing changes.
+24. Press Esc mid-drag: the drag ends, nothing moves, and the open channel doesn't jump to the present. Drag an account off the switcher (onto the rail or the chat) and let go: nothing moves, and the rail shows no line.
+25. Clicking an account still switches to it (including a click with a pixel of movement); right-click still offers Log Out.
+26. Quit and restart: the account order is kept, and the rail still opens in the web client's order.
+
+**Themes (plan Manual Test 3)**
+27. In light and dark themes: folder tints (closed and open), the 2×2 preview, the Edit folder dialog's palette and ring, the rail's drop line and ring, and the faded dragged items in the rail and the switcher are visible.

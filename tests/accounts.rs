@@ -1,6 +1,7 @@
-//! The account list file: round trips, a missing file and a corrupt one.
+//! The account list file: round trips, a missing file and a corrupt one,
+//! and a reordered list.
 
-use stoat_gpui::accounts::{AccountList, AccountsFile, FileAccounts};
+use stoat_gpui::accounts::{AccountList, AccountsFile, FileAccounts, MemoryAccounts};
 
 #[test]
 fn list_round_trips_through_the_file() {
@@ -82,4 +83,31 @@ fn a_file_from_before_session_ids_still_loads_and_they_round_trip() {
         again.get("a1").unwrap().session_id.as_deref(),
         Some("01SESSION")
     );
+}
+
+fn ids(list: &AccountList) -> Vec<String> {
+    list.accounts.iter().map(|a| a.id.clone()).collect()
+}
+
+#[test]
+fn a_reordered_list_keeps_its_order() {
+    let mut list = AccountList::default();
+    let a = list.add_or_update("https://api.stoat.chat", "01A", Some("Ann".into()));
+    let b = list.add_or_update("https://api.stoat.chat", "01B", Some("Bo".into()));
+    let c = list.add_or_update("https://stoat.example.com/api", "01C", None);
+    list.set_active(&b);
+    // Dragging the third account to the top.
+    assert!(list.move_account(&c, Some(&a)));
+
+    let memory = MemoryAccounts::default();
+    memory.save(&list).unwrap();
+    let loaded = memory.load().unwrap().unwrap();
+    assert_eq!(ids(&loaded), [c.clone(), a.clone(), b.clone()]);
+    assert_eq!(loaded.active, Some(b.clone()));
+
+    // And through the file, as across a restart.
+    let dir = tempfile::tempdir().unwrap();
+    let file = FileAccounts::at(dir.path().join("accounts.json"));
+    file.save(&loaded).unwrap();
+    assert_eq!(ids(&file.load().unwrap().unwrap()), [c, a, b]);
 }

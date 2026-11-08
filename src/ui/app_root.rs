@@ -16,10 +16,11 @@ use crate::runtime::spawn_io;
 use crate::session::{self, Restored, TokenStore};
 use crate::store::display_name;
 use crate::ui::app_prefs::AppPrefs;
-use crate::ui::chat::{ChatEvent, ChatView};
+use crate::ui::chat::{ChatEvent, ChatView, DropMark};
 use crate::ui::login::{LoginEvent, LoginView};
 use crate::ui::switcher::{
-    AccountAction, AccountStatus, SwitcherItem, host_of, notice_labels, render_switcher,
+    AccountAction, AccountStatus, DragAction, SwitcherDrag, SwitcherItem, host_of, notice_labels,
+    render_switcher,
 };
 
 /// Shown when Stoat has ended an account's session.
@@ -60,6 +61,17 @@ enum Shown {
     },
 }
 
+/// A drag in the switcher: what's dragged and where it would land.
+struct AccountDragState {
+    dragged: String,
+    /// Beside which account, above or below it. `None` off the switcher,
+    /// or over the dragged account itself.
+    target: Option<(String, DropMark)>,
+    /// The pointer is over the switcher. Accounts scrolled out of sight
+    /// still see it, so they only take it while it is.
+    over_switcher: bool,
+}
+
 /// Top-level view for the main window: every saved account, each connected
 /// on its own, with a switcher to pick the one on screen.
 pub struct AppRoot {
@@ -74,7 +86,12 @@ pub struct AppRoot {
     shown: Shown,
     /// The count last shown on the Dock icon, to only touch AppKit on change.
     dock_badge: usize,
+    /// An account being dragged in the switcher. Only while gpui has a drag
+    /// going (see [`Self::account_dragging`]).
+    account_drag: Option<AccountDragState>,
     _appearance: Subscription,
+    /// Esc cancels a drag in the switcher, which gpui doesn't do itself.
+    _drag_escape: Subscription,
 }
 
 impl AppRoot {
@@ -107,6 +124,22 @@ impl AppRoot {
                     .ok();
             });
         }
+
+        // Esc cancels a drag in the switcher, as in the server rail, before
+        // anything else sees it.
+        let root = cx.weak_entity();
+        let drag_escape = cx.intercept_keystrokes(move |event, window, cx| {
+            if event.keystroke.key != "escape" || !cx.has_active_drag() {
+                return;
+            }
+            if root
+                .update(cx, |this, cx| this.end_account_drag(cx))
+                .unwrap_or(false)
+            {
+                cx.stop_active_drag(window);
+                cx.stop_propagation();
+            }
+        });
 
         let default_instance = StoatClient::from_env().base_url().to_string();
         log::info!("default Stoat API: {default_instance}");
@@ -150,7 +183,9 @@ impl AppRoot {
             states: HashMap::new(),
             shown: Shown::Loading { _task: task },
             dock_badge: 0,
+            account_drag: None,
             _appearance: appearance,
+            _drag_escape: drag_escape,
         }
     }
 
@@ -314,6 +349,94 @@ impl AppRoot {
                     .unwrap_or_else(|| host_of(&entry.instance)),
                 None,
             ),
+        }
+    }
+
+    /// The drag in the switcher, if one is going. One that ended without the
+    /// switcher seeing it end is ignored.
+    fn account_dragging(&self, cx: &App) -> Option<&AccountDragState> {
+        self.account_drag.as_ref().filter(|_| cx.has_active_drag())
+    }
+
+    /// Follow a drag in the switcher: where it would land, and the drop.
+    fn account_drag_event(&mut self, event: SwitcherDrag, cx: &mut Context<Self>) {
+        match event {
+            SwitcherDrag::Started(id) => {
+                self.account_drag = Some(AccountDragState {
+                    dragged: id.to_string(),
+                    target: None,
+                    over_switcher: true,
+                });
+                cx.notify();
+            }
+            SwitcherDrag::Moved(over) => {
+                if let Some(drag) = &mut self.account_drag {
+                    drag.over_switcher = over;
+                }
+                if !over {
+                    self.set_account_target(None, cx);
+                }
+            }
+            // Between accounts, it stays where it was.
+            SwitcherDrag::Over { hovered, mark } => {
+                let Some(drag) = &self.account_drag else {
+                    return;
+                };
+                if !drag.over_switcher {
+                    return;
+                }
+                let target = (drag.dragged != hovered).then(|| (hovered.to_string(), mark));
+                self.set_account_target(target, cx);
+            }
+            SwitcherDrag::Dropped => self.drop_account(cx),
+            SwitcherDrag::Ended => {
+                self.end_account_drag(cx);
+            }
+        }
+    }
+
+    /// Show where the drag in the switcher would land, if that's changed.
+    fn set_account_target(&mut self, target: Option<(String, DropMark)>, cx: &mut Context<Self>) {
+        if let Some(drag) = &mut self.account_drag
+            && drag.target != target
+        {
+            drag.target = target;
+            cx.notify();
+        }
+    }
+
+    /// Forget the drag in the switcher: dropped, cancelled, or ended off
+    /// it. Whether there was one.
+    fn end_account_drag(&mut self, cx: &mut Context<Self>) -> bool {
+        let ended = self.account_drag.take().is_some();
+        if ended {
+            cx.notify();
+        }
+        ended
+    }
+
+    /// An account dropped on the switcher moves where the line showed, and
+    /// the new order is saved. The Accounts menu and ⌘1–9 follow it (they
+    /// go by [`Self::account_names`] and [`Self::show_account_at`]). One
+    /// that lands where it was changes nothing.
+    fn drop_account(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.account_drag.take() else {
+            return;
+        };
+        cx.notify();
+        let Some((hovered, mark)) = drag.target else {
+            return;
+        };
+        let accounts = &self.accounts.accounts;
+        let Some(at) = accounts.iter().position(|a| a.id == hovered) else {
+            return;
+        };
+        let before = match mark {
+            DropMark::Below => accounts.get(at + 1).map(|a| a.id.clone()),
+            DropMark::Above | DropMark::Onto => Some(hovered),
+        };
+        if self.accounts.move_account(&drag.dragged, before.as_deref()) {
+            self.save_accounts();
         }
     }
 
@@ -732,6 +855,7 @@ impl AppRoot {
 
     fn render_switcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let shown = self.shown_account();
+        let drag = self.account_dragging(cx);
         let items = self
             .accounts
             .accounts
@@ -756,6 +880,11 @@ impl AppRoot {
                     selected: shown == Some(entry.id.as_str()),
                     unread,
                     mentions,
+                    dragged: drag.is_some_and(|d| d.dragged == entry.id),
+                    mark: drag
+                        .and_then(|d| d.target.as_ref())
+                        .filter(|(target, _)| *target == entry.id)
+                        .map(|(_, mark)| *mark),
                 }
             })
             .collect();
@@ -773,12 +902,17 @@ impl AppRoot {
                     .ok();
             }
         });
+        let on_drag: DragAction = Rc::new(move |event, _, cx| {
+            root.update(cx, |this, cx| this.account_drag_event(event, cx))
+                .ok();
+        });
         render_switcher(
             items,
             matches!(self.shown, Shown::Adding { .. }),
             on_select,
             on_log_out,
             cx.listener(|this, _, window, cx| this.add_account(window, cx)),
+            on_drag,
             cx,
         )
     }

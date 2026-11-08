@@ -42,7 +42,8 @@ pub struct AccountEntry {
     pub session_id: Option<String>,
 }
 
-/// The saved accounts, in the order they were added, and which one was shown last.
+/// The saved accounts, in the switcher's order (as added, unless dragged
+/// since), and which one was shown last.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountList {
     #[serde(default)]
@@ -137,6 +138,30 @@ impl AccountList {
         if self.get(id).is_some() {
             self.active = Some(id.to_string());
         }
+    }
+
+    /// Move an account to just before `before`, or to the end with `None`
+    /// (dragging it in the switcher). Returns whether the order changed:
+    /// moving it before itself, or to where it already is, doesn't; nor
+    /// does an unknown account or `before`.
+    pub fn move_account(&mut self, id: &str, before: Option<&str>) -> bool {
+        let position = |id: &str| self.accounts.iter().position(|a| a.id == id);
+        let Some(from) = position(id) else {
+            return false;
+        };
+        // Where it goes once taken out.
+        let to = match before.map(position) {
+            None => self.accounts.len() - 1,
+            Some(None) => return false,
+            Some(Some(at)) if at > from => at - 1,
+            Some(Some(at)) => at,
+        };
+        if to == from {
+            return false;
+        }
+        let entry = self.accounts.remove(from);
+        self.accounts.insert(to, entry);
+        true
     }
 
     /// Forget an account. If it was the active one, the account after it (or
@@ -368,6 +393,43 @@ mod tests {
         accounts.set_active("c");
         accounts.remove("a");
         assert_eq!(accounts.active.as_deref(), Some("c"));
+    }
+
+    fn ids(accounts: &AccountList) -> Vec<&str> {
+        accounts.accounts.iter().map(|a| a.id.as_str()).collect()
+    }
+
+    #[test]
+    fn move_account_to_the_front_and_the_end() {
+        let mut accounts = list(&["a", "b", "c"]);
+        accounts.set_active("b");
+        assert!(accounts.move_account("c", Some("a")));
+        assert_eq!(ids(&accounts), ["c", "a", "b"]);
+        assert!(accounts.move_account("c", None));
+        assert_eq!(ids(&accounts), ["a", "b", "c"]);
+        assert!(accounts.move_account("a", Some("c")));
+        assert_eq!(ids(&accounts), ["b", "a", "c"]);
+        // Which account is shown doesn't change.
+        assert_eq!(accounts.active.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn move_account_where_it_is_changes_nothing() {
+        let mut accounts = list(&["a", "b", "c"]);
+        // Before itself, before the next one, and the last to the end.
+        assert!(!accounts.move_account("b", Some("b")));
+        assert!(!accounts.move_account("a", Some("b")));
+        assert!(!accounts.move_account("c", None));
+        assert_eq!(ids(&accounts), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn move_account_ignores_unknown_ids() {
+        let mut accounts = list(&["a", "b"]);
+        assert!(!accounts.move_account("missing", Some("a")));
+        assert!(!accounts.move_account("missing", None));
+        assert!(!accounts.move_account("b", Some("missing")));
+        assert_eq!(ids(&accounts), ["a", "b"]);
     }
 
     #[test]

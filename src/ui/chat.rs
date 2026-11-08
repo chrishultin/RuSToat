@@ -9406,8 +9406,8 @@ const NOTIFICATIONS_FAILED_TEXT: &str = "Couldn't save notification settings.";
 const RAIL_FAILED_TEXT: &str = "Couldn't save the server list. Try again.";
 /// Each server's icon in a closed folder's two-by-two preview.
 const FOLDER_PREVIEW_ICON: f32 = 18.;
-/// A rail item being dragged is this opaque where it was.
-const DRAGGED_OPACITY: f32 = 0.35;
+/// A rail (or switcher) item being dragged is this opaque where it was.
+pub(crate) const DRAGGED_OPACITY: f32 = 0.35;
 /// What follows the pointer while dragging is this opaque.
 const DRAG_PREVIEW_OPACITY: f32 = 0.8;
 
@@ -12283,7 +12283,13 @@ pub(crate) fn rail_button(
 
 /// A rail item's row: `button` centred, with a marker on the left edge
 /// (tall when `selected`, a short pill when `unread`) and a mention badge.
-fn rail_slot(button: AnyElement, selected: bool, unread: bool, mentions: usize, cx: &App) -> Div {
+pub(crate) fn rail_slot(
+    button: AnyElement,
+    selected: bool,
+    unread: bool,
+    mentions: usize,
+    cx: &App,
+) -> Div {
     let theme = cx.theme();
     let marker = theme.foreground;
     let badge_ring = theme.sidebar;
@@ -12323,7 +12329,7 @@ fn rail_slot(button: AnyElement, selected: bool, unread: bool, mentions: usize, 
 
 /// A rail button's face, without its click or menu: filled when selected,
 /// else a circle that squares off on hover.
-fn rail_icon(
+pub(crate) fn rail_icon(
     id: impl Into<ElementId>,
     content: AnyElement,
     tooltip: impl Into<SharedString>,
