@@ -72,6 +72,7 @@ use crate::ui::composer::{Composer, ComposerEvent, file_icon};
 use crate::ui::emoji_picker::emoji_grid;
 use crate::ui::friends::{RowButtons, render_add_friend, render_friends_page};
 use crate::ui::gif_picker::GifCache;
+use crate::ui::group_dialogs::{CREATE_GROUP_DIALOG_WIDTH, CreateGroupDialog};
 use crate::ui::identity_dialog::{IDENTITY_DIALOG_WIDTH, IdentityEditor};
 use crate::ui::invites::{CREATE_DIALOG_WIDTH, CreateInviteDialog, JOIN_DIALOG_WIDTH, JoinDialog};
 use crate::ui::markup::{
@@ -374,6 +375,8 @@ pub struct ChatView {
     /// The longest an invite may last on this instance, in days, when it
     /// says.
     invite_max_days: Option<u32>,
+    /// The most members a group may have on this instance, when it says.
+    group_size: Option<u32>,
     /// The person whose DM is being asked for ("Message" on their card).
     dm_opening: Option<String>,
     /// People whose friend request or block is on its way to Stoat.
@@ -537,6 +540,7 @@ impl ChatView {
                         // Before `set_media`, whose re-sync adds the cards.
                         this.store.set_invite_hosts(this.invite_hosts());
                         this.invite_max_days = root.features.limits.global.max_invite_duration_days;
+                        this.group_size = root.features.limits.global.group_size;
                         this.set_media(media, cx);
                         this.composer
                             .update(cx, |composer, _| composer.set_limits(limits));
@@ -774,6 +778,7 @@ impl ChatView {
             invite_joins: HashSet::new(),
             own_member_fetches: HashSet::new(),
             invite_max_days: None,
+            group_size: None,
             image_limits: ImageLimits::default(),
             window: window.window_handle(),
             dm_opening: None,
@@ -4510,6 +4515,10 @@ impl ChatView {
             }
             UserMenuItem::Profile => self.open_card(user, window.mouse_position(), window, cx),
             UserMenuItem::Message => self.message_user(user, window, cx),
+            UserMenuItem::CreateGroupWith => {
+                self.close_card(false, window, cx);
+                self.open_create_group(Some(user), window, cx);
+            }
             UserMenuItem::Mention => {
                 let Some(channel) = channel else {
                     return;
@@ -4884,6 +4893,12 @@ impl ChatView {
         self.web_app.as_deref()
     }
 
+    /// The most members a group may have on this instance, its owner
+    /// included, when it says.
+    pub fn group_size(&self) -> Option<u32> {
+        self.group_size
+    }
+
     /// "Invite people to {server}": create an invite to `channel` and copy
     /// its link.
     pub fn open_create_invite(
@@ -5050,6 +5065,39 @@ impl ChatView {
             Some(channel) => self.open_channel(&channel, cx),
             None => self.select_place(Place::Server(id), cx),
         }
+    }
+
+    /// "Create a new group": name it and pick friends for it (`preselected`
+    /// already picked, from their menu), and open it once Stoat has made
+    /// it.
+    fn open_create_group(
+        &mut self,
+        preselected: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let weak = cx.entity().downgrade();
+        let dialog = cx.new(|cx| CreateGroupDialog::new(self, weak, preselected, window, cx));
+        let first_build = std::cell::Cell::new(true);
+        window.open_dialog(cx, move |modal, window, cx| {
+            if first_build.replace(false) {
+                let input = dialog.read(cx).input().read(cx).focus_handle(cx);
+                window.focus(&input, cx);
+            }
+            modal
+                .title("Create a new group")
+                .w(px(CREATE_GROUP_DIALOG_WIDTH))
+                .child(dialog.clone())
+        });
+    }
+
+    /// The user created a group: add it at once (its `ChannelCreate` may
+    /// come before or after) and open it.
+    pub fn group_created(&mut self, channel: Channel, cx: &mut Context<Self>) {
+        let id = crate::store::channel_id(&channel).to_string();
+        log::debug!("created group {id}");
+        self.store.add_channel(channel);
+        self.open_channel(&id, cx);
     }
 
     /// "Create channel" in `server`, put in `category` when it's asked for
@@ -6656,16 +6704,29 @@ impl ChatView {
 
         let theme = cx.theme();
         let (hover_bg, hover_fg) = (theme.sidebar_accent, theme.sidebar_accent_foreground);
+        // Home's "+" makes a group.
+        let create_group = (self.place == Place::Home && self.has_ready).then(|| {
+            Button::new("create-group")
+                .ghost()
+                .xsmall()
+                .icon(IconName::Plus)
+                .tooltip("Create a group")
+                .on_click(
+                    cx.listener(|this, _, window, cx| this.open_create_group(None, window, cx)),
+                )
+        });
         // A server's name opens its info.
         let heading = h_flex()
             .id("channel-list-title")
             .h(px(48.))
             .flex_none()
             .px_4()
+            .gap_2()
             .border_b_1()
             .border_color(theme.sidebar_border)
             .font_weight(FontWeight::SEMIBOLD)
-            .child(div().truncate().child(title))
+            .child(div().flex_1().min_w_0().truncate().child(title))
+            .children(create_group)
             .when_some(server, |el, server| {
                 el.cursor_pointer()
                     .hover(move |style| style.bg(hover_bg).text_color(hover_fg))
@@ -7356,6 +7417,11 @@ impl ChatView {
             view.update(cx, |this, cx| this.open_add_friend(window, cx))
                 .ok();
         };
+        let view = cx.entity().downgrade();
+        let on_new_group = move |window: &mut Window, cx: &mut App| {
+            view.update(cx, |this, cx| this.open_create_group(None, window, cx))
+                .ok();
+        };
         let buttons = |user: &str| RowButtons {
             actions: crate::friends::row_actions(&self.store, user),
             pending: self.relationship_pending.contains(user),
@@ -7373,6 +7439,7 @@ impl ChatView {
             &lists,
             self.friends_tab,
             on_add_friend,
+            on_new_group,
             colors,
             buttons,
             on_tab,
@@ -8676,6 +8743,7 @@ fn user_menu_label(item: UserMenuItem) -> Option<(&'static str, IconName)> {
     Some(match item {
         UserMenuItem::Profile => ("Profile", IconName::CircleUser),
         UserMenuItem::Message => ("Message", IconName::MessageCircle),
+        UserMenuItem::CreateGroupWith => ("Create group with…", IconName::Users),
         UserMenuItem::Mention => ("Mention", IconName::AtSign),
         UserMenuItem::CopyUsername => ("Copy username", IconName::Copy),
         UserMenuItem::CopyUserId => ("Copy user ID", IconName::IdCard),

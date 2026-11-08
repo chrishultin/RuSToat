@@ -16,6 +16,7 @@ pub mod draft;
 pub mod embed;
 pub mod emoji;
 pub mod friends;
+pub mod groups;
 pub mod http;
 pub mod invites;
 pub mod links;

@@ -236,6 +236,7 @@ mod menu {
             [
                 Profile,
                 Message,
+                CreateGroupWith,
                 Mention,
                 Separator,
                 Relationship(RemoveFriend),
@@ -253,6 +254,24 @@ mod menu {
         assert!(user_menu(&store, ADA, Some("grp")).contains(&Mention));
         assert!(!user_menu(&store, ADA, Some("dm")).contains(&Mention));
         assert!(!user_menu(&store, ADA, None).contains(&Mention));
+    }
+
+    #[test]
+    fn create_group_with_is_for_friends_only() {
+        let store = store();
+        assert!(user_menu(&store, "u-bob", None).contains(&CreateGroupWith));
+        for user in [ADA, "u-plain", "u-bot", "u-blocked", "u-me"] {
+            assert!(
+                !user_menu(&store, user, Some("ch")).contains(&CreateGroupWith),
+                "{user}"
+            );
+        }
+        // Becoming friends offers it.
+        let mut store = store;
+        store.apply_relationship(
+            serde_json::from_value(user("u-plain", json!({ "relationship": "Friend" }))).unwrap(),
+        );
+        assert!(user_menu(&store, "u-plain", Some("ch")).contains(&CreateGroupWith));
     }
 
     #[test]

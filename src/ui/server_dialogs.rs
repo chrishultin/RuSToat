@@ -196,7 +196,7 @@ impl Render for CreateServerDialog {
 
 /// A name field as these dialogs show it: `label` above the field, a
 /// "{n}/32" counter under it (red past 32), and `error` below that.
-fn name_field(
+pub(crate) fn name_field(
     label: &'static str,
     input: &Entity<InputState>,
     busy: bool,
@@ -221,7 +221,7 @@ fn name_field(
 }
 
 /// A field's label, above it.
-fn field_label(label: &'static str, cx: &App) -> Div {
+pub(crate) fn field_label(label: &'static str, cx: &App) -> Div {
     div()
         .text_sm()
         .font_weight(FontWeight::MEDIUM)

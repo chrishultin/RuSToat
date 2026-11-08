@@ -76,6 +76,10 @@ pub struct GlobalLimits {
     /// The longest an invite may last, in days (Stoat's default is 30).
     #[serde(default)]
     pub max_invite_duration_days: Option<u32>,
+    /// The most members a group may have, its owner included (Stoat's
+    /// default is 100).
+    #[serde(default)]
+    pub group_size: Option<u32>,
 }
 
 /// The limits this client uses, out of many.
@@ -845,6 +849,26 @@ impl StoatClient {
             Method::POST,
             "/servers/create",
             Some(&CreateServer { name }),
+        )
+        .await
+    }
+
+    /// `POST /channels/create`: a new group called `name`, owned by the
+    /// user, with `users` (the user's friends, at most 49) as its other
+    /// members. Stoat then sends `ChannelCreate` to each of them, the user
+    /// included.
+    pub async fn create_group(&self, name: &str, users: &[String]) -> Result<Channel, ApiError> {
+        // `DataCreateGroup` would also send `"description": null` and the
+        // rest.
+        #[derive(Serialize)]
+        struct CreateGroup<'a> {
+            name: &'a str,
+            users: &'a [String],
+        }
+        self.send(
+            Method::POST,
+            "/channels/create",
+            Some(&CreateGroup { name, users }),
         )
         .await
     }

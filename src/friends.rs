@@ -50,6 +50,8 @@ pub struct FriendRow {
     pub user_id: String,
     /// Display name, else username.
     pub name: String,
+    /// Without the `#1234` (what the group picker's search matches too).
+    pub username: String,
     pub avatar_url: String,
     pub presence: PresenceKind,
     /// The custom status, else the presence's name (empty when offline).
@@ -227,6 +229,7 @@ fn friend_row(store: &ChatStore, user: &User) -> FriendRow {
     FriendRow {
         user_id: user.id.clone(),
         name: display_name(user).to_string(),
+        username: user.username.clone(),
         avatar_url: store.user_avatar_url(&user.id),
         presence,
         status: custom.unwrap_or(presence.label()).to_string(),

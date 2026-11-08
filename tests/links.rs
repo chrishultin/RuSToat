@@ -96,6 +96,20 @@ fn the_longest_invite_comes_from_the_root_config_when_sent() {
 }
 
 #[test]
+fn the_largest_group_comes_from_the_root_config_when_sent() {
+    let root: RootConfig =
+        serde_json::from_str(include_str!("fixtures/root.json")).expect("root.json");
+    assert_eq!(root.features.limits.global.group_size, Some(100));
+
+    let root: RootConfig = serde_json::from_value(serde_json::json!({
+        "revolt": "0.16.2", "ws": "wss://events.stoat.chat",
+        "features": { "limits": { "global": {} } }
+    }))
+    .unwrap();
+    assert_eq!(root.features.limits.global.group_size, None);
+}
+
+#[test]
 fn message_links_lead_to_their_channel_and_message() {
     let hosts = official();
     for link in [

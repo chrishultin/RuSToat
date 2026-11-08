@@ -9,6 +9,7 @@ pub mod composer;
 pub mod emoji_picker;
 pub mod friends;
 pub mod gif_picker;
+pub mod group_dialogs;
 pub mod identity_dialog;
 pub mod invites;
 pub mod login;

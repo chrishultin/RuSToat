@@ -158,6 +158,8 @@ pub enum UserMenuItem {
     Profile,
     /// Open the DM with them (see [`can_message`]).
     Message,
+    /// Open "Create a new group" with them picked (friends only).
+    CreateGroupWith,
     /// Put a mention of them in the message box.
     Mention,
     /// Change how the user relates to them (friend requests, blocks).
@@ -226,10 +228,11 @@ fn standing_actions(store: &ChatStore, user: &str) -> Vec<RelationshipAction> {
 }
 
 /// The menu for `user`, as seen from `channel`, in the web client's order:
-/// Profile, Message, Mention; the friend requests; Remove friend and Block
-/// or Unblock; then the copy items. Message follows [`can_message`];
-/// Mention is only for others, in server channels and groups (where the
-/// message box can mention them). Groups are split by separators.
+/// Profile, Message, Create group with (RuSToat's own, for friends),
+/// Mention; the friend requests; Remove friend and Block or Unblock; then
+/// the copy items. Message follows [`can_message`]; Mention is only for
+/// others, in server channels and groups (where the message box can
+/// mention them). Groups are split by separators.
 pub fn user_menu(store: &ChatStore, user: &str, channel: Option<&str>) -> Vec<UserMenuItem> {
     use UserMenuItem::*;
     let me = user == store.me();
@@ -241,6 +244,12 @@ pub fn user_menu(store: &ChatStore, user: &str, channel: Option<&str>) -> Vec<Us
     let mut people = vec![Profile];
     if can_message(store, user) {
         people.push(Message);
+    }
+    let friend = store
+        .user(user)
+        .is_some_and(|person| person.relationship == RelationshipStatus::Friend);
+    if friend && !me {
+        people.push(CreateGroupWith);
     }
     if mentionable && !me {
         people.push(Mention);

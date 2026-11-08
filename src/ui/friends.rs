@@ -73,13 +73,15 @@ fn page_rows(
 }
 
 /// The Friends page. `on_add_friend` is called by the header's "Add
-/// friend" button (see [`render_add_friend`]), `buttons` gives each
-/// person's row buttons, and `on_tab` is called with the tab clicked.
+/// friend" button (see [`render_add_friend`]), `on_new_group` by its "New
+/// group", `buttons` gives each person's row buttons, and `on_tab` is
+/// called with the tab clicked.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_friends_page(
     lists: &FriendLists,
     tab: FriendsTab,
     on_add_friend: impl Fn(&mut Window, &mut App) + 'static,
+    on_new_group: impl Fn(&mut Window, &mut App) + 'static,
     colors: MemberColors,
     buttons: impl Fn(&str) -> RowButtons,
     on_tab: impl Fn(FriendsTab, &mut Window, &mut App) + 'static,
@@ -98,6 +100,14 @@ pub(crate) fn render_friends_page(
         .font_weight(FontWeight::SEMIBOLD)
         .child(Icon::new(IconName::Users).text_color(theme.muted_foreground))
         .child(div().flex_1().child("Friends"))
+        .child(
+            Button::new("new-group")
+                .outline()
+                .small()
+                .icon(IconName::Users)
+                .label("New group")
+                .on_click(move |_, window, cx| on_new_group(window, cx)),
+        )
         .child(
             Button::new("add-friend")
                 .primary()

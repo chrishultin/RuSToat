@@ -321,3 +321,23 @@ fn a_sent_request_says_who_it_went_to() {
         AddFriendState::Sent("You're now friends with bob#0042.".into())
     );
 }
+
+#[test]
+fn a_group_can_be_made_with_friends_only_sorted_by_name() {
+    use stoat_gpui::groups::pickable_friends;
+    let store = store_with(vec![
+        user("u-zed", "Friend", json!({ "display_name": "Ada" })),
+        user("u-away", "Friend", json!({ "online": false })),
+        user("u-in", "Incoming", json!({})),
+        user("u-out", "Outgoing", json!({})),
+        user("u-blocked", "Blocked", json!({})),
+        user("u-none", "None", json!({})),
+    ]);
+    // Offline friends too, by display name; not the user.
+    let all = pickable_friends(&store, &[]);
+    assert_eq!(ids(&all), ["u-zed", "u-away"]);
+    assert_eq!(all[0].username, "zed");
+    // Without those already in the group.
+    let rest = pickable_friends(&store, &["u-zed".into(), "u-none".into()]);
+    assert_eq!(ids(&rest), ["u-away"]);
+}
