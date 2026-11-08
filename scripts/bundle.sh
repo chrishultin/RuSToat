@@ -72,6 +72,8 @@ cat > "$app/Contents/Info.plist" <<EOF
   <string>11.0</string>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>RuSToat uses the microphone in voice calls.</string>
 </dict>
 </plist>
 EOF

@@ -1,10 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Entitlements for release builds (hardened runtime). Deliberately empty:
-  network clients, the Keychain and user notifications need no runtime
-  exceptions. Add the narrowest one here if a release build ever needs it.
+  Entitlements for release builds (hardened runtime). Network clients, the
+  Keychain and user notifications need no runtime exceptions. The microphone,
+  for voice calls, does: without audio-input, the hardened runtime denies it
+  silently. Add the narrowest one here if a release build ever needs more.
 -->
 <plist version="1.0">
-<dict/>
+<dict>
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+</dict>
 </plist>

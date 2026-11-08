@@ -93,6 +93,7 @@ use crate::ui::server_dialogs::{
     CreateServerDialog, EditFolderDialog, INFO_DIALOG_WIDTH, InfoContent, InfoPlaceholder,
     NAME_DIALOG_WIDTH, NameDialog, render_info,
 };
+use crate::voice::VoiceCall;
 
 actions!(
     chat,
@@ -399,6 +400,8 @@ pub struct ChatView {
     /// The voice server to ask for when joining a call, if the instance has
     /// voice (see [`crate::api::RootConfig::voice_node`]).
     voice_node: Option<String>,
+    /// The voice call this account is in, or joining. One at a time.
+    voice: Option<ActiveCall>,
     /// The person whose DM is being asked for ("Message" on their card).
     dm_opening: Option<String>,
     /// People whose friend request or block is on its way to Stoat.
@@ -507,6 +510,22 @@ pub struct ChatView {
 
 /// How often relative timestamps ("in 3 hours") are worked out again.
 const RELATIVE_TIME_TICK: Duration = Duration::from_secs(60);
+
+/// The voice call an account is in, or joining.
+struct ActiveCall {
+    /// The voice channel.
+    channel: String,
+    state: CallState,
+    /// Joins, then waits for the call to end by itself. Dropping it (by
+    /// leaving) cancels the join, and nobody is told the call ended.
+    _task: Task<()>,
+}
+
+enum CallState {
+    Joining,
+    /// Dropping the call leaves it.
+    Connected(VoiceCall),
+}
 
 /// How long after a message is pinned or unpinned the open pins list is
 /// fetched again, so that a burst of changes makes one request.
@@ -830,6 +849,7 @@ impl ChatView {
             invite_max_days: None,
             group_size: None,
             voice_node: None,
+            voice: None,
             image_limits: ImageLimits::default(),
             window: window.window_handle(),
             dm_opening: None,
@@ -5935,6 +5955,101 @@ impl ChatView {
         self.voice_node.as_deref()
     }
 
+    /// Whether the user is in `channel`'s call, or joining it.
+    fn voice_state(&self, channel: &str) -> Option<&CallState> {
+        self.voice
+            .as_ref()
+            .filter(|call| call.channel == channel)
+            .map(|call| &call.state)
+    }
+
+    /// Join `channel`'s voice call, leaving any other this account is in.
+    /// Stoat takes the call over from any other device this account is in
+    /// it on. Sends the microphone with Speak and plays everyone else with
+    /// Listen.
+    fn join_voice(&mut self, channel: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(node) = self.voice_node.clone() else {
+            return;
+        };
+        self.leave_voice(cx);
+        let publish_mic = self.store.can_speak(&channel);
+        let subscribe = self.store.can_listen(&channel);
+        log::info!("voice: joining {channel} (microphone: {publish_mic}, listening: {subscribe})");
+        let client = self.client.clone();
+        let join = spawn_io({
+            let channel = channel.clone();
+            async move {
+                let call = client.join_call(&channel, &node).await?;
+                // Straight away: the token lasts 10 seconds.
+                VoiceCall::join(&channel, &call.url, &call.token, publish_mic, subscribe).await
+            }
+        });
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = join.await;
+            let events = this
+                .update_in(cx, |this, window, cx| {
+                    let joined = match result {
+                        Ok(Ok(joined)) => Ok(joined),
+                        Ok(Err(err)) => {
+                            log::warn!("voice: couldn't join: {err}");
+                            Err(err.text())
+                        }
+                        Err(err) => {
+                            log::warn!("voice: join task failed: {err:?}");
+                            Err("Couldn't join the call. Try again.".to_string())
+                        }
+                    };
+                    cx.notify();
+                    match joined {
+                        Ok((call, events)) => {
+                            if let Some(active) = &mut this.voice {
+                                active.state = CallState::Connected(call);
+                            }
+                            Some(events)
+                        }
+                        Err(text) => {
+                            // Drops this task: nothing after this runs.
+                            this.voice = None;
+                            window.push_notification(Notification::error(text), cx);
+                            None
+                        }
+                    }
+                })
+                .ok()
+                .flatten();
+            let Some(mut events) = events else {
+                return;
+            };
+            // Only a call that ends by itself gets here: leaving drops this
+            // task first.
+            events.next().await;
+            this.update_in(cx, |this, window, cx| {
+                this.voice = None;
+                window.push_notification(Notification::error("Disconnected from voice."), cx);
+                cx.notify();
+            })
+            .ok();
+        });
+        self.voice = Some(ActiveCall {
+            channel,
+            state: CallState::Joining,
+            _task: task,
+        });
+        cx.notify();
+    }
+
+    /// Leave the voice call this account is in, or stop joining one.
+    fn leave_voice(&mut self, cx: &mut Context<Self>) {
+        let Some(active) = self.voice.take() else {
+            return;
+        };
+        match active.state {
+            CallState::Connected(call) => call.leave(),
+            CallState::Joining => log::info!("voice: stopped joining {}", active.channel),
+        }
+        cx.notify();
+    }
+
     /// "Invite people to {server}" (or "{group}"): create an invite to
     /// `channel`, a server channel or a group, and copy its link.
     pub fn open_create_invite(
@@ -8294,6 +8409,8 @@ impl ChatView {
         let unread_fg = theme.sidebar_foreground;
         let id = channel.id.clone();
         let (unread, mentions, muted) = (channel.unread, channel.mentions, channel.muted);
+        let in_call = matches!(self.voice_state(&channel.id), Some(CallState::Connected(_)));
+        let accent = theme.primary;
         let menu = self.channel_menu(&channel, cx);
         h_flex()
             .id(SharedString::from(format!("channel-{}", channel.id)))
@@ -8331,8 +8448,11 @@ impl ChatView {
                             theme.secondary,
                             theme.secondary_foreground,
                         ),
+                        // A voice channel the user is in shows it in the
+                        // accent colour.
                         None => Icon::new(channel_icon(channel.kind))
                             .small()
+                            .when(in_call, |icon| icon.text_color(accent))
                             .into_any_element(),
                     }),
             )
@@ -8535,6 +8655,36 @@ impl ChatView {
             // Right side: search in every channel, but DMs and Saved Notes
             // have no member list to toggle.
             .when(usable, |el| el.child(search_box))
+            // Joining and leaving a voice channel's call, when the instance
+            // has voice and the user may connect.
+            .when_some(
+                channel
+                    .as_ref()
+                    .filter(|c| {
+                        usable
+                            && c.kind == ChannelKind::Text { voice: true }
+                            && self.voice_node.is_some()
+                            && self.store.can_connect(&c.id)
+                    })
+                    .map(|c| c.id.clone()),
+                |el, id| {
+                    let button = Button::new("voice-call").small();
+                    el.child(match self.voice_state(&id) {
+                        Some(CallState::Connected(_)) => button
+                            .danger()
+                            .label("Leave voice")
+                            .on_click(cx.listener(|this, _, _, cx| this.leave_voice(cx))),
+                        Some(CallState::Joining) => button
+                            .primary()
+                            .label("Joining…")
+                            .loading(true)
+                            .disabled(true),
+                        None => button.primary().label("Join voice").on_click(cx.listener(
+                            move |this, _, window, cx| this.join_voice(id.clone(), window, cx),
+                        )),
+                    })
+                },
+            )
             // Adding friends, in groups where the user may.
             .when_some(
                 channel

@@ -109,3 +109,64 @@ Dependencies (`cargo tree -e normal,build,dev --target aarch64-apple-darwin`, un
 
 ### Manual Validation
 None required for this chunk.
+
+## Chunk 3: Join and leave a voice channel
+
+### Changes Made
+- `src/voice.rs` (the tokio side, no GPUI):
+  - `VoiceError { Api(ApiError), LiveKit(RoomError), Audio(AudioError) }` with `text()`:
+    - Api: `join_error_text`.
+    - LiveKit: "Couldn't connect to the voice server. Try again."
+    - Audio: "Couldn't start your microphone and speakers."
+  - `VoiceEvent::Disconnected` and `VoiceEvents` (a `futures` unbounded receiver).
+  - `VoiceCall::join(channel, url, token, publish_mic, subscribe)`:
+    - Creates `PlatformAudio`, then `Room::connect` with `auto_subscribe = false`.
+    - With `subscribe`, subscribes to the audio publications of everyone already in the room.
+    - Spawns `read_events` on `runtime()`.
+    - With `publish_mic`, publishes `LocalAudioTrack::create_audio_track("microphone", audio.rtc_source())` with `TrackSource::Microphone`.
+    - Once the room exists, dropping the half-built call (a publish error, or the join being cancelled) closes it.
+  - `read_events`:
+    - Logs participants joining and leaving (info), audio subscribed, unsubscribed and failed (debug/warn), and `Reconnecting` / `Reconnected` (info).
+    - Subscribes to newly published **audio** only, when `subscribe` is on.
+    - On `Disconnected` (or the event stream ending) sends `VoiceEvent::Disconnected`.
+  - `VoiceCall::leave(self)` logs and drops. `Drop` aborts the event task (so leaving isn't reported as a disconnect), then on `runtime()`: `room.close()` (ignoring `AlreadyClosed`), drop the `PlatformAudio`, log "left".
+  - Removed `webrtc_ready()`.
+- `src/main.rs`: removed chunk 1's startup `webrtc_ready()` call. The rustls provider stays.
+- `src/ui/chat.rs`:
+  - `ActiveCall { channel, state: CallState, _task }` with `CallState::{Joining, Connected(VoiceCall)}`, kept as `ChatView.voice: Option<ActiveCall>`.
+  - `voice_state(channel)` reports whether you're joining or in that channel's call.
+  - `join_voice(channel, window, cx)`:
+    - Leaves any current call, then reads `can_speak` / `can_listen`.
+    - One `spawn_io` runs `join_call(channel, node)` and then, straight away, `VoiceCall::join`.
+    - One GPUI task then sets `Connected` (or clears the call and toasts `VoiceError::text()`, with a warn log), and waits on `VoiceEvents`. If those say the call ended, it clears it and toasts "Disconnected from voice."
+    - Leaving drops that task, so nothing is toasted.
+  - `leave_voice(cx)`.
+  - Header: a small button after the search box, shown for `ChannelKind::Text { voice: true }` channels when the channel is usable (not age-gated), `voice_node` is known and `can_connect`. It reads "Join voice" (primary), "Joining…" (primary, loading, disabled) or "Leave voice" (danger).
+  - Channel row: the icon is drawn in `theme.primary` (the palette's accent) while `Connected` in that channel.
+  - Teardown needs no new code: `voice` is a `ChatView` field, so dropping the view (log out, sign out, closing the window) drops the `VoiceCall`, whose `Drop` closes the room.
+- `scripts/bundle.sh`: `NSMicrophoneUsageDescription` = "RuSToat uses the microphone in voice calls."
+- `scripts/entitlements.plist`: `com.apple.security.device.audio-input`, and its comment explains it.
+
+### Divergences
+- **Minor:** `VoiceCall::join` also takes the channel ID, for logging.
+- **Minor:** `VoiceError` has a third case, `Audio`, for `PlatformAudio::new()` failing (no audio devices, say), with its own text. Assumption 8 didn't list one.
+- **Minor:** a GPUI task that fails without an answer (cancelled or panicked) toasts the generic "Couldn't join the call. Try again."
+- **Finding (testing, not product): no microphone prompt under a tool-launched `cargo run`.** macOS attributes microphone access to the *responsible* app. The `cargo run` started from this session inherits it from `HumanLayer-Local.app`, whose `Info.plist` has no `NSMicrophoneUsageDescription`. TCC therefore denies the mic silently, with no prompt, and the call would send silence. Launching the bundle through LaunchServices (`scripts/bundle.sh debug` then `open target/debug/RuSToat.app`) makes RuSToat responsible for itself. From a normal terminal, `cargo run` attributes the mic to the terminal, as the plan says.
+- **Risk #1468 did not show:** join → leave → join worked four times in a row with a fresh `PlatformAudio` each time (it logged "released Platform ADM (ref_count now: 0)" then "acquired" again). Assumption 11's fallback (one `PlatformAudio` for the process) wasn't needed so far; chunk 4 runs five cycles.
+
+### Verification Performed
+- `cargo test`: 71 test binaries, 1061 passed (one new `voice::tests::a_failed_connection_or_audio_says_which`), 0 failed, 5 ignored.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt drift: `src/ui/chat.rs` 17 (unchanged, after moving the new `use` to the end of the list), `src/voice.rs` 0, `src/main.rs` 0.
+- `plutil -lint scripts/entitlements.plist`: OK. The bundled `Info.plist` has the usage string.
+- Checked that the token isn't logged: our client logs only the method and URL, and the error on failure. LiveKit sends the token in an `Authorization` header and logs only redacted URLs (`livekit_net::redact_url`).
+- `RUST_LOG=stoat_gpui=debug,livekit=info cargo run` (attributed to HumanLayer-Local, so no mic): join → "joined … as <user>", "sending the microphone"; leave → "Disconnected … ClientInitiated", "released Platform ADM", "left". Twice in a row. Connection setup took 2.7 s and 1.8 s.
+- The bundled debug app launched with `open`:
+  - Join and leave as account A.
+  - Then account B joined. The web client user (account A) came in, and the log showed "01KH4Q74… joined", "subscribing to …'s Microphone audio", "subscribed".
+  - Then "Leave voice" closed the room cleanly.
+  - LiveKit connection setup took 1.6 s and 1.5 s.
+
+### Manual Validation
+- The user ran the call against the stoat.chat web client and reported "it's looking good". Two-way audio, the button states and the row icon were checked by eye.
+- Not yet confirmed explicitly, and carried into chunk 4's trial: the bundled app's microphone prompt text, and leaving by logging out mid-call (the log shows only button leaves).

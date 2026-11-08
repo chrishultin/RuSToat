@@ -71,17 +71,6 @@ fn main() {
     // the first network call.
     runtime::runtime();
 
-    // Voice spike: check that WebRTC links and starts, and name the audio
-    // devices it sees. Off the main thread; only when debug logging is on.
-    if log::log_enabled!(log::Level::Debug) {
-        runtime::runtime().spawn_blocking(|| match stoat_gpui::voice::webrtc_ready() {
-            Ok((inputs, outputs)) => {
-                log::debug!("webrtc ready: inputs {inputs:?}, outputs {outputs:?}")
-            }
-            Err(err) => log::warn!("webrtc audio didn't start: {err}"),
-        });
-    }
-
     // Pasted images left behind by RuSToat processes that have since quit
     // (a day without changes); in the background, so launch isn't held up.
     std::thread::spawn(|| {
