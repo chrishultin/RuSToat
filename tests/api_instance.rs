@@ -1,7 +1,7 @@
 //! Finding an instance's API from a typed address, against a mock server.
 
-use serde_json::Value;
-use stoat_gpui::api::{InstanceError, resolve_instance};
+use serde_json::{Value, json};
+use stoat_gpui::api::{InstanceError, RootConfig, resolve_instance};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -119,4 +119,28 @@ async fn other_api_versions_still_resolve() {
 async fn junk_is_rejected_without_a_request() {
     let err = resolve_instance("   ").await.unwrap_err();
     assert!(matches!(err, InstanceError::Invalid), "got {err:?}");
+}
+
+#[test]
+fn the_first_voice_node_is_offered() {
+    let config: RootConfig = serde_json::from_value(root()).unwrap();
+    assert_eq!(config.voice_node(), Some("hel1"));
+}
+
+#[test]
+fn no_voice_node_when_voice_is_off_or_missing() {
+    let mut disabled = root();
+    disabled["features"]["livekit"]["enabled"] = false.into();
+    let mut no_nodes = root();
+    no_nodes["features"]["livekit"]["nodes"] = json!([]);
+    let mut missing = root();
+    missing["features"]
+        .as_object_mut()
+        .unwrap()
+        .remove("livekit");
+
+    for value in [disabled, no_nodes, missing] {
+        let config: RootConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(config.voice_node(), None);
+    }
 }

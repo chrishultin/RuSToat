@@ -2617,6 +2617,24 @@ impl ChatStore {
         crate::permissions::can_add_to_group(self, &self.me, channel)
     }
 
+    /// Whether the user may join `channel`'s voice call (see
+    /// [`crate::permissions::can_connect`]).
+    pub fn can_connect(&self, channel: &str) -> bool {
+        crate::permissions::can_connect(self, &self.me, channel)
+    }
+
+    /// Whether the user may be heard in `channel`'s call (see
+    /// [`crate::permissions::can_speak`]).
+    pub fn can_speak(&self, channel: &str) -> bool {
+        crate::permissions::can_speak(self, &self.me, channel)
+    }
+
+    /// Whether the user may hear others in `channel`'s call (see
+    /// [`crate::permissions::can_listen`]).
+    pub fn can_listen(&self, channel: &str) -> bool {
+        crate::permissions::can_listen(self, &self.me, channel)
+    }
+
     /// Whether the user may delete `channel` (see
     /// [`crate::permissions::can_manage_channel`]).
     pub fn can_manage_channel(&self, channel: &str) -> bool {

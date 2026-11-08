@@ -396,6 +396,9 @@ pub struct ChatView {
     invite_max_days: Option<u32>,
     /// The most members a group may have on this instance, when it says.
     group_size: Option<u32>,
+    /// The voice server to ask for when joining a call, if the instance has
+    /// voice (see [`crate::api::RootConfig::voice_node`]).
+    voice_node: Option<String>,
     /// The person whose DM is being asked for ("Message" on their card).
     dm_opening: Option<String>,
     /// People whose friend request or block is on its way to Stoat.
@@ -577,6 +580,7 @@ impl ChatView {
                         root.app
                     );
                     this.update(cx, |this, cx| {
+                        this.voice_node = root.voice_node().map(str::to_owned);
                         this.web_app = root.app;
                         this.image_limits = image_limits;
                         // Before `set_media`, whose re-sync adds the cards.
@@ -825,6 +829,7 @@ impl ChatView {
             own_member_fetches: HashSet::new(),
             invite_max_days: None,
             group_size: None,
+            voice_node: None,
             image_limits: ImageLimits::default(),
             window: window.window_handle(),
             dm_opening: None,
@@ -5922,6 +5927,12 @@ impl ChatView {
     /// included, when it says.
     pub fn group_size(&self) -> Option<u32> {
         self.group_size
+    }
+
+    /// The voice server to ask for when joining a call, if the instance has
+    /// voice. Unknown until its config has loaded.
+    pub fn voice_node(&self) -> Option<&str> {
+        self.voice_node.as_deref()
     }
 
     /// "Invite people to {server}" (or "{group}"): create an invite to

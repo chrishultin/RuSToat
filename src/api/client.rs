@@ -4,12 +4,12 @@ use std::time::Duration;
 use reqwest::{Client, Method};
 use revolt_models::v0::{
     AccountInfo, AllMemberResponse, BulkMessageResponse, Category, Channel,
-    CreateServerLegacyResponse, DataChangeEmail, DataChangePassword, DataEditMessage,
-    DataEditSession, DataEditUser, DataLogin, DataMemberEdit, DataMessageSearch, DataMessageSend,
-    DataSendFriendRequest, Emoji, FieldsUser, Invite, InviteJoinResponse, InviteResponse,
-    MFAResponse, MFATicket, Member, Message, MessageSort, MultiFactorStatus, MutualResponse,
-    OptionsQueryMessages, Presence, ReplyIntent, ResponseLogin, ResponseTotpSecret, SessionInfo,
-    User, UserProfile, UserStatus,
+    CreateServerLegacyResponse, CreateVoiceUserResponse, DataChangeEmail, DataChangePassword,
+    DataEditMessage, DataEditSession, DataEditUser, DataLogin, DataMemberEdit, DataMessageSearch,
+    DataMessageSend, DataSendFriendRequest, Emoji, FieldsUser, Invite, InviteJoinResponse,
+    InviteResponse, MFAResponse, MFATicket, Member, Message, MessageSort, MultiFactorStatus,
+    MutualResponse, OptionsQueryMessages, Presence, ReplyIntent, ResponseLogin, ResponseTotpSecret,
+    SessionInfo, User, UserProfile, UserStatus,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -59,6 +59,28 @@ pub struct RootFeatures {
     /// What accounts may do: established ones, and new ones (their first days).
     #[serde(default)]
     pub limits: RootLimits,
+    /// Voice calls: the LiveKit servers ("nodes") the instance runs.
+    #[serde(default)]
+    pub livekit: Option<VoiceFeature>,
+}
+
+/// The instance's voice servers, from `features.livekit`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct VoiceFeature {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub nodes: Vec<VoiceNode>,
+}
+
+/// One LiveKit server. Stoat also sends where it is (`lat`, `lon`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct VoiceNode {
+    /// What `join_call` names it by, e.g. `hel1`.
+    pub name: String,
+    /// Its address, e.g. `wss://livekit.hel1.voice.stoat.chat`.
+    #[serde(default)]
+    pub public_url: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -171,6 +193,18 @@ impl RootConfig {
             .filter_map(|l| l.message_attachments)
             .min()
             .unwrap_or(DEFAULT_MAX_ATTACHMENTS)
+    }
+
+    /// The voice server to ask for when joining a call: the first one
+    /// listed, if the instance has voice at all. The web client pings each
+    /// and takes the fastest; with one node there's nothing to choose.
+    pub fn voice_node(&self) -> Option<&str> {
+        self.features
+            .livekit
+            .as_ref()
+            .filter(|v| v.enabled)
+            .and_then(|v| v.nodes.first())
+            .map(|node| node.name.as_str())
     }
 }
 
@@ -981,6 +1015,35 @@ impl StoatClient {
             Method::POST,
             &format!("/servers/{server}/channels"),
             Some(&CreateChannel { kind, name }),
+        )
+        .await
+    }
+
+    /// `POST /channels/{channel}/join_call`: a LiveKit room token for the
+    /// voice channel, on `node` (Stoat keeps a call already running on its
+    /// own node). Always with `force_disconnect`, so a call this account is
+    /// in elsewhere (another device, the web client) ends and this one joins.
+    ///
+    /// The token lasts only 10 seconds: connect to LiveKit straight away.
+    /// Never log it.
+    pub async fn join_call(
+        &self,
+        channel: &str,
+        node: &str,
+    ) -> Result<CreateVoiceUserResponse, ApiError> {
+        // `DataJoinCall` would also send `"recipients": null`.
+        #[derive(Serialize)]
+        struct JoinCall<'a> {
+            node: &'a str,
+            force_disconnect: bool,
+        }
+        self.send(
+            Method::POST,
+            &format!("/channels/{channel}/join_call"),
+            Some(&JoinCall {
+                node,
+                force_disconnect: true,
+            }),
         )
         .await
     }

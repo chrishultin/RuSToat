@@ -74,3 +74,38 @@ Dependencies (`cargo tree -e normal,build,dev --target aarch64-apple-darwin`, un
 ### Manual Validation
 - The user ran the bundled release app (`scripts/run-bundled.sh release`): it works as before.
 - macOS did **not** ask for the microphone at launch, even though `PlatformAudio` enabled ADM recording during `webrtc_ready()`. Nothing was published, so nothing opened the mic.
+
+## Chunk 2: Ask Stoat for a call
+
+### Changes Made
+- `src/api/client.rs`:
+  - `RootFeatures.livekit: Option<VoiceFeature>` (`#[serde(default)]`).
+  - New `VoiceFeature { enabled, nodes: Vec<VoiceNode> }` and `VoiceNode { name, public_url }`, both with serde defaults. `lat`/`lon` are ignored.
+  - `RootConfig::voice_node() -> Option<&str>`: the first node's name when `enabled`, else `None`.
+  - `StoatClient::join_call(channel, node) -> CreateVoiceUserResponse`: `POST /channels/{channel}/join_call` with a private `JoinCall { node, force_disconnect: true }` body (not `DataJoinCall`, which would send `"recipients": null`). The doc says the token lasts 10 seconds and must never be logged. The client's own logging only prints the method and URL, and on failure the error, never a success body.
+  - `CreateVoiceUserResponse` added to the `revolt_models::v0` import list, which was re-wrapped by hand.
+- `src/voice.rs`: `join_error_text(&ApiError) -> String` with the texts of Assumption 8 (minus the LiveKit one, which is chunk 3's). Everything else goes to `profile_edit::error_text(err, "Couldn't join the call. Try again.")`. Three unit tests.
+- `src/permissions.rs`: `can_connect`, `can_speak` and `can_listen` (Connect, Speak, Listen on the channel), modelled on `can_view`.
+- `src/store.rs`: `ChatStore::can_connect` / `can_speak` / `can_listen` wrappers beside `can_pin`.
+- `src/ui/chat.rs`:
+  - `voice_node: Option<String>` on `ChatView`, set from `root.voice_node()` when the root config loads, beside `group_size`.
+  - A public `voice_node()` getter, so the field isn't dead code before chunk 3 reads it.
+- `tests/fixtures/root.json`: the live `features.livekit` section (`hel1`, `wss://livekit.hel1.voice.stoat.chat`), fetched from `api.stoat.chat` today.
+- `tests/api_instance.rs`: `the_first_voice_node_is_offered`, and `no_voice_node_when_voice_is_off_or_missing` (disabled, empty node list, no `livekit` key).
+- `tests/api_voice.rs` (new): `join_call` sends exactly `{"node":"hel1","force_disconnect":true}` with the session token to `/channels/c1/join_call` and parses `{token, url}`. A 400 `CannotJoinCall` and a 403 `MissingPermission` stay `ApiError::Api`.
+- `tests/permissions.rs`:
+  - All three permissions are true for an ordinary member with Stoat's default permissions, and `can_connect` is false for a non-member.
+  - A channel default-permission override denying Connect, Speak or Listen takes away only that one.
+
+### Divergences
+- **Minor:** `ChatView::voice_node()`, a public getter, isn't in the plan. It keeps clippy's dead-code check quiet until chunk 3 reads the field.
+- **Minor:** `voice_node` is set before `web_app`, because `root.app` is moved out of `root` on that line.
+- **Minor:** `CreateVoiceUserResponse` derives `Deserialize` with the `serde` feature RuSToat already enables, so the plan's fallback private struct wasn't needed.
+
+### Verification Performed
+- `cargo test`: 71 test binaries, 1060 passed (9 new), 0 failed, 5 ignored.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt drift (`Diff in` counts): `src/api/client.rs` 3, `src/ui/chat.rs` 17, `src/store.rs` 15 (all unchanged); `src/permissions.rs`, `tests/permissions.rs`, `tests/api_instance.rs`, `src/voice.rs` and `tests/api_voice.rs` 0.
+
+### Manual Validation
+None required for this chunk.

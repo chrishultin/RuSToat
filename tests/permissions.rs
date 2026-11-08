@@ -7,9 +7,10 @@ use revolt_permissions::{
 use serde_json::{Value, json};
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::permissions::{
-    can_add_to_group, can_bypass_slowmode, can_change_avatar, can_change_nickname, can_invite,
-    can_manage_channel, can_manage_channels, can_mention_everyone, can_mention_roles, can_pin,
-    can_send_embeds, can_view, channel_permissions, has, server_permissions,
+    can_add_to_group, can_bypass_slowmode, can_change_avatar, can_change_nickname, can_connect,
+    can_invite, can_listen, can_manage_channel, can_manage_channels, can_mention_everyone,
+    can_mention_roles, can_pin, can_send_embeds, can_speak, can_view, channel_permissions, has,
+    server_permissions,
 };
 use stoat_gpui::store::ChatStore;
 
@@ -19,6 +20,9 @@ const MANAGE: u64 = ChannelPermission::ManageMessages as u64;
 const NICKNAME: u64 = ChannelPermission::ChangeNickname as u64;
 const AVATAR: u64 = ChannelPermission::ChangeAvatar as u64;
 const MANAGE_CHANNEL: u64 = ChannelPermission::ManageChannel as u64;
+const CONNECT: u64 = ChannelPermission::Connect as u64;
+const SPEAK: u64 = ChannelPermission::Speak as u64;
+const LISTEN: u64 = ChannelPermission::Listen as u64;
 
 fn member(user: &str, roles: &[&str], extra: Value) -> Value {
     let mut member = json!({
@@ -692,4 +696,46 @@ fn nobody_creates_channels_before_their_membership_is_known() {
     );
     // Even the owner, whose permissions would be complete.
     assert!(!can_manage_channels(&store, "u-owner", "srv"));
+}
+
+#[test]
+fn members_can_join_speak_and_listen_in_voice_by_default() {
+    let store = server_store();
+    assert!(can_connect(&store, "u-plain", "ch-open"));
+    assert!(can_speak(&store, "u-plain", "ch-open"));
+    assert!(can_listen(&store, "u-plain", "ch-open"));
+    // Someone who isn't a member can't.
+    assert!(!can_connect(&store, "u-stranger", "ch-open"));
+}
+
+#[test]
+fn a_channel_override_takes_away_each_voice_permission() {
+    let channels = json!([
+        {
+            "channel_type": "TextChannel", "_id": "ch-no-connect", "server": "srv",
+            "name": "no-connect", "voice": {},
+            "default_permissions": { "a": 0, "d": CONNECT }
+        },
+        {
+            "channel_type": "TextChannel", "_id": "ch-no-speak", "server": "srv",
+            "name": "no-speak", "voice": {},
+            "default_permissions": { "a": 0, "d": SPEAK }
+        },
+        {
+            "channel_type": "TextChannel", "_id": "ch-no-listen", "server": "srv",
+            "name": "no-listen", "voice": {},
+            "default_permissions": { "a": 0, "d": LISTEN }
+        }
+    ]);
+    let store = store_with(channels, vec![], vec![member("u-me", &[], json!({}))]);
+
+    assert!(!can_connect(&store, "u-me", "ch-no-connect"));
+    assert!(can_speak(&store, "u-me", "ch-no-connect"));
+
+    assert!(can_connect(&store, "u-me", "ch-no-speak"));
+    assert!(!can_speak(&store, "u-me", "ch-no-speak"));
+    assert!(can_listen(&store, "u-me", "ch-no-speak"));
+
+    assert!(can_connect(&store, "u-me", "ch-no-listen"));
+    assert!(!can_listen(&store, "u-me", "ch-no-listen"));
 }

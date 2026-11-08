@@ -155,6 +155,33 @@ pub fn can_add_to_group(store: &ChatStore, user: &str, channel: &str) -> bool {
         )
 }
 
+/// Whether `user` may join the voice call in `channel` (Connect), as Stoat
+/// checks before handing out a room token.
+pub fn can_connect(store: &ChatStore, user: &str, channel: &str) -> bool {
+    has(
+        channel_permissions(store, user, channel),
+        ChannelPermission::Connect,
+    )
+}
+
+/// Whether `user` may be heard in `channel`'s call (Speak): Stoat lets them
+/// publish their microphone only with it.
+pub fn can_speak(store: &ChatStore, user: &str, channel: &str) -> bool {
+    has(
+        channel_permissions(store, user, channel),
+        ChannelPermission::Speak,
+    )
+}
+
+/// Whether `user` may hear others in `channel`'s call (Listen): Stoat lets
+/// them subscribe to others' audio only with it.
+pub fn can_listen(store: &ChatStore, user: &str, channel: &str) -> bool {
+    has(
+        channel_permissions(store, user, channel),
+        ChannelPermission::Listen,
+    )
+}
+
 /// Whether `user` may delete `channel`: only server channels here (closing
 /// DMs and leaving groups need no permission), with Manage Channels on that
 /// channel, as Stoat checks.
