@@ -105,14 +105,14 @@ Some milestones lay foundations that later ones reuse. When the earlier one's pl
 - Delete a channel (with confirmation, for those with Manage Channels). Deleting a server moved to milestone 23.
 - Server and channel info dialogs (icon, banner, description), from the header
 
-### Milestone 20: Groups and DMs (M)
+### Milestone 20: Groups and DMs (M). Plan: [`groups-and-dms.md`](groups-and-dms.md)
 - Create a group, including from the Friends page
 - Add or remove group members
 - Leave a group, or transfer its ownership
 - Close a DM
 - Mutual friends, servers and groups on profile cards
 
-### Milestone 21: Server list and accounts (M)
+### Milestone 21: Server list and accounts (M). Plan: [`server-list-and-accounts.md`](server-list-and-accounts.md)
 - Server folders
 - Drag to reorder servers (synced through `/sync/settings`, as the web client does)
 - Drag to reorder accounts in the switcher, and a shortcut for each (⌘1–9, if milestone 9 hasn't already added them)
