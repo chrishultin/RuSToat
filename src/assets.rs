@@ -38,6 +38,7 @@ gpui_kit::assets::icon_assets!(
         MonitorSmartphone,
         Paperclip,
         Pencil,
+        PhoneOff,
         Pin,
         PinOff,
         RefreshCw,
@@ -89,6 +90,7 @@ mod tests {
             IconName::Hash.path(),
             IconName::Volume2.path(),
             IconName::MicOff.path(),
+            IconName::PhoneOff.path(),
             IconName::FileImage.path(),
             IconName::Download.path(),
         ] {

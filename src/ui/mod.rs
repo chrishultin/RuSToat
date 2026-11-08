@@ -22,5 +22,6 @@ pub mod sessions_page;
 pub mod settings;
 pub mod switcher;
 pub mod thumbhash;
+pub mod voice_global;
 
 pub use app_root::AppRoot;

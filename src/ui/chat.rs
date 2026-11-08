@@ -93,6 +93,7 @@ use crate::ui::server_dialogs::{
     CreateServerDialog, EditFolderDialog, INFO_DIALOG_WIDTH, InfoContent, InfoPlaceholder,
     NAME_DIALOG_WIDTH, NameDialog, render_info,
 };
+use crate::ui::voice_global::ActiveVoice;
 use crate::voice::VoiceCall;
 
 actions!(
@@ -6012,15 +6013,25 @@ impl ChatView {
             .map(|call| &call.state)
     }
 
-    /// Join `channel`'s voice call, leaving any other this account is in.
-    /// Stoat takes the call over from any other device this account is in
-    /// it on. Sends the microphone with Speak and plays everyone else with
-    /// Listen.
+    /// Join `channel`'s voice call, leaving any other call in the app (this
+    /// account's, or another's: one call at a time). Stoat takes the call
+    /// over from any other device this account is in it on. Sends the
+    /// microphone with Speak and plays everyone else with Listen.
     fn join_voice(&mut self, channel: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(node) = self.voice_node.clone() else {
             return;
         };
+        // Another account's call: a different view, so updating it here
+        // doesn't re-enter this one.
+        let me = cx.entity().downgrade();
+        if let Some(other) = ActiveVoice::holder(cx)
+            .filter(|other| *other != me)
+            .and_then(|other| other.upgrade())
+        {
+            other.update(cx, |other, cx| other.leave_voice(cx));
+        }
         self.leave_voice(cx);
+        ActiveVoice::set(me, cx);
         let publish_mic = self.store.can_speak(&channel);
         let subscribe = self.store.can_listen(&channel);
         log::info!("voice: joining {channel} (microphone: {publish_mic}, listening: {subscribe})");
@@ -6058,7 +6069,7 @@ impl ChatView {
                         }
                         Err(text) => {
                             // Drops this task: nothing after this runs.
-                            this.voice = None;
+                            this.voice_ended(cx);
                             window.push_notification(Notification::error(text), cx);
                             None
                         }
@@ -6073,7 +6084,7 @@ impl ChatView {
             // task first.
             events.next().await;
             this.update_in(cx, |this, window, cx| {
-                this.voice = None;
+                this.voice_ended(cx);
                 window.push_notification(Notification::error("Disconnected from voice."), cx);
                 cx.notify();
             })
@@ -6092,11 +6103,18 @@ impl ChatView {
         let Some(active) = self.voice.take() else {
             return;
         };
+        ActiveVoice::clear(&cx.entity().downgrade(), cx);
         match active.state {
             CallState::Connected(call) => call.leave(),
             CallState::Joining => log::info!("voice: stopped joining {}", active.channel),
         }
         cx.notify();
+    }
+
+    /// The call ended without the user leaving it (it failed, or dropped).
+    fn voice_ended(&mut self, cx: &mut Context<Self>) {
+        self.voice = None;
+        ActiveVoice::clear(&cx.entity().downgrade(), cx);
     }
 
     /// "Invite people to {server}" (or "{group}"): create an invite to
@@ -8414,7 +8432,76 @@ impl ChatView {
             .border_color(theme.sidebar_border)
             .child(heading)
             .child(list)
+            .children(self.render_voice_panel(cx))
             .child(self.render_user_panel(cx))
+    }
+
+    /// The call this account is in (or joining), above the user panel: its
+    /// state, its channel (which opens it), and Leave.
+    fn render_voice_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let call = self.voice.as_ref()?;
+        let theme = cx.theme();
+        let (status, status_colour) = match call.state {
+            CallState::Connected(_) => ("Voice connected", theme.success),
+            CallState::Joining => ("Connecting…", theme.muted_foreground),
+        };
+        let place = match self.store.channel(&call.channel) {
+            Some(Channel::TextChannel { name, server, .. }) => match self.store.server(server) {
+                Some(server) => format!("{name} / {}", server.name),
+                None => name.clone(),
+            },
+            _ => "Voice channel".to_string(),
+        };
+        let (muted, hover_fg) = (theme.muted_foreground, theme.sidebar_foreground);
+        let channel = call.channel.clone();
+        Some(
+            h_flex()
+                .id("voice-panel")
+                .flex_none()
+                .px_3()
+                .py_2()
+                .gap_2()
+                .border_t_1()
+                .border_color(theme.sidebar_border)
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(status_colour)
+                                .truncate()
+                                .child(status),
+                        )
+                        .child(
+                            div()
+                                .id("voice-panel-channel")
+                                .text_xs()
+                                .text_color(muted)
+                                .truncate()
+                                .cursor_pointer()
+                                .hover(move |style| style.text_color(hover_fg))
+                                .tooltip(|window, cx| {
+                                    Tooltip::new("Open channel").build(window, cx)
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.open_channel(&channel, cx)
+                                }))
+                                .child(place),
+                        ),
+                )
+                .child(
+                    Button::new("voice-leave")
+                        .danger()
+                        .small()
+                        .icon(IconName::PhoneOff)
+                        .tooltip("Leave call")
+                        .on_click(cx.listener(|this, _, _, cx| this.leave_voice(cx))),
+                )
+                .into_any_element(),
+        )
     }
 
     /// Home's Friends row, with a badge counting friend requests.
@@ -8766,21 +8853,21 @@ impl ChatView {
                             && self.store.can_connect(&c.id)
                     })
                     .map(|c| c.id.clone()),
+                // In the call, there's no button: the voice panel leaves.
                 |el, id| {
                     let button = Button::new("voice-call").small();
-                    el.child(match self.voice_state(&id) {
-                        Some(CallState::Connected(_)) => button
-                            .danger()
-                            .label("Leave voice")
-                            .on_click(cx.listener(|this, _, _, cx| this.leave_voice(cx))),
-                        Some(CallState::Joining) => button
-                            .primary()
-                            .label("Joining…")
-                            .loading(true)
-                            .disabled(true),
-                        None => button.primary().label("Join voice").on_click(cx.listener(
+                    el.children(match self.voice_state(&id) {
+                        Some(CallState::Connected(_)) => None,
+                        Some(CallState::Joining) => Some(
+                            button
+                                .primary()
+                                .label("Joining…")
+                                .loading(true)
+                                .disabled(true),
+                        ),
+                        None => Some(button.primary().label("Join voice").on_click(cx.listener(
                             move |this, _, window, cx| this.join_voice(id.clone(), window, cx),
-                        )),
+                        ))),
                     })
                 },
             )

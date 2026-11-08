@@ -69,3 +69,25 @@ Pending, in the end-of-milestone pass:
 
 ### Manual Validation
 Pending, in the end-of-milestone pass: someone in a voice channel on the web client is listed under it at launch; their leave removes the row; their mute shows the mic-off icon within about a second; an empty channel shows nothing extra; `Ready`'s `skipped` stays 0 on the live account; each voice event's JSON checked against a frame captured live (`RUST_LOG=stoat_gpui::api::events=trace`).
+
+## Chunk 3: The call panel, and one call app-wide
+
+### Changes Made
+- `src/ui/voice_global.rs` (new): `ActiveVoice(Option<WeakEntity<ChatView>>)`, a GPUI `Global`, with `holder(cx)`, `set(view, cx)` and `clear(view, cx)` (clears only if `view` still holds it).
+- `src/ui/mod.rs`: `pub mod voice_global;`.
+- `src/ui/chat.rs`:
+  - `join_voice`: if another view holds the call, upgrades it and calls its `leave_voice` (a different entity, so no re-entry; no toast), then leaves this view's own call and sets itself as the holder.
+  - `leave_voice` clears the global; new `voice_ended` (used where a join fails and where the call drops by itself) sets `voice = None` and clears it.
+  - The header button: "Join voice", or "Joining…" (disabled, spinner) while joining that channel; nothing once connected there.
+  - `render_voice_panel`, between the channel list and the user panel while `voice` is `Some`: "Voice connected" in `theme.success`, or "Connecting…" muted; "channel / server" below it (opens the channel via `open_channel`, tooltip "Open channel"); a danger `PhoneOff` Leave button (tooltip "Leave call").
+- `src/assets.rs`: `PhoneOff` in `ExtraIcons` and the icons test.
+
+### Divergences
+- None. (The global went in its own module, the plan's first option.)
+
+### Verification Performed
+- `cargo test`: 1077 passed, 0 failed, 5 ignored (no new tests; the global needs a GPUI app with two accounts, covered by the manual check). `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt drift: `src/ui/chat.rs` 17 (was 17), `src/assets.rs` 0, `src/ui/voice_global.rs` 0 (new). `src/ui/mod.rs` edited by hand (one line), not formatted.
+
+### Manual Validation
+Pending, in the end-of-milestone pass: the panel shows "Connecting…" then "Voice connected" with channel and server; clicking the name from another server opens the channel; Leave works; with two accounts, joining from B ends A's call (the web client sees A leave, A's panel goes) and the log shows A's `voice: leaving` before B's `voice: joining`; both themes readable.
