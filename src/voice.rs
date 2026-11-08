@@ -47,6 +47,26 @@ impl VoiceError {
     }
 }
 
+/// Why a call ended without the user leaving it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndReason {
+    /// The voice server removed the user. Stoat does that when the account
+    /// joins on another device, when a moderator moves the user (before
+    /// telling them where to), and when a moderator disconnects them.
+    Removed,
+    /// Anything else: the connection was lost for good, say.
+    Other,
+}
+
+impl EndReason {
+    fn from_livekit(reason: livekit::DisconnectReason) -> Self {
+        match reason {
+            livekit::DisconnectReason::ParticipantRemoved => EndReason::Removed,
+            _ => EndReason::Other,
+        }
+    }
+}
+
 /// Something that happened to a call that the UI must act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VoiceEvent {
@@ -61,7 +81,7 @@ pub enum VoiceEvent {
     /// The call ended without the user leaving it: LiveKit lost the
     /// connection for good, or the user was removed (by joining on another
     /// device, say).
-    Disconnected,
+    Disconnected(EndReason),
 }
 
 /// A call's [`VoiceEvent`]s, as they happen. Ends when the call does.
@@ -398,13 +418,15 @@ async fn read_events(
             RoomEvent::Reconnected => log::info!("voice: reconnected to {channel}"),
             RoomEvent::Disconnected { reason } => {
                 log::info!("voice: disconnected from {channel} ({reason:?})");
-                break;
+                let _ =
+                    tx.unbounded_send(VoiceEvent::Disconnected(EndReason::from_livekit(reason)));
+                return;
             }
             _ => {}
         }
     }
-    // Disconnected, or the room went away under us.
-    let _ = tx.unbounded_send(VoiceEvent::Disconnected);
+    // The room went away under us.
+    let _ = tx.unbounded_send(VoiceEvent::Disconnected(EndReason::Other));
 }
 
 /// What a toast says when Stoat won't let the user join a call.
@@ -532,6 +554,28 @@ mod tests {
         // Not deafened, it's a plain toggle.
         assert!(MuteState::default().toggle_mute().muted);
         assert!(!MuteState::default().toggle_mute().toggle_mute().muted);
+    }
+
+    #[test]
+    fn only_being_removed_by_the_server_counts_as_removed() {
+        use livekit::DisconnectReason;
+        assert_eq!(
+            EndReason::from_livekit(DisconnectReason::ParticipantRemoved),
+            EndReason::Removed
+        );
+        for other in [
+            DisconnectReason::UnknownReason,
+            DisconnectReason::ClientInitiated,
+            DisconnectReason::DuplicateIdentity,
+            DisconnectReason::ServerShutdown,
+            DisconnectReason::RoomDeleted,
+        ] {
+            assert_eq!(
+                EndReason::from_livekit(other),
+                EndReason::Other,
+                "{other:?}"
+            );
+        }
     }
 
     #[test]

@@ -199,13 +199,33 @@ impl RootConfig {
     /// listed, if the instance has voice at all. The web client pings each
     /// and takes the fastest; with one node there's nothing to choose.
     pub fn voice_node(&self) -> Option<&str> {
+        self.voice_nodes().first().map(|node| node.name.as_str())
+    }
+
+    /// The instance's voice servers; none if it doesn't have voice.
+    pub fn voice_nodes(&self) -> &[VoiceNode] {
         self.features
             .livekit
             .as_ref()
             .filter(|v| v.enabled)
-            .and_then(|v| v.nodes.first())
-            .map(|node| node.name.as_str())
+            .map(|v| v.nodes.as_slice())
+            .unwrap_or_default()
     }
+
+    /// The address of the voice server `name` (for following a move to
+    /// another channel, which names its node).
+    pub fn voice_node_url(&self, name: &str) -> Option<&str> {
+        voice_node_url(self.voice_nodes(), name)
+    }
+}
+
+/// The address of the voice server `name` among `nodes`, if it has one.
+pub fn voice_node_url<'a>(nodes: &'a [VoiceNode], name: &str) -> Option<&'a str> {
+    nodes
+        .iter()
+        .find(|node| node.name == name)
+        .map(|node| node.public_url.as_str())
+        .filter(|url| !url.is_empty())
 }
 
 fn enabled_url(feature: &Option<ServiceFeature>) -> Option<&str> {

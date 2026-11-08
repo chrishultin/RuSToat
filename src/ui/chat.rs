@@ -31,7 +31,8 @@ use gpui_kit::*;
 
 use crate::api::ApiError;
 use crate::api::StoatClient;
-use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent};
+use crate::api::client::{VoiceNode, voice_node_url};
+use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent, VoiceMove};
 use crate::api::gifbox::GifboxClient;
 use crate::api::models::{
     BulkMessageResponse, Category, Channel, CreateServerLegacyResponse, FieldsMessage,
@@ -53,7 +54,7 @@ use crate::places::{Place, Places, PlacesFile};
 use crate::profile::{RelationshipAction, UserMenuItem};
 use crate::profile_edit::ImageLimits;
 use crate::rail::{self, DropTarget, Folder, Ordering, RailEntry, ServerFolders};
-use crate::runtime::spawn_io;
+use crate::runtime::{IoTask, spawn_io};
 use crate::safety::{LinkCheck, SafetyFile, SafetySettings, classify, is_own_instance, origin};
 use crate::search::{
     MAX_QUERY_CHARS, PINS_LIMIT, QueryCheck, RELEVANCE_LIMIT, SearchCursor, check_query,
@@ -96,7 +97,7 @@ use crate::ui::server_dialogs::{
     NAME_DIALOG_WIDTH, NameDialog, render_info,
 };
 use crate::ui::voice_global::ActiveVoice;
-use crate::voice::{MuteState, VoiceCall, VoiceEvent};
+use crate::voice::{EndReason, MuteState, VoiceCall, VoiceError, VoiceEvent, VoiceEvents};
 
 actions!(
     chat,
@@ -400,9 +401,10 @@ pub struct ChatView {
     invite_max_days: Option<u32>,
     /// The most members a group may have on this instance, when it says.
     group_size: Option<u32>,
-    /// The voice server to ask for when joining a call, if the instance has
-    /// voice (see [`crate::api::RootConfig::voice_node`]).
-    voice_node: Option<String>,
+    /// The instance's voice servers (see
+    /// [`crate::api::RootConfig::voice_nodes`]); none without voice. Calls
+    /// are joined on the first; a moderator's move names its own.
+    voice_nodes: Vec<VoiceNode>,
     /// The voice call this account is in, or joining. One at a time.
     voice: Option<ActiveCall>,
     /// People in a call who weren't loaded and were asked for, so each is
@@ -533,7 +535,22 @@ enum CallState {
     Joining,
     /// Dropping the call leaves it.
     Connected(VoiceCall),
+    /// The voice server removed the user, and the call's place is held for
+    /// [`MOVE_GRACE`] in case Stoat says it was a moderator's move: it
+    /// removes the user from the old room before saying where to go.
+    /// `elsewhere` once Stoat reports this account joining a call (another
+    /// device took it over).
+    Removed {
+        elsewhere: bool,
+    },
 }
+
+/// How long a removed call waits for a move (see [`CallState::Removed`]).
+/// Stoat sends the move straight after removing the user.
+const MOVE_GRACE: Duration = Duration::from_secs(3);
+
+/// A call being connected: the room and its events, once it has joined.
+type CallJoin = IoTask<Result<(VoiceCall, VoiceEvents), VoiceError>>;
 
 /// Play a call's `sound`, unless call sounds are off.
 fn play_call_sound(sound: CallSound, cx: &App) {
@@ -621,7 +638,7 @@ impl ChatView {
                         root.app
                     );
                     this.update(cx, |this, cx| {
-                        this.voice_node = root.voice_node().map(str::to_owned);
+                        this.voice_nodes = root.voice_nodes().to_vec();
                         this.web_app = root.app;
                         this.image_limits = image_limits;
                         // Before `set_media`, whose re-sync adds the cards.
@@ -870,7 +887,7 @@ impl ChatView {
             own_member_fetches: HashSet::new(),
             invite_max_days: None,
             group_size: None,
-            voice_node: None,
+            voice_nodes: Vec::new(),
             voice: None,
             voice_user_fetches: HashSet::new(),
             image_limits: ImageLimits::default(),
@@ -1309,6 +1326,16 @@ impl ChatView {
             }
             ConnectionEvent::Event(ServerEvent::VoiceChannelJoin { channel, state }) => {
                 log::debug!("live: {} joined {channel}'s call", state.id);
+                // Removed from the call, and now in one again: another
+                // device took it over.
+                if state.id == self.store.me()
+                    && let Some(ActiveCall {
+                        state: CallState::Removed { elsewhere },
+                        ..
+                    }) = &mut self.voice
+                {
+                    *elsewhere = true;
+                }
                 self.store.apply_voice_join(&channel, *state);
                 self.fetch_voice_users(cx);
             }
@@ -1337,6 +1364,9 @@ impl ChatView {
                 if !self.store.apply_voice_update(&channel, &user, *data) {
                     return;
                 }
+            }
+            ConnectionEvent::Event(ServerEvent::UserMoveVoiceChannel(moved)) => {
+                self.follow_move(*moved, window, cx);
             }
             ConnectionEvent::Event(ServerEvent::UserSlowmodes(slowmodes)) => {
                 log::debug!("live: {} slowmode cooldowns", slowmodes.len());
@@ -6020,7 +6050,7 @@ impl ChatView {
     /// The voice server to ask for when joining a call, if the instance has
     /// voice. Unknown until its config has loaded.
     pub fn voice_node(&self) -> Option<&str> {
-        self.voice_node.as_deref()
+        self.voice_nodes.first().map(|node| node.name.as_str())
     }
 
     /// Whether the user is in `channel`'s call, or joining it.
@@ -6036,7 +6066,7 @@ impl ChatView {
     /// over from any other device this account is in it on. Sends the
     /// microphone with Speak and plays everyone else with Listen.
     fn join_voice(&mut self, channel: String, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(node) = self.voice_node.clone() else {
+        let Some(node) = self.voice_node().map(str::to_owned) else {
             return;
         };
         // Another account's call: a different view, so updating it here
@@ -6073,6 +6103,65 @@ impl ChatView {
                 .await
             }
         });
+        self.start_call(channel, join, window, cx);
+    }
+
+    /// A moderator moved the user to another voice channel. Stoat has
+    /// already removed them from `from`'s room; if this view's call was
+    /// there, it follows to `to` with the token given, without the leave
+    /// sound or a toast.
+    fn follow_move(&mut self, moved: VoiceMove, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .voice
+            .as_ref()
+            .is_none_or(|call| call.channel != moved.from)
+        {
+            log::debug!(
+                "voice: not in {}'s call, so not following the move",
+                moved.from
+            );
+            return;
+        }
+        let VoiceMove {
+            node,
+            from,
+            to,
+            token,
+        } = moved;
+        let Some(url) = voice_node_url(&self.voice_nodes, &node).map(str::to_owned) else {
+            log::warn!("voice: moved to {to} on {node}, which this instance doesn't list");
+            self.voice_ended(cx);
+            play_call_sound(CallSound::Leave, cx);
+            window.push_notification(
+                Notification::error("Couldn't join the call. Try again."),
+                cx,
+            );
+            return;
+        };
+        let publish_mic = self.store.can_speak(&to);
+        let subscribe = self.store.can_listen(&to);
+        let mute = mute_state(cx);
+        log::info!(
+            "voice: moved from {from} to {to} (microphone: {publish_mic}, listening: {subscribe})"
+        );
+        let join = spawn_io({
+            let to = to.clone();
+            // Straight away: the token lasts 10 seconds.
+            async move { VoiceCall::join(&to, &url, &token, publish_mic, subscribe, mute).await }
+        });
+        // Replaces the old call (dropping it closes its room).
+        self.start_call(to, join, window, cx);
+    }
+
+    /// Hold `channel`'s call while `join` connects it, then follow it until
+    /// it ends by itself (leaving drops the task first).
+    fn start_call(
+        &mut self,
+        channel: String,
+        join: CallJoin,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = join.await;
             let events = this
@@ -6112,7 +6201,7 @@ impl ChatView {
             };
             // Only a call that ends by itself gets past this loop: leaving
             // drops this task first.
-            loop {
+            let reason = loop {
                 let update = match events.next().await {
                     Some(VoiceEvent::Speaking(speakers)) => {
                         this.update(cx, |this, cx| this.set_speaking(speakers, cx))
@@ -6123,16 +6212,40 @@ impl ChatView {
                     Some(VoiceEvent::ParticipantLeft) => {
                         this.update(cx, |_, cx| play_call_sound(CallSound::OtherLeave, cx))
                     }
-                    Some(VoiceEvent::Disconnected) | None => break,
+                    Some(VoiceEvent::Disconnected(reason)) => break reason,
+                    None => break EndReason::Other,
                 };
                 if update.is_err() {
                     return;
                 }
+            };
+            if reason == EndReason::Removed {
+                // A move replaces this call (and drops this task) meanwhile.
+                let held = this.update(cx, |this, cx| {
+                    if let Some(call) = &mut this.voice {
+                        call.state = CallState::Removed { elsewhere: false };
+                        call.speaking.clear();
+                    }
+                    cx.notify();
+                });
+                if held.is_err() {
+                    return;
+                }
+                cx.background_executor().timer(MOVE_GRACE).await;
             }
             this.update_in(cx, |this, window, cx| {
+                let text = match this.voice.as_ref().map(|call| &call.state) {
+                    Some(CallState::Removed { elsewhere: true }) => {
+                        "You joined this call somewhere else."
+                    }
+                    Some(CallState::Removed { elsewhere: false }) => {
+                        "You were removed from the call."
+                    }
+                    _ => "Disconnected from voice.",
+                };
                 this.voice_ended(cx);
                 play_call_sound(CallSound::Leave, cx);
-                window.push_notification(Notification::error("Disconnected from voice."), cx);
+                window.push_notification(Notification::error(text), cx);
                 cx.notify();
             })
             .ok();
@@ -6158,6 +6271,7 @@ impl ChatView {
                 play_call_sound(CallSound::Leave, cx);
             }
             CallState::Joining => log::info!("voice: stopped joining {}", active.channel),
+            CallState::Removed { .. } => log::info!("voice: left {} after removal", active.channel),
         }
         cx.notify();
     }
@@ -8545,7 +8659,9 @@ impl ChatView {
         let theme = cx.theme();
         let (status, status_colour) = match call.state {
             CallState::Connected(_) => ("Voice connected", theme.success),
-            CallState::Joining => ("Connecting…", theme.muted_foreground),
+            CallState::Joining | CallState::Removed { .. } => {
+                ("Connecting…", theme.muted_foreground)
+            }
         };
         let place = match self.store.channel(&call.channel) {
             Some(Channel::TextChannel { name, server, .. }) => match self.store.server(server) {
@@ -9024,7 +9140,7 @@ impl ChatView {
                     .filter(|c| {
                         usable
                             && c.kind == ChannelKind::Text { voice: true }
-                            && self.voice_node.is_some()
+                            && self.voice_node().is_some()
                             && self.store.can_connect(&c.id)
                     })
                     .map(|c| c.id.clone()),
@@ -9033,7 +9149,7 @@ impl ChatView {
                     let button = Button::new("voice-call").small();
                     el.children(match self.voice_state(&id) {
                         Some(CallState::Connected(_)) => None,
-                        Some(CallState::Joining) => Some(
+                        Some(CallState::Joining | CallState::Removed { .. }) => Some(
                             button
                                 .primary()
                                 .label("Joining…")

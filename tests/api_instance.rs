@@ -128,6 +128,21 @@ fn the_first_voice_node_is_offered() {
 }
 
 #[test]
+fn a_voice_node_is_found_by_name() {
+    let config: RootConfig = serde_json::from_value(root()).unwrap();
+    assert_eq!(
+        config.voice_node_url("hel1"),
+        Some("wss://livekit.hel1.voice.stoat.chat")
+    );
+    assert_eq!(config.voice_node_url("nowhere"), None);
+    // Voice off: no node is known.
+    let mut disabled = root();
+    disabled["features"]["livekit"]["enabled"] = false.into();
+    let config: RootConfig = serde_json::from_value(disabled).unwrap();
+    assert_eq!(config.voice_node_url("hel1"), None);
+}
+
+#[test]
 fn no_voice_node_when_voice_is_off_or_missing() {
     let mut disabled = root();
     disabled["features"]["livekit"]["enabled"] = false.into();

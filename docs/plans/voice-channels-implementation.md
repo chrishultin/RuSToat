@@ -161,3 +161,64 @@ Pending, in the end-of-milestone pass: talking on the web client rings their ava
 
 ### Manual Validation
 Pending, in the end-of-milestone pass: each sound at its moment and the switch silencing them all; quick join/leave on the web client plays at most one sound a second; joining a busy call doesn't play a burst (LiveKit shouldn't report people already there as `ParticipantConnected`); whether others hear the sounds through the user's mic (echo cancellation can't remove `NSSound`).
+
+## Chunk 7: Moves and takeovers
+
+### Changes Made
+- `src/api/client.rs`: `RootConfig::voice_nodes()` (the enabled instance's nodes, else none), `voice_node()` now its first name, `RootConfig::voice_node_url(name)` and the free `voice_node_url(nodes, name)` (`None` for an unknown name or an empty `public_url`).
+- `tests/api_instance.rs`: `voice_node_url("hel1")`, an unknown name, and voice off.
+- `src/voice.rs`: `EndReason { Removed, Other }` from LiveKit's (protocol) `DisconnectReason` (`ParticipantRemoved` → `Removed`), carried by `VoiceEvent::Disconnected(EndReason)`; the room vanishing without a disconnect event is `Other`. Unit test of the mapping.
+- `src/ui/chat.rs`:
+  - `voice_nodes: Vec<VoiceNode>` replaces `voice_node: Option<String>`; `voice_node()` is the first's name.
+  - `join_voice` now ends in a shared `start_call(channel, join, window, cx)`, which holds the call while `join` (a `CallJoin` IO task) connects and then follows its events.
+  - `CallState::Removed { elsewhere }`: on `EndReason::Removed` the call's place is held for `MOVE_GRACE` (3 s), speakers cleared, the panel showing "Connecting…" and the header "Joining…". Then, unless something replaced it, the call ends with Leave and "You joined this call somewhere else." (`elsewhere`) or "You were removed from the call."; other ends keep "Disconnected from voice.".
+  - A `VoiceChannelJoin` for the user while `Removed` sets `elsewhere`.
+  - `follow_move` on `ServerEvent::UserMoveVoiceChannel`: if this view's call is in `from`, it joins `to` at once with the node's `public_url` and the event's token, replacing the old call (no leave sound or toast; the join sound plays on connecting). A node the instance doesn't list ends the call with "Couldn't join the call. Try again."; an expired token fails as any join does ("Couldn't connect to the voice server. Try again.").
+  - `leave_voice` during `Removed` just logs.
+- `docs/plans/voice-channels.md`: Assumption 11 and chunk 7 amended with option A.
+
+### Divergences
+- **Significant, decided by the user (option A): Stoat removes before it moves.** `member_edit.rs` ~285 calls `voice_client.remove_user(old_node, …)` and only then publishes `UserMoveVoiceChannel`, so LiveKit's `ParticipantRemoved` disconnect almost always arrives first. And `ParticipantRemoved` also means a takeover (`force_disconnect` in `voice_join.rs`) or a moderator's disconnect. Options put to the user: (A) hold a removed call 3 s for a move, then choose the toast by whether this account was seen joining a call; (B) end at once with a neutral toast and rejoin on a late move; (C) the plan as written. A was chosen, and the plan amended.
+- **Minor: `EndReason::Removed`** rather than the plan's `RemovedElsewhere`, since removal doesn't say why.
+- **Note:** a takeover whose new device takes longer than 3 s to join is reported with the neutral text.
+
+### Verification Performed
+- `cargo test`: 1085 passed, 0 failed, 5 ignored (+2: `voice_node_url`, the end-reason mapping). `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt: `src/ui/chat.rs` 17 (was 17), `src/api/client.rs` 3 (was 3), `src/voice.rs` formatted (clean), `tests/api_instance.rs` 0.
+
+### Manual Validation
+Pending, in the end-of-milestone pass: the web client (moderator) moves RuSToat's user → the panel shows the new channel, audio continues, the web client lists the user only there, no toast; joining in the web client with RuSToat's account → "You joined this call somewhere else."; a moderator disconnecting the user → after about 3 s, "You were removed from the call.".
+
+## Summary
+
+_Code completed: 2026-11-08. The manual pass is pending (the user batched every chunk's manual check to the end)._
+
+### Chunks Completed
+1. Settle the spike's conditions: no code; WebRTC's processing can't be turned off per part in LiveKit 0.10.1 on macOS, so the switch was dropped and the comparison is RuSToat vs the web client (measurements pending).
+2. Who's in each voice channel: `Ready`/`ServerCreate` voice states, the five voice events, participant rows.
+3. The call panel, and one call app-wide: "Voice connected" panel, `ActiveVoice` global.
+4. Mute and deafen: the web client's rules, recording stopped while muted, saved in prefs.
+5. Speaking indicators: green ring from LiveKit's active speakers.
+6. Call sounds: macOS system sounds with a "Call sounds" switch.
+7. Moves and takeovers: removed calls held 3 s for a move; takeover/removal toasts.
+
+### Divergences
+- Chunk 1 (significant, resolved by the plan's own risk): no per-part audio processing switch; plan amended.
+- Chunk 7 (significant, user chose option A): removal arrives before the move; removed calls are held 3 s; plan amended.
+- Minor: parsing tests in `src/api/events.rs` rather than `tests/live_events.rs`; `set_server_voice` instead of an `add_server` parameter; unknown participants named by 8 ID characters; mute state applied at join through an ordered control task; a deafened user's row shows only `HeadphoneOff`; the user is always left out of speakers while muted; `EndReason::Removed` naming.
+- Notes: raw event frames at trace level include a move's token; a rare deafen/subscribe race; a takeover slower than 3 s gets the neutral text.
+
+### Definition of Done
+- [ ] Chunk 1's CPU comparison and roadmap entries: **pending the manual pass** (the finding that parts can't be turned off is recorded).
+- [ ] The waived checks (five cycles, log out, close window, switch channels, takeover): **pending the manual pass**.
+- [x] `Ready` asks for `voice_states`; participants listed live from `Ready`, `ServerCreate` and the four events, mic-off for `!is_publishing`; tested in `tests/store_voice.rs` and `src/api/events.rs` (not `tests/live_events.rs`, see chunk 2). Live behaviour pending the manual pass.
+- [x] Panel with Mute, Deafen, Leave and the channel name; header only "Join voice" / "Joining…". (Looks pending the manual pass.)
+- [x] Joining from one account leaves another's call (code; manual check pending).
+- [x] Mute/deafen rules unit-tested and saved in prefs; seen-as-muted by the web client pending the manual pass.
+- [x] Green speaking ring (code; manual check pending).
+- [x] Call sounds and the Settings switch (code; by-ear check pending).
+- [x] Moves followed, takeovers explained (code, as amended; manual check pending).
+- [x] `cargo test && cargo clippy --all-targets -- -D warnings` pass (1085 passed, 0 failed, 5 ignored); no touched file's rustfmt drift grew (`src/store.rs` fell from 15 to 14).
+
+### Remaining Manual Steps
+The batched manual pass: every chunk's "Manual Validation" above, plus the plan's Manual Tests (a 10-minute call using mute, deafen and speaking, with CPU noted; overnight in a call; both themes). Then record the CPU table and the waived checks under chunk 1, and update the roadmap's milestone 32/33 entries.

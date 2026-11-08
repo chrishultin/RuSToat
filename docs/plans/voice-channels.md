@@ -123,6 +123,8 @@ Milestone 33 of the [roadmap](roadmap.md) turns the voice spike (milestone 32, [
     - No toast; the panel's channel name changes.
     - If the token has expired (10 s), it toasts the usual join error.
 11. **Being removed because the same account joined elsewhere** (LiveKit's `DisconnectReason::ParticipantRemoved`, seen in the spike) toasts "You joined this call somewhere else." instead of "Disconnected from voice." Other reasons keep the old text.
+
+    **Amended during implementation (2026-11-08, user's option A):** Stoat removes the user from the old room *before* sending `UserMoveVoiceChannel` (`member_edit.rs` ~285), and uses `ParticipantRemoved` for takeovers, moves and a moderator's disconnect alike. So a removed call is held for 3 s ("Connecting…" in the panel). A move from that channel in that time is followed (join sound only). Otherwise the call ends with "You joined this call somewhere else." if Stoat reported this account joining a call meanwhile, else "You were removed from the call."
 12. **Your own entry in a list comes from Stoat**, like everyone else's. It appears about a second after joining, when Stoat's webhook arrives. The panel shows "Connecting…" / "Voice connected" from the call itself, so nothing waits on it.
 13. **CPU is measured on the release bundle launched with `open`**, as in the spike (`top -l 13 -s 5 … -stats cpu`, first sample dropped, plus the `ps` CPU-time delta over 60 s).
     - The web client is measured in the same silent call on the same Mac: its browser's processes (renderer, GPU and audio-service helpers), summed. RuSToat is in the call as the other account.
@@ -317,8 +319,8 @@ Milestone 33 of the [roadmap](roadmap.md) turns the voice spike (milestone 32, [
 - `src/ui/chat.rs`:
   - Keeps the root config's voice nodes (`Vec<VoiceNode>`), not just the first name.
   - On `ServerEvent::UserMoveVoiceChannel` where `from` is this view's call: drop the current call and `VoiceCall::join` to `to` with the node's `public_url` and the event's token (Assumption 10).
-  - On `VoiceEvent::Disconnected` with `ParticipantRemoved`, toasts the takeover text (Assumption 11).
-- `src/voice.rs`: `VoiceEvent::Disconnected` carries the reason, as an enum of what the UI cares about: `RemovedElsewhere`, `Other`.
+  - On `VoiceEvent::Disconnected` with `ParticipantRemoved`, holds the call for 3 s for a move, then toasts the takeover or neutral text (Assumption 11, as amended).
+- `src/voice.rs`: `VoiceEvent::Disconnected` carries the reason, as an enum of what the UI cares about: `Removed`, `Other`.
 - `src/api/client.rs`: `RootConfig::voice_node_url(name) -> Option<&str>`.
 
 **Depends on:** Chunk 2 (the event parsing), chunk 3 (the panel and global).
@@ -331,6 +333,7 @@ Milestone 33 of the [roadmap](roadmap.md) turns the voice spike (milestone 32, [
 **Manual check:**
 - The web client (moderator) moves RuSToat's user to another voice channel. RuSToat's panel shows the new channel, audio continues, and the web client lists the user in the new channel only.
 - Joining in the web client with RuSToat's account: RuSToat toasts the takeover text.
+- A moderator disconnecting RuSToat's user from the call: after about 3 s, "You were removed from the call."
 
 **Shippable when:** moves are followed and takeovers are explained.
 
