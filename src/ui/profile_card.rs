@@ -212,6 +212,22 @@ pub fn render_profile_card(
     };
 
     let mut sections: Vec<AnyElement> = Vec::new();
+    if let Some(until) = card.timed_out_until {
+        let until = crate::time::format_until(
+            until.with_timezone(&Local).naive_local(),
+            Local::now().naive_local(),
+        );
+        sections.push(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .text_sm()
+                .text_color(theme.danger)
+                .child(Icon::new(IconName::Clock).text_color(theme.danger))
+                .child(format!("Timed out until {until}"))
+                .into_any_element(),
+        );
+    }
     if let Some(status) = &card.status {
         sections.push(
             section("Status")

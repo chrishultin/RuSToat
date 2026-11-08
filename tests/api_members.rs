@@ -6,7 +6,9 @@ use revolt_result::ErrorType;
 use serde_json::json;
 use stoat_gpui::api::models::DataBanCreate;
 use stoat_gpui::api::{ApiError, StoatClient};
-use stoat_gpui::moderation::moderation_error_text;
+use stoat_gpui::moderation::{
+    end_timeout_edit, moderation_error_text, timeout_edit, timeout_until,
+};
 use stoat_gpui::profile_edit::{IdentityForm, ProfileImage};
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -195,6 +197,72 @@ async fn kicking_someone_who_outranks_you_says_so() {
         .unwrap_err();
     assert_eq!(
         moderation_error_text(&err, "Couldn't kick them."),
+        "They rank too high for you to do that."
+    );
+}
+
+#[tokio::test]
+async fn a_timeout_sends_when_it_ends() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/servers/srv/members/u-ada"))
+        .and(body_json(json!({ "timeout": "2026-11-08T12:05:00.000Z" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(member(json!({
+            "_id": { "server": "srv", "user": "u-ada" },
+            "timeout": "2026-11-08T12:05:00.000Z"
+        }))))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // 2026-11-08T12:00:00Z, plus 5 minutes.
+    let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_794_139_200);
+    let edit = timeout_edit(timeout_until(now, 300));
+    let member = client(&server)
+        .edit_member("srv", "u-ada", &edit)
+        .await
+        .unwrap();
+    assert!(member.timeout.is_some());
+}
+
+#[tokio::test]
+async fn ending_a_timeout_removes_it() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/servers/srv/members/u-ada"))
+        .and(body_json(json!({ "remove": ["Timeout"] })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(member(json!({
+            "_id": { "server": "srv", "user": "u-ada" }
+        }))))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client(&server)
+        .edit_member("srv", "u-ada", &end_timeout_edit())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn timing_out_a_moderator_says_they_rank_too_high() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/servers/srv/members/u-ada"))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .set_body_json(json!({ "type": "IsElevated", "location": "x" })),
+        )
+        .mount(&server)
+        .await;
+
+    let now = std::time::SystemTime::now();
+    let err = client(&server)
+        .edit_member("srv", "u-ada", &timeout_edit(timeout_until(now, 60)))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        moderation_error_text(&err, "x"),
         "They rank too high for you to do that."
     );
 }

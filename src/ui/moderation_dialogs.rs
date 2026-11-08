@@ -1,5 +1,6 @@
 //! Acting on a server's members: a confirmation that runs one request
-//! (Kick), and "Ban", with a reason and how much of their history goes.
+//! (Kick, End timeout), "Ban", with a reason and how much of their history
+//! goes, and "Time out", for how long.
 //! The options and error texts are in [`crate::moderation`]; who may do
 //! what is [`crate::permissions::moderation`].
 
@@ -13,7 +14,9 @@ use gpui_kit::*;
 
 use crate::api::models::DataBanCreate;
 use crate::api::{ApiError, StoatClient};
-use crate::moderation::{BAN_HISTORY, BAN_REASON_MAX, moderation_error_text};
+use crate::moderation::{
+    BAN_HISTORY, BAN_REASON_MAX, TIMEOUTS, moderation_error_text, timeout_edit, timeout_until,
+};
 use crate::runtime::spawn_io;
 use crate::ui::server_dialogs::field_label;
 
@@ -31,6 +34,8 @@ pub struct MemberActionRequest {
     pub detail: SharedString,
     /// The confirm button: "Kick".
     pub ok_label: &'static str,
+    /// The button is drawn as destructive.
+    pub danger: bool,
     /// The toast when Stoat refuses for no reason it gives.
     pub failed_text: String,
 }
@@ -149,7 +154,11 @@ impl Render for ConfirmMemberAction {
                     )
                     .child(
                         Button::new("member-action-ok")
-                            .with_variant(ButtonVariant::Danger)
+                            .with_variant(if self.request.danger {
+                                ButtonVariant::Danger
+                            } else {
+                                ButtonVariant::Primary
+                            })
                             .label(self.request.ok_label)
                             .loading(self.busy)
                             .disabled(self.busy)
@@ -348,6 +357,152 @@ impl Render for BanDialog {
                             .on_click(move |_, window, cx| {
                                 entity.update(cx, |this, cx| this.ban(window, cx)).ok();
                             }),
+                    ),
+            )
+    }
+}
+
+/// Time `user` (called `name`) out on `server`: a dialog asks for how long.
+pub fn open_timeout_dialog(
+    client: StoatClient,
+    server: String,
+    user: String,
+    name: &str,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let title: SharedString = format!("Time out {name}").into();
+    let detail: SharedString = format!(
+        "While timed out, {name} can read the server but can't send messages, react or join \
+         calls."
+    )
+    .into();
+    let dialog = cx.new(|_| TimeoutDialog {
+        client,
+        server,
+        user,
+        detail,
+        length: 0,
+        busy: false,
+    });
+    window.open_dialog(cx, move |modal, _, _| {
+        modal
+            .title(title.clone())
+            .w(px(MODERATION_DIALOG_WIDTH))
+            .child(dialog.clone())
+    });
+}
+
+/// The Time out dialog's content (see [`open_timeout_dialog`]).
+pub struct TimeoutDialog {
+    client: StoatClient,
+    server: String,
+    user: String,
+    detail: SharedString,
+    /// The chosen [`TIMEOUTS`] option.
+    length: usize,
+    busy: bool,
+}
+
+impl TimeoutDialog {
+    /// Send the timeout, ending the chosen length from now. Success closes
+    /// the dialog (`ServerMemberUpdate` brings the timeout); a refusal
+    /// toasts and keeps it.
+    fn time_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let until = timeout_until(std::time::SystemTime::now(), TIMEOUTS[self.length].1);
+        let edit = timeout_edit(until);
+        self.busy = true;
+        cx.notify();
+        let request = spawn_io({
+            let (client, server, user) =
+                (self.client.clone(), self.server.clone(), self.user.clone());
+            async move { client.edit_member(&server, &user, &edit).await }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.busy = false;
+                let error = match result {
+                    Ok(Ok(_)) => {
+                        log::info!("timed out {} on {}", this.user, this.server);
+                        window.close_dialog(cx);
+                        None
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!(
+                            "couldn't time out {} on {}: {err:?}",
+                            this.user,
+                            this.server
+                        );
+                        Some(moderation_error_text(
+                            &err,
+                            "Couldn't time them out. Try again.",
+                        ))
+                    }
+                    Err(err) => {
+                        log::warn!("timeout task failed: {err:?}");
+                        Some("Couldn't reach Stoat. Try again.".into())
+                    }
+                };
+                if let Some(error) = error {
+                    window.push_notification(Notification::error(error), cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
+impl Render for TimeoutDialog {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .gap_3()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(self.detail.clone()),
+            )
+            .child(
+                v_flex().gap_1().child(field_label("Duration", cx)).child(
+                    RadioGroup::vertical("timeout-length")
+                        .flex_none()
+                        .children(
+                            TIMEOUTS.iter().map(|(label, _)| {
+                                Radio::new(SharedString::from(*label)).label(*label)
+                            }),
+                        )
+                        .selected_index(Some(self.length))
+                        .disabled(self.busy)
+                        .on_change(cx.listener(|this, index: &usize, _, cx| {
+                            this.length = *index;
+                            cx.notify();
+                        })),
+                ),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .justify_end()
+                    .child(
+                        Button::new("timeout-cancel")
+                            .outline()
+                            .label("Cancel")
+                            .disabled(self.busy)
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("timeout-ok")
+                            .with_variant(ButtonVariant::Danger)
+                            .label("Time out")
+                            .loading(self.busy)
+                            .disabled(self.busy)
+                            .on_click(cx.listener(|this, _, window, cx| this.time_out(window, cx))),
                     ),
             )
     }

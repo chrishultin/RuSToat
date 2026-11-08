@@ -65,7 +65,9 @@ fn store_owned_by(owner: &str) -> ChatStore {
             user("u-bot", json!({ "bot": { "owner": "u-me" }, "status": { "text": "   " } })),
             user("u-plain", json!({})),
             user("u-blocked", json!({ "relationship": "Blocked" })),
-            user("u-closed", json!({}))
+            user("u-closed", json!({})),
+            user("u-timed", json!({})),
+            user("u-lapsed", json!({}))
         ],
         "servers": [{
             "_id": "srv", "owner": owner, "name": "Test Server", "channels": ["ch"],
@@ -94,7 +96,9 @@ fn store_owned_by(owner: &str) -> ChatStore {
             })),
             member("u-bob", &[], json!({ "nickname": "   " })),
             member("u-plain", &[], json!({})),
-            member("u-blocked", &[], json!({}))
+            member("u-blocked", &[], json!({})),
+            member("u-timed", &[], json!({ "timeout": "2999-01-01T00:00:00.000Z" })),
+            member("u-lapsed", &[], json!({ "timeout": "2001-01-01T00:00:00.000Z" }))
         ]
     });
     let Some(ServerEvent::Ready(ready)) = parse_frame(&ready.to_string()).pop() else {
@@ -118,6 +122,35 @@ fn in_a_server_the_nickname_and_server_pronouns_win() {
     assert_eq!(card.status.as_deref(), Some("counting"));
     assert_eq!(card.presence, PresenceKind::Busy);
     assert!(!card.bot && !card.is_me);
+}
+
+#[test]
+fn the_card_shows_a_running_timeout() {
+    let store = store();
+    let card = profile_card(&store, "u-timed", Some("ch")).unwrap();
+    assert_eq!(
+        card.timed_out_until,
+        Some(Utc.with_ymd_and_hms(2999, 1, 1, 0, 0, 0).unwrap())
+    );
+    // Not one that has run out, nor outside the server.
+    assert_eq!(
+        profile_card(&store, "u-lapsed", Some("ch"))
+            .unwrap()
+            .timed_out_until,
+        None
+    );
+    assert_eq!(
+        profile_card(&store, "u-timed", None)
+            .unwrap()
+            .timed_out_until,
+        None
+    );
+    assert_eq!(
+        profile_card(&store, ADA, Some("ch"))
+            .unwrap()
+            .timed_out_until,
+        None
+    );
 }
 
 #[test]
@@ -244,6 +277,7 @@ mod menu {
                 CreateGroupWith,
                 Mention,
                 Separator,
+                TimeOut,
                 Kick,
                 Ban,
                 Separator,
@@ -301,6 +335,7 @@ mod menu {
                 Profile,
                 Mention,
                 Separator,
+                TimeOut,
                 Kick,
                 Ban,
                 Separator,
@@ -408,6 +443,21 @@ mod menu {
             let menu = user_menu(&store, user, Some("ch"));
             assert!(!menu.contains(&Kick) && !menu.contains(&Ban), "{user}");
         }
+    }
+
+    #[test]
+    fn a_running_timeout_swaps_time_out_for_end_timeout() {
+        let store = store();
+        let timed = user_menu(&store, "u-timed", Some("ch"));
+        assert!(timed.contains(&EndTimeout) && !timed.contains(&TimeOut));
+        // One that has run out can be given again.
+        let lapsed = user_menu(&store, "u-lapsed", Some("ch"));
+        assert!(lapsed.contains(&TimeOut) && !lapsed.contains(&EndTimeout));
+        // Neither outside a server, nor without the permission.
+        assert!(!user_menu(&store, "u-timed", None).contains(&EndTimeout));
+        let store = store_owned_by("u-plain");
+        assert!(!user_menu(&store, "u-timed", Some("ch")).contains(&EndTimeout));
+        assert!(!user_menu(&store, "u-lapsed", Some("ch")).contains(&TimeOut));
     }
 
     #[test]

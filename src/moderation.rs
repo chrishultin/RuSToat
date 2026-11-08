@@ -1,12 +1,16 @@
-//! Acting on a server's members (kicks and bans), and why Stoat refused,
-//! in words. Plain data with no GPUI, so it's unit-testable. Who may do
+//! Acting on a server's members (kicks, bans and timeouts), and why Stoat
+//! refused, in words. Plain data with no GPUI, so it's unit-testable. Who may do
 //! what is [`crate::permissions::moderation`]; the dialogs are in
 //! [`crate::ui::moderation_dialogs`].
 
+use std::time::{Duration, SystemTime};
+
+use iso8601_timestamp::Timestamp;
 use revolt_result::ErrorType;
 
 use crate::api::ApiError;
-use crate::profile_edit::error_text;
+use crate::api::models::{DataMemberEdit, FieldsMember};
+use crate::profile_edit::{empty_member_edit, error_text};
 
 /// The longest ban reason Stoat takes.
 pub const BAN_REASON_MAX: usize = 1024;
@@ -21,6 +25,38 @@ pub const BAN_HISTORY: [(&str, i64); 6] = [
     ("3 days", 3 * 86_400),
     ("7 days", 7 * 86_400),
 ];
+
+/// How long a timeout lasts: the web client's choices, as labels and
+/// seconds. The first is the default.
+pub const TIMEOUTS: [(&str, u64); 6] = [
+    ("1 minute", 60),
+    ("5 minutes", 5 * 60),
+    ("10 minutes", 10 * 60),
+    ("1 hour", 3600),
+    ("1 day", 86_400),
+    ("1 week", 7 * 86_400),
+];
+
+/// When a timeout of `seconds` given at `now` (the Mac's clock) ends.
+pub fn timeout_until(now: SystemTime, seconds: u64) -> Timestamp {
+    Timestamp::from(now + Duration::from_secs(seconds))
+}
+
+/// The member edit that times someone out until `until`.
+pub fn timeout_edit(until: Timestamp) -> DataMemberEdit {
+    DataMemberEdit {
+        timeout: Some(until),
+        ..empty_member_edit()
+    }
+}
+
+/// The member edit that ends someone's timeout early.
+pub fn end_timeout_edit() -> DataMemberEdit {
+    DataMemberEdit {
+        remove: vec![FieldsMember::Timeout],
+        ..empty_member_edit()
+    }
+}
 
 /// What a toast says when Stoat refuses a moderation action, else
 /// `fallback` (or why a change was refused, such as a rate limit).
@@ -51,6 +87,34 @@ mod tests {
     fn ban_history_runs_from_none_to_stoats_most() {
         let seconds: Vec<i64> = BAN_HISTORY.iter().map(|(_, s)| *s).collect();
         assert_eq!(seconds, [0, 3600, 21_600, 86_400, 259_200, 604_800]);
+    }
+
+    #[test]
+    fn timeouts_run_from_a_minute_to_a_week() {
+        let seconds: Vec<u64> = TIMEOUTS.iter().map(|(_, s)| *s).collect();
+        assert_eq!(seconds, [60, 300, 600, 3600, 86_400, 604_800]);
+    }
+
+    #[test]
+    fn a_timeout_ends_its_length_after_now() {
+        // 2026-11-08T12:00:00Z.
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_794_139_200);
+        let until = timeout_until(now, 60);
+        assert_eq!(
+            serde_json::to_value(until).unwrap(),
+            "2026-11-08T12:01:00.000Z"
+        );
+        assert_eq!(
+            serde_json::to_value(timeout_edit(until)).unwrap()["timeout"],
+            "2026-11-08T12:01:00.000Z"
+        );
+    }
+
+    #[test]
+    fn ending_a_timeout_removes_it() {
+        let edit = end_timeout_edit();
+        assert_eq!(edit.remove, [FieldsMember::Timeout]);
+        assert!(edit.timeout.is_none());
     }
 
     #[test]

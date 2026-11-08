@@ -49,3 +49,39 @@ _Started: 2026-11-08_
 
 ### Manual Validation
 Deferred to the end at the user's request (kick, then ban with 1 hour of history).
+
+## Chunk 2: Timeouts
+
+### Changes Made
+- `Cargo.toml` / `Cargo.lock`: `iso8601-timestamp = "0.2"` as a direct dependency, the crate revolt-models already uses for `Timestamp`.
+- `src/moderation.rs`: `TIMEOUTS` (1 minute to 1 week), `timeout_until(now: SystemTime, seconds) -> Timestamp`, `timeout_edit(until)` and `end_timeout_edit()` (both via `profile_edit::empty_member_edit`), with unit tests:
+  - the lengths;
+  - 60 s after 2026-11-08T12:00:00Z serialises to `2026-11-08T12:01:00.000Z`, alone and in the edit;
+  - ending a timeout removes `Timeout`.
+- `src/profile.rs`:
+  - `UserMenuItem::{TimeOut, EndTimeout}` lead the moderation group, chosen by `permissions::is_timed_out` on the cached member.
+  - `ProfileCard::timed_out_until`, set only while the timeout runs and in a server context.
+- `src/ui/moderation_dialogs.rs`:
+  - `open_timeout_dialog` / `TimeoutDialog`: a "Duration" radio group with the first option chosen, and a Time out button.
+  - `MemberActionRequest` gets `danger: bool`: Kick is destructive, End timeout isn't.
+- `src/ui/chat.rs`:
+  - Labels "Time out…" and "End timeout…" (`Clock`).
+  - Arms `ChatView::open_timeout` and `ChatView::end_timeout` (confirms "End {name}'s timeout?", then `edit_member` with `remove: [Timeout]`).
+- `src/ui/profile_card.rs`: a "Timed out until {format_until}" line, in the danger colour with a clock, above Status.
+- Tests:
+  - `tests/profile.rs`: fixture gains `u-timed` (until 2999) and `u-lapsed` (2001). The two exact menus now start the moderation group with `TimeOut`. New tests: the item swap, and the card line.
+  - `tests/api_members.rs`: the timeout body as an RFC 3339 string; `{"remove":["Timeout"]}`; `IsElevated` gives the rank toast.
+
+### Divergences
+- **A new direct dependency** (`iso8601-timestamp`), already in the lock through revolt-models. revolt-models doesn't re-export `Timestamp`, so `timeout_until` can't name its return type without it.
+- **The confirmation's button can be non-destructive** (`danger: false`, for End timeout).
+- **The menu doesn't draw "Time out…" as destructive**: the web client marks only Kick and Ban.
+- Later chunks are unaffected.
+
+### Verification Performed
+- `cargo test`: 1110 passed, 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt drift is unchanged (`client.rs` 3, `chat.rs` 17, `store.rs` 14). `profile_card.rs` and the other clean files are still clean.
+
+### Manual Validation
+Deferred to the end: time out for 1 minute, check the message box and card, then end it early.

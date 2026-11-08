@@ -28,6 +28,8 @@ pub struct ProfileCard {
     pub roles: Vec<CardRole>,
     /// The server's name and when they joined it, in server channels.
     pub joined_server: Option<(String, DateTime<Utc>)>,
+    /// When their timeout on the channel's server ends, while it runs.
+    pub timed_out_until: Option<DateTime<Utc>>,
     /// When the account was created (from its ID).
     pub created: Option<DateTime<Utc>>,
     /// Their relationship to the user.
@@ -99,6 +101,9 @@ pub fn profile_card(store: &ChatStore, user: &str, channel: Option<&str>) -> Opt
     let joined_server = server
         .zip(member)
         .and_then(|(server, member)| Some((server.name.clone(), utc(&member.joined_at)?)));
+    let timed_out_until = member
+        .filter(|member| crate::permissions::is_timed_out(member))
+        .and_then(|member| utc(member.timeout.as_ref()?));
     let created = crate::time::ulid_millis(user)
         .and_then(|millis| i64::try_from(millis).ok())
         .and_then(|millis| Utc.timestamp_millis_opt(millis).single());
@@ -114,6 +119,7 @@ pub fn profile_card(store: &ChatStore, user: &str, channel: Option<&str>) -> Opt
         bot: person.bot.is_some(),
         roles,
         joined_server,
+        timed_out_until,
         created,
         relationship: person.relationship.clone(),
         friend_buttons: friend_buttons(store, user),
@@ -261,6 +267,11 @@ pub enum UserMenuItem {
     /// Make them the owner of the group the menu was opened in (its owner
     /// only, after asking).
     MakeGroupOwner,
+    /// Time them out on the server the menu was opened in (a dialog asks
+    /// for how long).
+    TimeOut,
+    /// End their running timeout early (after asking).
+    EndTimeout,
     /// Kick them from the server the menu was opened in (after asking).
     Kick,
     /// Ban them from the server the menu was opened in (a dialog asks for
@@ -340,14 +351,15 @@ fn standing_actions(store: &ChatStore, user: &str) -> Vec<RelationshipAction> {
 
 /// The menu for `user`, as seen from `channel`, in the web client's order:
 /// Profile, Message, Create group with (RuSToat's own, for friends),
-/// Mention; Remove from group and Make group owner; Kick and Ban; the
-/// friend requests; Remove friend and Block or Unblock; then the copy
-/// items. Message follows [`can_message`]; Mention is only for others, in
-/// server channels and groups (where the message box can mention them).
-/// Remove from group and Make group owner are for the owner of the group
-/// `channel`, on its other members. Kick and Ban are for server channels,
-/// as [`crate::permissions::moderation`] allows. Groups are split by
-/// separators.
+/// Mention; Remove from group and Make group owner; Time out (or End
+/// timeout), Kick and Ban; the friend requests; Remove friend and Block or
+/// Unblock; then the copy items. Message follows [`can_message`]; Mention
+/// is only for others, in server channels and groups (where the message
+/// box can mention them). Remove from group and Make group owner are for
+/// the owner of the group `channel`, on its other members. Time out, Kick
+/// and Ban are for server channels, as [`crate::permissions::moderation`]
+/// allows; End timeout replaces Time out while one runs. Groups are split
+/// by separators.
 pub fn user_menu(store: &ChatStore, user: &str, channel: Option<&str>) -> Vec<UserMenuItem> {
     use UserMenuItem::*;
     let me = user == store.me();
@@ -379,6 +391,12 @@ pub fn user_menu(store: &ChatStore, user: &str, channel: Option<&str>) -> Vec<Us
     let mut moderation = Vec::new();
     if let Some(server) = channel.and_then(|channel| store.channel_server(channel)) {
         let allowed = crate::permissions::moderation(store, server, user);
+        if allowed.timeout {
+            let timed_out = store
+                .member(server, user)
+                .is_some_and(crate::permissions::is_timed_out);
+            moderation.push(if timed_out { EndTimeout } else { TimeOut });
+        }
         if allowed.kick {
             moderation.push(Kick);
         }

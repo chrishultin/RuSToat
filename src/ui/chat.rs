@@ -88,7 +88,8 @@ use crate::ui::markup::{
 };
 use crate::ui::math::MathPlugin;
 use crate::ui::moderation_dialogs::{
-    MemberActionRequest, confirm_member_action, open_ban_dialog, run_member_action,
+    MemberActionRequest, confirm_member_action, open_ban_dialog, open_timeout_dialog,
+    run_member_action,
 };
 use crate::ui::profile_card::{
     CardBio, CardContent, MUTUALS_DIALOG_WIDTH, MutualList, MutualPick, OnLink, OnMutualPick,
@@ -5660,6 +5661,18 @@ impl ChatView {
                     self.confirm_make_owner(channel, user, window, cx);
                 }
             }
+            UserMenuItem::TimeOut => {
+                if let Some(channel) = channel {
+                    self.close_card(false, window, cx);
+                    self.open_timeout(channel, user, window, cx);
+                }
+            }
+            UserMenuItem::EndTimeout => {
+                if let Some(channel) = channel {
+                    self.close_card(false, window, cx);
+                    self.end_timeout(channel, user, window, cx);
+                }
+            }
             UserMenuItem::Kick => {
                 if let Some(channel) = channel {
                     self.close_card(false, window, cx);
@@ -5731,6 +5744,7 @@ impl ChatView {
             )
             .into(),
             ok_label: "Kick",
+            danger: true,
             failed_text,
         };
         confirm_member_action(request, action, window, cx);
@@ -5761,6 +5775,51 @@ impl ChatView {
             window,
             cx,
         );
+    }
+
+    /// Open "Time out {name}" for `user` on the server of `channel`.
+    fn open_timeout(
+        &mut self,
+        channel: String,
+        user: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(server) = self.store.channel_server(&channel).map(str::to_string) else {
+            return;
+        };
+        let name = self.store.name_in(&channel, &user);
+        open_timeout_dialog(self.client.clone(), server, user, &name, window, cx);
+    }
+
+    /// End `user`'s timeout on the server of `channel` early, after asking.
+    /// `ServerMemberUpdate` brings the change; a refusal toasts.
+    fn end_timeout(
+        &mut self,
+        channel: String,
+        user: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(server) = self.store.channel_server(&channel).map(str::to_string) else {
+            return;
+        };
+        let name = self.store.name_in(&channel, &user);
+        let action = {
+            let client = self.client.clone();
+            Box::pin(async move {
+                let edit = crate::moderation::end_timeout_edit();
+                client.edit_member(&server, &user, &edit).await.map(|_| ())
+            })
+        };
+        let request = MemberActionRequest {
+            title: format!("End {name}'s timeout?").into(),
+            detail: format!("{name} will be able to send messages and join calls again.").into(),
+            ok_label: "End timeout",
+            danger: false,
+            failed_text: format!("Couldn't end {name}'s timeout. Try again."),
+        };
+        confirm_member_action(request, action, window, cx);
     }
 
     /// Close the profile card. `refocus`: give focus back to the message box
@@ -11044,6 +11103,8 @@ fn user_menu_label(item: UserMenuItem) -> Option<(&'static str, IconName)> {
         UserMenuItem::Mention => ("Mention", IconName::AtSign),
         UserMenuItem::RemoveFromGroup => ("Remove from group…", IconName::UserMinus),
         UserMenuItem::MakeGroupOwner => ("Make group owner…", IconName::Crown),
+        UserMenuItem::TimeOut => ("Time out…", IconName::Clock),
+        UserMenuItem::EndTimeout => ("End timeout…", IconName::Clock),
         UserMenuItem::Kick => ("Kick…", IconName::UserX),
         UserMenuItem::Ban => ("Ban…", IconName::Ban),
         UserMenuItem::CopyUsername => ("Copy username", IconName::Copy),

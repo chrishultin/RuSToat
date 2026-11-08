@@ -8094,6 +8094,7 @@ dependencies = [
  "futures",
  "gpui-kit",
  "image",
+ "iso8601-timestamp",
  "keyring",
  "livekit",
  "log",
