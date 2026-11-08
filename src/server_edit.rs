@@ -154,6 +154,12 @@ pub fn delete_channel_error_text(err: &ApiError) -> String {
     }
 }
 
+/// Why `DELETE /servers/{id}` (leaving) was refused. (`NotFound` isn't a
+/// refusal: the user is already out.)
+pub fn leave_error_text(err: &ApiError) -> String {
+    error_text(err, "Couldn't leave the server. Try again.")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,6 +233,21 @@ mod tests {
         assert_eq!(
             delete_channel_error_text(&api_error(ErrorType::InternalError)),
             "Couldn't delete the channel. Try again."
+        );
+    }
+
+    #[test]
+    fn leave_refusals_say_why() {
+        let limited = ApiError::RateLimited {
+            retry_after_ms: Some(4200),
+        };
+        assert_eq!(
+            leave_error_text(&limited),
+            "Stoat is limiting changes. Try again in 5 s."
+        );
+        assert_eq!(
+            leave_error_text(&api_error(ErrorType::InternalError)),
+            "Couldn't leave the server. Try again."
         );
     }
 

@@ -291,6 +291,8 @@ pub struct ChatView {
     /// The category whose "Delete {TITLE}?" confirmation is waiting for
     /// Stoat to answer, likewise.
     deleting_category: Option<String>,
+    /// The open "Leave {name}?" confirmation.
+    leave_prompt: Option<LeavePrompt>,
     /// The age gate's "I am at least 18" box, as the user set it in this
     /// channel. In any other channel it starts as `safety.adult_confirmed`.
     age_gate_tick: Option<(String, bool)>,
@@ -738,6 +740,7 @@ impl ChatView {
             link_prompt: None,
             deleting_channel: None,
             deleting_category: None,
+            leave_prompt: None,
             age_gate_tick: None,
             media,
             web_app: None,
@@ -3871,7 +3874,7 @@ impl ChatView {
 
     /// A server's right-click menu: Mark as read; Edit identity…; Mute Server (for how
     /// long), or Unmute Server and until when it's muted; its Notifications
-    /// level; Copy server ID.
+    /// level; Leave server… unless the user owns it; Copy server ID.
     fn server_menu(&self, server: &str, cx: &Context<Self>) -> MenuBuilder {
         let view = cx.entity().downgrade();
         let server = server.to_string();
@@ -3882,6 +3885,7 @@ impl ChatView {
             let store = &this.read(cx).store;
             let mute = store.server_mute_until(&server);
             let level = store.notification_settings().server_level(&server);
+            let leavable = this.read(cx).may_leave(&server);
             let mark_read = {
                 let (view, server) = (view.clone(), server.clone());
                 move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
@@ -3952,12 +3956,206 @@ impl ChatView {
                 })
             };
             let levels = view.clone();
-            menu.submenu("Notifications", window, cx, move |menu, _, _| {
+            let menu = menu.submenu("Notifications", window, cx, move |menu, _, _| {
                 level_items(menu, &levels, None, Some(level), &set)
-            })
-            .separator()
-            .item(copy_id_item("Copy server ID", server.clone()))
+            });
+            let menu = if leavable {
+                let (view, server) = (view.clone(), server.clone());
+                menu.item(
+                    PopupMenuItem::element(|_, cx| {
+                        let danger = cx.theme().danger;
+                        h_flex()
+                            .gap_2()
+                            .text_color(danger)
+                            .child(Icon::new(IconName::LogOut).text_color(danger))
+                            .child("Leave server…")
+                    })
+                    .on_click(move |_, window, cx| {
+                        view.update(cx, |this, cx| {
+                            this.confirm_leave_server(server.clone(), window, cx)
+                        })
+                        .ok();
+                    }),
+                )
+            } else {
+                menu
+            };
+            menu.separator()
+                .item(copy_id_item("Copy server ID", server.clone()))
         })
+    }
+
+    /// Whether the user may leave `server`: it's known, their membership is
+    /// known, and they don't own it (for the owner, leaving deletes the
+    /// server).
+    fn may_leave(&self, server: &str) -> bool {
+        self.store.server(server).is_some()
+            && self.store.member(server, self.store.me()).is_some()
+            && !self.store.is_owner(server)
+    }
+
+    /// Ask before leaving a server: "Leave {name}?", with "Don't notify
+    /// others that you've left" (unticked). Once Leave is chosen, the
+    /// buttons wait, disabled, for Stoat's answer.
+    fn confirm_leave_server(
+        &mut self,
+        server: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) = self.store.server(&server).map(|s| s.name.clone()) else {
+            return;
+        };
+        self.leave_prompt = Some(LeavePrompt {
+            server,
+            name,
+            silently: false,
+            leaving: false,
+        });
+        let view = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let Some(prompt) = view
+                .upgrade()
+                .and_then(|view| view.read(cx).leave_prompt.clone())
+            else {
+                return alert;
+            };
+            let busy = prompt.leaving;
+            let leave = {
+                let view = view.clone();
+                move |window: &mut Window, cx: &mut App| {
+                    view.update(cx, |this, cx| this.leave_server_now(window, cx))
+                        .ok();
+                }
+            };
+            let tick = {
+                let view = view.clone();
+                move |ticked: &bool, _: &mut Window, cx: &mut App| {
+                    let ticked = *ticked;
+                    view.update(cx, |this, cx| {
+                        if let Some(prompt) = &mut this.leave_prompt {
+                            prompt.silently = ticked;
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            };
+            alert
+                .title(format!("Leave {}?", prompt.name))
+                .description("You won't be able to rejoin unless you are re-invited.")
+                .keyboard(!busy)
+                .child(
+                    Checkbox::new("leave-silently")
+                        .label("Don't notify others that you've left")
+                        .checked(prompt.silently)
+                        .disabled(busy)
+                        .on_click(tick),
+                )
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("leave-server-cancel")
+                                .label("Cancel")
+                                .disabled(busy)
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("leave-server-ok")
+                                .with_variant(ButtonVariant::Danger)
+                                .label("Leave")
+                                .loading(busy)
+                                .disabled(busy)
+                                .on_click({
+                                    let leave = leave.clone();
+                                    move |_, window, cx| leave(window, cx)
+                                }),
+                        ),
+                )
+                .on_ok(move |_, window, cx| {
+                    if !busy {
+                        leave(window, cx);
+                    }
+                    false
+                })
+        });
+    }
+
+    /// Leave the server the confirmation asks about (its Leave). The owner
+    /// is checked again first, from the store as it is now: for the owner
+    /// the request would delete the server. On Stoat's answer (or
+    /// `NotFound`: already out) the server goes at once, the confirmation
+    /// closes and a toast says so. Otherwise the confirmation stays and a
+    /// toast says why.
+    fn leave_server_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(prompt) = self.leave_prompt.as_mut().filter(|prompt| !prompt.leaving) else {
+            return;
+        };
+        let (server, name, silently) =
+            (prompt.server.clone(), prompt.name.clone(), prompt.silently);
+        if self.store.server(&server).is_none() {
+            log::debug!("server {server} is already gone");
+            window.close_dialog(cx);
+            return;
+        }
+        if self.store.is_owner(&server) {
+            log::warn!("not leaving server {server}: the user owns it");
+            window.close_dialog(cx);
+            let error = format!("You own {name}, so you can't leave it.");
+            window.push_notification(Notification::error(error), cx);
+            return;
+        }
+        prompt.leaving = true;
+        window.refresh();
+        let request = spawn_io({
+            let (client, server) = (self.client.clone(), server.clone());
+            async move { client.leave_server(&server, silently).await }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                if let Some(prompt) = &mut this.leave_prompt
+                    && prompt.server == server
+                {
+                    prompt.leaving = false;
+                }
+                let error = match result {
+                    Ok(Ok(())) => None,
+                    // Already out (kicked, or left elsewhere): what we wanted.
+                    Ok(Err(err))
+                        if matches!(err.error_type(), Some(revolt_result::ErrorType::NotFound)) =>
+                    {
+                        None
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't leave server {server}: {err:?}");
+                        Some(crate::server_edit::leave_error_text(&err))
+                    }
+                    Err(err) => {
+                        log::warn!("leave server task failed: {err:?}");
+                        Some("Couldn't leave the server. Try again.".to_string())
+                    }
+                };
+                match error {
+                    None => {
+                        log::debug!("left server {server} (silently: {silently})");
+                        // `ServerMemberLeave` follows, and finds it gone.
+                        this.leave_prompt = None;
+                        this.leave_server(&server, cx);
+                        window.close_dialog(cx);
+                        let left = Notification::success(format!("Left {name}."));
+                        window.push_notification(left, cx);
+                    }
+                    Some(error) => window.push_notification(Notification::error(error), cx),
+                }
+                window.refresh();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The custom status editor ("Set your status"): one field, filled with
@@ -7827,6 +8025,19 @@ impl LinkPrompt {
     fn ready(&self) -> bool {
         self.understood || !matches!(self.check, LinkCheck::Mismatch(_))
     }
+}
+
+/// A "Leave {name}?" confirmation.
+#[derive(Clone)]
+struct LeavePrompt {
+    server: String,
+    /// The server's name, as it was when asked (for the title and toast).
+    name: String,
+    /// "Don't notify others that you've left" is ticked.
+    silently: bool,
+    /// Leave was chosen and Stoat hasn't answered yet: the buttons wait,
+    /// disabled.
+    leaving: bool,
 }
 
 /// Something a message row asks the view to do.

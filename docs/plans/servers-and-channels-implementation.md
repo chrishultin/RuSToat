@@ -213,3 +213,40 @@ Deferred to the batched manual pass. Steps:
 7. Rename or delete a category from the web client while RuSToat's Rename dialog for it is open, then save: the error line says the category was deleted, or the new name is saved over the web client's.
 8. As a member without Manage Channels, none of the menus offer the category items.
 9. Light and dark themes: the dialogs and the red menu item are readable.
+
+## Chunk 5: Leave a server
+
+### Changes Made
+- `src/api/client.rs`: `leave_server(server, silently)` (`DELETE /servers/{id}?leave_silently=true|false`, no body, returns `()`). Its doc says that for the owner the same request deletes the server, so it must never be called for a server the user owns.
+- `src/store.rs`: `is_owner(server) -> bool` (false for an unknown server).
+- `src/server_edit.rs`: `leave_error_text(&ApiError)`: `profile_edit::error_text` with "Couldn't leave the server. Try again." (rate limits say how long to wait). One unit test.
+- `src/ui/chat.rs`:
+  - `may_leave(server)`: the server is known, the user's membership is known, and they don't own it.
+  - "Leave server…" at the end of `server_menu`, before Copy server ID's separator, where `may_leave` (checked when the menu opens). It's drawn like Delete channel… (danger colour), with the `LogOut` icon.
+  - `confirm_leave_server(server, ..)`: "Leave {name}?", "You won't be able to rejoin unless you are re-invited.", a "Don't notify others that you've left" checkbox (unticked), Cancel and a Danger "Leave". Its state is a new `leave_prompt: Option<LeavePrompt>` (`server`, `name`, `silently`, `leaving`), read on each render, as `link_prompt` is. While the request runs the buttons and the checkbox are disabled, Leave shows a spinner, and Escape is off, as in `confirm_delete_channel`.
+  - `leave_server_now(..)`: the second guard. It re-reads the store when Leave is chosen. If the server is gone, the dialog closes and nothing is sent. If the user now owns it, nothing is sent, the dialog closes and a toast says "You own {name}, so you can't leave it." Otherwise it sends `leave_server` with the checkbox's value. On 204 or `NotFound` it runs the existing `leave_server` (Home opens if the server was on screen), closes the dialog and toasts "Left {name}." The `ServerMemberLeave` that follows finds nothing left to remove. Other errors toast and leave the confirmation open and enabled again.
+- Tests:
+  - `tests/api_servers.rs`: `DELETE /servers/s1` with `leave_silently=true` and with `=false` (matched on the query), the token and an empty body, 204 → `Ok(())`; a 404 `NotFound` stays an error with that type.
+  - `tests/store_servers.rs`: `is_owner` for the fixture's owned and joined servers, an unknown server, a created server and a joined one; and after `ServerUpdate`s handing one server to the user and another away.
+
+### Divergences
+- **The owner guard also toasts.** If the user became the owner while the confirmation was open, nothing is sent and a toast says "You own {name}, so you can't leave it." The plan only said to re-read the owner, not what to show.
+- **A failed leave leaves the confirmation open** beside the toast, as Delete channel and Delete category do. The web client shows the error in the dialog.
+- **The "Left {name}." toast is a success toast,** like "Joined {name}.".
+- **The server's name in the title and toast is read when the confirmation opens.**
+
+### Verification Performed
+- `cargo test --lib server_edit`: 16 passed (1 new). `cargo test --test api_servers`: 13 passed (3 new). `--test store_servers`: 10 passed (2 new).
+- `cargo test`: 951 passed, 0 failed (945 before).
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt `Diff in` counts:
+  - `src/api/client.rs` 3, `src/ui/chat.rs` 17 and `src/store.rs` 15: unchanged, after hand-formatting the new code.
+  - `src/server_edit.rs`, `tests/api_servers.rs` and `tests/store_servers.rs`: 0.
+
+### Manual Validation
+Deferred to the batched manual pass. Steps:
+1. Right-click a server you joined: "Leave server…" is last before Copy server ID, in red. Choose it: "Leave {name}?" asks, with the checkbox unticked. Cancel keeps the server.
+2. Leave with the box unticked: Leave shows a spinner, then the server disappears from the rail, Home opens if it was on screen, and "Left {name}." shows. The web client shows "{you} left" in the server's system channel (if it has one).
+3. Join again and leave with the box ticked: no message in the web client.
+4. On a server you own, the menu has no Leave server….
+5. Light and dark themes: the red menu item, the dialog and the checkbox are readable.

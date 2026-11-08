@@ -3199,6 +3199,14 @@ impl ChatStore {
         self.servers.get(id)
     }
 
+    /// Whether the user owns `server` (false for an unknown server). Leaving
+    /// a server you own would delete it instead.
+    pub fn is_owner(&self, server: &str) -> bool {
+        self.servers
+            .get(server)
+            .is_some_and(|server| server.owner == self.me)
+    }
+
     pub fn member(&self, server: &str, user: &str) -> Option<&Member> {
         self.members.get(&(server.to_string(), user.to_string()))
     }

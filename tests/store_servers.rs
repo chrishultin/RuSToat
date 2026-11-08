@@ -1,5 +1,5 @@
 //! Servers joined or created (`ServerCreate`) and deleted (`ServerDelete`)
-//! while the client runs.
+//! while the client runs, and who owns them.
 
 use revolt_permissions::{ChannelPermission, DEFAULT_PERMISSION_SERVER};
 use serde_json::{Value, json};
@@ -246,4 +246,41 @@ fn a_server_create_then_the_create_response_gives_one_server_with_general() {
         Some("srv-mine")
     );
     assert_eq!(channel_list(&store, "srv-mine"), ["ch-general"]);
+}
+
+fn update(store: &mut ChatStore, event: Value) {
+    let Some(ServerEvent::ServerUpdate { id, data, clear }) = parse_frame(&event.to_string()).pop()
+    else {
+        panic!("ServerUpdate");
+    };
+    store.apply_server_update(&id, *data, &clear);
+}
+
+#[test]
+fn the_user_owns_only_their_own_servers() {
+    let mut store = store();
+    assert!(store.is_owner("srv-beta"));
+    assert!(!store.is_owner("srv-alpha"));
+    assert!(!store.is_owner("srv-gone"));
+    add_created(&mut store);
+    assert!(store.is_owner("srv-mine"));
+    add_joined(&mut store);
+    assert!(!store.is_owner("srv-new"));
+}
+
+#[test]
+fn ownership_follows_a_server_update() {
+    let mut store = store();
+    // Alpha is handed to the user and Beta handed away. Whether Leave is
+    // offered and sent hangs on this: for the owner, it deletes the server.
+    update(
+        &mut store,
+        json!({ "type": "ServerUpdate", "id": "srv-alpha", "data": { "owner": "u-me" } }),
+    );
+    assert!(store.is_owner("srv-alpha"));
+    update(
+        &mut store,
+        json!({ "type": "ServerUpdate", "id": "srv-beta", "data": { "owner": "u-ada" } }),
+    );
+    assert!(!store.is_owner("srv-beta"));
 }

@@ -915,6 +915,21 @@ impl StoatClient {
             .map(|_| ())
     }
 
+    /// `DELETE /servers/{server}?leave_silently={silently}`: leave a server
+    /// (no permission needed). Unless `silently`, Stoat posts "{user} left"
+    /// in the server's "user left" channel, if it has one. `ServerMemberLeave`
+    /// follows. **For the server's owner the same request deletes the
+    /// server**, so never call this for a server the user owns.
+    pub async fn leave_server(&self, server: &str, silently: bool) -> Result<(), ApiError> {
+        self.send_raw(
+            Method::DELETE,
+            &format!("/servers/{server}?leave_silently={silently}"),
+            None::<&()>,
+        )
+        .await
+        .map(|_| ())
+    }
+
     /// `PUT /servers/{server}/ack`: mark every channel in `server` read.
     pub async fn ack_server(&self, server: &str) -> Result<(), ApiError> {
         self.send_raw(Method::PUT, &format!("/servers/{server}/ack"), None::<&()>)

@@ -1,13 +1,13 @@
 //! Servers and channels against a mock Stoat API: `POST /servers/create`
 //! (create a server), `POST /servers/{id}/channels` (create a channel),
-//! `PATCH /servers/{id}` (its categories) and `DELETE /channels/{id}`
-//! (delete a channel).
+//! `PATCH /servers/{id}` (its categories), `DELETE /channels/{id}`
+//! (delete a channel) and `DELETE /servers/{id}` (leave a server).
 
 use revolt_result::ErrorType;
 use serde_json::json;
 use stoat_gpui::api::models::{Category, Channel};
 use stoat_gpui::api::{ApiError, StoatClient};
-use wiremock::matchers::{body_json, body_string, header, method, path};
+use wiremock::matchers::{body_json, body_string, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn client(server: &MockServer) -> StoatClient {
@@ -243,4 +243,46 @@ async fn deleting_the_last_category_sends_an_empty_list() {
 
     let kept = client(&server).edit_categories("s1", &[]).await.unwrap();
     assert!(kept.is_empty());
+}
+
+/// Leave `s1`, with Stoat expecting exactly `leave_silently={expected}`.
+async fn leave(silently: bool, expected: &str) {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/servers/s1"))
+        .and(query_param("leave_silently", expected))
+        .and(header("x-session-token", "tok"))
+        .and(body_string(""))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client(&server).leave_server("s1", silently).await.unwrap();
+}
+
+#[tokio::test]
+async fn leaving_silently_says_so() {
+    leave(true, "true").await;
+}
+
+#[tokio::test]
+async fn leaving_with_notice_says_so() {
+    leave(false, "false").await;
+}
+
+#[tokio::test]
+async fn leaving_a_server_already_left_is_not_found() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/servers/s1"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({ "type": "NotFound" })))
+        .mount(&server)
+        .await;
+
+    let err = client(&server).leave_server("s1", false).await.unwrap_err();
+    assert!(
+        matches!(err.error_type(), Some(ErrorType::NotFound)),
+        "{err:?}"
+    );
 }
