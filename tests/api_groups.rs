@@ -1,12 +1,13 @@
 //! Groups against a mock Stoat API: `POST /channels/create` (create a
-//! group), and `PUT` and `DELETE /channels/{id}/recipients/{user}` (add
-//! and remove a member).
+//! group), `PUT` and `DELETE /channels/{id}/recipients/{user}` (add and
+//! remove a member), `PATCH /channels/{id}` (hand it on) and `DELETE
+//! /channels/{id}` (leave it).
 
 use revolt_result::ErrorType;
 use serde_json::json;
 use stoat_gpui::api::models::Channel;
 use stoat_gpui::api::{ApiError, StoatClient};
-use wiremock::matchers::{body_json, body_string, header, method, path};
+use wiremock::matchers::{body_json, body_string, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn client(server: &MockServer) -> StoatClient {
@@ -171,6 +172,67 @@ async fn adding_a_stranger_is_an_api_error() {
     assert!(matches!(&err, ApiError::Api(_)), "{err:?}");
     assert!(
         matches!(err.error_type(), Some(ErrorType::NotFriends)),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn leaving_a_group_says_whether_silently() {
+    let server = MockServer::start().await;
+    for silently in ["true", "false"] {
+        Mock::given(method("DELETE"))
+            .and(path("/channels/g1"))
+            .and(header("x-session-token", "tok"))
+            .and(query_param("leave_silently", silently))
+            .and(body_string(""))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+
+    client(&server).leave_channel("g1", true).await.unwrap();
+    client(&server).leave_channel("g1", false).await.unwrap();
+}
+
+#[tokio::test]
+async fn handing_a_group_on_sends_only_its_new_owner() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/channels/g1"))
+        .and(header("x-session-token", "tok"))
+        .and(body_json(json!({ "owner": "u2" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "channel_type": "Group", "_id": "g1", "name": "Trip", "owner": "u2",
+            "recipients": ["u-me", "u2"]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let channel = client(&server).transfer_group("g1", "u2").await.unwrap();
+    let Channel::Group { owner, .. } = &channel else {
+        panic!("a group: {channel:?}");
+    };
+    assert_eq!(owner, "u2");
+}
+
+#[tokio::test]
+async fn handing_on_a_group_the_user_doesnt_own_is_an_api_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/channels/g1"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({ "type": "NotOwner" })))
+        .mount(&server)
+        .await;
+
+    let err = client(&server)
+        .transfer_group("g1", "u2")
+        .await
+        .unwrap_err();
+    assert!(matches!(&err, ApiError::Api(_)), "{err:?}");
+    assert!(
+        matches!(err.error_type(), Some(ErrorType::NotOwner)),
         "{err:?}"
     );
 }

@@ -1,6 +1,7 @@
 //! Making and changing groups: who can be picked for one and how many,
-//! and why Stoat refused, in words. Plain data with no GPUI, so it's
-//! unit-testable. The dialogs are in [`crate::ui::group_dialogs`].
+//! who takes over from an owner who leaves, and why Stoat refused, in
+//! words. Plain data with no GPUI, so it's unit-testable. The dialogs are
+//! in [`crate::ui::group_dialogs`].
 
 use revolt_result::ErrorType;
 
@@ -129,6 +130,41 @@ pub fn remove_member_error_text(err: &ApiError, name: &str) -> String {
             Some(name),
             &format!("Couldn't remove {name}. Try again."),
         ),
+    }
+}
+
+/// Who Stoat makes the owner when `owner` leaves a group with these
+/// `recipients`: the first other member, in their order. `None` when the
+/// owner is alone (leaving deletes the group).
+pub fn default_next_owner(recipients: &[String], owner: &str) -> Option<String> {
+    recipients.iter().find(|id| *id != owner).cloned()
+}
+
+/// Why `PATCH /channels/{id}` making `name` the owner was refused.
+pub fn transfer_error_text(err: &ApiError, name: &str) -> String {
+    match err.error_type() {
+        Some(ErrorType::MissingPermission { .. }) => "Only the group's owner can do that.".into(),
+        _ => group_error_text(
+            err,
+            Some(name),
+            &format!("Couldn't make {name} the owner. Try again."),
+        ),
+    }
+}
+
+/// Why `DELETE /channels/{id}` (leaving a group) was refused. `handed_to`
+/// is who the user made the owner just before, if anyone: they stay the
+/// owner, and the user stays a member. (`NotFound` isn't a refusal: the
+/// user is already out.)
+pub fn leave_group_error_text(err: &ApiError, handed_to: Option<&str>) -> String {
+    let fallback = "Couldn't leave the group. Try again.";
+    let why = group_error_text(err, None, fallback);
+    match handed_to {
+        None => why,
+        Some(name) if why == fallback => {
+            format!("{name} is now the owner, but leaving failed. Try again.")
+        }
+        Some(name) => format!("{name} is now the owner, but leaving failed: {why}"),
     }
 }
 
@@ -300,6 +336,65 @@ mod tests {
         assert_eq!(
             remove_member_error_text(&api_error(ErrorType::InternalError), "ada"),
             "Couldn't remove ada. Try again."
+        );
+    }
+
+    #[test]
+    fn the_next_owner_is_the_first_other_member() {
+        let recipients = ["u2", "u-me", "u3"].map(String::from);
+        assert_eq!(
+            default_next_owner(&recipients, "u-me").as_deref(),
+            Some("u2")
+        );
+        assert_eq!(
+            default_next_owner(&recipients, "u2").as_deref(),
+            Some("u-me")
+        );
+        // Alone: nobody takes over.
+        assert_eq!(default_next_owner(&["u-me".into()], "u-me"), None);
+        assert_eq!(default_next_owner(&[], "u-me"), None);
+    }
+
+    #[test]
+    fn handing_over_refusals_say_why() {
+        assert_eq!(
+            transfer_error_text(&api_error(ErrorType::NotOwner), "ada"),
+            "Only the group's owner can do that."
+        );
+        let missing = api_error(ErrorType::MissingPermission {
+            permission: "ManageChannel".into(),
+        });
+        assert_eq!(
+            transfer_error_text(&missing, "ada"),
+            "Only the group's owner can do that."
+        );
+        assert_eq!(
+            transfer_error_text(&api_error(ErrorType::NotInGroup), "ada"),
+            "ada isn't in this group any more."
+        );
+        assert_eq!(
+            transfer_error_text(&api_error(ErrorType::InternalError), "ada"),
+            "Couldn't make ada the owner. Try again."
+        );
+    }
+
+    #[test]
+    fn leaving_refusals_say_whether_the_group_was_handed_on() {
+        let failed = api_error(ErrorType::InternalError);
+        assert_eq!(
+            leave_group_error_text(&failed, None),
+            "Couldn't leave the group. Try again."
+        );
+        assert_eq!(
+            leave_group_error_text(&failed, Some("ada")),
+            "ada is now the owner, but leaving failed. Try again."
+        );
+        let limited = ApiError::RateLimited {
+            retry_after_ms: Some(3000),
+        };
+        assert_eq!(
+            leave_group_error_text(&limited, Some("ada")),
+            "ada is now the owner, but leaving failed: Stoat is limiting changes. Try again in 3 s."
         );
     }
 }

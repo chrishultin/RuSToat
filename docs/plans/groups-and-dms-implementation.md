@@ -131,3 +131,45 @@ Deferred to the batched manual pass. Steps:
 3. As owner, right-click a member (in the member list, and on one of their messages): "Remove from group…" asks "Remove {name}?", and Remove takes them out; the web client shows the removal. It isn't offered on yourself, in a group you don't own, or for them in another channel.
 4. Create an invite for a group from its header and from its menu: the title is "Invite people to {group}" with no "To #…" line. Join it from another account.
 5. DMs and Saved Notes offer neither button nor Create invite….
+
+## Chunk 4: Leave a group and transfer ownership
+
+### Changes Made
+- `src/api/client.rs`: `transfer_group(group, owner) -> Channel` (`PATCH /channels/{group}` with exactly `{"owner": …}`, from a private struct) and `leave_channel(group, silently)` (`DELETE /channels/{group}?leave_silently=…`, no body). Milestone 19's `delete_channel` stays as it was for server channels.
+- `src/store.rs`: `set_group_owner(channel, user) -> bool` (`false` for a repeat or anything but a group). Chunk 1's live `channel_ownership_changed` handling in `apply_message` now goes through it.
+- `src/groups.rs`: `default_next_owner(recipients, owner)` (the first other member, `None` when alone); `transfer_error_text(err, name)` (Missing Permission as "Only the group's owner can do that.", else `group_error_text` with "Couldn't make {name} the owner. Try again."); `leave_group_error_text(err, handed_to)` ("Couldn't leave the group. Try again.", or "{name} is now the owner, but leaving failed…" when the group was handed on first).
+- `src/profile.rs`: `UserMenuItem::MakeGroupOwner`, after Remove from group in the same section and with the same gating (the menu's channel is a group the user owns, the person isn't the user, and they're in it).
+- `src/ui/chat.rs`:
+  - The leave confirmation is shared by servers and groups: `LeavePrompt` holds a `LeaveTarget` (`Server` or `Group`) and the owner's `next_owner` pick; `confirm_leave_server` and the new `confirm_leave_group` both open `open_leave_prompt`, whose Leave goes through `leave_now` to `leave_server_now` or `leave_group_now`.
+  - For a group (Assumption 6), each time it's drawn the dialog reads the group as it is now (`group_leave` → `GroupLeave { alone, candidates, next_owner }`). For its owner with others in it, a "New owner" row has an outline dropdown of the other members' display names in `recipients` order, starting at Stoat's choice. For the only member, the description is "You're the only member, so leaving deletes the group." and the button says "Delete group". Otherwise it's "You won't be able to rejoin unless you are re-invited.", the "Don't notify others that you've left" checkbox, Cancel and Danger "Leave", with milestone 19's waiting footer.
+  - `leave_group_now`: if the user still owns the group and picked someone other than Stoat's choice, `transfer_group` is sent first, then `leave_channel`, in one request task. If the handover is refused, nothing else is sent and a toast says why. If the leave is refused after a handover, the new owner is applied locally and the toast says "{name} is now the owner, but leaving failed…". On success (or `NotFound`) the group goes through `channel_deleted`, the dialog closes and the toast says "Left {name}."
+  - "Leave group…" (red, `IconName::LogOut`) in `channel_menu` for groups, after Delete channel's place and before Copy channel ID.
+  - `confirm_make_owner(channel, user)` (Assumption 7): "Make {name} the owner?", "You'll stay in the group, but only {name} will be able to remove members or hand ownership on.", Cancel and primary "Make owner", waiting on `transferring_group` as Remove does on `removing_member`. `make_owner` applies the response's `owner` with `set_group_owner`, forgets the member lists and closes; a refusal is a toast and the confirmation stays.
+  - `UserMenuItem::MakeGroupOwner` closes the card and opens the confirmation. Label "Make group owner…", `IconName::Crown`.
+- `src/assets.rs`: `Crown` bundled, and in `people_icons_load`.
+- Tests: `tests/api_groups.rs` (`DELETE /channels/g1` with `leave_silently=true` and `=false` and an empty body; `PATCH /channels/g1` with exactly `{"owner":"u2"}` parsing the group; `NotOwner` staying an `Api` error); `tests/profile.rs` (the owner's full menu for a member now has Make group owner after Remove from group; it's not on yourself, someone outside the group, from another channel, or for a plain member; once the group is handed on, neither item shows); `tests/store_groups.rs` (`set_group_owner` hands it on, a repeat changes nothing, only groups); `src/groups.rs` unit tests (`default_next_owner`, the handover and leaving error texts).
+
+### Divergences
+- **One confirmation for servers and groups.** Milestone 19's `LeavePrompt` gained a `LeaveTarget` and `next_owner` instead of a second prompt; the server flow is unchanged apart from its buttons' element IDs (`leave-cancel`, `leave-ok`).
+- **The handover is only sent when it changes something.** If the owner leaves Stoat's choice picked (the default), RuSToat sends just the `DELETE` and Stoat hands the group on itself. If the user is no longer the owner by the time they press Leave, there's no handover either.
+- **The dialog follows the group live.** If the picked person leaves while the dialog is open, the picker falls back to Stoat's choice; if everyone else leaves, it turns into "Delete group".
+- **No silent checkbox for the only member,** since there's nobody to notify (Assumption 6 lists it for every member).
+- **A new `ChatStore::set_group_owner`** applies the PATCH response's owner (and the owner after a handover whose leave failed); chunk 1's ownership messages use it too.
+- **Make group owner is a primary (not Danger) button, with no toast on success,** like Remove; the "gave ownership" system message and the menu items changing show it worked. Its icon is `Crown`, newly bundled.
+- **Handing over has its own Missing Permission text,** "Only the group's owner can do that." (the same words as `NotOwner`).
+- **A member the store doesn't know** is listed in the New owner picker by user ID rather than left out, since Stoat may hand the group to them.
+
+### Verification Performed
+- `cargo test --lib groups::`: 12 passed. `cargo test --test api_groups`: 11 passed. `--test profile` and `--test store_groups`: pass, with one more test each.
+- `cargo test`: 992 passed, 0 failed (984 before).
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt `Diff in` counts: `src/api/client.rs` 3, `src/ui/chat.rs` 17 and `src/store.rs` 15, unchanged (hand-formatted). `src/groups.rs`, `src/profile.rs`, `src/assets.rs`, `tests/api_groups.rs`, `tests/profile.rs` and `tests/store_groups.rs` 0.
+
+### Manual Validation
+Deferred to the batched manual pass. Steps:
+1. As a member (not the owner), right-click a group in Home: "Leave group…" (red) asks "Leave {name}?" with the silent checkbox. Leave silently: the group leaves Home, the toast says "Left {name}.", and the web client shows no "left" message. Leave another without ticking it: the web client shows the "left" message.
+2. As owner of a three-person group, open "Leave group…": "New owner" shows the first other member. Pick the second member and leave: they become owner in the web client (the "gave ownership" message names them).
+3. As owner, leave with the default pick: Stoat's choice (the first other member) becomes owner.
+4. As the only member, the dialog says "You're the only member, so leaving deletes the group.", has no checkbox, and its button says "Delete group"; the group is deleted.
+5. As owner, right-click a member in the group's member list (and on one of their messages): "Make group owner…" asks "Make {name} the owner?"; Make owner hands it on, and afterwards neither "Remove from group…" nor "Make group owner…" is offered to you. Neither shows for a plain member or on yourself.
+6. Light and dark themes: the New owner dropdown and the checkbox in the leave dialog are readable.

@@ -296,6 +296,9 @@ pub struct ChatView {
     /// The group and member whose "Remove {name}?" confirmation is waiting
     /// for Stoat to answer, likewise.
     removing_member: Option<(String, String)>,
+    /// The group and member whose "Make {name} the owner?" confirmation is
+    /// waiting for Stoat to answer, likewise.
+    transferring_group: Option<(String, String)>,
     /// The category whose "Delete {TITLE}?" confirmation is waiting for
     /// Stoat to answer, likewise.
     deleting_category: Option<String>,
@@ -751,6 +754,7 @@ impl ChatView {
             link_prompt: None,
             deleting_channel: None,
             removing_member: None,
+            transferring_group: None,
             deleting_category: None,
             leave_prompt: None,
             age_gate_tick: None,
@@ -3508,7 +3512,8 @@ impl ChatView {
     /// Notifications level, led by its default (the server's level, or
     /// All for DMs and groups); Create invite… (server channels and
     /// groups), Create channel… (in this channel's category), Create
-    /// category… and Delete channel… where allowed; Copy channel ID. A channel in a muted server still offers
+    /// category… and Delete channel… where allowed; Leave group… (groups);
+    /// Copy channel ID. A channel in a muted server still offers
     /// Mute Channel: the server's mute is what silences it.
     fn channel_menu(&self, channel: &ChannelEntry, cx: &Context<Self>) -> MenuBuilder {
         let view = cx.entity().downgrade();
@@ -3521,6 +3526,7 @@ impl ChatView {
             let store = &this.read(cx).store;
             let invitable = store.can_invite(&channel_id);
             let deletable = in_server && store.can_manage_channel(&channel_id);
+            let group = matches!(store.channel(&channel_id), Some(Channel::Group { .. }));
             // Creating takes Manage Channels across the server, not on this
             // channel.
             let create_in = match store.channel(&channel_id) {
@@ -3602,6 +3608,27 @@ impl ChatView {
                     .on_click(move |_, window, cx| {
                         view.update(cx, |this, cx| {
                             this.confirm_delete_channel(channel.clone(), window, cx)
+                        })
+                        .ok();
+                    }),
+                )
+            } else {
+                menu
+            };
+            let menu = if group {
+                let (view, channel) = (view.clone(), channel_id.clone());
+                menu.item(
+                    PopupMenuItem::element(|_, cx| {
+                        let danger = cx.theme().danger;
+                        h_flex()
+                            .gap_2()
+                            .text_color(danger)
+                            .child(Icon::new(IconName::LogOut).text_color(danger))
+                            .child("Leave group…")
+                    })
+                    .on_click(move |_, window, cx| {
+                        view.update(cx, |this, cx| {
+                            this.confirm_leave_group(channel.clone(), window, cx)
                         })
                         .ok();
                     }),
@@ -4077,26 +4104,58 @@ impl ChatView {
         let Some(name) = self.store.server(&server).map(|s| s.name.clone()) else {
             return;
         };
+        self.open_leave_prompt(LeaveTarget::Server(server), name, window, cx);
+    }
+
+    /// Ask before leaving a group, as for a server. Its owner also picks
+    /// who takes over ("New owner", starting at Stoat's choice); for the
+    /// only member it says leaving deletes the group.
+    fn confirm_leave_group(&mut self, group: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Channel::Group { name, .. }) = self.store.channel(&group) else {
+            return;
+        };
+        let name = name.clone();
+        self.open_leave_prompt(LeaveTarget::Group(group), name, window, cx);
+    }
+
+    /// The "Leave {name}?" confirmation for `target`. A group's owner
+    /// picker and "only member" wording follow the group as it is now, so
+    /// they keep up with people joining and leaving while it's open.
+    fn open_leave_prompt(
+        &mut self,
+        target: LeaveTarget,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.leave_prompt = Some(LeavePrompt {
-            server,
+            target,
             name,
             silently: false,
+            next_owner: None,
             leaving: false,
         });
         let view = cx.entity().downgrade();
         window.open_alert_dialog(cx, move |alert, _, cx| {
-            let Some(prompt) = view
-                .upgrade()
-                .and_then(|view| view.read(cx).leave_prompt.clone())
-            else {
+            let Some((prompt, group)) = view.upgrade().and_then(|view| {
+                let this = view.read(cx);
+                let prompt = this.leave_prompt.clone()?;
+                let group = match &prompt.target {
+                    LeaveTarget::Group(id) => {
+                        Some(this.group_leave(id, prompt.next_owner.as_deref()))
+                    }
+                    LeaveTarget::Server(_) => None,
+                };
+                Some((prompt, group))
+            }) else {
                 return alert;
             };
             let busy = prompt.leaving;
+            let alone = group.as_ref().is_some_and(|group| group.alone);
             let leave = {
                 let view = view.clone();
                 move |window: &mut Window, cx: &mut App| {
-                    view.update(cx, |this, cx| this.leave_server_now(window, cx))
-                        .ok();
+                    view.update(cx, |this, cx| this.leave_now(window, cx)).ok();
                 }
             };
             let tick = {
@@ -4112,31 +4171,82 @@ impl ChatView {
                     .ok();
                 }
             };
+            let description = if alone {
+                "You're the only member, so leaving deletes the group."
+            } else {
+                "You won't be able to rejoin unless you are re-invited."
+            };
+            let new_owner = group
+                .filter(|group| !group.candidates.is_empty())
+                .map(|group| {
+                    let chosen = group
+                        .candidates
+                        .iter()
+                        .find(|(id, _)| Some(id) == group.next_owner.as_ref());
+                    let label = chosen.map(|(_, name)| name.clone()).unwrap_or_default();
+                    let (view, candidates, next) =
+                        (view.clone(), group.candidates, group.next_owner);
+                    h_flex()
+                        .justify_between()
+                        .gap_3()
+                        .child(div().text_sm().child("New owner"))
+                        .child(
+                            Button::new("leave-group-owner")
+                                .outline()
+                                .small()
+                                .label(label)
+                                .icon(IconName::ChevronDown)
+                                .disabled(busy)
+                                .dropdown_menu(move |menu, _, _| {
+                                    candidates.iter().fold(menu, |menu, (id, name)| {
+                                        let (view, id) = (view.clone(), id.clone());
+                                        menu.item(
+                                            PopupMenuItem::new(name.clone())
+                                                .checked(next.as_ref() == Some(&id))
+                                                .on_click(move |_, _, cx| {
+                                                    view.update(cx, |this, cx| {
+                                                        this.pick_next_owner(id.clone(), cx)
+                                                    })
+                                                    .ok();
+                                                }),
+                                        )
+                                    })
+                                }),
+                        )
+                });
             alert
                 .title(format!("Leave {}?", prompt.name))
-                .description("You won't be able to rejoin unless you are re-invited.")
+                .description(description)
                 .keyboard(!busy)
                 .child(
-                    Checkbox::new("leave-silently")
-                        .label("Don't notify others that you've left")
-                        .checked(prompt.silently)
-                        .disabled(busy)
-                        .on_click(tick),
+                    v_flex()
+                        .gap_3()
+                        .children(new_owner)
+                        // Nobody to notify.
+                        .when(!alone, |this| {
+                            this.child(
+                                Checkbox::new("leave-silently")
+                                    .label("Don't notify others that you've left")
+                                    .checked(prompt.silently)
+                                    .disabled(busy)
+                                    .on_click(tick),
+                            )
+                        }),
                 )
                 .footer(
                     h_flex()
                         .gap_2()
                         .justify_end()
                         .child(
-                            Button::new("leave-server-cancel")
+                            Button::new("leave-cancel")
                                 .label("Cancel")
                                 .disabled(busy)
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
-                            Button::new("leave-server-ok")
+                            Button::new("leave-ok")
                                 .with_variant(ButtonVariant::Danger)
-                                .label("Leave")
+                                .label(if alone { "Delete group" } else { "Leave" })
                                 .loading(busy)
                                 .disabled(busy)
                                 .on_click({
@@ -4154,6 +4264,67 @@ impl ChatView {
         });
     }
 
+    /// The leave confirmation's "New owner" choice.
+    fn pick_next_owner(&mut self, user: String, cx: &mut Context<Self>) {
+        if let Some(prompt) = &mut self.leave_prompt {
+            prompt.next_owner = Some(user);
+        }
+        cx.notify();
+    }
+
+    /// What leaving the group `channel` means now (see [`GroupLeave`]),
+    /// with `picked` as the owner's choice of who takes over.
+    fn group_leave(&self, channel: &str, picked: Option<&str>) -> GroupLeave {
+        let me = self.store.me();
+        let Some(Channel::Group {
+            recipients, owner, ..
+        }) = self.store.channel(channel)
+        else {
+            return GroupLeave {
+                alone: false,
+                candidates: Vec::new(),
+                next_owner: None,
+            };
+        };
+        let alone = recipients.iter().all(|id| id == me);
+        if owner != me || alone {
+            return GroupLeave {
+                alone,
+                candidates: Vec::new(),
+                next_owner: None,
+            };
+        }
+        let candidates: Vec<(String, String)> = recipients
+            .iter()
+            .filter(|id| *id != me)
+            .map(|id| {
+                let name = self
+                    .store
+                    .user(id)
+                    .map_or_else(|| id.clone(), |person| display_name(person).to_string());
+                (id.clone(), name)
+            })
+            .collect();
+        let next_owner = picked
+            .filter(|picked| candidates.iter().any(|(id, _)| id == picked))
+            .map(str::to_string)
+            .or_else(|| crate::groups::default_next_owner(recipients, me));
+        GroupLeave {
+            alone,
+            candidates,
+            next_owner,
+        }
+    }
+
+    /// The confirmation's Leave: leave its server or group.
+    fn leave_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.leave_prompt.as_ref().map(|prompt| &prompt.target) {
+            Some(LeaveTarget::Server(_)) => self.leave_server_now(window, cx),
+            Some(LeaveTarget::Group(_)) => self.leave_group_now(window, cx),
+            None => {}
+        }
+    }
+
     /// Leave the server the confirmation asks about (its Leave). The owner
     /// is checked again first, from the store as it is now: for the owner
     /// the request would delete the server. On Stoat's answer (or
@@ -4164,8 +4335,10 @@ impl ChatView {
         let Some(prompt) = self.leave_prompt.as_mut().filter(|prompt| !prompt.leaving) else {
             return;
         };
-        let (server, name, silently) =
-            (prompt.server.clone(), prompt.name.clone(), prompt.silently);
+        let LeaveTarget::Server(server) = &prompt.target else {
+            return;
+        };
+        let (server, name, silently) = (server.clone(), prompt.name.clone(), prompt.silently);
         if self.store.server(&server).is_none() {
             log::debug!("server {server} is already gone");
             window.close_dialog(cx);
@@ -4188,7 +4361,7 @@ impl ChatView {
             let result = request.await;
             this.update_in(cx, |this, window, cx| {
                 if let Some(prompt) = &mut this.leave_prompt
-                    && prompt.server == server
+                    && matches!(&prompt.target, LeaveTarget::Server(id) if *id == server)
                 {
                     prompt.leaving = false;
                 }
@@ -4215,6 +4388,113 @@ impl ChatView {
                         // `ServerMemberLeave` follows, and finds it gone.
                         this.leave_prompt = None;
                         this.leave_server(&server, cx);
+                        window.close_dialog(cx);
+                        let left = Notification::success(format!("Left {name}."));
+                        window.push_notification(left, cx);
+                    }
+                    Some(error) => window.push_notification(Notification::error(error), cx),
+                }
+                window.refresh();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Leave the group the confirmation asks about (its Leave or Delete
+    /// group). If the user owns it and picked someone other than Stoat's
+    /// choice, they're made the owner first; if that's refused, nothing
+    /// else happens. On Stoat's answer to the leave (or `NotFound`: already
+    /// out) the group goes at once, the confirmation closes and a toast
+    /// says so. Otherwise the confirmation stays and a toast says why (and
+    /// who owns the group now, if it was handed on).
+    fn leave_group_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(prompt) = self.leave_prompt.as_ref().filter(|prompt| !prompt.leaving) else {
+            return;
+        };
+        let LeaveTarget::Group(group) = &prompt.target else {
+            return;
+        };
+        let (group, name, silently) = (group.clone(), prompt.name.clone(), prompt.silently);
+        let Some(Channel::Group { recipients, .. }) = self.store.channel(&group) else {
+            log::debug!("group {group} is already gone");
+            window.close_dialog(cx);
+            return;
+        };
+        // From the group as it is now: someone else may own it by now.
+        let stoats_choice = crate::groups::default_next_owner(recipients, self.store.me());
+        let handover = self
+            .group_leave(&group, prompt.next_owner.as_deref())
+            .next_owner
+            .filter(|next| Some(next) != stoats_choice.as_ref())
+            .map(|next| {
+                let name = self
+                    .store
+                    .user(&next)
+                    .map_or_else(|| "They".into(), |person| display_name(person).to_string());
+                (next, name)
+            });
+        if let Some(prompt) = &mut self.leave_prompt {
+            prompt.leaving = true;
+        }
+        window.refresh();
+        let request = spawn_io({
+            let (client, group) = (self.client.clone(), group.clone());
+            let next = handover.as_ref().map(|(next, _)| next.clone());
+            // Outer error: the handover was refused, so it didn't leave.
+            async move {
+                if let Some(next) = &next {
+                    client.transfer_group(&group, next).await?;
+                }
+                Ok::<_, ApiError>(client.leave_channel(&group, silently).await)
+            }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                if let Some(prompt) = &mut this.leave_prompt
+                    && matches!(&prompt.target, LeaveTarget::Group(id) if *id == group)
+                {
+                    prompt.leaving = false;
+                }
+                let handed_to = handover.as_ref().map(|(_, name)| name.as_str());
+                let error = match result {
+                    Ok(Ok(Ok(()))) => None,
+                    // Already out (removed, or left elsewhere): what we
+                    // wanted.
+                    Ok(Ok(Err(err)))
+                        if matches!(err.error_type(), Some(revolt_result::ErrorType::NotFound)) =>
+                    {
+                        None
+                    }
+                    Ok(Ok(Err(err))) => {
+                        log::warn!("couldn't leave group {group}: {err:?}");
+                        // Still in it, but no longer its owner.
+                        if let Some((next, _)) = &handover
+                            && this.store.set_group_owner(&group, next)
+                        {
+                            this.forget_member_lists();
+                        }
+                        Some(crate::groups::leave_group_error_text(&err, handed_to))
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't hand group {group} on: {err:?}");
+                        let name = handed_to.unwrap_or("them");
+                        Some(crate::groups::transfer_error_text(&err, name))
+                    }
+                    Err(err) => {
+                        log::warn!("leave group task failed: {err:?}");
+                        Some("Couldn't leave the group. Try again.".to_string())
+                    }
+                };
+                match error {
+                    None => {
+                        log::debug!("left group {group} (silently: {silently})");
+                        // `ChannelGroupLeave` (or `ChannelDelete`) follows,
+                        // and finds it gone.
+                        this.leave_prompt = None;
+                        this.channel_deleted(&group, cx);
                         window.close_dialog(cx);
                         let left = Notification::success(format!("Left {name}."));
                         window.push_notification(left, cx);
@@ -4555,6 +4835,12 @@ impl ChatView {
                 if let Some(channel) = channel {
                     self.close_card(false, window, cx);
                     self.confirm_remove_member(channel, user, window, cx);
+                }
+            }
+            UserMenuItem::MakeGroupOwner => {
+                if let Some(channel) = channel {
+                    self.close_card(false, window, cx);
+                    self.confirm_make_owner(channel, user, window, cx);
                 }
             }
             UserMenuItem::Mention => {
@@ -5287,6 +5573,141 @@ impl ChatView {
                         this.group_member_removed(&channel, &user, cx);
                         window.close_dialog(cx);
                     }
+                    Some(error) => window.push_notification(Notification::error(error), cx),
+                }
+                window.refresh();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Ask before handing the group `channel` to `user`: "Make {name} the
+    /// owner?". Once Make owner is chosen, the buttons wait, disabled, for
+    /// Stoat's answer.
+    fn confirm_make_owner(
+        &mut self,
+        channel: String,
+        user: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(self.store.channel(&channel), Some(Channel::Group { .. })) {
+            return;
+        }
+        let name = self
+            .store
+            .user(&user)
+            .map(|person| display_name(person).to_string())
+            .unwrap_or_else(|| "them".into());
+        let title: SharedString = format!("Make {name} the owner?").into();
+        let description: SharedString = format!(
+            "You'll stay in the group, but only {name} will be able to remove members or hand \
+             ownership on."
+        )
+        .into();
+        let view = cx.entity().downgrade();
+        let pending = (channel, user);
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let busy = view
+                .upgrade()
+                .is_some_and(|view| view.read(cx).transferring_group.as_ref() == Some(&pending));
+            let transfer = {
+                let (view, (channel, user)) = (view.clone(), pending.clone());
+                move |window: &mut Window, cx: &mut App| {
+                    view.update(cx, |this, cx| {
+                        this.make_owner(channel.clone(), user.clone(), window, cx)
+                    })
+                    .ok();
+                }
+            };
+            alert
+                .title(title.clone())
+                .description(description.clone())
+                .keyboard(!busy)
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("make-owner-cancel")
+                                .label("Cancel")
+                                .disabled(busy)
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("make-owner-ok")
+                                .primary()
+                                .label("Make owner")
+                                .loading(busy)
+                                .disabled(busy)
+                                .on_click({
+                                    let transfer = transfer.clone();
+                                    move |_, window, cx| transfer(window, cx)
+                                }),
+                        ),
+                )
+                .on_ok(move |_, window, cx| {
+                    if !busy {
+                        transfer(window, cx);
+                    }
+                    false
+                })
+        });
+    }
+
+    /// Make `user` the owner of the group `channel` (the confirmation's
+    /// Make owner). On Stoat's answer the group's new owner is applied at
+    /// once (`ChannelUpdate` repeats it) and the confirmation closes.
+    /// Otherwise the confirmation stays and a toast says why.
+    fn make_owner(
+        &mut self,
+        channel: String,
+        user: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.transferring_group.is_some() {
+            return;
+        }
+        self.transferring_group = Some((channel.clone(), user.clone()));
+        window.refresh();
+        let request = spawn_io({
+            let (client, channel, user) = (self.client.clone(), channel.clone(), user.clone());
+            async move { client.transfer_group(&channel, &user).await }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.transferring_group = None;
+                let name = this
+                    .store
+                    .user(&user)
+                    .map(|person| display_name(person).to_string())
+                    .unwrap_or_else(|| "them".into());
+                let error = match result {
+                    Ok(Ok(group)) => {
+                        let owner = match &group {
+                            Channel::Group { owner, .. } => owner.as_str(),
+                            _ => user.as_str(),
+                        };
+                        log::debug!("handed group {channel} to {owner}");
+                        this.store.set_group_owner(&channel, owner);
+                        this.forget_member_lists();
+                        None
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't hand group {channel} to {user}: {err:?}");
+                        Some(crate::groups::transfer_error_text(&err, &name))
+                    }
+                    Err(err) => {
+                        log::warn!("make owner task failed: {err:?}");
+                        Some(format!("Couldn't make {name} the owner. Try again."))
+                    }
+                };
+                match error {
+                    None => window.close_dialog(cx),
                     Some(error) => window.push_notification(Notification::error(error), cx),
                 }
                 window.refresh();
@@ -8473,14 +8894,37 @@ impl LinkPrompt {
 /// A "Leave {name}?" confirmation.
 #[derive(Clone)]
 struct LeavePrompt {
-    server: String,
-    /// The server's name, as it was when asked (for the title and toast).
+    target: LeaveTarget,
+    /// The server's or group's name, as it was when asked (for the title
+    /// and toast).
     name: String,
     /// "Don't notify others that you've left" is ticked.
     silently: bool,
+    /// The group's owner picked who takes over (`None`: Stoat's choice,
+    /// the first other member). Passed over if they've left since.
+    next_owner: Option<String>,
     /// Leave was chosen and Stoat hasn't answered yet: the buttons wait,
     /// disabled.
     leaving: bool,
+}
+
+/// What a [`LeavePrompt`] leaves.
+#[derive(Clone)]
+enum LeaveTarget {
+    Server(String),
+    Group(String),
+}
+
+/// What leaving a group means for the user, as the group is now.
+struct GroupLeave {
+    /// Nobody else is in it: leaving deletes it.
+    alone: bool,
+    /// For its owner: the other members who could take over (ID and name),
+    /// in `recipients` order. Empty otherwise.
+    candidates: Vec<(String, String)>,
+    /// Who will take over: the owner's pick while they're still in it,
+    /// else Stoat's choice. `None` unless the user owns it and isn't alone.
+    next_owner: Option<String>,
 }
 
 /// Something a message row asks the view to do.
@@ -8967,6 +9411,7 @@ fn user_menu_label(item: UserMenuItem) -> Option<(&'static str, IconName)> {
         UserMenuItem::CreateGroupWith => ("Create group with…", IconName::Users),
         UserMenuItem::Mention => ("Mention", IconName::AtSign),
         UserMenuItem::RemoveFromGroup => ("Remove from group…", IconName::UserMinus),
+        UserMenuItem::MakeGroupOwner => ("Make group owner…", IconName::Crown),
         UserMenuItem::CopyUsername => ("Copy username", IconName::Copy),
         UserMenuItem::CopyUserId => ("Copy user ID", IconName::IdCard),
         UserMenuItem::Relationship(action) => relationship_label(action),

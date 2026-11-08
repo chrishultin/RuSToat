@@ -900,6 +900,39 @@ impl StoatClient {
         .map(|_| ())
     }
 
+    /// `PATCH /channels/{group}`: make `owner` (a member) the group's owner
+    /// (its owner only). Returns the group; Stoat sends a "gave ownership"
+    /// message to it, then `ChannelUpdate`.
+    pub async fn transfer_group(&self, group: &str, owner: &str) -> Result<Channel, ApiError> {
+        // `DataEditChannel` would also send the rest as nulls.
+        #[derive(Serialize)]
+        struct TransferGroup<'a> {
+            owner: &'a str,
+        }
+        self.send(
+            Method::PATCH,
+            &format!("/channels/{group}"),
+            Some(&TransferGroup { owner }),
+        )
+        .await
+    }
+
+    /// `DELETE /channels/{group}?leave_silently={silently}`: leave a group.
+    /// Unless `silently`, Stoat posts "{user} left" in it. If the user owns
+    /// it, the first other member in `recipients` becomes the owner (with
+    /// a "gave ownership" message, even when silent, but no
+    /// `ChannelUpdate`). The last member leaving deletes it
+    /// (`ChannelDelete`); otherwise `ChannelGroupLeave` follows.
+    pub async fn leave_channel(&self, group: &str, silently: bool) -> Result<(), ApiError> {
+        self.send_raw(
+            Method::DELETE,
+            &format!("/channels/{group}?leave_silently={silently}"),
+            None::<&()>,
+        )
+        .await
+        .map(|_| ())
+    }
+
     /// `POST /servers/{server}/channels`: a new text channel called `name`
     /// (a voice channel if `voice`), needing Manage Channels across the
     /// server. Stoat adds it at the end of the server's list, in no

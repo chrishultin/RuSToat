@@ -1127,10 +1127,8 @@ impl ChatStore {
         // An owner leaving a group hands it on with only this message, no
         // `ChannelUpdate`. Live messages only: an old one in a history page
         // could undo a later handover.
-        if let Some(SystemMessage::ChannelOwnershipChanged { to, .. }) = &message.system
-            && let Some(Channel::Group { owner, .. }) = self.channels.get_mut(&message.channel)
-        {
-            owner.clone_from(to);
+        if let Some(SystemMessage::ChannelOwnershipChanged { to, .. }) = &message.system {
+            self.set_group_owner(&message.channel, to);
         }
         let Some(history) = self.histories.get_mut(&message.channel) else {
             return false;
@@ -1978,6 +1976,18 @@ impl ChatStore {
         let before = recipients.len();
         recipients.retain(|id| id != user);
         recipients.len() != before
+    }
+
+    /// `user` now owns the group `channel` (a handover). Returns whether
+    /// that changed anything; `false` for anything but a group.
+    pub fn set_group_owner(&mut self, channel: &str, user: &str) -> bool {
+        match self.channels.get_mut(channel) {
+            Some(Channel::Group { owner, .. }) if owner != user => {
+                user.clone_into(owner);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// A channel changed (`ChannelUpdate`): merge what's in `data`, then clear

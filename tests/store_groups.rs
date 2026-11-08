@@ -1,8 +1,8 @@
 //! Groups' members and owners in the store: people added and removed live
 //! (`ChannelGroupJoin`, `ChannelGroupLeave`), and owners handed on by a
 //! live `channel_ownership_changed` message but not by one in a history
-//! page. Built on the `Ready` fixture, where `grp-weekend` is Ada's, with
-//! the user and Bob in it.
+//! page, or directly (the user's own handover). Built on the `Ready`
+//! fixture, where `grp-weekend` is Ada's, with the user and Bob in it.
 
 use serde_json::json;
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
@@ -106,6 +106,21 @@ fn a_live_ownership_message_hands_the_group_on() {
     store.apply_message(handover("01JC0000000000000000000011", "u-me", "u-bob"));
     assert_eq!(owner(&store, "grp-weekend"), "u-bob");
     assert!(!store.is_group_owner("grp-weekend"));
+}
+
+#[test]
+fn a_group_is_handed_on_directly() {
+    let mut store = store();
+    assert!(store.set_group_owner("grp-weekend", "u-me"));
+    assert!(store.is_group_owner("grp-weekend"));
+    // A repeat changes nothing.
+    assert!(!store.set_group_owner("grp-weekend", "u-me"));
+    assert!(store.set_group_owner("grp-weekend", "u-bob"));
+    assert_eq!(owner(&store, "grp-weekend"), "u-bob");
+    // Only groups have owners to hand on.
+    for channel in ["ch-beta", "dm-ada", "grp-nowhere"] {
+        assert!(!store.set_group_owner(channel, "u-me"), "{channel}");
+    }
 }
 
 #[test]

@@ -165,6 +165,9 @@ pub enum UserMenuItem {
     /// Take them out of the group the menu was opened in (its owner only,
     /// after asking).
     RemoveFromGroup,
+    /// Make them the owner of the group the menu was opened in (its owner
+    /// only, after asking).
+    MakeGroupOwner,
     /// Change how the user relates to them (friend requests, blocks).
     Relationship(RelationshipAction),
     Separator,
@@ -232,12 +235,12 @@ fn standing_actions(store: &ChatStore, user: &str) -> Vec<RelationshipAction> {
 
 /// The menu for `user`, as seen from `channel`, in the web client's order:
 /// Profile, Message, Create group with (RuSToat's own, for friends),
-/// Mention; Remove from group; the friend requests; Remove friend and
-/// Block or Unblock; then the copy items. Message follows [`can_message`];
-/// Mention is only for others, in server channels and groups (where the
-/// message box can mention them). Remove from group is for the owner of
-/// the group `channel`, on its other members. Groups are split by
-/// separators.
+/// Mention; Remove from group and Make group owner; the friend requests;
+/// Remove friend and Block or Unblock; then the copy items. Message
+/// follows [`can_message`]; Mention is only for others, in server channels
+/// and groups (where the message box can mention them). Remove from group
+/// and Make group owner are for the owner of the group `channel`, on its
+/// other members. Groups are split by separators.
 pub fn user_menu(store: &ChatStore, user: &str, channel: Option<&str>) -> Vec<UserMenuItem> {
     use UserMenuItem::*;
     let me = user == store.me();
@@ -264,7 +267,7 @@ pub fn user_menu(store: &ChatStore, user: &str, channel: Option<&str>) -> Vec<Us
         && !me
         && store.lists_member(channel, user)
     {
-        membership.push(RemoveFromGroup);
+        membership.extend([RemoveFromGroup, MakeGroupOwner]);
     }
     let requests = friend_buttons(store, user)
         .into_iter()

@@ -315,6 +315,7 @@ mod menu {
                 Mention,
                 Separator,
                 RemoveFromGroup,
+                MakeGroupOwner,
                 Separator,
                 Relationship(RemoveFriend),
                 Relationship(Block),
@@ -347,10 +348,32 @@ mod menu {
             .unwrap(),
         );
         for user in [ADA, "u-bob", "u-me"] {
+            let menu = user_menu(&store, user, Some("grp-ada"));
+            assert!(!menu.contains(&RemoveFromGroup), "{user}");
+            assert!(!menu.contains(&MakeGroupOwner), "{user}");
+        }
+    }
+
+    #[test]
+    fn the_group_owner_can_hand_the_group_to_another_member() {
+        let mut store = store();
+        assert!(user_menu(&store, "u-bob", Some("grp")).contains(&MakeGroupOwner));
+        assert!(user_menu(&store, ADA, Some("grp")).contains(&MakeGroupOwner));
+        // Not themselves, nor anyone outside the group or in another channel.
+        assert!(!user_menu(&store, "u-me", Some("grp")).contains(&MakeGroupOwner));
+        assert!(!user_menu(&store, "u-plain", Some("grp")).contains(&MakeGroupOwner));
+        for channel in [Some("ch"), Some("dm"), None] {
             assert!(
-                !user_menu(&store, user, Some("grp-ada")).contains(&RemoveFromGroup),
-                "{user}"
+                !user_menu(&store, "u-bob", channel).contains(&MakeGroupOwner),
+                "{channel:?}"
             );
+        }
+        // Once handed on, neither membership item is the user's any more.
+        assert!(store.set_group_owner("grp", "u-bob"));
+        for user in [ADA, "u-bob"] {
+            let menu = user_menu(&store, user, Some("grp"));
+            assert!(!menu.contains(&RemoveFromGroup), "{user}");
+            assert!(!menu.contains(&MakeGroupOwner), "{user}");
         }
     }
 
