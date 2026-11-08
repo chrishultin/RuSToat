@@ -98,12 +98,12 @@ Some milestones lay foundations that later ones reuse. When the earlier one's pl
 - Invite links in messages show as cards with a Join button
 - Create an invite for a channel and copy its link
 
-### Milestone 19: Create, leave and delete servers and channels (M)
+### Milestone 19: Create, leave and delete servers and channels (M). Plan: [`servers-and-channels.md`](servers-and-channels.md)
 - Create a server
-- Create a channel or category (with Manage Channels)
+- Create a channel or category, and rename or delete a category (with Manage Channels)
 - Leave a server
-- Delete a channel or server (with confirmation, for owners and admins)
-- Server and channel info dialogs (descriptions), from the header
+- Delete a channel (with confirmation, for those with Manage Channels). Deleting a server moved to milestone 23.
+- Server and channel info dialogs (icon, banner, description), from the header
 
 ### Milestone 20: Groups and DMs (M)
 - Create a group, including from the Friends page
@@ -130,6 +130,7 @@ Some milestones lay foundations that later ones reuse. When the earlier one's pl
 - Invites: list and revoke
 - Bans: list and unban
 - Transfer server ownership
+- Delete the server (owner only), confirmed by typing its name. Moved here from milestone 19.
 
 ### Milestone 24: Roles editor, part 1 (M)
 - List roles, and create, delete or rename one
@@ -143,7 +144,7 @@ Some milestones lay foundations that later ones reuse. When the earlier one's pl
 
 ### Milestone 26: Channel settings and order (M)
 - Channel overview: name, description, icon, slowmode, mature flag
-- Reorder channels, and move them between categories; edit categories
+- Reorder channels and categories, and move channels between categories. Creating, renaming and deleting categories came in milestone 19.
 
 ### Milestone 27: Channel permission overrides (M)
 - Allow or deny, per role and for the default permissions, reusing milestone 25's matrix
