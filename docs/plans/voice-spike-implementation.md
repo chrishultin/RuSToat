@@ -170,3 +170,160 @@ None required for this chunk.
 ### Manual Validation
 - The user ran the call against the stoat.chat web client and reported "it's looking good". Two-way audio, the button states and the row icon were checked by eye.
 - Not yet confirmed explicitly, and carried into chunk 4's trial: the bundled app's microphone prompt text, and leaving by logging out mid-call (the log shows only button leaves).
+
+## Chunk 4: Trial, write-up and decision
+
+### Changes Made
+- `docs/plans/voice-spike-implementation.md`: this entry and "Results and decision" below.
+- `docs/plans/roadmap.md`: milestone 32's verdict and a link here. Milestone 33 gets the CPU work as its first item.
+- No code changes: the trial turned up nothing to fix in `src/voice.rs` or `src/ui/chat.rs`.
+
+### Divergences
+- **The trial ran on the release bundle launched with `open`** (`scripts/bundle.sh release`, then `open -n --env RUST_LOG=stoat_gpui=debug,livekit=info --stdout … target/release/RuSToat.app`), not `cargo run`. From this session, `cargo run` can't use the microphone (chunk 3), and the release build is what the CPU criterion is about.
+- **CPU was measured three ways.** Two runs of the plan's `top -l 13 -s 5 -pid … -stats cpu` (first sample dropped), plus the process's CPU-time delta over 60 s from `ps -o utime=,time=`, and a 5-second `sample` to see where it goes.
+- **Not run (waived by the user, "they seem fine"):** five join/leave cycles in a row, leaving by logging out or by closing the window, joining a second channel while in one, and taking a call over from RuSToat. What the logs do show is under Stability below.
+- **Not reported in detail:** latency as it felt, echo on speakers, and what happened when the audio device changed. The user reported "audio stuff seems to be working" and "all looks good", including both themes and the bundle's mic prompt.
+
+### Verification Performed
+- `cargo test`: 71 test binaries, 1061 passed, 0 failed, 5 ignored (re-run at the end; no code changed in this chunk).
+- `cargo clippy --all-targets -- -D warnings`: clean.
+
+### Manual Validation
+- The user and the implementer ran the trial against stoat.chat's web client with a second account on the official `hel1` node; results below.
+
+## Results and decision
+
+### Build
+| | Before (`3bccfcd`) | After (chunk 1) | Change |
+|---|---|---|---|
+| Clean release build | 80 s | 99 s | **+19 s** |
+| Clean release build, WebRTC already on disk (`LK_CUSTOM_WEBRTC`) | – | 92 s | +12 s |
+| Incremental release rebuild (`touch src/ui/chat.rs`) | 19 s | 19 s | ±0 |
+| Clean debug build | 55 s | 75 s | +20 s |
+| `cargo test --no-run` | 32 s | 37 s | +5 s |
+| `target/` on disk | 8.9 GB | 12 GB | +3.1 GB |
+
+- **The WebRTC download:** `webrtc-mac-arm64-release.zip` (`webrtc-a545de4`) is 277 MB and took 4 s here. It extracts to 1.1 GB.
+- **Where it goes:** under `target/<profile>/build/scratch-*/out/livekit_webrtc/`, so debug and release each keep a copy (2.2 GB together).
+- **`cargo clean` removes it,** and the next clean build of each profile downloads it again. `LK_CUSTOM_WEBRTC=<kept copy of mac-arm64-release/>` avoids that.
+- **Offline:** a build with a cold `target/` and no network fails. Not tried, but it follows from the build script.
+
+### Size
+| | Before | After | Change |
+|---|---|---|---|
+| Release binary | 50,304,576 B | 68,182,192 B | +17.9 MB (+36%) |
+| `RuSToat.app` (release) | 48 MB | 65 MB | +17 MB |
+
+### What the crate needs
+- **Dependencies:** 594 → 655 crates on `aarch64-apple-darwin` (+61). Crates in more than one version go from 46 to 55: a second `tokio-tungstenite`/`tungstenite` (0.29), a third `reqwest` (0.12), and `sha1`/`digest` and their helpers. There's still one `rustls` (0.23.46) and one `prost` (0.14.4).
+- **WebRTC:** a prebuilt static `libwebrtc.a` (the download), a C++20/ObjC++ `cxx` bridge built with Xcode's clang (Apple clang 21, Xcode 27.2: no trouble), and 17 system frameworks, ScreenCaptureKit among them.
+- **`-ObjC` on the app binary only** (`build.rs`, `cargo:rustc-link-arg-bins`). The 70 test binaries link and pass without it.
+- **A rustls crypto provider, chosen explicitly.** LiveKit brings `ring` next to reqwest's `aws-lc-rs`, and with both rustls panics on the first TLS connection unless the process installs a default. `main` installs `aws-lc-rs`. LiveKit's own TLS uses the same process default.
+- **Tokio:** LiveKit runs on our existing 2-worker `runtime()`; nothing else was needed. WebRTC adds its own threads: network, worker, signaling, CaptureWorker and RenderWorker, and two CoreAudio IO threads during a call.
+- **Microphone permission:**
+  - `NSMicrophoneUsageDescription` in the bundle's `Info.plist`, and `com.apple.security.device.audio-input` for hardened-runtime (release-signed) builds.
+  - The bundle asks on first join, naming RuSToat (user confirmed). Launch it with `open` or from Finder so RuSToat is its own responsible process.
+  - `cargo run` attributes the mic to whichever app started it. From a terminal that's the terminal; from an app with no usage description (HumanLayer-Local here) the mic is denied silently with no prompt, and the call sends silence.
+
+### Audio
+- **Two-way audio:** RuSToat and the web client heard each other. One call ran 9 minutes (17:24:44–17:33:58+, left at 17:37:59) with no reconnect, warning or drop in the log, and the user reported audio working.
+- **Joining:** about 3 s from click to "joined" (Stoat's `join_call`, then LiveKit). LiveKit's own "connection setup took" was 1.5–2.7 s over six joins.
+- **Subscriptions:** only remote **audio** publications were subscribed (`TR_…` Microphone tracks); no video was decoded.
+- **Echo cancellation:** WebRTC's software AEC, NS and AGC were on ("Audio processing configured: AEC=true, AGC=true, NS=true, prefer_hw=false").
+- **Latency, echo on speakers, and a device change mid-call:** not reported in detail (see Divergences).
+
+### Stability
+- **Join/leave cycles:** six joins over three processes, each with a fresh `PlatformAudio` (the log shows "released Platform ADM (ref_count now: 0)" between them), with no hang or crash:
+  - two in a row under `cargo run`;
+  - two in a row in the debug bundle;
+  - two in the release bundle, one ended by LiveKit and one by Leave.
+  - Join → leave → join therefore works at least once per process. **Five in a row in one process wasn't run** (waived). #1468 (a reconnect hang after the last peer connection drops) didn't show, and Assumption 11's fallback wasn't needed.
+- **Leaving:** "Leave voice" closes the room in the same second ("Disconnected … ClientInitiated", then "left"). The window stayed responsive while joining and leaving.
+- **Taken over by the web client** (found by accident, manual test 4 in reverse):
+  - RuSToat was in the call as account A when the web client joined the same channel as account A.
+  - The web client wasn't refused with "already connected", as the plan expected. Instead LiveKit removed RuSToat's participant: `Disconnected … ParticipantRemoved`, the toast "Disconnected from voice.", the button reset, and the audio module was released.
+  - Two clients with the same identity can't share a room, and the newest wins.
+- **Not run (waived):** leaving by logging out or closing the window, switching channels mid-call, and RuSToat taking a call over from the web client. Logging out and closing the window rely on dropping `ChatView`, which drops the `VoiceCall`; that's the same `Drop` path the Leave button uses.
+
+### CPU
+Release bundle, Apple M3 Max. `top`'s %CPU is per core: 100% is one core, and the machine has 16.
+
+| State | `top` mean (12 × 5 s) | Max | Other measure |
+|---|---|---|---|
+| Idle, signed in, outside a call | **0.67%** | 0.8% | |
+| Silent call, mic published (first 60 s; includes a 9 s gap between calls) | **7.98%** | 10.1% | |
+| Silent call, mic published, the web client user in the room and quiet | **8.43%** | 9.1% | `ps` CPU time over 60 s: **7.05%** (5.5% user, 1.6% system) |
+
+Where it goes (`sample`, 5 s, in the call):
+- **Our threads:** the main thread is parked in `nextEventMatchingMask`, so GPUI isn't redrawing, and both `stoat-io` threads are idle.
+- **WebRTC:** all the busy time is in its audio pipeline:
+  - `CaptureWorkerThread`, the largest: AEC3's delay estimator (`MatchedFilterCore_NEON`, `ApplyFilter_Neon`), noise suppression, and Opus/SILK encoding (`silk_NSQ_del_dec_neon`).
+  - `RenderWorkerThread`: NetEq, Opus decode and comfort noise, and mixing.
+  - The CoreAudio IO threads and WebRTC's network thread, a little.
+
+The silent call costs about 7–8% of one core, roughly 0.5% of the whole machine. It's WebRTC's software audio processing working every 10 ms, and none of it is RuSToat's code.
+
+### Rough edges
+1. **rustls provider clash** (above). Fixed with one line in `main`; any future crate that pulls in `ring` is covered by the same line.
+2. **Microphone attribution under `cargo run`** (above). Test the mic through the bundle.
+3. **The WebRTC download is per profile and wiped by `cargo clean`.** 277 MB per clean build per profile, and builds need the network.
+4. **Same-account calls:** the newest client always wins in LiveKit. RuSToat's `force_disconnect` matches that from our side. When the web client takes the call over, RuSToat just shows "Disconnected from voice."; milestone 33 could say "You joined this call somewhere else." from `DisconnectReason::ParticipantRemoved`.
+5. **`PlatformAudio` known issues:**
+   - #1468 (reconnect hang) wasn't seen in six joins.
+   - #1560 (publishing opens the mic) is how it's meant to work here.
+   - #1638 (`set_*_device` fails while audio runs) wasn't exercised; milestone 34's device picker will hit it.
+6. **No mic prompt at launch:** creating `PlatformAudio` with recording enabled (chunk 1's smoke check) didn't prompt. The prompt comes when a track is published.
+
+### Verdict against Decision 4
+| Criterion | Result | Verdict |
+|---|---|---|
+| Two-way audio with a web client user stays clear for 5 minutes | 9 minutes, no drop, the user reports it working | **Pass** |
+| Five join/leave/join cycles without a hang or crash | Six joins over three processes, at most two in a row in one, no hang or crash; five in a row not run (waived) | **Not shown.** No failure seen, but the criterion as written wasn't run. |
+| A clean release build takes no more than 5 minutes longer | +19 s (+12 s with WebRTC kept) | **Pass** |
+| CPU stays under 5% in a silent call | 7.05–8.43% across three measurements, all WebRTC's audio processing | **Fail** |
+
+### Decision: go, with changes
+The SDK builds and links cleanly, joins Stoat's LiveKit, carries clear two-way audio with the web client, leaves cleanly, and costs little to build. What fails is a silent call's CPU: about 7–8% of a core, against a 5% target. That is WebRTC's own audio processing, not our integration. Milestones 33–37 go ahead, on these conditions:
+
+1. **First, in milestone 33: bring a silent call under 5%, or agree on a new target.**
+   - Measure what each part of WebRTC's audio processing costs: `PlatformAudio::set_echo_cancellation` / `set_noise_suppression` / `set_auto_gain_control` off, one at a time.
+   - Check whether macOS voice-processing I/O can do the echo cancellation in hardware.
+   - As a reference, measure the web client in a browser on this Mac, which runs the same WebRTC processing.
+   - The plan's rejected `cpal` + `NativeAudioSource` route isn't obviously cheaper, because it still needs WebRTC's processing for echo cancellation. Try it only if the measurements show `PlatformAudio` itself is the overhead.
+2. **Run the five-cycle check properly in milestone 33,** before building on join and leave. Also run the waived checks there: leaving by logging out and by closing the window, switching channels, and RuSToat taking over from the web client.
+3. **Keep the rustls provider line in `main`,** and don't test the microphone through a tool-launched `cargo run`.
+
+## Summary
+
+_Completed: 2026-11-08_
+
+### Chunks Completed
+1. Add the SDK and measure what it costs (`5e58c75`)
+2. Ask Stoat for a call (`d292d80`)
+3. Join and leave a voice channel (`293346d`)
+4. Trial, write-up and decision (this commit)
+
+### Divergences
+- Chunk 1: rustls had two crypto providers (LiveKit's `ring` beside reqwest's `aws-lc-rs`), so `main` installs `aws-lc-rs` and `rustls` became a direct dependency. The smoke check ran on the blocking pool, under debug logging only.
+- Chunk 2: a public `ChatView::voice_node()` getter; `voice_node` is set before `web_app` (a move); `CreateVoiceUserResponse` was usable as is.
+- Chunk 3: `VoiceCall::join` also takes the channel ID; a third `VoiceError::Audio` case with its own text; the generic text for a failed task. Finding: no mic prompt under a tool-launched `cargo run` (the responsible app has no usage description).
+- Chunk 4: the trial ran on the release bundle launched with `open`; CPU was measured three ways. The user waived five join/leave cycles in a row, leaving by logging out or closing the window, switching channels, and RuSToat taking a call over. Latency, echo and the device change weren't reported in detail. Found: the web client joining as the same account removes RuSToat from the call.
+
+### Definition of Done
+- [x] `livekit` 0.10.1 is in `Cargo.toml`, `build.rs` passes `-ObjC` to the app binary on macOS only, and RuSToat builds, launches and passes `cargo test` (1061 passed) and `cargo clippy --all-targets -- -D warnings`.
+- [x] `RootConfig` reads `features.livekit`. An instance without voice, or with it disabled, shows no Join button. `voice_node()` is tested for both; the button is gated on it. No instance without voice was tried by hand.
+- [~] `join_call` sends exactly `{"node":…,"force_disconnect":true}` to `/channels/{id}/join_call` (tested), and each Stoat voice error has its own message (tested). *Joining from RuSToat ends the same account's call on another client:* not run (waived). The reverse was seen: the web client joining as the same account ends RuSToat's call.
+- [~] In a voice channel where you have Connect, "Join voice" connects with the default microphone (with Speak) and plays others' audio (with Listen), and "Leave voice" disconnects: met. *Joining another channel leaves the first:* written (`join_voice` calls `leave_voice` first), but not run in the trial (waived).
+- [~] Logging out, signing out or closing the window while in a call disconnects it: by construction (dropping `ChatView` drops the `VoiceCall`, whose `Drop` closes the room), but not run in the trial (waived).
+- [x] The bundle's `Info.plist` has `NSMicrophoneUsageDescription`, and `scripts/entitlements.plist` has `com.apple.security.device.audio-input`.
+- [~] This record has before/after build times, binary and `.app` sizes, the WebRTC download, what the crate needs, audio, CPU in a silent call and the rough edges, with a verdict per criterion of Decision 4 and an overall **go, with changes**. Five join/leave cycles in a row weren't run; six joins over three processes are recorded instead.
+- [x] `docs/plans/roadmap.md` records the decision for milestone 32 and links here.
+- [x] No touched file's rustfmt drift grew (`src/api/client.rs` 3, `src/ui/chat.rs` 17, `src/store.rs` 15; new and clean files 0).
+
+### Remaining Manual Steps
+- The waived trial checks, carried into milestone 33 by the roadmap:
+  - five join/leave cycles in a row;
+  - leaving by logging out and by closing the window;
+  - switching channels mid-call;
+  - RuSToat taking a call over from the web client.
+- The milestone 33 CPU investigation (Decision, item 1).

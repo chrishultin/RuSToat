@@ -178,8 +178,15 @@ Some milestones lay foundations that later ones reuse. When the earlier one's pl
 - Add the LiveKit Rust SDK (`livekit` crate), built next to GPUI on macOS
 - Join one voice channel, audio only, with the default devices. The root config lists LiveKit nodes under `features.livekit`.
 - Write up the result: build time, binary size, what the crate needs (WebRTC), whether audio works, and any rough edges. Decide go or no-go.
+- **Decision (2026-11-08): go, with changes.** Plan: [`voice-spike.md`](voice-spike.md); results: [`voice-spike-implementation.md`](voice-spike-implementation.md#results-and-decision).
+  - It built (+19 s on a clean release build, +17.9 MB binary), joined `hel1`, and carried clear two-way audio with the web client for 9 minutes.
+  - A silent call costs 7–8% of a core, against a 5% target. The cost is WebRTC's software audio processing.
+  - The Join / Leave voice button it added stays, as milestone 33's starting point.
 
 ### Milestone 33: Voice channels (M)
+- First, the spike's conditions:
+  - Bring a silent call's CPU under 5% (or agree a new target): measure what each part of WebRTC's audio processing costs, and the web client's for reference.
+  - Run the checks the spike skipped: five join/leave cycles in a row, and leaving by logging out and by closing the window.
 - Join and leave a voice channel
 - Who's in each channel, in the channel list, with speaking indicators
 - Mute and deafen
