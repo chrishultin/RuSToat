@@ -173,3 +173,34 @@ Deferred to the batched manual pass. Steps:
 4. As the only member, the dialog says "You're the only member, so leaving deletes the group.", has no checkbox, and its button says "Delete group"; the group is deleted.
 5. As owner, right-click a member in the group's member list (and on one of their messages): "Make group owner…" asks "Make {name} the owner?"; Make owner hands it on, and afterwards neither "Remove from group…" nor "Make group owner…" is offered to you. Neither shows for a plain member or on yourself.
 6. Light and dark themes: the New owner dropdown and the checkbox in the leave dialog are readable.
+
+## Chunk 5: Close a DM
+
+### Changes Made
+- `src/store.rs`: `deactivate_dm(channel) -> bool`, the counterpart of `activate_dm`: sets a DM's `active` to false; `false` if it was already closed or isn't a DM. The DM stays in the store with its history.
+- `src/ui/chat.rs`:
+  - "Close conversation…" (red, `IconName::Close`) in `channel_menu` for DMs, after Leave group…'s place and before Copy channel ID.
+  - `confirm_close_dm(channel)` (Assumption 8): "Close conversation with {name}?", "You can re-open it later, but it will disappear on both sides.", Cancel and Danger "Close", with milestone 19's waiting footer (`closing_dm` disables both buttons and Escape while Stoat answers).
+  - `close_dm` sends `delete_channel` (`DELETE /channels/{dm}`, no query). On success, or `NotFound`, `dm_closed` applies it and the confirmation closes; otherwise a toast says why and the confirmation stays.
+  - `dm_closed(channel)`: `deactivate_dm`, then `drop_stale_selection`, `remember_places` and `ensure_current_loaded`, so if it was open, Home's first conversation opens. Stoat's `ChannelUpdate { active: false }` then changes nothing.
+- `tests/store_live.rs`: a DM closed here leaves Home and `shows_channel`, is still found by `profile::dm_with` (what "Message" uses), isn't closed twice, ignores non-DMs, survives the repeated `ChannelUpdate`, and `activate_dm` brings it back with its loaded history.
+
+### Divergences
+- **`delete_channel`, not `leave_channel(id, false)`:** the plan allowed either; a DM takes no `leave_silently`, so the request is exactly the web client's.
+- **"Close conversation…" is red, with `IconName::Close`,** like Leave group… (the web client's item for a DM is its destructive delete-channel button).
+- **No toast on success,** as for Delete channel: the DM leaving Home shows it worked, and Assumption 8 lists none. Refusals use `profile_edit::error_text` with "Couldn't close the conversation. Try again." (Assumption 11 has no text for this).
+- **`dm_closed` always runs `remember_places` and `ensure_current_loaded`,** as `channel_deleted` does, rather than only when the selection changed (as the `ChannelUpdate` handler does). A DM that was open only as Home's default, not an explicit selection, then still has its successor loaded. The `ChannelUpdate` handler itself is unchanged.
+- **The test sits in `tests/store_live.rs`** beside the existing "closed DM reopened here" test, and also checks the history is kept and `dm_with` still finds the closed DM.
+
+### Verification Performed
+- `cargo test --test store_live dm_closed`: 1 passed.
+- `cargo test`: 993 passed, 0 failed (992 before).
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt `Diff in` counts: `src/ui/chat.rs` 17 and `src/store.rs` 15, unchanged (hand-formatted). `tests/store_live.rs` 0.
+
+### Manual Validation
+Deferred to the batched manual pass. Steps:
+1. Right-click a DM in Home: "Close conversation…" (red) asks "Close conversation with {name}?". Close: it leaves Home here and in the other person's web client. Groups and Saved Notes don't offer it.
+2. Close the DM that's open: Home's first conversation opens.
+3. Message them from their card (and from the Friends page's Message): the DM comes back with its history.
+4. Cancel and Escape keep the DM; while Stoat answers, both buttons are disabled and Escape does nothing.

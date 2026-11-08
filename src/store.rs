@@ -3302,6 +3302,19 @@ impl ChatStore {
         }
     }
 
+    /// Close a DM here (`active = false`) once Stoat has closed it, so it
+    /// leaves Home. It stays in the store, with its history, for
+    /// [`Self::activate_dm`] to bring back. Returns true if it was open.
+    pub fn deactivate_dm(&mut self, channel: &str) -> bool {
+        match self.channels.get_mut(channel) {
+            Some(Channel::DirectMessage { active, .. }) if *active => {
+                *active = false;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Servers for the rail, in the user's order.
     pub fn servers(&self) -> Vec<ServerEntry> {
         self.server_order

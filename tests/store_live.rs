@@ -792,6 +792,41 @@ fn a_closed_dm_reopened_here_shows_in_home_until_closed_again() {
     assert!(!store.shows_channel("dm-closed"));
 }
 
+#[test]
+fn a_dm_closed_here_leaves_home_and_comes_back_with_its_history() {
+    let mut store = store_with_page(50);
+    let in_home = |store: &ChatStore| store.home_channels().iter().any(|c| c.id == "dm-ada");
+    let page: BulkMessageResponse = serde_json::from_value(serde_json::json!([
+        { "_id": LATER, "channel": "dm-ada", "author": "u-ada", "content": "hi" }
+    ]))
+    .unwrap();
+    store.set_history("dm-ada", page, 50);
+    assert!(in_home(&store));
+
+    assert!(store.deactivate_dm("dm-ada"));
+    assert!(!in_home(&store));
+    assert!(!store.shows_channel("dm-ada"));
+    // Kept, so messaging Ada finds it again.
+    assert_eq!(
+        stoat_gpui::profile::dm_with(&store, "u-ada").as_deref(),
+        Some("dm-ada")
+    );
+    // Already closed: nothing to do. Not a DM: nothing either.
+    assert!(!store.deactivate_dm("dm-ada"));
+    assert!(!store.deactivate_dm("ch-general"));
+    assert!(store.shows_channel("ch-general"));
+    // Stoat's `ChannelUpdate` repeats it, harmlessly.
+    let data: stoat_gpui::api::models::PartialChannel =
+        serde_json::from_value(serde_json::json!({ "active": false })).unwrap();
+    store.apply_channel_update("dm-ada", data, &[]);
+    assert!(!in_home(&store));
+
+    // "Message" on Ada's card reopens it, history and all.
+    assert!(store.activate_dm("dm-ada"));
+    assert!(in_home(&store));
+    assert_eq!(ids(&store, "dm-ada"), [LATER]);
+}
+
 // --- relationships -------------------------------------------------------
 
 fn relationship_event(user: serde_json::Value) -> stoat_gpui::api::models::User {

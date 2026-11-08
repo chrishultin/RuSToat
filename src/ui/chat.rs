@@ -299,6 +299,9 @@ pub struct ChatView {
     /// The group and member whose "Make {name} the owner?" confirmation is
     /// waiting for Stoat to answer, likewise.
     transferring_group: Option<(String, String)>,
+    /// The DM whose "Close conversation with {name}?" confirmation is
+    /// waiting for Stoat to answer, likewise.
+    closing_dm: Option<String>,
     /// The category whose "Delete {TITLE}?" confirmation is waiting for
     /// Stoat to answer, likewise.
     deleting_category: Option<String>,
@@ -755,6 +758,7 @@ impl ChatView {
             deleting_channel: None,
             removing_member: None,
             transferring_group: None,
+            closing_dm: None,
             deleting_category: None,
             leave_prompt: None,
             age_gate_tick: None,
@@ -3513,7 +3517,7 @@ impl ChatView {
     /// All for DMs and groups); Create invite… (server channels and
     /// groups), Create channel… (in this channel's category), Create
     /// category… and Delete channel… where allowed; Leave group… (groups);
-    /// Copy channel ID. A channel in a muted server still offers
+    /// Close conversation… (DMs); Copy channel ID. A channel in a muted server still offers
     /// Mute Channel: the server's mute is what silences it.
     fn channel_menu(&self, channel: &ChannelEntry, cx: &Context<Self>) -> MenuBuilder {
         let view = cx.entity().downgrade();
@@ -3527,6 +3531,10 @@ impl ChatView {
             let invitable = store.can_invite(&channel_id);
             let deletable = in_server && store.can_manage_channel(&channel_id);
             let group = matches!(store.channel(&channel_id), Some(Channel::Group { .. }));
+            let dm = matches!(
+                store.channel(&channel_id),
+                Some(Channel::DirectMessage { .. })
+            );
             // Creating takes Manage Channels across the server, not on this
             // channel.
             let create_in = match store.channel(&channel_id) {
@@ -3629,6 +3637,27 @@ impl ChatView {
                     .on_click(move |_, window, cx| {
                         view.update(cx, |this, cx| {
                             this.confirm_leave_group(channel.clone(), window, cx)
+                        })
+                        .ok();
+                    }),
+                )
+            } else {
+                menu
+            };
+            let menu = if dm {
+                let (view, channel) = (view.clone(), channel_id.clone());
+                menu.item(
+                    PopupMenuItem::element(|_, cx| {
+                        let danger = cx.theme().danger;
+                        h_flex()
+                            .gap_2()
+                            .text_color(danger)
+                            .child(Icon::new(IconName::Close).text_color(danger))
+                            .child("Close conversation…")
+                    })
+                    .on_click(move |_, window, cx| {
+                        view.update(cx, |this, cx| {
+                            this.confirm_close_dm(channel.clone(), window, cx)
                         })
                         .ok();
                     }),
@@ -3752,6 +3781,132 @@ impl ChatView {
             .ok();
         })
         .detach();
+    }
+
+    /// Ask before closing a DM: "Close conversation with {name}?", in the
+    /// web client's words. Once Close is chosen, the buttons wait,
+    /// disabled, for Stoat's answer.
+    fn confirm_close_dm(&mut self, channel: String, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(
+            self.store.channel(&channel),
+            Some(Channel::DirectMessage { .. })
+        ) {
+            return;
+        }
+        let Some(name) = self.store.channel_entry(&channel).map(|entry| entry.name) else {
+            return;
+        };
+        let title: SharedString = format!("Close conversation with {name}?").into();
+        let view = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let busy = view
+                .upgrade()
+                .is_some_and(|view| view.read(cx).closing_dm.as_ref() == Some(&channel));
+            let close = {
+                let (view, channel) = (view.clone(), channel.clone());
+                move |window: &mut Window, cx: &mut App| {
+                    view.update(cx, |this, cx| this.close_dm(channel.clone(), window, cx))
+                        .ok();
+                }
+            };
+            alert
+                .title(title.clone())
+                .description("You can re-open it later, but it will disappear on both sides.")
+                .keyboard(!busy)
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("close-dm-cancel")
+                                .label("Cancel")
+                                .disabled(busy)
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("close-dm-ok")
+                                .with_variant(ButtonVariant::Danger)
+                                .label("Close")
+                                .loading(busy)
+                                .disabled(busy)
+                                .on_click({
+                                    let close = close.clone();
+                                    move |_, window, cx| close(window, cx)
+                                }),
+                        ),
+                )
+                .on_ok(move |_, window, cx| {
+                    if !busy {
+                        close(window, cx);
+                    }
+                    false
+                })
+        });
+    }
+
+    /// Close a DM (the confirmation's Close). On Stoat's answer it leaves
+    /// Home at once (`ChannelUpdate` repeats it) and the confirmation
+    /// closes; `NotFound` counts as closed. Otherwise the confirmation
+    /// stays and a toast says why.
+    fn close_dm(&mut self, channel: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.closing_dm.is_some() {
+            return;
+        }
+        self.closing_dm = Some(channel.clone());
+        window.refresh();
+        let request = spawn_io({
+            let (client, channel) = (self.client.clone(), channel.clone());
+            async move { client.delete_channel(&channel).await }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.closing_dm = None;
+                let error = match result {
+                    Ok(Ok(())) => None,
+                    Ok(Err(err))
+                        if matches!(err.error_type(), Some(revolt_result::ErrorType::NotFound)) =>
+                    {
+                        None
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't close DM {channel}: {err:?}");
+                        Some(crate::profile_edit::error_text(
+                            &err,
+                            "Couldn't close the conversation. Try again.",
+                        ))
+                    }
+                    Err(err) => {
+                        log::warn!("close DM task failed: {err:?}");
+                        Some("Couldn't close the conversation. Try again.".to_string())
+                    }
+                };
+                match error {
+                    None => {
+                        log::debug!("closed DM {channel}");
+                        this.dm_closed(&channel, cx);
+                        window.close_dialog(cx);
+                    }
+                    Some(error) => window.push_notification(Notification::error(error), cx),
+                }
+                window.refresh();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A DM was closed here: it leaves Home but stays in the store, with
+    /// its history, for "Message" to reopen. If it was open, Home's first
+    /// conversation opens.
+    fn dm_closed(&mut self, channel: &str, cx: &mut Context<Self>) {
+        if !self.store.deactivate_dm(channel) {
+            return;
+        }
+        self.drop_stale_selection();
+        self.remember_places();
+        self.ensure_current_loaded(cx);
     }
 
     /// A category heading's right-click menu: Create channel… (in it),
