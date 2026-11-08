@@ -122,3 +122,23 @@ Pending, in the end-of-milestone pass: the panel shows "Connecting…" then "Voi
 
 ### Manual Validation
 Pending, in the end-of-milestone pass: mute → the web client shows RuSToat's user muted and hears nothing, unmute → hears again; deafen → RuSToat hears nothing and is muted, undeafen → hears again, mic back only if it was on; macOS mic indicator off while muted; five mute/unmute cycles (capture comes back each time, `PlatformAudio: started recording` in the log); quit and relaunch while muted → next call starts muted, and the web client shows muted rather than "no mic"; CPU while muted measured once.
+
+## Chunk 5: Speaking indicators
+
+### Changes Made
+- `src/voice.rs`: `VoiceEvent::Speaking(Vec<String>)` (no longer `Copy`), sent from `RoomEvent::ActiveSpeakersChanged` with each speaker's identity, which Stoat sets to the user ID (`crates/core/database/src/voice/voice_client.rs:82`, `.with_identity(&user.id)`). Logged at debug as `voice: speaking [...]`.
+- `src/ui/chat.rs`:
+  - `ActiveCall.speaking: HashSet<String>`, cleared with the call (it lives in `ActiveCall`).
+  - The call's task now loops over its events: `Speaking` calls `set_speaking`, anything else (or the stream ending) is the disconnect it handled before.
+  - `set_speaking` drops the user while their mic is off, and redraws only if the set changed.
+  - `render_voice_participant` wraps the avatar in a 2 px round border, `theme.success` while speaking and transparent otherwise (so rows don't shift; the indent drops 2 px to keep the avatar under the channel name). Only the channel the user is connected to passes speakers.
+
+### Divergences
+- **Minor: the user is always filtered out while their mic is off,** rather than only "if LiveKit reports it": cheaper than checking whether it does, and the result is the same.
+
+### Verification Performed
+- `cargo test`: 1080 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings`: clean (a `loop`/`match` became `while let` for `clippy::while_let_loop`).
+- rustfmt: `src/ui/chat.rs` 17 (was 17), `src/voice.rs` 0.
+
+### Manual Validation
+Pending, in the end-of-milestone pass: talking on the web client rings their avatar, talking in RuSToat rings the user's; the ring clears when talking stops; `voice: speaking [...]` lines appear at debug; CPU in a talking call recorded next to the silent figure.

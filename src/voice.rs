@@ -48,8 +48,11 @@ impl VoiceError {
 }
 
 /// Something that happened to a call that the UI must act on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VoiceEvent {
+    /// Who's speaking now, by user ID (LiveKit identities are Stoat user
+    /// IDs), the user included. Empty when nobody is.
+    Speaking(Vec<String>),
     /// The call ended without the user leaving it: LiveKit lost the
     /// connection for good, or the user was removed (by joining on another
     /// device, say).
@@ -379,6 +382,11 @@ async fn read_events(
                 "voice: couldn't subscribe to {}'s {track_sid}: {error}",
                 participant.identity().0
             ),
+            RoomEvent::ActiveSpeakersChanged { speakers } => {
+                let speakers: Vec<String> = speakers.iter().map(|p| p.identity().0).collect();
+                log::debug!("voice: speaking {speakers:?}");
+                let _ = tx.unbounded_send(VoiceEvent::Speaking(speakers));
+            }
             RoomEvent::Reconnecting => log::info!("voice: reconnecting to {channel}"),
             RoomEvent::Reconnected => log::info!("voice: reconnected to {channel}"),
             RoomEvent::Disconnected { reason } => {

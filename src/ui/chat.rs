@@ -95,7 +95,7 @@ use crate::ui::server_dialogs::{
     NAME_DIALOG_WIDTH, NameDialog, render_info,
 };
 use crate::ui::voice_global::ActiveVoice;
-use crate::voice::{MuteState, VoiceCall};
+use crate::voice::{MuteState, VoiceCall, VoiceEvent};
 
 actions!(
     chat,
@@ -521,6 +521,8 @@ struct ActiveCall {
     /// The voice channel.
     channel: String,
     state: CallState,
+    /// Who's speaking in it, by user ID (the user included).
+    speaking: HashSet<String>,
     /// Joins, then waits for the call to end by itself. Dropping it (by
     /// leaving) cancels the join, and nobody is told the call ended.
     _task: Task<()>,
@@ -6101,9 +6103,12 @@ impl ChatView {
             let Some(mut events) = events else {
                 return;
             };
-            // Only a call that ends by itself gets here: leaving drops this
-            // task first.
-            events.next().await;
+            // Only a call that ends by itself gets past this loop: leaving
+            // drops this task first.
+            while let Some(VoiceEvent::Speaking(speakers)) = events.next().await {
+                this.update(cx, |this, cx| this.set_speaking(speakers, cx))
+                    .ok();
+            }
             this.update_in(cx, |this, window, cx| {
                 this.voice_ended(cx);
                 window.push_notification(Notification::error("Disconnected from voice."), cx);
@@ -6114,6 +6119,7 @@ impl ChatView {
         self.voice = Some(ActiveCall {
             channel,
             state: CallState::Joining,
+            speaking: HashSet::new(),
             _task: task,
         });
         cx.notify();
@@ -6148,6 +6154,24 @@ impl ChatView {
             call.set_mute(mute);
         }
         cx.notify();
+    }
+
+    /// Who's speaking in the call changed. Redraws only if the set did.
+    fn set_speaking(&mut self, speakers: Vec<String>, cx: &mut Context<Self>) {
+        let mic_on = mute_state(cx).mic_on();
+        let Some(call) = &mut self.voice else {
+            return;
+        };
+        let me = self.store.me();
+        // A muted microphone sends nothing, so the user can't be speaking.
+        let speaking: HashSet<String> = speakers
+            .into_iter()
+            .filter(|id| mic_on || id != me)
+            .collect();
+        if speaking != call.speaking {
+            call.speaking = speaking;
+            cx.notify();
+        }
     }
 
     /// The call ended without the user leaving it (it failed, or dropped).
@@ -8634,6 +8658,12 @@ impl ChatView {
         };
         // Deafen is the user's own, so only their row in their call shows it.
         let deafened = in_call && mute_state(cx).deafened;
+        // Only the call the user is in knows who's speaking.
+        let speaking = self
+            .voice
+            .as_ref()
+            .filter(|_| in_call)
+            .map(|call| &call.speaking);
         let row = h_flex()
             .id(SharedString::from(format!("channel-{}", channel.id)))
             .gap_2()
@@ -8689,37 +8719,53 @@ impl ChatView {
             .child(row)
             .children(participants.into_iter().map(|participant| {
                 let deafened = deafened && participant.user_id == self.store.me();
-                self.render_voice_participant(participant, deafened, cx)
+                let speaking = speaking.is_some_and(|s| s.contains(&participant.user_id));
+                self.render_voice_participant(participant, deafened, speaking, cx)
             }))
             .into_any_element()
     }
 
     /// Someone in a voice channel's call, under the channel's row. A
-    /// `deafened` user shows that rather than their (muted) microphone.
+    /// `deafened` user shows that rather than their (muted) microphone;
+    /// someone `speaking` has a green ring around their avatar.
     fn render_voice_participant(
         &self,
         participant: VoiceParticipant,
         deafened: bool,
+        speaking: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
         h_flex()
             .id(SharedString::from(format!("voice-{}", participant.user_id)))
             .gap_2()
-            // Lines the avatar up under the channel's name.
-            .pl(px(32.))
+            // Lines the avatar up under the channel's name (the ring's
+            // border included).
+            .pl(px(30.))
             .pr_2()
             .py_0p5()
             .text_sm()
             .text_color(theme.muted_foreground)
-            .child(avatar(
-                format!("voice-avatar-{}", participant.user_id),
-                Some(participant.avatar_url),
-                &participant.name,
-                18.,
-                theme.secondary,
-                theme.secondary_foreground,
-            ))
+            .child(
+                // Always there, so speaking doesn't shift the row.
+                div()
+                    .flex_none()
+                    .rounded_full()
+                    .border_2()
+                    .border_color(if speaking {
+                        theme.success
+                    } else {
+                        transparent_black()
+                    })
+                    .child(avatar(
+                        format!("voice-avatar-{}", participant.user_id),
+                        Some(participant.avatar_url),
+                        &participant.name,
+                        18.,
+                        theme.secondary,
+                        theme.secondary_foreground,
+                    )),
+            )
             .child(div().flex_1().min_w_0().truncate().child(participant.name))
             .when(participant.muted && !deafened, |el| {
                 el.child(
