@@ -2,13 +2,16 @@
 //! "Create channel": name it and pick text or voice, and it's made in the
 //! category it was asked for from. "Create a new category" and "Rename
 //! category": a name, and the server's categories are sent again with it.
-//! The naming rules, the category edits and the error texts are in
+//! Server and channel info: the banner, icon, name and description. The
+//! naming rules, the category edits and the error texts are in
 //! [`crate::server_edit`].
 
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::radio::{Radio, RadioGroup};
-use gpui_kit::component::{ActiveTheme, Disableable, WindowExt, h_flex, v_flex};
+use gpui_kit::component::text::TextView;
+use gpui_kit::component::{ActiveTheme, Disableable, Icon, WindowExt, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
@@ -20,6 +23,9 @@ use crate::server_edit::{
     new_category_id, valid_name, with_category_added, with_category_renamed,
 };
 use crate::ui::chat::ChatView;
+use crate::ui::markup::{MarkupPlugin, code_block_actions};
+use crate::ui::math::MathPlugin;
+use crate::ui::profile_card::{CardBio, OnLink};
 
 /// The dialog's width (as Join a server's).
 pub const CREATE_SERVER_DIALOG_WIDTH: f32 = 420.;
@@ -29,6 +35,12 @@ pub const CREATE_CHANNEL_DIALOG_WIDTH: f32 = 420.;
 
 /// Create and Rename category's width (the same).
 pub const NAME_DIALOG_WIDTH: f32 = 420.;
+
+/// Server and channel info's width.
+pub const INFO_DIALOG_WIDTH: f32 = 440.;
+/// The server's banner, across the top of its info.
+const INFO_BANNER_HEIGHT: f32 = 140.;
+const INFO_ICON: f32 = 48.;
 
 /// The line under the name on the official instance, and its link.
 const AUP_TEXT: &str = "By creating this server, you agree to the Acceptable Use Policy.";
@@ -555,4 +567,125 @@ impl Render for NameDialog {
                     ),
             )
     }
+}
+
+/// What Server info or Channel info shows, read from the store each time
+/// it's drawn.
+pub struct InfoContent {
+    /// Keeps this icon's loading state apart from others'.
+    pub id: String,
+    pub name: String,
+    /// The uploaded icon, if there's one.
+    pub icon_url: Option<String>,
+    /// Shown instead of the icon while it loads, if it fails, or if there
+    /// isn't one.
+    pub placeholder: InfoPlaceholder,
+    /// Servers only.
+    pub banner_url: Option<String>,
+    /// The description as prepared Markdown; `None` says "No description."
+    pub description: Option<CardBio>,
+}
+
+/// What stands in for an info dialog's icon.
+#[derive(Clone)]
+pub enum InfoPlaceholder {
+    /// A server's initials, as on the rail.
+    Initials(String),
+    /// A channel's `#` or speaker, as in the sidebar.
+    Glyph(IconName),
+}
+
+/// Server or Channel info: the banner (if any) across the top, the icon
+/// beside the name, the description (selectable, its links through
+/// `on_link`), and Close. It's drawn edge to edge, in a dialog with no
+/// padding of its own, so the banner meets the dialog's border.
+pub fn render_info(content: &InfoContent, on_link: OnLink, cx: &App) -> Div {
+    let theme = cx.theme();
+    let placeholder = {
+        let kind = content.placeholder.clone();
+        let (bg, fg) = (theme.secondary, theme.secondary_foreground);
+        move || {
+            div()
+                .size(px(INFO_ICON))
+                .flex_none()
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(bg)
+                .text_color(fg)
+                .map(|tile| match &kind {
+                    InfoPlaceholder::Initials(initials) => tile
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(initials.clone()),
+                    InfoPlaceholder::Glyph(icon) => tile.child(Icon::new(*icon)),
+                })
+                .into_any_element()
+        }
+    };
+    let icon = match &content.icon_url {
+        Some(url) => img(SharedUri::from(url.clone()))
+            .id(SharedString::from(format!("info-icon-{}", content.id)))
+            .size(px(INFO_ICON))
+            .flex_none()
+            .rounded_full()
+            .object_fit(ObjectFit::Cover)
+            .with_loading(placeholder.clone())
+            .with_fallback(placeholder)
+            .into_any_element(),
+        None => placeholder(),
+    };
+    // A fixed height, so a slow banner doesn't move what's under it.
+    let banner = content.banner_url.as_ref().map(|url| {
+        img(SharedUri::from(url.clone()))
+            .id(SharedString::from(format!("info-banner-{}", content.id)))
+            .w_full()
+            .h(px(INFO_BANNER_HEIGHT))
+            .flex_none()
+            .rounded_t(theme.radius_lg)
+            .object_fit(ObjectFit::Cover)
+    });
+    let description = match &content.description {
+        Some(description) => TextView::markdown(
+            SharedString::from(description.render_key.clone()),
+            description.markdown.clone(),
+        )
+        .plugin(MathPlugin)
+        .plugin(MarkupPlugin::default())
+        .code_block_actions(code_block_actions)
+        .text_sm()
+        .selectable(true)
+        .on_link_click(move |url, _, window, cx| on_link(url, window, cx))
+        .into_any_element(),
+        None => div()
+            .text_sm()
+            .text_color(theme.muted_foreground)
+            .child("No description.")
+            .into_any_element(),
+    };
+
+    v_flex().children(banner).child(
+        v_flex()
+            .p_4()
+            .gap_3()
+            .child(
+                h_flex().gap_3().items_center().child(icon).child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_lg()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(content.name.clone()),
+                ),
+            )
+            .child(description)
+            .child(
+                h_flex().justify_end().child(
+                    Button::new("close-info")
+                        .outline()
+                        .label("Close")
+                        .on_click(|_, window, cx| window.close_dialog(cx)),
+                ),
+            ),
+    )
 }

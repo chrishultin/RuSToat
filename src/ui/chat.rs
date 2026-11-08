@@ -57,6 +57,7 @@ use crate::search::{
     MAX_QUERY_CHARS, PINS_LIMIT, QueryCheck, RELEVANCE_LIMIT, SearchCursor, check_query,
     next_cursor, page_limit,
 };
+use crate::server_edit::first_line;
 use crate::status::{PRESENCES, STATUS_TEXT_MAX, StatusCheck, check_status_text};
 use crate::store::{
     ChannelEntry, ChannelKind, ChannelSection, ChatStore, MemberList, MemberListRow, MessageRow,
@@ -81,7 +82,8 @@ use crate::ui::math::MathPlugin;
 use crate::ui::profile_card::{CardBio, CardContent, OnLink, render_profile_card};
 use crate::ui::server_dialogs::{
     CREATE_CHANNEL_DIALOG_WIDTH, CREATE_SERVER_DIALOG_WIDTH, CreateChannelDialog,
-    CreateServerDialog, NAME_DIALOG_WIDTH, NameDialog,
+    CreateServerDialog, INFO_DIALOG_WIDTH, InfoContent, InfoPlaceholder, NAME_DIALOG_WIDTH,
+    NameDialog, render_info,
 };
 
 actions!(
@@ -4536,6 +4538,17 @@ impl ChatView {
         }
     }
 
+    /// `text` (a bio, a description) as Markdown to draw outside a message,
+    /// cached under `key` until it changes. `None` when it's blank.
+    fn markdown_body(&self, key: &str, text: Option<&str>) -> Option<CardBio> {
+        let text = text.map(str::trim).filter(|text| !text.is_empty())?;
+        let markdown = crate::markdown::prepare(text, &self.store);
+        Some(CardBio {
+            render_key: crate::store::render_key(key, Some(&markdown)),
+            markdown,
+        })
+    }
+
     /// The open card, floating at its position and kept inside the window.
     fn render_card(&self, open: &OpenCard, cx: &mut Context<Self>) -> Option<AnyElement> {
         let card = crate::profile::profile_card(&self.store, &open.user, open.channel.as_deref())?;
@@ -4543,20 +4556,10 @@ impl ChatView {
         let banner_url = profile
             .and_then(|p| p.background.as_ref())
             .and_then(|file| self.store.media().file(file));
-        let bio = profile
-            .and_then(|p| p.content.as_deref())
-            .map(str::trim)
-            .filter(|content| !content.is_empty())
-            .map(|content| {
-                let markdown = crate::markdown::prepare(content, &self.store);
-                CardBio {
-                    render_key: crate::store::render_key(
-                        &format!("bio-{}", open.user),
-                        Some(&markdown),
-                    ),
-                    markdown,
-                }
-            });
+        let bio = self.markdown_body(
+            &format!("bio-{}", open.user),
+            profile.and_then(|p| p.content.as_deref()),
+        );
         let people = self.people(open.channel.clone(), cx);
         let on_link = people.link_handler();
         let content = CardContent {
@@ -5163,6 +5166,65 @@ impl ChatView {
         self.drop_stale_selection();
         self.remember_places();
         cx.notify();
+    }
+
+    /// Server info, from the server's name above the channel list: its
+    /// banner, icon, name and description.
+    fn open_server_info(&mut self, server: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.store.server(&server).is_none() {
+            return;
+        }
+        log::debug!("showing info for server {server}");
+        open_info_dialog(cx.entity().downgrade(), Info::Server(server), window, cx);
+    }
+
+    /// Channel info, from the channel's name or its description's first
+    /// line in the header: its icon, name and description.
+    fn open_channel_info(&mut self, channel: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.info_content(&Info::Channel(channel.clone())).is_none() {
+            return;
+        }
+        log::debug!("showing info for channel {channel}");
+        open_info_dialog(cx.entity().downgrade(), Info::Channel(channel), window, cx);
+    }
+
+    /// What an info dialog shows, from the store as it is now. `None` once
+    /// its server or channel has gone (left, deleted), or for a channel
+    /// that isn't a server's.
+    fn info_content(&self, info: &Info) -> Option<InfoContent> {
+        let media = self.store.media();
+        match info {
+            Info::Server(id) => {
+                let server = self.store.server(id)?;
+                Some(InfoContent {
+                    id: format!("server-{id}"),
+                    name: server.name.clone(),
+                    icon_url: server.icon.as_ref().and_then(|icon| media.file(icon)),
+                    placeholder: InfoPlaceholder::Initials(crate::store::initials(&server.name)),
+                    banner_url: server.banner.as_ref().and_then(|banner| media.file(banner)),
+                    description: self
+                        .markdown_body(&format!("server-info-{id}"), server.description.as_deref()),
+                })
+            }
+            Info::Channel(id) => {
+                let Some(Channel::TextChannel {
+                    icon, description, ..
+                }) = self.store.channel(id)
+                else {
+                    return None;
+                };
+                let entry = self.store.channel_entry(id)?;
+                Some(InfoContent {
+                    id: format!("channel-{id}"),
+                    name: entry.name,
+                    icon_url: icon.as_ref().and_then(|icon| media.file(icon)),
+                    placeholder: InfoPlaceholder::Glyph(channel_icon(entry.kind)),
+                    banner_url: None,
+                    description: self
+                        .markdown_body(&format!("channel-info-{id}"), description.as_deref()),
+                })
+            }
+        }
     }
 
     /// "Change identity on {server}": the user's nickname, avatar and
@@ -6561,6 +6623,25 @@ impl ChatView {
         };
 
         let theme = cx.theme();
+        let (hover_bg, hover_fg) = (theme.sidebar_accent, theme.sidebar_accent_foreground);
+        // A server's name opens its info.
+        let heading = h_flex()
+            .id("channel-list-title")
+            .h(px(48.))
+            .flex_none()
+            .px_4()
+            .border_b_1()
+            .border_color(theme.sidebar_border)
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(div().truncate().child(title))
+            .when_some(server, |el, server| {
+                el.cursor_pointer()
+                    .hover(move |style| style.bg(hover_bg).text_color(hover_fg))
+                    .tooltip(|window, cx| Tooltip::new("Server info").build(window, cx))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_server_info(server.clone(), window, cx)
+                    }))
+            });
         v_flex()
             .w(px(240.))
             .h_full()
@@ -6569,16 +6650,7 @@ impl ChatView {
             .text_color(theme.sidebar_foreground)
             .border_r_1()
             .border_color(theme.sidebar_border)
-            .child(
-                h_flex()
-                    .h(px(48.))
-                    .flex_none()
-                    .px_4()
-                    .border_b_1()
-                    .border_color(theme.sidebar_border)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(div().truncate().child(title)),
-            )
+            .child(heading)
             .child(list)
             .child(self.render_user_panel(cx))
     }
@@ -6798,6 +6870,53 @@ impl ChatView {
             .border_color(theme.border)
             .font_weight(FontWeight::SEMIBOLD)
             .map(|el| match &channel {
+                // A server channel's name, and its description's first line,
+                // open its info.
+                Some(channel) if matches!(channel.kind, ChannelKind::Text { .. }) => {
+                    let description = match self.store.channel(&channel.id) {
+                        Some(Channel::TextChannel { description, .. }) => {
+                            first_line(description.as_deref()).map(str::to_string)
+                        }
+                        _ => None,
+                    };
+                    let (id, line_id) = (channel.id.clone(), channel.id.clone());
+                    let (muted, foreground) = (theme.muted_foreground, theme.foreground);
+                    let line = description.map(|line| {
+                        div()
+                            .id("channel-header-description")
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .font_weight(FontWeight::NORMAL)
+                            .text_color(muted)
+                            .cursor_pointer()
+                            .hover(move |style| style.text_color(foreground))
+                            .tooltip(|window, cx| {
+                                Tooltip::new("Click to show full description").build(window, cx)
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_channel_info(line_id.clone(), window, cx)
+                            }))
+                            .child(line)
+                    });
+                    el.child(Icon::new(channel_icon(channel.kind)).text_color(muted))
+                        .child(
+                            div()
+                                .id("channel-header-name")
+                                .min_w_0()
+                                .max_w(px(HEADER_NAME_MAX_WIDTH))
+                                .truncate()
+                                .cursor_pointer()
+                                .hover(|style| style.text_color(muted))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.open_channel_info(id.clone(), window, cx)
+                                }))
+                                .child(channel.name.clone()),
+                        )
+                        // Only as wide as the line, so the space after it
+                        // isn't clickable.
+                        .child(h_flex().flex_1().min_w_0().children(line))
+                }
                 Some(channel) => el
                     .child(Icon::new(channel_icon(channel.kind)).text_color(theme.muted_foreground))
                     .child(
@@ -7789,6 +7908,10 @@ const MEMBER_PANEL_WIDTH: f32 = 240.;
 
 /// Width of the header's search box.
 const SEARCH_BOX_WIDTH: f32 = 220.;
+
+/// The widest a server channel's name gets in the header, leaving room
+/// for its description's first line.
+const HEADER_NAME_MAX_WIDTH: f32 = 240.;
 
 /// Height of every row of the member list (section titles too, which is what
 /// lets it be a `uniform_list`).
@@ -10171,6 +10294,43 @@ fn create_category_item(view: &WeakEntity<ChatView>, server: String) -> PopupMen
             })
             .ok();
         })
+}
+
+/// What an info dialog is about.
+enum Info {
+    Server(String),
+    Channel(String),
+}
+
+/// Open Server or Channel info. It's drawn from the store each time, so an
+/// edit made elsewhere shows at once, and it closes itself once its server
+/// or channel has gone.
+fn open_info_dialog(view: WeakEntity<ChatView>, info: Info, window: &mut Window, cx: &mut App) {
+    let closing = std::cell::Cell::new(false);
+    window.open_dialog(cx, move |modal, window, cx| {
+        // `render_info` pads itself, so the banner can reach the edges, and
+        // has its own Close.
+        let modal = modal.w(px(INFO_DIALOG_WIDTH)).p_0().close_button(false);
+        let shown = view.upgrade().and_then(|chat| {
+            let chat = chat.read(cx);
+            Some((chat.info_content(&info)?, chat.invite_hosts()))
+        });
+        let Some((content, hosts)) = shown else {
+            if !closing.replace(true) {
+                window.defer(cx, |window, cx| window.close_dialog(cx));
+            }
+            return modal;
+        };
+        let people = People {
+            view: view.clone(),
+            channel: match &info {
+                Info::Channel(channel) => Some(channel.clone()),
+                Info::Server(_) => None,
+            },
+            hosts,
+        };
+        modal.child(render_info(&content, people.link_handler(), cx))
+    });
 }
 
 /// Open a [`NameDialog`] titled `title`, its field focused.

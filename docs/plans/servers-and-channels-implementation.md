@@ -9,6 +9,8 @@ Starting rustfmt `Diff in` counts (2026-11-07): `src/api/client.rs` 3, `src/api/
 
 Supervision: continuous, unattended overnight; manual checks batched at the end.
 
+Commits: chunk 1 is commit `0ed2e49`. Commit signing (Secretive, through Touch ID) wasn't available overnight, so chunks 2–6 were left staged, uncommitted, and each chunk's tree (from `git write-tree`), with its patch against the one before, was recorded in `/tmp/rustoat-chunks/ledger.txt` (`m19-c2` to `m19-c6`). They're to be committed one by one in the morning, each from its recorded tree.
+
 ## Chunk 1: Create a server
 
 ### Changes Made
@@ -250,3 +252,166 @@ Deferred to the batched manual pass. Steps:
 3. Join again and leave with the box ticked: no message in the web client.
 4. On a server you own, the menu has no Leave server….
 5. Light and dark themes: the red menu item, the dialog and the checkbox are readable.
+
+## Chunk 6: Server and channel info
+
+### Changes Made
+- `src/server_edit.rs`: `first_line(description) -> Option<&str>` (Assumption 15): the first line that isn't blank, trimmed, with its Markdown left as typed. One unit test.
+- `src/ui/server_dialogs.rs`:
+  - `INFO_DIALOG_WIDTH` (440), `InfoContent` (ID, name, icon URL, placeholder, banner URL, description) and `InfoPlaceholder` (a server's initials, or a channel's `#` or speaker glyph).
+  - `render_info(content, on_link, cx)`: the banner (140 px, cover, fixed height so a slow image doesn't move anything) across the top when there's one, then the 48 px icon (round, with the placeholder while it loads, if it fails, or if there's none) beside the name, then the description as Markdown (selectable, with math and markup as in bios, links through `on_link`) or "No description." in muted text, then Close.
+- `src/ui/chat.rs`:
+  - `markdown_body(key, text) -> Option<CardBio>`: trimmed, `markdown::prepare`d, keyed by `render_key`. `render_card`'s bio now uses it too.
+  - `open_server_info(server, ..)`, `open_channel_info(channel, ..)` and `info_content(&Info) -> Option<InfoContent>`, read from the store (`server-info-{id}` and `channel-info-{id}` render keys, so an edited description is parsed again).
+  - The free `open_info_dialog(view, Info, ..)`: the dialog's builder reads `info_content` each time it's drawn, so an edit made elsewhere shows at once. Once the server or channel is gone (left, deleted), it closes itself, once, through `window.defer`. Its links go through a `People` (`link_handler`), so external links get the usual warning, invite links open the Join dialog and mentions open cards.
+  - The server's name above the channel list (`channel-list-title`) opens Server info: pointer cursor, the sidebar's hover colours, tooltip "Server info". Home's "Direct Messages" isn't clickable.
+  - The header, for server channels: the name (at most `HEADER_NAME_MAX_WIDTH`, 240 px, and shrinking before the search box does) opens Channel info, and so does the description's first line after it (muted, normal weight, small, truncated, tooltip "Click to show full description"), truncated to the space left and only as wide as its text, so the header's empty space isn't clickable. DMs, groups and Saved Notes keep the old header.
+
+### Divergences
+- **One `render_info` with an `InfoContent`,** not `render_server_info` and `render_channel_info`: the two differ only in the banner and what stands in for the icon.
+- **The dialogs have no title bar, padding or corner ✕.** The name is beside the icon, and the banner reaches the dialog's edges, as the profile card's does. A ✕ over a banner image could be unreadable. Close, Escape and clicking outside all close it.
+- **Channel info shows the bare name beside the `#` or speaker glyph,** not `#name`. The glyph already says what it is, and a voice channel isn't a `#`.
+- **The header's name shrinks, rather than being `flex_none`:** it's capped at 240 px and truncates in a narrow window too, so the search box and buttons are never pushed out.
+- **Hover:** the name dims to the muted colour, the description line brightens to the foreground colour, and the server title takes the sidebar rows' hover background.
+- **Channel mentions in descriptions are links, not pills,** as in bios.
+- **The self-closing has one gap:** gpui-component only closes the topmost dialog. If the server or channel goes while another dialog is on top of its info (the external-link warning, opened from the description), the warning closes instead, and the info stays open, empty, until it's dismissed.
+
+### Verification Performed
+- `cargo test --lib server_edit`: 17 passed (1 new: `None` for `None`, "", "\n\n" and blank lines; "Rules\nmore" gives "Rules"; "\n  Hi  \nx" gives "Hi"; Markdown kept and `\r\n` handled).
+- `cargo test`: 952 passed, 0 failed (951 before).
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt `Diff in` counts:
+  - `src/ui/chat.rs` 17: unchanged, after hand-formatting `info_content`.
+  - `src/server_edit.rs`, `src/ui/server_dialogs.rs` and `src/ui/profile_card.rs` (unchanged): 0.
+
+### Manual Validation
+Deferred to the batched manual pass. Steps:
+1. Hover the server's name above the channel list: the pointer, the hover colours and "Server info". Click it with a server that has a banner, an icon and a Markdown description (set them in the web client): all three show, the Markdown renders, and the text can be selected.
+2. A server with none of them: no banner, its initials, and "No description." in muted text.
+3. Home's "Direct Messages" title does nothing.
+4. A channel with a description shows its first line, muted, after its name in the header, with "Click to show full description" on hover. Clicking the name or the line shows Channel info: its icon (or `#`, or the speaker for a voice channel) beside its name, and the whole description. A channel without one shows only its name, still clickable.
+5. A long name and a long description truncate cleanly before the search box and buttons, also with the window narrowed. DMs, groups and Saved Notes show no line and aren't clickable.
+6. Edit a description, an icon or a banner in the web client while a dialog is open: it updates. Edit the description's first line: the header follows.
+7. A link in a description: an external one asks first, an invite link opens Join a server, a channel link opens the channel.
+8. Delete the channel, or leave the server, from elsewhere while its info is open (the web client, or another account): the dialog closes.
+9. Light and dark themes: both dialogs, "No description." and the header's line are readable.
+
+## Summary
+
+_Completed: 2026-11-07_
+
+### Chunks Completed
+1. Create a server from the rail's "+" menu or Stoat → Create Server…, landing in its General channel.
+2. Delete a channel from its menu, after confirming, and follow channels deleted elsewhere.
+3. Create text and voice channels from the category, channel and channel list menus, in the right category; empty categories show.
+4. Create, rename and delete categories (keeping their channels) from the same menus.
+5. Leave a server from its rail menu, optionally without the "left" message; owners can't.
+6. Server and channel info from the server's name and the channel header, which shows the description's first line.
+
+### Divergences
+- Chunk 1:
+  - The "+" is the rail's own face made selectable (`RailMenuButton`), not a ghost `Button`.
+  - `fetch_own_member` dedupes fetches already on their way, so the response and `ServerCreate` ask once.
+  - The dialog's title is "Create a server", to match the menu and "Join a server".
+  - Test fixtures carry `approximate_member_count`, which `revolt-models` requires.
+- Chunk 2:
+  - The menu item uses `Trash` in the danger colour, as "Delete message" does.
+  - The confirmation has its own Cancel and Delete, so they can be disabled with a spinner while the request runs, and Escape is off meanwhile.
+  - A failed delete leaves the confirmation open, enabled again, beside the toast.
+  - The title uses the bare channel name.
+  - The store's helper is `drop_channel_state`, apart from `ChatView::forget_channel`.
+- Chunk 3:
+  - `edit_categories` returns the categories, not the whole `Server`.
+  - `channel_created` takes the channel, the category's ID and title, and a window (for the failure toast).
+  - The category's title in the dialog and toast is read when the dialog opens.
+  - "Channel type" is labelled, and labels are in sentence case.
+  - The list's background menu is attached only for those who may manage channels.
+- Chunk 4:
+  - `with_category_renamed` and `without_category` return `None` for a category that's gone, so nothing is sent.
+  - Every edit also drops duplicate channel IDs already in the list.
+  - Create server and Create channel weren't folded onto `NameDialog`.
+  - `ulid` is 3.0.0.
+  - A failed delete leaves the confirmation open, as for channels.
+- Chunk 5:
+  - The owner guard toasts "You own {name}, so you can't leave it." if the user became the owner meanwhile.
+  - A failed leave leaves the confirmation open beside the toast.
+  - "Left {name}." is a success toast.
+  - The server's name is read when the confirmation opens.
+- Chunk 6:
+  - One `render_info` with an `InfoContent` serves both dialogs.
+  - The dialogs have no title bar, padding or corner ✕, so the banner reaches the edges; the name is beside the icon.
+  - Channel info shows the bare name beside its glyph, not `#name`.
+  - The header's name is capped at 240 px but can shrink further.
+  - Channel mentions in descriptions are links, as in bios.
+  - If another dialog is on top of an info dialog when its server or channel goes, that one closes instead, and the info stays open, empty, until dismissed.
+
+### Definition of Done
+- [ ] The rail's "+" opens a menu with "Create a server…" and "Join a server…"; Stoat → Create Server… opens the same dialog. Creating sends `{"name":…}`, adds the server once at the end of the rail, and opens General. `TooManyServers` and `CantCreateServers` have their own messages. (Manual pass pending. The body, the single rail entry in either order and the error texts are test-verified.)
+- [ ] `ChannelDelete` removes the channel from the sidebar, its categories and every per-channel state, and moves you off it if it was open. (Manual pass pending. The parse and the store's removal are test-verified.)
+- [ ] "Delete channel…" shows only with Manage Channels on that channel, always asks first, and removes the channel when Stoat answers 204 or `NotFound`. (Manual pass pending. `can_manage_channel` and the request are test-verified.)
+- [ ] "Create channel…" shows only with server-level Manage Channels, in the category menu, the server-channel menu and the list's background; it creates text or voice channels in the category it was started from, and opens them. (Manual pass pending. `can_manage_channels`, the request bodies, `with_channel_in` and both arrival orders are test-verified.)
+- [x] Empty categories show; categories whose channels you can't see stay hidden.
+- [ ] Categories can be created (appended, with a ULID), renamed and deleted (their channels kept) by those with Manage Channels, each sending the whole list as `{"categories":[…]}`. (Manual pass pending for the menus. The edits, the IDs, the bodies and the uncategorized channels are test-verified.)
+- [ ] "Leave server…" shows for every server you don't own and never for one you do; it sends `leave_silently` from the checkbox, removes the server, and toasts. (Manual pass pending. `is_owner`, including after an owner change, and both query values are test-verified.)
+- [ ] Clicking the server name above the channel list shows its banner, icon and markdown description; clicking the channel name or its first description line in the header shows its icon and description. (Manual pass pending. `first_line` is test-verified.)
+- [x] `cargo test` (952 passed) and `cargo clippy --all-targets -- -D warnings` pass, and no touched file's rustfmt drift grew.
+- [ ] Every chunk's manual check is recorded in `docs/plans/servers-and-channels-implementation.md`. (Manual pass pending. The steps are in each chunk's section and consolidated below.)
+
+### Remaining Manual Steps
+One sitting, in this order. You need two accounts on `api.stoat.chat`: **A**, who'll own the test server, and **B**, who'll join it. Sign both in to RuSToat, and sign in to the web client as A in a browser to watch.
+
+**Create a server (chunk 1)**
+1. As A, click the rail's "+": a menu with "Create a server…" (plus icon) and "Join a server…" opens to the right of the rail, not clipped by the window's edge. Try again with the window short enough that the "+" is near the bottom.
+2. Choose Join a server…: "Join a server" opens. Close it.
+3. Choose Create a server…: "Create a server" opens with the field focused. Create is disabled while the name is empty or blank and past 32 characters; the counter shows the count and turns red past 32.
+4. The "By creating this server, you agree to the Acceptable Use Policy." line shows (this is stoat.chat), and its link opens `https://stoat.chat/aup` in the browser. (On another instance it wouldn't show.)
+5. Name it "M19 Test" and Create: it appears at the end of the rail, General opens, and you can send a message there. No toast.
+6. Stoat → Create Server… opens the same dialog. Close it. With the login view on screen (adding an account, say), Stoat → Create Server… does nothing.
+
+**Categories and channels (chunks 3 and 4)**
+7. Right-click the channel list's empty space below General: only "Create channel…" and "Create category…". Right-click General: Create invite…, Create channel…, Create category…, Delete channel… (red), a separator, Copy channel ID; the list's own menu doesn't also open.
+8. Create category… "Alpha": "Create a new category", Create disabled until the name is valid. Alpha appears at the bottom as a heading with no rows. Create "Beta" and "Gamma" the same way. Fold and unfold Gamma (empty): it toggles.
+9. Right-click Alpha's heading: Create channel…, Create category…, Rename category…, Delete category… (red), a separator, Copy category ID.
+10. From Alpha's menu, Create channel…: "Create channel", "in ALPHA", Text Channel chosen; the radios switch, and Create follows the same name rules as step 3. Create a text channel "a-text": it lands at the end of Alpha and opens.
+11. From Beta's menu, create a text channel "b-text". Then right-click b-text → Create channel…, and create a Voice Channel "b-voice": it lands at the end of Beta with the speaker icon and opens.
+12. From the empty space's menu, create "loose": it's uncategorized, at the bottom of the top group, and opens.
+13. The web client shows a-text, b-text, b-voice and loose in the same places.
+14. Fold Beta, then Rename category… on it: "Rename category" with "Beta" filled in. Rename it "Bravo": the heading changes at once (and in the web client), and it stays folded.
+15. Open Create channel… from Gamma's menu and leave it open; delete Gamma in the web client; then Create "orphan": the channel is made, uncategorized, with no toast.
+16. Open Rename category… on Alpha and leave it open; delete Alpha in the web client; then Rename: the error line says the category has been deleted. Close it. (Alpha's channels are now uncategorized.)
+17. Create a category "Delta" in RuSToat. Open Rename on it, rename it in the web client to "Web", then save "Mine" in RuSToat: "Mine" wins, here and in the web client.
+18. Fold Bravo and Delete category… on it: "Delete BRAVO?" with "Its channels won't be deleted. They'll move out of the category." Delete shows a spinner; then b-text and b-voice move to the top group, none deleted, and the web client agrees. Create a category "Echo": it isn't folded.
+19. Delete every remaining category, the last one too: everything is uncategorized, with no error.
+
+**Server and channel info (chunk 6)**
+20. In the web client, give M19 Test an icon, a banner and a Markdown description with **bold** text, an external link, an invite link and a channel mention. Give General a two-line description whose first line is "Rules".
+21. Hover the server's name above the channel list: a pointer, the hover colours and "Server info". Click it: the banner across the top, the icon beside "M19 Test", and the description rendered and selectable. Close, Escape and clicking outside each close it.
+22. In Server info, click the external link (a warning asks first), the invite link (Join a server opens) and the channel mention (the channel opens).
+23. With Server info open, change the description in the web client: it updates. Remove the banner, icon and description: no banner, the initials "MT", and "No description." in muted text.
+24. Home's "Direct Messages" title isn't clickable.
+25. Open General: "Rules" shows after its name in the header, muted, with "Click to show full description" on hover. Click the line, then the name: Channel info shows the `#` beside "General" and the whole description. b-voice's info shows the speaker. A channel without a description shows only its name in the header, still clickable, and "No description.".
+26. Edit General's first line in the web client: the header follows, and an open Channel info updates. Give General an icon in the web client: Channel info shows it.
+27. Give a channel a long name and a long first line, and narrow the window: both truncate cleanly before the search box and the buttons. DMs, groups and Saved Notes show no line and aren't clickable.
+
+**Delete a channel (chunk 2)**
+28. Right-click "orphan": Delete channel… is last before Copy channel ID, in red. Choose it: "Delete orphan?" with "Once it's deleted, there's no going back." Cancel keeps it.
+29. Open "orphan" and delete it: Delete shows a spinner, the dialog closes, the channel disappears, and the sidebar's first channel opens.
+30. Create a category with one channel in it and delete that channel: the category stays, as a heading with no rows, folded or not.
+31. Open a channel in RuSToat and delete it from the web client: it disappears within a moment and another channel opens, with no pane or spinner left behind. With its Channel info open instead, the dialog closes.
+
+**A member's view, two accounts (chunks 2–5; plan Manual Tests 2 and 3)**
+32. As A, create an invite to M19 Test (the header's Create invite). As B, "+" → Join a server… with it.
+33. As B: channel menus have no Create channel…, Create category… or Delete channel…; category headings offer only Copy category ID; right-clicking the empty space does nothing. Server info and Channel info work. DMs and groups never offer Delete channel….
+34. Switch between A and B: the "+" menu, Stoat → Create Server… and every server and channel menu act for the account on screen.
+35. As B, open a channel; as A, delete it: it disappears for both, and B lands on another channel.
+36. As A, right-click M19 Test in the rail: no Leave server… (A owns it).
+
+**Leave a server (chunk 5)**
+37. In the web client as A, set M19 Test's "user left" system message channel to General.
+38. As B, right-click M19 Test: Leave server… is last before Copy server ID, in red. Choose it: "Leave M19 Test?", "You won't be able to rejoin unless you are re-invited.", and "Don't notify others that you've left", unticked. Cancel keeps the server.
+39. With M19 Test on screen, leave with the box unticked: Leave shows a spinner, the server disappears from the rail, Home opens, and "Left M19 Test." shows. The web client shows B left in General.
+40. Join again with a new invite and leave with the box ticked: no message in the web client.
+
+**Themes and clean-up (plan Manual Tests 4 and 5)**
+41. In light and dark themes: every dialog (Create a server, Create channel, Create a new category, Rename category, Delete channel, Delete category, Leave, Server info, Channel info), the counters, the Acceptable Use Policy link, "in {CATEGORY}", the radios, the checkbox, the red menu items, "No description." and the header's description line are readable.
+42. Delete M19 Test from the web client (Server settings): it leaves RuSToat's rail. (RuSToat gets Delete server in milestone 23.)

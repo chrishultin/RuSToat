@@ -1,6 +1,7 @@
 //! Making and changing servers: Stoat's rules for a name, edits to a
-//! server's categories, and why a request was refused, in words. Plain
-//! data with no GPUI, so it's unit-testable.
+//! server's categories, why a request was refused, in words, and what the
+//! channel header shows of a description. Plain data with no GPUI, so it's
+//! unit-testable.
 
 use revolt_result::ErrorType;
 
@@ -94,6 +95,16 @@ pub fn without_category(categories: &[Category], id: &str) -> Option<Vec<Categor
     edited.retain(|c| c.id != id);
     listed_once(&mut edited);
     Some(edited)
+}
+
+/// What the channel header shows of a `description`: its first line
+/// that isn't blank, trimmed, as typed (Markdown isn't rendered there).
+/// `None` when there's no such line.
+pub fn first_line(description: Option<&str>) -> Option<&str> {
+    description?
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
 }
 
 /// Keep each channel where it's first listed, and drop any later copy:
@@ -366,6 +377,18 @@ mod tests {
             a.chars()
                 .all(|c| c.is_ascii_digit() || c.is_ascii_uppercase() && !"ILOU".contains(c))
         );
+    }
+
+    #[test]
+    fn the_header_shows_the_first_line_that_isnt_blank() {
+        assert_eq!(first_line(None), None);
+        assert_eq!(first_line(Some("")), None);
+        assert_eq!(first_line(Some("\n\n")), None);
+        assert_eq!(first_line(Some("  \n\t\n")), None);
+        assert_eq!(first_line(Some("Rules\nmore")), Some("Rules"));
+        assert_eq!(first_line(Some("\n  Hi  \nx")), Some("Hi"));
+        // As typed: Markdown stays, and Windows line ends go.
+        assert_eq!(first_line(Some("**Be nice**\r\nx")), Some("**Be nice**"));
     }
 
     #[test]
