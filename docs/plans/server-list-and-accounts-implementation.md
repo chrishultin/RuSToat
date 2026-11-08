@@ -99,3 +99,52 @@ Deferred to the batched manual pass. Steps:
 5. ⌘⌥↑/↓ passes over the servers in the closed folder, and walks those in an open one.
 6. Remove from folder: the server lands just below the folder. Delete folder: its servers stay in place.
 7. Light and dark themes: tints, preview and the palette are visible.
+
+## Chunk 3: Drag servers and folders in the rail
+
+### Changes Made
+- `src/rail.rs`:
+  - `DropTarget::{Before(id), After(id), Into(id)}`: above or below an item (in its folder if it's in an open one), or onto a server (a new folder of the two) or into a folder (at its end).
+  - `target_for(rail, dragged, hovered, fraction) -> Option<DropTarget>` (Assumption 11, with the web client's fold band): over a top-level server or a folder's icon, the middle half is onto it and the top and bottom quarters above and below; below an open folder's icon is above its first server, in it; over a server in an open folder, above or below it by half. A dragged folder only goes above or below top-level items (over another folder's servers, below that folder). `None` over itself (or, for a folder, its own servers), or onto the dragged server's own folder.
+  - `apply_drop(ordering, folders, rail, dragged, target, new_folder_id)`, in the same shape as chunk 2's edits (the rail as drawn written into `serverSidebar`, then `settle`): a server beside a top-level item leaves its folder; beside a server in a folder, it joins that folder there; onto a server, a "New Folder" of the two in the target's place, the target first; into a folder, at its end. A folder moves whole. Folders left empty go. A drop that leaves the rail as it was (or can't be made: a folder into anything, an item that's gone) changes nothing, so nothing is written (and a rail still on the legacy order doesn't get a `serverSidebar`).
+  - Private helpers `locate`, `is_folder`, `place`, `fold`, `take_from_rail`, `beside`.
+  - 12 unit tests.
+- `src/ui/chat.rs`:
+  - `RailDrag { id }`, the dragged value; `RailDragState { dragged, target, over_rail }` held in `ChatView.rail_drag`, read through `rail_dragging` (only while gpui has a drag going, so one that ended unseen is ignored).
+  - Servers' and folders' buttons are draggable (`rail_draggable`: `on_drag` with a `DragPreview`; starting a drag records it). Servers in a closed folder aren't drawn, so can't be dragged; Home and "+" aren't draggable. `render_rail_server` now builds its button from `rail_icon` and `rail_slot` (as the folder does) rather than through `rail_button`, whose signature (shared with the switcher) is unchanged.
+  - Finding the target: each item's row has an `on_drag_move` (`rail_drop_slot` → `rail_drag_over`) that, when the pointer is inside its own bounds, asks `rail::target_for` with the pointer's fraction down the row. The rail's own listener (`rail_drag_moved`, which gpui runs before its items') clears the target when the pointer leaves the rail, and items take the pointer only while it's over the rail (an item scrolled out of sight still sees it). Home, and "+" with the space below it (now one column that fills the rest of the rail), mean above the first item and below the last (`rail_drag_over_end`). Between items, the target stays where it was.
+  - Drawing: the dragged item's row (an open folder's whole strip) at 35%; `with_drop_mark` draws a 3 px line in the primary colour centred in the 8 px gap above or below an item (an open folder: its whole strip), or a 2 px ring around a 48 px button (an open folder: around its icon).
+  - Dropping: `on_drop::<RailDrag>` on the rail (`drop_on_rail`) runs `apply_drop` through `edit_rail` / `update_rail`; a mouse-up off the rail (`on_mouse_up_out`) forgets the drag; nothing happens.
+  - Esc: gpui doesn't cancel a drag on Esc (checked in `gpui-pre` 0.3.11: only a mouse-up ends one), so `ChatView::new` adds a keystroke interceptor (`_drag_escape`) that, while a rail drag is going, forgets it, calls `cx.stop_active_drag(window)` and stops the Esc there (so it doesn't also jump to the present).
+  - Reusable for the switcher (chunk 4): `DropMark::{Above, Below, Onto}` and `with_drop_mark(item, mark, cx)`; `drag_face(content, bg, cx)` (a 48 px face) and `DragPreview::new(face, cx)` (the preview entity for `on_drag`, at 80%); `DRAGGED_OPACITY`.
+
+### Divergences
+- **`target_for` takes the rail, the dragged ID and the hovered ID** (rather than `(entry, fraction, inside_open_folder)`), since what's possible depends on what's dragged (a folder goes into nothing) and where (an open folder's icon, a server's own folder).
+- **`apply_drop` edits `(ordering, folders)` in place and changes nothing for a no-op**, as chunk 2's edits do, rather than returning `Option<(Ordering, ServerFolders)>`; `update_rail` already writes nothing when nothing changed.
+- **Below an open folder's icon drops above its first server, in the folder**, as in the web client (whose bottom half there inserts before the first member); Assumption 11 has only the middle of a folder's icon meaning "into it".
+- **Below the last server in an open folder stays in the folder** (Assumption 11: "only before and after, within the folder"); the web client puts it after the folder. To drop just below an open folder at the top level, use the top quarter of the next item, or the "+" area if it's last.
+- **A dragged folder over another folder's servers goes below that folder**, as in the web client.
+- **No ring onto a server's own folder** (the web client shows one, and the drop does nothing).
+- **Leaving the rail cancels**, rather than the web client's 80 px margin either side: the drop has to land on the rail for gpui to hand it over, so the line goes as soon as the pointer leaves it.
+- **Home and "+" (and the space below it) mean first and last**, matching the web client's "above the first entry" and "below the last".
+
+### Verification Performed
+- `cargo test --lib rail::`: 37 passed (12 new): `target_for` at 0.1, 0.5 and 0.9 over top-level servers (and the quarters' edges), a closed and an open folder's icon (below the open one's is its first server; onto its own folder is nothing), servers in an open folder, and for a dragged folder (top-level only; over its own servers, nothing); `apply_drop` above and below, onto a server (a new folder in its place, target first, "New Folder", no colour, open), into a folder (at its end; from another folder, which goes when emptied), beside a server in a folder (joins it there; reordered within its own), beside a top-level item (out of its folder; a folder's last server takes its place), a folder before and after a server and beside another folder's server (moves whole, folders untouched); thirteen no-op drops change nothing, including on the legacy order (no `serverSidebar` written); every target `target_for` shows keeps every server drawn exactly once.
+- `cargo test`: 1047 passed, 0 failed (1035 before).
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt `Diff in` counts: `src/ui/chat.rs` 17 (unchanged; hand-formatted, and its `--check` output matches the staged version's), `src/rail.rs` 0.
+
+### Manual Validation
+Deferred to the batched manual pass. Steps:
+1. Drag a server between two others (top or bottom quarter of a neighbour): a line shows where; drop: it moves there. The dragged icon fades and its icon follows the pointer.
+2. Drag a server onto the middle of another: a ring shows; drop: a "New Folder" appears in the target's place, holding the target then the dragged server.
+3. Drag a server onto a closed folder's middle: it goes to the end of the folder. Onto an open folder's icon: the same; just below the icon: it goes first in the folder.
+4. With a folder open, drag one of its servers above or below another in it: it reorders within the folder. Drag it to the top or bottom quarter of a top-level server: it leaves the folder (the folder goes if it was the last).
+5. Drag a folder (open and closed) above or below servers and other folders: it moves whole; over a server's middle there's no ring.
+6. Drag over Home: the line shows above the first item; over "+" or the space below it: below the last.
+7. Drop where the item already is (or onto itself): nothing changes, and nothing is written (no "Couldn't save" toast, the web client doesn't change).
+8. Press Esc mid-drag: the drag ends, nothing moves, and the open channel doesn't jump to the present. Drag off the rail and let go: nothing moves.
+9. The web client shows the same order and folders after each drop.
+10. Clicking servers and folders still opens them and toggles folders (including a click with a pixel of movement); right-click menus still open.
+11. With enough servers that the rail scrolls, drags near its ends still drop where shown (no auto-scroll).
+12. Light and dark themes: the line, ring and faded item are visible.

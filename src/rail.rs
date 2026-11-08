@@ -12,8 +12,8 @@
 //! Both are kept with their unknown fields, so a write here loses nothing
 //! the web client (or a later one) stores in them.
 //!
-//! The menus' edits to folders are here too, each on the two settings as
-//! held and the rail as drawn from them.
+//! The menus' edits to folders and the drags' drops are here too, each on
+//! the two settings as held and the rail as drawn from them.
 
 use std::collections::{HashMap, HashSet};
 
@@ -466,6 +466,244 @@ pub fn delete_folder(
     sidebar.retain(|s| s != id);
     folders.folders.retain(|f| f.id != id);
     settle(ordering, folders, sidebar);
+}
+
+/// Where a server or folder dragged in the rail would land.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DropTarget {
+    /// Just above the item `id`, in its folder if it's in one.
+    Before(String),
+    /// Just below the item `id` (a folder: below its servers), in its
+    /// folder if it's in one.
+    After(String),
+    /// Onto the server `id`, making a folder of the two, or into the folder
+    /// `id`, at its end.
+    Into(String),
+}
+
+/// How much of an item's height, about its middle, drops onto it rather
+/// than beside it, as in the web client.
+const FOLD_BAND: f32 = 0.5;
+
+/// What dropping `dragged` on the rail item `hovered` would do, with the
+/// pointer `fraction` of the way down it (0 at its top, 1 at its bottom).
+/// `hovered` is a server or a folder's icon in `rail` (the rail as drawn).
+/// `None` where dropping would do nothing worth showing: on itself, or a
+/// server into its own folder.
+///
+/// - A top-level server or a folder's icon: the middle half drops onto it
+///   (a server only; a folder can't go into anything), the top and bottom
+///   quarters above and below. Below an open folder's icon is above its
+///   first server, in it.
+/// - A server in an open folder: above or below it, in the folder, by half.
+///   A folder dragged there goes below that folder.
+pub fn target_for(
+    rail: &[RailEntry],
+    dragged: &str,
+    hovered: &str,
+    fraction: f32,
+) -> Option<DropTarget> {
+    if dragged == hovered {
+        return None;
+    }
+    let dragging_folder = is_folder(rail, dragged);
+    let upper = fraction < 0.5;
+    // Outside the middle half, or a folder, which never goes into anything.
+    let beside_only = dragging_folder || (fraction - 0.5).abs() >= FOLD_BAND / 2.;
+    let (at, member) = locate(rail, hovered)?;
+    let RailEntry::Folder { folder, servers } = &rail[at] else {
+        // A top-level server.
+        return Some(match beside_only {
+            true => beside(hovered, upper),
+            false => DropTarget::Into(hovered.into()),
+        });
+    };
+    if member.is_some() {
+        return match dragging_folder {
+            // Over its own servers.
+            true if folder.id == dragged => None,
+            true => Some(DropTarget::After(folder.id.clone())),
+            false => Some(beside(hovered, upper)),
+        };
+    }
+    if beside_only {
+        return Some(match servers.first() {
+            // An open folder's servers are drawn just below its icon.
+            Some(first) if !upper && !dragging_folder && !folder.collapsed => {
+                DropTarget::Before(first.clone())
+            }
+            _ => beside(hovered, upper),
+        });
+    }
+    if servers.iter().any(|s| s == dragged) {
+        return None;
+    }
+    Some(DropTarget::Into(hovered.into()))
+}
+
+/// Just above `id` if `upper`, else just below it.
+fn beside(id: &str, upper: bool) -> DropTarget {
+    match upper {
+        true => DropTarget::Before(id.into()),
+        false => DropTarget::After(id.into()),
+    }
+}
+
+/// Drop `dragged` (a server or a folder drawn in `rail`) at `target`, from
+/// [`target_for`]. A server dropped beside a top-level item leaves its
+/// folder; beside a server in a folder, it joins that folder there. One
+/// dropped onto a server makes a folder ([`NEW_FOLDER_NAME`], `new_folder`)
+/// of the two in that server's place, the target first. A folder can only
+/// move between top-level items.
+///
+/// Nothing changes, and so nothing is written, if the drop leaves the rail
+/// as it was, or can't be made (an item that's gone, a folder dropped into
+/// something).
+pub fn apply_drop(
+    ordering: &mut Ordering,
+    folders: &mut ServerFolders,
+    rail: &[RailEntry],
+    dragged: &str,
+    target: &DropTarget,
+    new_folder: String,
+) {
+    let mut moved = rail.to_vec();
+    let mut edited = folders.clone();
+    if place(&mut moved, &mut edited, dragged, target, new_folder).is_none() {
+        return;
+    }
+    let sidebar = to_sidebar(&moved);
+    if sidebar == to_sidebar(rail) && edited == *folders {
+        return;
+    }
+    *folders = edited;
+    settle(ordering, folders, sidebar);
+}
+
+/// [`apply_drop`]'s move, on the rail and the folders. `None` if it can't
+/// be made.
+fn place(
+    rail: &mut Vec<RailEntry>,
+    folders: &mut ServerFolders,
+    dragged: &str,
+    target: &DropTarget,
+    new_folder: String,
+) -> Option<()> {
+    let (from, member) = locate(rail, dragged)?;
+    let dragging_folder = is_folder(rail, dragged);
+    let (anchor, after) = match target {
+        DropTarget::Before(anchor) => (anchor, false),
+        DropTarget::After(anchor) => (anchor, true),
+        // A folder can't go into anything.
+        DropTarget::Into(_) if dragging_folder => return None,
+        DropTarget::Into(onto) => return fold(rail, folders, dragged, onto, new_folder),
+    };
+    if anchor == dragged {
+        return None;
+    }
+
+    // A folder moves whole, among the top-level items; a server in a
+    // folder stands for its folder.
+    if dragging_folder {
+        let (at, _) = locate(rail, anchor)?;
+        if at == from {
+            return None;
+        }
+        let entry = rail.remove(from);
+        let at = if at > from { at - 1 } else { at };
+        rail.insert(at + usize::from(after), entry);
+        return Some(());
+    }
+
+    locate(rail, anchor)?;
+    take_from_rail(rail, from, member);
+    folders.take_out(dragged);
+    let (at, member) = locate(rail, anchor)?;
+    match (member, &mut rail[at]) {
+        (Some(j), RailEntry::Folder { folder, servers }) => {
+            servers.insert(j + usize::from(after), dragged.to_string());
+            let folder = folders.folder_mut(&folder.id)?;
+            let k = folder.servers.iter().position(|s| s == anchor)?;
+            folder
+                .servers
+                .insert(k + usize::from(after), dragged.to_string());
+        }
+        _ => rail.insert(at + usize::from(after), RailEntry::Server(dragged.into())),
+    }
+    Some(())
+}
+
+/// Whether `id` is a folder's in `rail`.
+fn is_folder(rail: &[RailEntry], id: &str) -> bool {
+    rail.iter()
+        .any(|e| matches!(e, RailEntry::Folder { folder, .. } if folder.id == id))
+}
+
+/// Drop the server `dragged` onto `onto`: into it if it's a folder (at its
+/// end), else a new folder of the two in `onto`'s place.
+fn fold(
+    rail: &mut Vec<RailEntry>,
+    folders: &mut ServerFolders,
+    dragged: &str,
+    onto: &str,
+    new_folder: String,
+) -> Option<()> {
+    let (from, member) = locate(rail, dragged)?;
+    // Only onto a top-level item.
+    if onto == dragged || locate(rail, onto)?.1.is_some() {
+        return None;
+    }
+    if folders
+        .folder(onto)
+        .is_some_and(|f| f.servers.iter().any(|s| s == dragged))
+    {
+        return None;
+    }
+    take_from_rail(rail, from, member);
+    folders.take_out(dragged);
+    let (at, _) = locate(rail, onto)?;
+    match &mut rail[at] {
+        RailEntry::Folder { folder, servers } => {
+            servers.push(dragged.to_string());
+            folders
+                .folder_mut(&folder.id)?
+                .servers
+                .push(dragged.to_string());
+        }
+        RailEntry::Server(_) => {
+            let servers = vec![onto.to_string(), dragged.to_string()];
+            let folder = Folder::new(new_folder, NEW_FOLDER_NAME, servers.clone());
+            folders.folders.push(folder.clone());
+            rail[at] = RailEntry::Folder { folder, servers };
+        }
+    }
+    Some(())
+}
+
+/// Where `id` is in `rail`: its top-level item's index (a server's, or a
+/// folder's by its ID), and its place among that folder's servers if it's
+/// one of them.
+fn locate(rail: &[RailEntry], id: &str) -> Option<(usize, Option<usize>)> {
+    rail.iter().enumerate().find_map(|(at, entry)| match entry {
+        RailEntry::Server(server) => (server == id).then_some((at, None)),
+        RailEntry::Folder { folder, .. } if folder.id == id => Some((at, None)),
+        RailEntry::Folder { servers, .. } => {
+            servers.iter().position(|s| s == id).map(|j| (at, Some(j)))
+        }
+    })
+}
+
+/// Take the server at (`at`, `member`), from [`locate`], out of `rail`. A
+/// folder left with none stays, for [`settle`] to drop.
+fn take_from_rail(rail: &mut Vec<RailEntry>, at: usize, member: Option<usize>) {
+    match (member, &mut rail[at]) {
+        (Some(j), RailEntry::Folder { servers, .. }) => {
+            servers.remove(j);
+        }
+        _ => {
+            rail.remove(at);
+        }
+    }
 }
 
 /// Drop the folders left with no servers (as writing them would), and
@@ -993,6 +1231,327 @@ mod tests {
         let (one, two) = (new_folder_id(), new_folder_id());
         assert!(one.starts_with("folder-") && one.len() == "folder-".len() + 26);
         assert_ne!(one, two);
+    }
+
+    /// A rail of a top-level server "a", an open folder "folder-1" of "b"
+    /// and "c", a closed one "folder-2" of "d", and a server "e".
+    fn drag_rail() -> (Ordering, ServerFolders, Vec<String>) {
+        let ordering = ordering(json!({
+            "servers": [],
+            "serverSidebar": ["a", "folder-1", "b", "c", "folder-2", "d", "e"]
+        }));
+        let folders = folders(json!({ "folders": [
+            { "id": "folder-1", "servers": ["b", "c"] },
+            { "id": "folder-2", "collapsed": true, "servers": ["d"] }
+        ] }));
+        (ordering, folders, ids(&["a", "b", "c", "d", "e"]))
+    }
+
+    fn above(id: &str) -> Option<DropTarget> {
+        Some(DropTarget::Before(id.into()))
+    }
+
+    fn below(id: &str) -> Option<DropTarget> {
+        Some(DropTarget::After(id.into()))
+    }
+
+    fn onto(id: &str) -> Option<DropTarget> {
+        Some(DropTarget::Into(id.into()))
+    }
+
+    /// `target_for` dragging `dragged` over `hovered` at 0.1, 0.5 and 0.9.
+    fn targets(rail: &[RailEntry], dragged: &str, hovered: &str) -> [Option<DropTarget>; 3] {
+        [0.1, 0.5, 0.9].map(|y| target_for(rail, dragged, hovered, y))
+    }
+
+    #[test]
+    fn a_server_over_a_top_level_server_goes_above_onto_or_below_it() {
+        let (ordering, folders, known) = drag_rail();
+        let rail = entries(&ordering, &folders, &known);
+        assert_eq!(
+            targets(&rail, "a", "e"),
+            [above("e"), onto("e"), below("e")]
+        );
+        // From inside a folder too.
+        assert_eq!(
+            targets(&rail, "b", "a"),
+            [above("a"), onto("a"), below("a")]
+        );
+        // The quarters' edges.
+        assert_eq!(target_for(&rail, "a", "e", 0.25), above("e"));
+        assert_eq!(target_for(&rail, "a", "e", 0.26), onto("e"));
+        assert_eq!(target_for(&rail, "a", "e", 0.75), below("e"));
+        // Over itself: nothing.
+        assert_eq!(targets(&rail, "a", "a"), [None, None, None]);
+    }
+
+    #[test]
+    fn a_server_over_a_folder_goes_above_into_or_below_it() {
+        let (ordering, folders, known) = drag_rail();
+        let rail = entries(&ordering, &folders, &known);
+        assert_eq!(
+            targets(&rail, "a", "folder-2"),
+            [above("folder-2"), onto("folder-2"), below("folder-2")]
+        );
+        // Below an open folder's icon is its first server's place.
+        assert_eq!(
+            targets(&rail, "a", "folder-1"),
+            [above("folder-1"), onto("folder-1"), above("b")]
+        );
+        // Into its own folder: nothing, but it can still move to the top.
+        assert_eq!(
+            targets(&rail, "c", "folder-1"),
+            [above("folder-1"), None, above("b")]
+        );
+    }
+
+    #[test]
+    fn a_server_over_one_in_a_folder_goes_above_or_below_it() {
+        let (ordering, folders, known) = drag_rail();
+        let rail = entries(&ordering, &folders, &known);
+        assert_eq!(
+            targets(&rail, "a", "c"),
+            [above("c"), below("c"), below("c")]
+        );
+        assert_eq!(
+            targets(&rail, "c", "b"),
+            [above("b"), below("b"), below("b")]
+        );
+    }
+
+    #[test]
+    fn a_folder_goes_only_above_or_below_top_level_items() {
+        let (ordering, folders, known) = drag_rail();
+        let rail = entries(&ordering, &folders, &known);
+        assert_eq!(
+            targets(&rail, "folder-2", "a"),
+            [above("a"), below("a"), below("a")]
+        );
+        assert_eq!(
+            targets(&rail, "folder-2", "folder-1"),
+            [above("folder-1"), below("folder-1"), below("folder-1")]
+        );
+        // Over another folder's servers: below that folder.
+        assert_eq!(
+            targets(&rail, "folder-2", "b"),
+            [below("folder-1"), below("folder-1"), below("folder-1")]
+        );
+        // Over itself or its own servers: nothing.
+        assert_eq!(targets(&rail, "folder-1", "folder-1"), [None, None, None]);
+        assert_eq!(targets(&rail, "folder-1", "c"), [None, None, None]);
+        // Something not in the rail: nothing.
+        assert_eq!(targets(&rail, "a", "gone"), [None, None, None]);
+    }
+
+    /// `dragged` dropped at `target` on [`drag_rail`]: as [`after`].
+    fn dropped(dragged: &str, target: DropTarget) -> (Ordering, ServerFolders, Vec<RailEntry>) {
+        let (ordering, folders, known) = drag_rail();
+        after(&ordering, &folders, &known, |o, f, rail| {
+            apply_drop(o, f, rail, dragged, &target, "folder-new".into())
+        })
+    }
+
+    #[test]
+    fn a_server_dropped_above_or_below_another_moves_there() {
+        let (_, _, rail) = dropped("a", DropTarget::Before("e".into()));
+        assert_eq!(
+            shape(&rail),
+            vec![
+                ("folder-1".into(), ids(&["b", "c"])),
+                ("folder-2".into(), ids(&["d"])),
+                ("a".into(), ids(&["a"])),
+                ("e".into(), ids(&["e"])),
+            ]
+        );
+        let (ordering, _, rail) = dropped("e", DropTarget::After("folder-1".into()));
+        assert_eq!(
+            shape(&rail),
+            vec![
+                ("a".into(), ids(&["a"])),
+                ("folder-1".into(), ids(&["b", "c"])),
+                ("e".into(), ids(&["e"])),
+                ("folder-2".into(), ids(&["d"])),
+            ]
+        );
+        assert_eq!(
+            ordering.server_sidebar(),
+            Some(&ids(&["a", "folder-1", "b", "c", "e", "folder-2", "d"])[..])
+        );
+    }
+
+    #[test]
+    fn a_server_dropped_onto_another_makes_a_folder_of_the_two() {
+        let (ordering, folders, rail) = dropped("a", DropTarget::Into("e".into()));
+        assert_eq!(
+            shape(&rail),
+            vec![
+                ("folder-1".into(), ids(&["b", "c"])),
+                ("folder-2".into(), ids(&["d"])),
+                // In the target's place, the target first.
+                ("folder-new".into(), ids(&["e", "a"])),
+            ]
+        );
+        let folder = folders.folder("folder-new").unwrap();
+        assert_eq!(folder.name, "New Folder");
+        assert_eq!((folder.colour.as_deref(), folder.collapsed), (None, false));
+        assert!(
+            ordering
+                .sidebar()
+                .ends_with(&ids(&["folder-new", "e", "a"]))
+        );
+    }
+
+    #[test]
+    fn a_server_dropped_into_a_folder_goes_at_its_end() {
+        let (_, folders, rail) = dropped("a", DropTarget::Into("folder-1".into()));
+        assert_eq!(shape(&rail)[0], ("folder-1".into(), ids(&["b", "c", "a"])));
+        assert_eq!(
+            folders.folder("folder-1").unwrap().servers,
+            ids(&["b", "c", "a"])
+        );
+        // From another folder, which goes when it's left empty.
+        let (ordering, folders, rail) = dropped("d", DropTarget::Into("folder-1".into()));
+        assert_eq!(
+            shape(&rail),
+            vec![
+                ("a".into(), ids(&["a"])),
+                ("folder-1".into(), ids(&["b", "c", "d"])),
+                ("e".into(), ids(&["e"])),
+            ]
+        );
+        assert_eq!(folders.folder("folder-2"), None);
+        assert!(!ordering.sidebar().contains(&"folder-2".to_string()));
+    }
+
+    #[test]
+    fn a_server_dropped_beside_one_in_a_folder_joins_it_there() {
+        let (_, folders, rail) = dropped("a", DropTarget::Before("c".into()));
+        assert_eq!(shape(&rail)[0], ("folder-1".into(), ids(&["b", "a", "c"])));
+        assert_eq!(
+            folders.folder("folder-1").unwrap().servers,
+            ids(&["b", "a", "c"])
+        );
+        // Reordered within its own folder.
+        let (_, folders, _) = dropped("b", DropTarget::After("c".into()));
+        assert_eq!(
+            folders.folder("folder-1").unwrap().servers,
+            ids(&["c", "b"])
+        );
+    }
+
+    #[test]
+    fn a_server_dropped_beside_a_top_level_item_leaves_its_folder() {
+        let (_, folders, rail) = dropped("c", DropTarget::Before("folder-1".into()));
+        assert_eq!(
+            shape(&rail),
+            vec![
+                ("a".into(), ids(&["a"])),
+                ("c".into(), ids(&["c"])),
+                ("folder-1".into(), ids(&["b"])),
+                ("folder-2".into(), ids(&["d"])),
+                ("e".into(), ids(&["e"])),
+            ]
+        );
+        assert_eq!(folders.folder_of("c"), None);
+        // Its folder's last: the folder goes, the server in its place.
+        let (_, folders, rail) = dropped("d", DropTarget::After("folder-1".into()));
+        assert_eq!(
+            shape(&rail),
+            vec![
+                ("a".into(), ids(&["a"])),
+                ("folder-1".into(), ids(&["b", "c"])),
+                ("d".into(), ids(&["d"])),
+                ("e".into(), ids(&["e"])),
+            ]
+        );
+        assert_eq!(folders.folder("folder-2"), None);
+    }
+
+    #[test]
+    fn a_folder_moves_whole_and_goes_into_nothing() {
+        let (_, folders, rail) = dropped("folder-1", DropTarget::Before("a".into()));
+        assert_eq!(
+            shape(&rail),
+            vec![
+                ("folder-1".into(), ids(&["b", "c"])),
+                ("a".into(), ids(&["a"])),
+                ("folder-2".into(), ids(&["d"])),
+                ("e".into(), ids(&["e"])),
+            ]
+        );
+        assert_eq!(folders, drag_rail().1);
+        let (_, _, rail) = dropped("folder-1", DropTarget::After("e".into()));
+        assert_eq!(shape(&rail).last().unwrap().0, "folder-1");
+        // Beside a server in another folder: beside that folder.
+        let (_, _, rail) = dropped("folder-2", DropTarget::Before("c".into()));
+        assert_eq!(
+            shape(&rail)
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "folder-2", "folder-1", "e"]
+        );
+    }
+
+    #[test]
+    fn a_drop_that_changes_nothing_writes_nothing() {
+        let (ordering, folders, known) = drag_rail();
+        // No `serverSidebar` yet: a no-op drop mustn't write one.
+        let legacy = Ordering::parse(r#"{"servers": ["a", "e"]}"#);
+        for (ordering, dragged, target) in [
+            (&ordering, "a", DropTarget::Before("folder-1".into())),
+            (&ordering, "e", DropTarget::After("folder-2".into())),
+            (&ordering, "a", DropTarget::After("a".into())),
+            (&ordering, "b", DropTarget::Before("c".into())),
+            (&ordering, "c", DropTarget::Into("folder-1".into())),
+            (&ordering, "a", DropTarget::Into("a".into())),
+            (&ordering, "folder-1", DropTarget::Into("a".into())),
+            (&ordering, "folder-1", DropTarget::Before("folder-2".into())),
+            (&ordering, "folder-1", DropTarget::After("b".into())),
+            (&ordering, "a", DropTarget::Into("b".into())),
+            (&ordering, "gone", DropTarget::Before("a".into())),
+            (&ordering, "a", DropTarget::Before("gone".into())),
+            (&legacy, "a", DropTarget::Before("e".into())),
+        ] {
+            let rail = entries(ordering, &folders, &known);
+            let (mut edited, mut edited_folders) = (ordering.clone(), folders.clone());
+            apply_drop(
+                &mut edited,
+                &mut edited_folders,
+                &rail,
+                dragged,
+                &target,
+                "folder-new".into(),
+            );
+            assert_eq!(
+                (&edited, &edited_folders),
+                (ordering, &folders),
+                "{dragged} {target:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_target_shown_keeps_every_server_drawn_once() {
+        let (ordering, folders, known) = drag_rail();
+        let rail = entries(&ordering, &folders, &known);
+        let items = ["a", "folder-1", "b", "c", "folder-2", "e"];
+        for dragged in items {
+            for hovered in items {
+                for y in [0.1, 0.5, 0.9] {
+                    let Some(target) = target_for(&rail, dragged, hovered, y) else {
+                        continue;
+                    };
+                    let (_, _, moved) = after(&ordering, &folders, &known, |o, f, rail| {
+                        apply_drop(o, f, rail, dragged, &target, "folder-new".into())
+                    });
+                    let mut drawn: Vec<String> =
+                        moved.iter().flat_map(|e| e.servers().to_vec()).collect();
+                    drawn.sort();
+                    assert_eq!(drawn, known, "{dragged} {target:?}");
+                }
+            }
+        }
     }
 
     #[test]

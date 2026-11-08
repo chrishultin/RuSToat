@@ -52,7 +52,7 @@ use crate::notify::{self, Delivery, Level, MuteFor, Notice, NotificationSettings
 use crate::places::{Place, Places, PlacesFile};
 use crate::profile::{RelationshipAction, UserMenuItem};
 use crate::profile_edit::ImageLimits;
-use crate::rail::{self, Folder, Ordering, RailEntry, ServerFolders};
+use crate::rail::{self, DropTarget, Folder, Ordering, RailEntry, ServerFolders};
 use crate::runtime::spawn_io;
 use crate::safety::{LinkCheck, SafetyFile, SafetySettings, classify, is_own_instance, origin};
 use crate::search::{
@@ -418,6 +418,11 @@ pub struct ChatView {
     /// Counts server list writes (order and folders), as
     /// `notifications_write`.
     rail_write: u64,
+    /// A server or folder being dragged in the rail. Only while gpui has a
+    /// drag going (see [`Self::rail_dragging`]).
+    rail_drag: Option<RailDragState>,
+    /// Esc cancels a drag in the rail, which gpui doesn't do itself.
+    _drag_escape: Subscription,
     /// The message whose reaction picker is open.
     picker_for: Option<String>,
     /// Reaction changes waiting on the server, as (message, emoji). Another
@@ -531,6 +536,21 @@ impl ChatView {
             this.maybe_ack_current(window, cx);
             if window.is_window_active() && this.active && this.friends_open() {
                 this.dismiss_friend_banner(cx);
+            }
+        });
+        // Esc cancels a drag in the rail, as in the web client (gpui
+        // doesn't), before anything else sees it.
+        let view = cx.entity().downgrade();
+        let drag_escape = cx.intercept_keystrokes(move |event, window, cx| {
+            if event.keystroke.key != "escape" || !cx.has_active_drag() {
+                return;
+            }
+            if view
+                .update(cx, |this, cx| this.end_rail_drag(cx))
+                .unwrap_or(false)
+            {
+                cx.stop_active_drag(window);
+                cx.stop_propagation();
             }
         });
         let root = spawn_io({
@@ -818,6 +838,8 @@ impl ChatView {
             status_saving: false,
             notifications_write: 0,
             rail_write: 0,
+            rail_drag: None,
+            _drag_escape: drag_escape,
             picker_for: None,
             reacting: HashSet::new(),
             reply_fetches: HashSet::new(),
@@ -3754,6 +3776,171 @@ impl ChatView {
             window,
             cx,
         );
+    }
+
+    /// The drag in the rail, if one is going. One that ended without the
+    /// rail seeing it end is ignored.
+    fn rail_dragging(&self, cx: &App) -> Option<&RailDragState> {
+        self.rail_drag.as_ref().filter(|_| cx.has_active_drag())
+    }
+
+    /// A server or folder has started being dragged in the rail.
+    fn start_rail_drag(&mut self, id: String, cx: &mut Context<Self>) {
+        self.rail_drag = Some(RailDragState {
+            dragged: id,
+            target: None,
+            over_rail: true,
+        });
+        cx.notify();
+    }
+
+    /// Forget the drag in the rail: dropped, cancelled, or ended off the
+    /// rail. Whether there was one.
+    fn end_rail_drag(&mut self, cx: &mut Context<Self>) -> bool {
+        let ended = self.rail_drag.take().is_some();
+        if ended {
+            cx.notify();
+        }
+        ended
+    }
+
+    /// Show where the drag in the rail would land, if that's changed.
+    fn set_rail_target(&mut self, target: Option<DropTarget>, cx: &mut Context<Self>) {
+        if let Some(drag) = &mut self.rail_drag
+            && drag.target != target
+        {
+            drag.target = target;
+            cx.notify();
+        }
+    }
+
+    /// The drag moved, as the rail sees it. Off the rail, a drop does
+    /// nothing. (The rail's own listener runs before its items'.)
+    fn rail_drag_moved(&mut self, event: &DragMoveEvent<RailDrag>, cx: &mut Context<Self>) {
+        let over = event.bounds.contains(&event.event.position);
+        if let Some(drag) = &mut self.rail_drag {
+            drag.over_rail = over;
+        }
+        if !over {
+            self.set_rail_target(None, cx);
+        }
+    }
+
+    /// The drag moved, as the rail item `hovered` (a server, or a
+    /// folder's icon) sees it: over it, it would land as
+    /// [`rail::target_for`] says. Between items, it stays where it was.
+    fn rail_drag_over(
+        &mut self,
+        hovered: &str,
+        event: &DragMoveEvent<RailDrag>,
+        cx: &mut Context<Self>,
+    ) {
+        let position = event.event.position;
+        let over_rail = self.rail_drag.as_ref().is_some_and(|d| d.over_rail);
+        if !over_rail || !event.bounds.contains(&position) {
+            return;
+        }
+        let fraction = (position.y - event.bounds.origin.y) / event.bounds.size.height;
+        let dragged = event.drag(cx).id.clone();
+        let target = rail::target_for(&self.store.rail_entries(), &dragged, hovered, fraction);
+        self.set_rail_target(target, cx);
+    }
+
+    /// The drag moved, as one end of the rail sees it (Home at the top,
+    /// "+" and the space below it at the bottom): there, it would land
+    /// above the first item or below the last.
+    fn rail_drag_over_end(
+        &mut self,
+        top: bool,
+        event: &DragMoveEvent<RailDrag>,
+        cx: &mut Context<Self>,
+    ) {
+        let over_rail = self.rail_drag.as_ref().is_some_and(|d| d.over_rail);
+        if !over_rail || !event.bounds.contains(&event.event.position) {
+            return;
+        }
+        let entries = self.store.rail_entries();
+        let end = match if top { entries.first() } else { entries.last() } {
+            Some(RailEntry::Server(id)) => id,
+            Some(RailEntry::Folder { folder, .. }) => &folder.id,
+            None => return,
+        };
+        let target = (*end != event.drag(cx).id).then(|| match top {
+            true => DropTarget::Before(end.clone()),
+            false => DropTarget::After(end.clone()),
+        });
+        self.set_rail_target(target, cx);
+    }
+
+    /// A drag dropped on the rail lands where it was shown to, if
+    /// anywhere. One that changes nothing writes nothing.
+    fn drop_on_rail(&mut self, drag: &RailDrag, window: &mut Window, cx: &mut Context<Self>) {
+        let target = self.rail_drag.take().and_then(|d| d.target);
+        cx.notify();
+        let Some(target) = target else {
+            return;
+        };
+        let dragged = drag.id.clone();
+        self.edit_rail(
+            |ordering, folders, entries| {
+                let id = rail::new_folder_id();
+                rail::apply_drop(ordering, folders, entries, &dragged, &target, id)
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Where the drag in the rail would land beside the item `id`.
+    fn rail_mark(&self, id: &str, cx: &App) -> Option<DropMark> {
+        match self.rail_dragging(cx)?.target.as_ref()? {
+            DropTarget::Before(target) if target == id => Some(DropMark::Above),
+            DropTarget::After(target) if target == id => Some(DropMark::Below),
+            DropTarget::Into(target) if target == id => Some(DropMark::Onto),
+            _ => None,
+        }
+    }
+
+    /// Whether the item `id` is being dragged in the rail.
+    fn rail_dragged(&self, id: &str, cx: &App) -> bool {
+        self.rail_dragging(cx).is_some_and(|d| d.dragged == id)
+    }
+
+    /// `face`, the rail item `id`'s button, dragged with `preview`
+    /// following the pointer. A drag starts after a few pixels and
+    /// cancels the click; the right-click menu is unaffected.
+    fn rail_draggable(
+        &self,
+        face: Stateful<Div>,
+        id: &str,
+        preview: Rc<dyn Fn(&App) -> AnyElement>,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        let view = cx.entity().downgrade();
+        let drag = RailDrag { id: id.to_string() };
+        face.on_drag(drag, move |drag, _, _, cx| {
+            let id = drag.id.clone();
+            view.update(cx, |this, cx| this.start_rail_drag(id, cx))
+                .ok();
+            DragPreview::new(preview.clone(), cx)
+        })
+    }
+
+    /// `slot`, the rail item `id`'s row (a server's, or a folder's icon's),
+    /// taking the drag in the rail over it and showing `mark`.
+    fn rail_drop_slot(
+        &self,
+        slot: Div,
+        id: &str,
+        mark: Option<DropMark>,
+        cx: &Context<Self>,
+    ) -> Div {
+        let hovered = id.to_string();
+        with_drop_mark(slot, mark, cx).on_drag_move(cx.listener(
+            move |this, event: &DragMoveEvent<RailDrag>, _, cx| {
+                this.rail_drag_over(&hovered, event, cx)
+            },
+        ))
     }
 
     /// Save the Edit folder dialog: the folder's name and colour.
@@ -7644,7 +7831,10 @@ impl ChatView {
             None,
             cx.listener(|this, _, _, cx| this.select_place(Place::Home, cx)),
             cx,
-        );
+        )
+        .on_drag_move(cx.listener(|this, event: &DragMoveEvent<RailDrag>, _, cx| {
+            this.rail_drag_over_end(true, event, cx)
+        }));
         let servers: Vec<_> = self
             .store
             .rail_entries()
@@ -7660,7 +7850,6 @@ impl ChatView {
             })
             .collect();
         let has_servers = !servers.is_empty();
-        let add = self.render_rail_add(cx);
         let divider = || {
             div()
                 .w(px(32.))
@@ -7668,6 +7857,18 @@ impl ChatView {
                 .flex_none()
                 .bg(theme.sidebar_border)
         };
+        // "+" and the space below it, where a drag lands last.
+        let end = v_flex()
+            .w_full()
+            .flex_grow_1()
+            .flex_shrink_0()
+            .items_center()
+            .gap_2()
+            .when(has_servers, |end| end.child(divider()))
+            .child(self.render_rail_add(cx))
+            .on_drag_move(cx.listener(|this, event: &DragMoveEvent<RailDrag>, _, cx| {
+                this.rail_drag_over_end(false, event, cx)
+            }));
 
         v_flex()
             .id("server-rail")
@@ -7681,15 +7882,30 @@ impl ChatView {
             .border_r_1()
             .border_color(theme.sidebar_border)
             .overflow_y_scroll()
+            .on_drag_move(cx.listener(|this, event: &DragMoveEvent<RailDrag>, _, cx| {
+                this.rail_drag_moved(event, cx)
+            }))
+            .on_drop(
+                cx.listener(|this, drag: &RailDrag, window, cx| {
+                    this.drop_on_rail(drag, window, cx)
+                }),
+            )
+            // Dropped off the rail: nothing happens.
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.end_rail_drag(cx);
+                }),
+            )
             .child(home)
             .child(divider())
             .children(servers)
-            .when(has_servers, |rail| rail.child(divider()))
-            .child(add)
+            .child(end)
     }
 
     /// A server's rail icon: its unread and selected pills, mention badge,
-    /// mute in the tooltip and right-click menu. Click opens it.
+    /// mute in the tooltip and right-click menu. Click opens it; dragging
+    /// moves it.
     fn render_rail_server(&self, server: &ServerEntry, cx: &Context<Self>) -> Div {
         let place = Place::Server(server.id.clone());
         let selected = self.place == place;
@@ -7698,17 +7914,28 @@ impl ChatView {
             Some(until) => format!("{} · {}", server.name, notify::mute_label(until)),
             None => server.name.clone(),
         };
-        rail_button(
-            SharedString::from(format!("rail-{}", server.id)),
-            icon,
-            tooltip,
+        let menu = self.server_menu(&server.id, cx);
+        let preview: Rc<dyn Fn(&App) -> AnyElement> = {
+            let (server, media) = (server.clone(), self.media.clone());
+            Rc::new(move |cx| drag_face(server_icon(&server, &media, false), None, cx))
+        };
+        let id = SharedString::from(format!("rail-{}", server.id));
+        let face = rail_icon(id, icon, tooltip, selected, cx)
+            .on_click(cx.listener(move |this, _, _, cx| this.select_place(place.clone(), cx)));
+        let face = self
+            .rail_draggable(face, &server.id, preview, cx)
+            .context_menu(move |popup, window, cx| menu(popup, window, cx));
+        let slot = rail_slot(
+            face.into_any_element(),
             selected,
             server.unread,
             server.mentions,
-            Some(self.server_menu(&server.id, cx)),
-            cx.listener(move |this, _, _, cx| this.select_place(place.clone(), cx)),
             cx,
         )
+        .when(self.rail_dragged(&server.id, cx), |slot| {
+            slot.opacity(DRAGGED_OPACITY)
+        });
+        self.rail_drop_slot(slot, &server.id, self.rail_mark(&server.id, cx), cx)
     }
 
     /// A folder in the rail; a click opens or closes it. Closed: up to
@@ -7716,7 +7943,7 @@ impl ChatView {
     /// servers' mentions summed in a badge, the unread pill if any is
     /// unread, and the selected marker if the open server is in it. Open: a
     /// folder icon in its colour, then its servers, on a strip tinted with
-    /// it.
+    /// it. Dragging its icon moves it.
     fn render_rail_folder(&self, folder: &Folder, servers: &[String], cx: &Context<Self>) -> Div {
         let theme = cx.theme();
         let servers: Vec<ServerEntry> = servers
@@ -7741,11 +7968,13 @@ impl ChatView {
                 this.update_rail(|_, folders| folders.toggle_folder(&folder), window, cx)
             })
         };
-        let face = |content: AnyElement| {
-            rail_icon(id.clone(), content, name.to_string(), false, cx)
-                .on_click(toggle)
+        let face = |content: AnyElement, preview: Rc<dyn Fn(&App) -> AnyElement>| {
+            let face = rail_icon(id.clone(), content, name.to_string(), false, cx).on_click(toggle);
+            self.rail_draggable(face, &folder.id, preview, cx)
                 .context_menu(move |popup, window, cx| menu(popup, window, cx))
         };
+        let dragged = self.rail_dragged(&folder.id, cx);
+        let mark = self.rail_mark(&folder.id, cx);
 
         if folder.collapsed {
             let selected = servers
@@ -7757,20 +7986,41 @@ impl ChatView {
             // The tint over the circle's own colour, so hovering still
             // shows as it does on a server.
             let tint = colour.map(|colour| theme.secondary.blend(colour.opacity(0.3)));
-            let face = face(preview.into_any_element()).when_some(tint, |face, tint| face.bg(tint));
-            return rail_slot(face.into_any_element(), selected, unread, mentions, cx);
+            let drag_preview: Rc<dyn Fn(&App) -> AnyElement> = {
+                let (servers, media) = (servers.clone(), self.media.clone());
+                Rc::new(move |cx| {
+                    let preview = folder_preview(&servers, &media, cx).into_any_element();
+                    drag_face(preview, tint, cx)
+                })
+            };
+            let face = face(preview.into_any_element(), drag_preview)
+                .when_some(tint, |face, tint| face.bg(tint));
+            let slot = rail_slot(face.into_any_element(), selected, unread, mentions, cx)
+                .when(dragged, |slot| slot.opacity(DRAGGED_OPACITY));
+            return self.rail_drop_slot(slot, &folder.id, mark, cx);
         }
 
-        let icon = Icon::new(IconName::FolderOpen)
-            .size(px(24.))
-            .when_some(colour, |icon, colour| icon.text_color(colour));
+        let icon = move || {
+            Icon::new(IconName::FolderOpen)
+                .size(px(24.))
+                .when_some(colour, |icon, colour| icon.text_color(colour))
+        };
+        let drag_preview: Rc<dyn Fn(&App) -> AnyElement> =
+            Rc::new(move |cx| drag_face(icon().into_any_element(), None, cx));
         let strip = colour.map_or(theme.foreground.opacity(0.1), |colour| colour.opacity(0.18));
-        v_flex()
+        // Onto the folder: a ring around its icon. Above or below it: a
+        // line beside the whole strip.
+        let (onto, beside) = match mark {
+            Some(DropMark::Onto) => (mark, None),
+            _ => (None, mark),
+        };
+        let strip = v_flex()
             .relative()
             .w_full()
             .flex_none()
             .gap_2()
             .py(px(6.))
+            .when(dragged, |strip| strip.opacity(DRAGGED_OPACITY))
             // Behind the icons, narrower than the rail so the pills on its
             // edge stay outside it.
             .child(
@@ -7783,18 +8033,24 @@ impl ChatView {
                     .rounded_xl()
                     .bg(strip),
             )
-            .child(rail_slot(
-                face(icon.into_any_element()).into_any_element(),
-                false,
-                false,
-                0,
+            .child(self.rail_drop_slot(
+                rail_slot(
+                    face(icon().into_any_element(), drag_preview).into_any_element(),
+                    false,
+                    false,
+                    0,
+                    cx,
+                ),
+                &folder.id,
+                onto,
                 cx,
             ))
             .children(
                 servers
                     .iter()
                     .map(|server| self.render_rail_server(server, cx)),
-            )
+            );
+        with_drop_mark(strip, beside, cx)
     }
 
     /// The rail's "+": a menu to create a server or join one.
@@ -9150,6 +9406,27 @@ const NOTIFICATIONS_FAILED_TEXT: &str = "Couldn't save notification settings.";
 const RAIL_FAILED_TEXT: &str = "Couldn't save the server list. Try again.";
 /// Each server's icon in a closed folder's two-by-two preview.
 const FOLDER_PREVIEW_ICON: f32 = 18.;
+/// A rail item being dragged is this opaque where it was.
+const DRAGGED_OPACITY: f32 = 0.35;
+/// What follows the pointer while dragging is this opaque.
+const DRAG_PREVIEW_OPACITY: f32 = 0.8;
+
+/// What a server or folder carries while it's dragged in the rail.
+#[derive(Clone)]
+struct RailDrag {
+    id: String,
+}
+
+/// A drag in the rail: what's dragged and where it would land.
+struct RailDragState {
+    dragged: String,
+    /// `None` off the rail, or where dropping would do nothing worth
+    /// showing (see [`rail::target_for`]).
+    target: Option<DropTarget>,
+    /// The pointer is over the rail. Items scrolled out of sight still
+    /// see it, so they only take it while it is.
+    over_rail: bool,
+}
 
 /// A change to the user's own status.
 enum StatusChange {
@@ -12080,6 +12357,98 @@ fn rail_icon(
         })
         .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         .child(content)
+}
+
+/// Where a drop would land, relative to an item being dragged over.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DropMark {
+    /// In the gap above it.
+    Above,
+    /// In the gap below it.
+    Below,
+    /// Onto it.
+    Onto,
+}
+
+/// The drop line's thickness.
+const DROP_LINE: f32 = 3.;
+
+/// `item` showing `mark`: a line in the gap above or below it, or a ring
+/// around its 48 px button. `item` is `relative`, as wide as its column,
+/// its button centred, with `gap_2` (8 px) between it and the next (as
+/// [`rail_slot`]'s rows are).
+pub(crate) fn with_drop_mark(item: Div, mark: Option<DropMark>, cx: &App) -> Div {
+    let accent = cx.theme().primary;
+    // Centred in the gap.
+    let line = || {
+        div()
+            .absolute()
+            .left(px(12.))
+            .right(px(12.))
+            .h(px(DROP_LINE))
+            .rounded_full()
+            .bg(accent)
+    };
+    let gap = px(-(4. + DROP_LINE / 2.));
+    let mark = match mark {
+        None => return item,
+        Some(DropMark::Above) => line().top(gap),
+        Some(DropMark::Below) => line().bottom(gap),
+        Some(DropMark::Onto) => div()
+            .absolute()
+            .top(px(-4.))
+            .bottom(px(-4.))
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .size(px(56.))
+                    .rounded_full()
+                    .border_2()
+                    .border_color(accent),
+            ),
+    };
+    item.child(mark)
+}
+
+/// A rail button's face as it follows the pointer while dragged: `content`
+/// on a 48 px circle, `bg` or the button's own colour.
+pub(crate) fn drag_face(content: AnyElement, bg: Option<Hsla>, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    div()
+        .size(px(48.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(bg.unwrap_or(theme.secondary))
+        .text_color(theme.secondary_foreground)
+        .text_sm()
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(content)
+        .into_any_element()
+}
+
+/// What follows the pointer while a rail item is dragged: its face (from
+/// `face`, e.g. [`drag_face`]), a little see-through.
+pub(crate) struct DragPreview {
+    face: Rc<dyn Fn(&App) -> AnyElement>,
+}
+
+impl DragPreview {
+    /// For `on_drag`'s constructor, which is handed where the pointer is
+    /// in the dragged element: the preview is drawn as far from it.
+    pub(crate) fn new(face: Rc<dyn Fn(&App) -> AnyElement>, cx: &mut App) -> Entity<Self> {
+        cx.new(|_| DragPreview { face })
+    }
+}
+
+impl Render for DragPreview {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div().opacity(DRAG_PREVIEW_OPACITY).child((self.face)(cx))
+    }
 }
 
 /// A rail button whose left click opens a menu (the "+"). A
