@@ -91,3 +91,34 @@ Pending, in the end-of-milestone pass: someone in a voice channel on the web cli
 
 ### Manual Validation
 Pending, in the end-of-milestone pass: the panel shows "Connecting…" then "Voice connected" with channel and server; clicking the name from another server opens the channel; Leave works; with two accounts, joining from B ends A's call (the web client sees A leave, A's panel goes) and the log shows A's `voice: leaving` before B's `voice: joining`; both themes readable.
+
+## Chunk 4: Mute and deafen
+
+### Changes Made
+- `src/voice.rs`:
+  - `MuteState { muted, deafened }` with the web client's rules: `mic_on()` (`!muted && !deafened`), `toggle_mute()` (while deafened: undeafen, stay muted), `toggle_deafen()` (keeps `muted`, so undeafening restores the mic only if it was on). Unit tests for each rule.
+  - `VoiceCall::join` takes the starting `MuteState`. The room is now an `Arc<Room>`; a `deafened: Arc<AtomicBool>` is set before subscribing.
+  - The microphone publication is kept, and a `Controls` task (one per call, on the IO runtime, aborted on drop) applies `MuteState` changes in order from a channel: deafen → `set_enabled(!deafened)` on every remote audio publication; mic off → publication `mute()` then `PlatformAudio::stop_recording()`, mic on → `start_recording()` then `unmute()`. Each change logs `voice: deafened/undeafened …` / `voice: microphone on/off …`. Failures to stop/start recording are logged at warn.
+  - `VoiceCall::set_mute(MuteState)` sends to it. The starting state goes through it after the microphone is published, so a muted call publishes, then mutes and stops recording (the plan's order).
+  - `read_events` disables audio subscribed while the flag is set.
+- `src/prefs.rs`: `voice_muted`, `voice_deafened` (default `false`, loaded from older files by `#[serde(default)]`); test for defaults, an old file, and a round trip; the full round-trip test sets them.
+- `src/ui/chat.rs`:
+  - `mute_state(cx)` reads the saved state from `AppPrefs`; `join_voice` passes it to `VoiceCall::join` (and logs it).
+  - `change_mute(change)` saves the new state and applies it to a connected call.
+  - The panel gains ghost Mute (`Mic` / `MicOff` in `theme.danger`; tooltip Mute / Unmute; disabled with "You can't speak here" without Speak) and Deafen (`Headphones` / `HeadphoneOff` in danger; tooltip Deafen / Undeafen), before Leave.
+  - The user's own row in the channel they're connected to shows `HeadphoneOff` while deafened (instead of `MicOff`).
+- `src/assets.rs`: `Mic`, `Headphones`, `HeadphoneOff` in `ExtraIcons` and the icons test.
+
+### Divergences
+- **Minor: the saved state is applied at join, not "once Connected".** It's passed into `VoiceCall::join`, so a call that starts muted never sends audio, and deafen is set before anything is subscribed.
+- **Minor: mute/deafen run on a per-call control task fed by a channel,** not one `runtime().spawn` per change, so quick toggles can't apply out of order on the multi-threaded runtime.
+- **Minor: a deafened user's own row shows only `HeadphoneOff`,** not `MicOff` as well (deafened implies muted).
+- **Note:** a remote track subscribed in the instant a deafen is being applied could miss both the controls' sweep (not subscribed yet) and the subscribe-time check (flag not set yet). Toggling deafen again fixes it. Accepted as rare.
+- Look-ahead: chunk 6's mute/deafen sounds go in `change_mute`; no other effect.
+
+### Verification Performed
+- `cargo test`: 1080 passed, 0 failed, 5 ignored (+3: two `MuteState` rule tests, one prefs test). `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt: `src/voice.rs` and `src/prefs.rs` formatted (clean before, clean after); `src/ui/chat.rs` 17 (was 17); `src/assets.rs` 0.
+
+### Manual Validation
+Pending, in the end-of-milestone pass: mute → the web client shows RuSToat's user muted and hears nothing, unmute → hears again; deafen → RuSToat hears nothing and is muted, undeafen → hears again, mic back only if it was on; macOS mic indicator off while muted; five mute/unmute cycles (capture comes back each time, `PlatformAudio: started recording` in the log); quit and relaunch while muted → next call starts muted, and the web client shows muted rather than "no mic"; CPU while muted measured once.

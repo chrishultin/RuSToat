@@ -9,6 +9,9 @@
 //! never on the UI thread: rooms and the audio module are made and dropped
 //! there.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use futures::channel::mpsc;
 use livekit::options::TrackPublishOptions;
 use livekit::prelude::*;
@@ -56,6 +59,47 @@ pub enum VoiceEvent {
 /// A call's [`VoiceEvent`]s, as they happen. Ends when the call does.
 pub type VoiceEvents = mpsc::UnboundedReceiver<VoiceEvent>;
 
+/// The user's mute and deafen, with the web client's rules. `muted` is
+/// the user's own choice for the microphone; deafening turns it off too
+/// without changing that choice, so undeafening brings it back only if it
+/// was on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MuteState {
+    pub muted: bool,
+    pub deafened: bool,
+}
+
+impl MuteState {
+    /// Whether the microphone is sent.
+    pub fn mic_on(self) -> bool {
+        !self.muted && !self.deafened
+    }
+
+    /// The Mute button. While deafened, it undeafens and leaves the
+    /// microphone off.
+    pub fn toggle_mute(self) -> Self {
+        if self.deafened {
+            MuteState {
+                muted: true,
+                deafened: false,
+            }
+        } else {
+            MuteState {
+                muted: !self.muted,
+                ..self
+            }
+        }
+    }
+
+    /// The Deafen button.
+    pub fn toggle_deafen(self) -> Self {
+        MuteState {
+            deafened: !self.deafened,
+            ..self
+        }
+    }
+}
+
 /// A call in progress: a LiveKit room, and the platform audio module playing
 /// it and capturing the microphone.
 ///
@@ -63,10 +107,14 @@ pub type VoiceEvents = mpsc::UnboundedReceiver<VoiceEvent>;
 /// released on the IO runtime, so dropping never blocks the UI.
 pub struct VoiceCall {
     channel: String,
-    room: Option<Room>,
+    room: Option<Arc<Room>>,
     audio: Option<PlatformAudio>,
     /// The task reading the room's events.
     events: tokio::task::AbortHandle,
+    /// Mute and deafen changes, applied in order by the task that
+    /// `controls` aborts (started once the microphone is published).
+    mute: tokio::sync::mpsc::UnboundedSender<MuteState>,
+    controls: Option<tokio::task::AbortHandle>,
 }
 
 impl VoiceCall {
@@ -75,7 +123,8 @@ impl VoiceCall {
     /// once: it lasts 10 seconds). With `publish_mic`, the default
     /// microphone is sent (Stoat allows it with Speak); with `subscribe`,
     /// everyone else's audio plays on the default speakers (with Listen).
-    /// Video isn't subscribed to.
+    /// Video isn't subscribed to. `mute` is applied from the start: a muted
+    /// microphone is still published, so unmuting is instant.
     ///
     /// Must run on the IO runtime.
     pub async fn join(
@@ -84,12 +133,16 @@ impl VoiceCall {
         token: &str,
         publish_mic: bool,
         subscribe: bool,
+        mute: MuteState,
     ) -> Result<(VoiceCall, VoiceEvents), VoiceError> {
         let audio = PlatformAudio::new()?;
         let mut options = RoomOptions::default();
         // Audio only: what's subscribed to is picked below.
         options.auto_subscribe = false;
         let (room, room_events) = Room::connect(url, token, options).await?;
+        let room = Arc::new(room);
+        // Before subscribing, so nothing plays while deafened.
+        let deafened = Arc::new(AtomicBool::new(mute.deafened));
         log::info!(
             "voice: joined {channel} as {}",
             room.local_participant().identity().0
@@ -104,28 +157,55 @@ impl VoiceCall {
             }
         }
         let (tx, events) = mpsc::unbounded();
-        let task = runtime().spawn(read_events(channel.to_string(), room_events, subscribe, tx));
+        let task = runtime().spawn(read_events(
+            channel.to_string(),
+            room_events,
+            subscribe,
+            deafened.clone(),
+            tx,
+        ));
+        let (send_mute, changes) = tokio::sync::mpsc::unbounded_channel();
         // From here on, dropping `call` (an error below, or the join being
         // cancelled) closes the room.
-        let call = VoiceCall {
+        let mut call = VoiceCall {
             channel: channel.to_string(),
-            room: Some(room),
-            audio: Some(audio),
+            room: Some(room.clone()),
+            audio: Some(audio.clone()),
             events: task.abort_handle(),
+            mute: send_mute,
+            controls: None,
         };
 
-        if publish_mic && let (Some(room), Some(audio)) = (&call.room, &call.audio) {
+        let mut mic = None;
+        if publish_mic {
             let track = LocalAudioTrack::create_audio_track("microphone", audio.rtc_source());
             let options = TrackPublishOptions {
                 source: TrackSource::Microphone,
                 ..TrackPublishOptions::default()
             };
-            room.local_participant()
-                .publish_track(LocalTrack::Audio(track), options)
-                .await?;
+            mic = Some(
+                room.local_participant()
+                    .publish_track(LocalTrack::Audio(track), options)
+                    .await?,
+            );
             log::info!("voice: sending the microphone in {channel}");
         }
+        let controls = Controls {
+            channel: channel.to_string(),
+            room,
+            audio,
+            mic,
+            deafened,
+            applied: MuteState::default(),
+        };
+        call.controls = Some(runtime().spawn(controls.run(changes)).abort_handle());
+        call.set_mute(mute);
         Ok((call, events))
+    }
+
+    /// Apply the user's mute and deafen to the call.
+    pub fn set_mute(&self, mute: MuteState) {
+        let _ = self.mute.send(mute);
     }
 
     /// The voice channel this call is in.
@@ -143,6 +223,9 @@ impl Drop for VoiceCall {
     fn drop(&mut self) {
         // Leaving isn't a disconnect to tell the UI about.
         self.events.abort();
+        if let Some(controls) = &self.controls {
+            controls.abort();
+        }
         let channel = std::mem::take(&mut self.channel);
         let room = self.room.take();
         let audio = self.audio.take();
@@ -157,6 +240,73 @@ impl Drop for VoiceCall {
             drop(audio);
             log::info!("voice: left {channel}");
         });
+    }
+}
+
+/// What applies mute and deafen to a call, one change at a time.
+struct Controls {
+    channel: String,
+    room: Arc<Room>,
+    audio: PlatformAudio,
+    /// The microphone's publication; `None` without Speak.
+    mic: Option<LocalTrackPublication>,
+    /// Shared with [`read_events`], which silences audio subscribed while
+    /// deafened.
+    deafened: Arc<AtomicBool>,
+    /// What's in effect. The microphone starts on, as published.
+    applied: MuteState,
+}
+
+impl Controls {
+    async fn run(mut self, mut changes: tokio::sync::mpsc::UnboundedReceiver<MuteState>) {
+        while let Some(mute) = changes.recv().await {
+            self.apply(mute);
+        }
+    }
+
+    fn apply(&mut self, mute: MuteState) {
+        if mute.deafened != self.applied.deafened {
+            self.deafened.store(mute.deafened, Ordering::Relaxed);
+            for participant in self.room.remote_participants().values() {
+                for publication in participant.track_publications().values() {
+                    if publication.kind() == TrackKind::Audio {
+                        publication.set_enabled(!mute.deafened);
+                    }
+                }
+            }
+            log::info!(
+                "voice: {} in {}",
+                if mute.deafened {
+                    "deafened"
+                } else {
+                    "undeafened"
+                },
+                self.channel
+            );
+        }
+        if let Some(mic) = &self.mic
+            && mute.mic_on() != self.applied.mic_on()
+        {
+            // Recording stops too, so the microphone is let go (and macOS's
+            // indicator goes off). Unmuting starts it before unmuting.
+            if mute.mic_on() {
+                if let Err(err) = self.audio.start_recording() {
+                    log::warn!("voice: couldn't start the microphone again: {err}");
+                }
+                mic.unmute();
+            } else {
+                mic.mute();
+                if let Err(err) = self.audio.stop_recording() {
+                    log::warn!("voice: couldn't stop the microphone: {err}");
+                }
+            }
+            log::info!(
+                "voice: microphone {} in {}",
+                if mute.mic_on() { "on" } else { "off" },
+                self.channel
+            );
+        }
+        self.applied = mute;
     }
 }
 
@@ -175,11 +325,13 @@ fn subscribe_audio(publication: &RemoteTrackPublication, participant: &RemotePar
 }
 
 /// Log `channel`'s room events, subscribe to audio as it's published (with
-/// `subscribe`), and pass on what the UI needs to `tx`.
+/// `subscribe`), silence it while `deafened`, and pass on what the UI needs
+/// to `tx`.
 async fn read_events(
     channel: String,
     mut events: tokio::sync::mpsc::UnboundedReceiver<RoomEvent>,
     subscribe: bool,
+    deafened: Arc<AtomicBool>,
     tx: mpsc::UnboundedSender<VoiceEvent>,
 ) {
     while let Some(event) = events.recv().await {
@@ -198,12 +350,17 @@ async fn read_events(
                 publication,
                 participant,
                 ..
-            } => log::debug!(
-                "voice: subscribed to {}'s {:?} ({})",
-                participant.identity().0,
-                publication.source(),
-                publication.sid()
-            ),
+            } => {
+                log::debug!(
+                    "voice: subscribed to {}'s {:?} ({})",
+                    participant.identity().0,
+                    publication.source(),
+                    publication.sid()
+                );
+                if deafened.load(Ordering::Relaxed) && publication.kind() == TrackKind::Audio {
+                    publication.set_enabled(false);
+                }
+            }
             RoomEvent::TrackUnsubscribed {
                 publication,
                 participant,
@@ -314,6 +471,52 @@ mod tests {
             VoiceError::Api(stoat(ErrorType::CannotJoinCall)).text(),
             "This voice channel is full."
         );
+    }
+
+    #[test]
+    fn deafening_turns_the_microphone_off_and_undeafening_restores_it() {
+        let open = MuteState::default();
+        assert!(open.mic_on());
+        let deaf = open.toggle_deafen();
+        assert_eq!(
+            deaf,
+            MuteState {
+                muted: false,
+                deafened: true
+            }
+        );
+        assert!(!deaf.mic_on());
+        assert!(deaf.toggle_deafen().mic_on(), "it was on before");
+        // Muted first: undeafening leaves it off.
+        let muted = open.toggle_mute().toggle_deafen().toggle_deafen();
+        assert_eq!(
+            muted,
+            MuteState {
+                muted: true,
+                deafened: false
+            }
+        );
+        assert!(!muted.mic_on());
+    }
+
+    #[test]
+    fn muting_while_deafened_undeafens_and_stays_muted() {
+        for before in [false, true] {
+            let deaf = MuteState {
+                muted: before,
+                deafened: true,
+            };
+            assert_eq!(
+                deaf.toggle_mute(),
+                MuteState {
+                    muted: true,
+                    deafened: false
+                }
+            );
+        }
+        // Not deafened, it's a plain toggle.
+        assert!(MuteState::default().toggle_mute().muted);
+        assert!(!MuteState::default().toggle_mute().toggle_mute().muted);
     }
 
     #[test]

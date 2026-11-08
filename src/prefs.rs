@@ -180,6 +180,12 @@ pub struct Prefs {
     /// A message notice plays a sound (see [`crate::sound`]). On unless
     /// turned off. Not synced: it's this Mac's.
     pub notification_sounds: bool,
+    /// The user muted their microphone in a call. Kept for the next call,
+    /// in any account, as the web client does.
+    pub voice_muted: bool,
+    /// The user deafened themselves in a call (which also turns their
+    /// microphone off). Kept like `voice_muted`.
+    pub voice_deafened: bool,
 }
 
 impl Default for Prefs {
@@ -191,6 +197,8 @@ impl Default for Prefs {
             appearance: Appearance::default(),
             keep_running: true,
             notification_sounds: true,
+            voice_muted: false,
+            voice_deafened: false,
         }
     }
 }
@@ -272,6 +280,8 @@ mod tests {
             appearance: Appearance::Dark,
             keep_running: false,
             notification_sounds: false,
+            voice_muted: true,
+            voice_deafened: true,
         };
         file.save(&prefs).unwrap();
         assert_eq!(file.load(), prefs);
@@ -364,6 +374,29 @@ mod tests {
         };
         PrefsFile::at(&path).save(&off).unwrap();
         assert!(!PrefsFile::at(&path).load().notification_sounds);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn mute_and_deafen_are_off_unless_a_file_says_otherwise() {
+        let dir = temp_dir("voice");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("prefs.json");
+        assert!(!Prefs::default().voice_muted);
+        assert!(!Prefs::default().voice_deafened);
+        // A file from before the settings existed.
+        std::fs::write(&path, br#"{"notification_sounds":false}"#).unwrap();
+        let old = PrefsFile::at(&path).load();
+        assert!(!old.voice_muted && !old.voice_deafened);
+        assert!(!old.notification_sounds);
+        let muted = Prefs {
+            voice_muted: true,
+            voice_deafened: true,
+            ..Prefs::default()
+        };
+        PrefsFile::at(&path).save(&muted).unwrap();
+        let loaded = PrefsFile::at(&path).load();
+        assert!(loaded.voice_muted && loaded.voice_deafened);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

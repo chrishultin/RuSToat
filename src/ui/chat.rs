@@ -70,6 +70,7 @@ use crate::store::{
 use crate::time::{format_countdown, format_duration_short, ulid_millis};
 use crate::typing::{OutgoingTyping, TypingSignal, TypingState, typing_label};
 use crate::ui::actions::OpenProfileSettings;
+use crate::ui::app_prefs::AppPrefs;
 use crate::ui::composer::{Composer, ComposerEvent, file_icon};
 use crate::ui::emoji_picker::emoji_grid;
 use crate::ui::friends::{RowButtons, render_add_friend, render_friends_page};
@@ -94,7 +95,7 @@ use crate::ui::server_dialogs::{
     NAME_DIALOG_WIDTH, NameDialog, render_info,
 };
 use crate::ui::voice_global::ActiveVoice;
-use crate::voice::VoiceCall;
+use crate::voice::{MuteState, VoiceCall};
 
 actions!(
     chat,
@@ -529,6 +530,15 @@ enum CallState {
     Joining,
     /// Dropping the call leaves it.
     Connected(VoiceCall),
+}
+
+/// The user's saved mute and deafen, for any call in the app.
+fn mute_state(cx: &App) -> MuteState {
+    let prefs = AppPrefs::get(cx);
+    MuteState {
+        muted: prefs.voice_muted,
+        deafened: prefs.voice_deafened,
+    }
 }
 
 /// How long after a message is pinned or unpinned the open pins list is
@@ -6034,14 +6044,25 @@ impl ChatView {
         ActiveVoice::set(me, cx);
         let publish_mic = self.store.can_speak(&channel);
         let subscribe = self.store.can_listen(&channel);
-        log::info!("voice: joining {channel} (microphone: {publish_mic}, listening: {subscribe})");
+        let mute = mute_state(cx);
+        log::info!(
+            "voice: joining {channel} (microphone: {publish_mic}, listening: {subscribe}, {mute:?})"
+        );
         let client = self.client.clone();
         let join = spawn_io({
             let channel = channel.clone();
             async move {
                 let call = client.join_call(&channel, &node).await?;
                 // Straight away: the token lasts 10 seconds.
-                VoiceCall::join(&channel, &call.url, &call.token, publish_mic, subscribe).await
+                VoiceCall::join(
+                    &channel,
+                    &call.url,
+                    &call.token,
+                    publish_mic,
+                    subscribe,
+                    mute,
+                )
+                .await
             }
         });
         let task = cx.spawn_in(window, async move |this, cx| {
@@ -6107,6 +6128,24 @@ impl ChatView {
         match active.state {
             CallState::Connected(call) => call.leave(),
             CallState::Joining => log::info!("voice: stopped joining {}", active.channel),
+        }
+        cx.notify();
+    }
+
+    /// The panel's Mute or Deafen: `change` the saved state, and apply it
+    /// to the call if there is one.
+    fn change_mute(&mut self, change: fn(MuteState) -> MuteState, cx: &mut Context<Self>) {
+        let mute = change(mute_state(cx));
+        AppPrefs::update(cx, |prefs| {
+            prefs.voice_muted = mute.muted;
+            prefs.voice_deafened = mute.deafened;
+        });
+        if let Some(ActiveCall {
+            state: CallState::Connected(call),
+            ..
+        }) = &self.voice
+        {
+            call.set_mute(mute);
         }
         cx.notify();
     }
@@ -8452,7 +8491,23 @@ impl ChatView {
             },
             _ => "Voice channel".to_string(),
         };
-        let (muted, hover_fg) = (theme.muted_foreground, theme.sidebar_foreground);
+        let (muted, hover_fg, danger) = (
+            theme.muted_foreground,
+            theme.sidebar_foreground,
+            theme.danger,
+        );
+        let mute = mute_state(cx);
+        let can_speak = self.store.can_speak(&call.channel);
+        let mic = if mute.mic_on() {
+            Icon::new(IconName::Mic)
+        } else {
+            Icon::new(IconName::MicOff).text_color(danger)
+        };
+        let headphones = if mute.deafened {
+            Icon::new(IconName::HeadphoneOff).text_color(danger)
+        } else {
+            Icon::new(IconName::Headphones)
+        };
         let channel = call.channel.clone();
         Some(
             h_flex()
@@ -8491,6 +8546,31 @@ impl ChatView {
                                 }))
                                 .child(place),
                         ),
+                )
+                .child(
+                    Button::new("voice-mute")
+                        .ghost()
+                        .small()
+                        .icon(mic)
+                        .disabled(!can_speak)
+                        .tooltip(match (can_speak, mute.mic_on()) {
+                            (false, _) => "You can't speak here",
+                            (true, true) => "Mute",
+                            (true, false) => "Unmute",
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.change_mute(MuteState::toggle_mute, cx)
+                        })),
+                )
+                .child(
+                    Button::new("voice-deafen")
+                        .ghost()
+                        .small()
+                        .icon(headphones)
+                        .tooltip(if mute.deafened { "Undeafen" } else { "Deafen" })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.change_mute(MuteState::toggle_deafen, cx)
+                        })),
                 )
                 .child(
                     Button::new("voice-leave")
@@ -8552,6 +8632,8 @@ impl ChatView {
             ChannelKind::Text { voice: true } => self.store.voice_rows(&channel.id),
             _ => Vec::new(),
         };
+        // Deafen is the user's own, so only their row in their call shows it.
+        let deafened = in_call && mute_state(cx).deafened;
         let row = h_flex()
             .id(SharedString::from(format!("channel-{}", channel.id)))
             .gap_2()
@@ -8605,18 +8687,19 @@ impl ChatView {
         v_flex()
             .gap_0p5()
             .child(row)
-            .children(
-                participants
-                    .into_iter()
-                    .map(|participant| self.render_voice_participant(participant, cx)),
-            )
+            .children(participants.into_iter().map(|participant| {
+                let deafened = deafened && participant.user_id == self.store.me();
+                self.render_voice_participant(participant, deafened, cx)
+            }))
             .into_any_element()
     }
 
-    /// Someone in a voice channel's call, under the channel's row.
+    /// Someone in a voice channel's call, under the channel's row. A
+    /// `deafened` user shows that rather than their (muted) microphone.
     fn render_voice_participant(
         &self,
         participant: VoiceParticipant,
+        deafened: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
@@ -8638,9 +8721,16 @@ impl ChatView {
                 theme.secondary_foreground,
             ))
             .child(div().flex_1().min_w_0().truncate().child(participant.name))
-            .when(participant.muted, |el| {
+            .when(participant.muted && !deafened, |el| {
                 el.child(
                     Icon::new(IconName::MicOff)
+                        .xsmall()
+                        .text_color(theme.muted_foreground),
+                )
+            })
+            .when(deafened, |el| {
+                el.child(
+                    Icon::new(IconName::HeadphoneOff)
                         .xsmall()
                         .text_color(theme.muted_foreground),
                 )
