@@ -3262,6 +3262,15 @@ impl ChatStore {
             .unwrap_or_default()
     }
 
+    /// Which of `server`'s voice channels `user` is in a call in, if any.
+    pub fn voice_channel_of(&self, server: &str, user: &str) -> Option<&str> {
+        self.voice
+            .iter()
+            .filter(|(channel, _)| self.server_of(channel) == Some(server))
+            .find(|(_, participants)| participants.iter().any(|p| p.id == user))
+            .map(|(channel, _)| channel.as_str())
+    }
+
     /// `channel`'s participants as the channel list shows them, in the
     /// order they joined.
     pub fn voice_rows(&self, channel: &str) -> Vec<VoiceParticipant> {

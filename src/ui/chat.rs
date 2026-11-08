@@ -35,9 +35,9 @@ use crate::api::client::{VoiceNode, voice_node_url};
 use crate::api::events::{self, Connection, ConnectionEvent, ServerEvent, VoiceMove};
 use crate::api::gifbox::GifboxClient;
 use crate::api::models::{
-    BulkMessageResponse, Category, Channel, CreateServerLegacyResponse, FieldsMessage,
-    InviteJoinResponse, MessageSort, MutualResponse, Presence, ReplyIntent, Server, SystemMessage,
-    UserProfile,
+    BulkMessageResponse, Category, Channel, CreateServerLegacyResponse, DataMemberEdit,
+    FieldsMember, FieldsMessage, InviteJoinResponse, MessageSort, MutualResponse, Presence,
+    ReplyIntent, Server, SystemMessage, UserProfile,
 };
 use crate::attachment::{AttachmentView, fit_into};
 use crate::complete::{Query, QueryKind, Suggestion, TokenRef, rank, rank_mentions};
@@ -5673,6 +5673,37 @@ impl ChatView {
                     self.open_roles(channel, user, window, cx);
                 }
             }
+            UserMenuItem::ServerMute(on) => {
+                if let Some(channel) = channel {
+                    let edit = DataMemberEdit {
+                        can_publish: Some(!on),
+                        ..crate::profile_edit::empty_member_edit()
+                    };
+                    let verb = if on { "server mute" } else { "unmute" };
+                    self.edit_voice(channel, user, edit, verb, window, cx);
+                }
+            }
+            UserMenuItem::ServerDeafen(on) => {
+                if let Some(channel) = channel {
+                    let edit = DataMemberEdit {
+                        can_receive: Some(!on),
+                        ..crate::profile_edit::empty_member_edit()
+                    };
+                    let verb = if on { "server deafen" } else { "undeafen" };
+                    self.edit_voice(channel, user, edit, verb, window, cx);
+                }
+            }
+            UserMenuItem::DisconnectVoice => {
+                if let Some(channel) = channel {
+                    let edit = DataMemberEdit {
+                        remove: vec![FieldsMember::VoiceChannel],
+                        ..crate::profile_edit::empty_member_edit()
+                    };
+                    self.edit_voice(channel, user, edit, "disconnect", window, cx);
+                }
+            }
+            // Its submenu's channels are chosen instead (see `People::menu`).
+            UserMenuItem::MoveTo => {}
             UserMenuItem::TimeOut => {
                 if let Some(channel) = channel {
                     self.close_card(false, window, cx);
@@ -5837,6 +5868,49 @@ impl ChatView {
         let name = self.store.name_in(&channel, &user);
         let weak = cx.entity().downgrade();
         open_roles_dialog(self, weak, server, user, &name, window, cx);
+    }
+
+    /// Change how `user` is in their call on the server of `channel`
+    /// (server mute or deafen, move, disconnect) with `edit`, at once.
+    /// Their voice state and membership update through the events that
+    /// follow; a refusal toasts that the user couldn't `verb` them.
+    fn edit_voice(
+        &mut self,
+        channel: String,
+        user: String,
+        edit: DataMemberEdit,
+        verb: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(server) = self.store.channel_server(&channel).map(str::to_string) else {
+            return;
+        };
+        let name = self.store.name_in(&channel, &user);
+        let action = {
+            let client = self.client.clone();
+            Box::pin(async move { client.edit_member(&server, &user, &edit).await.map(|_| ()) })
+        };
+        let failed_text = format!("Couldn't {verb} {name}. Try again.");
+        run_member_action(action, failed_text, window, cx);
+    }
+
+    /// Move `user` to the voice channel `target` on the server of
+    /// `channel`. Their RuSToat follows (`VoiceChannelMove`); a refusal
+    /// toasts.
+    fn move_member(
+        &mut self,
+        channel: String,
+        user: String,
+        target: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let edit = DataMemberEdit {
+            voice_channel: Some(target),
+            ..crate::profile_edit::empty_member_edit()
+        };
+        self.edit_voice(channel, user, edit, "move", window, cx);
     }
 
     /// Open "Time out {name}" for `user` on the server of `channel`.
@@ -9075,13 +9149,16 @@ impl ChatView {
         if participants.is_empty() {
             return row.into_any_element();
         }
+        // A participant's menu is the person's, with the channel's server
+        // as its context, as in the member list.
+        let people = self.people(Some(channel.id.clone()), cx);
         v_flex()
             .gap_0p5()
             .child(row)
             .children(participants.into_iter().map(|participant| {
                 let deafened = deafened && participant.user_id == self.store.me();
                 let speaking = speaking.is_some_and(|s| s.contains(&participant.user_id));
-                self.render_voice_participant(participant, deafened, speaking, cx)
+                self.render_voice_participant(participant, deafened, speaking, &people, cx)
             }))
             .into_any_element()
     }
@@ -9089,14 +9166,17 @@ impl ChatView {
     /// Someone in a voice channel's call, under the channel's row. A
     /// `deafened` user shows that rather than their (muted) microphone;
     /// someone `speaking` has a green ring around their avatar.
+    /// Right-clicking opens their menu (see [`People`]).
     fn render_voice_participant(
         &self,
         participant: VoiceParticipant,
         deafened: bool,
         speaking: bool,
+        people: &People,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
+        let menu = people.menu(&participant.user_id, true);
         h_flex()
             .id(SharedString::from(format!("voice-{}", participant.user_id)))
             .gap_2()
@@ -9142,6 +9222,7 @@ impl ChatView {
                         .text_color(theme.muted_foreground),
                 )
             })
+            .context_menu(menu)
             .into_any_element()
     }
 
@@ -11112,7 +11193,7 @@ impl People {
         profile: bool,
     ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
         let (people, user) = (self.clone(), user.to_string());
-        move |menu, _, cx| {
+        move |menu, window, cx| {
             let Some(view) = people.view.upgrade() else {
                 return menu;
             };
@@ -11127,6 +11208,42 @@ impl People {
                     };
                     let (view, user, channel) =
                         (people.view.clone(), user.clone(), people.channel.clone());
+                    if item == UserMenuItem::MoveTo {
+                        let Some(channel) = channel else {
+                            return menu;
+                        };
+                        let targets = move_menu_targets(&view, &channel, &user, cx);
+                        return menu.submenu_with_icon(
+                            Some(Icon::new(icon)),
+                            label,
+                            window,
+                            cx,
+                            move |menu, _, _| {
+                                targets.iter().fold(menu, |menu, (target, name)| {
+                                    let (view, user, channel, target) = (
+                                        view.clone(),
+                                        user.clone(),
+                                        channel.clone(),
+                                        target.clone(),
+                                    );
+                                    menu.item(PopupMenuItem::new(name.clone()).on_click(
+                                        move |_, window, cx| {
+                                            view.update(cx, |this, cx| {
+                                                this.move_member(
+                                                    channel.clone(),
+                                                    user.clone(),
+                                                    target.clone(),
+                                                    window,
+                                                    cx,
+                                                )
+                                            })
+                                            .ok();
+                                        },
+                                    ))
+                                })
+                            },
+                        );
+                    }
                     let entry = if item.is_destructive() {
                         PopupMenuItem::element(move |_, cx| {
                             let danger = cx.theme().danger;
@@ -11158,6 +11275,33 @@ impl People {
     }
 }
 
+/// Where "Move to" can take `user`, as seen from `channel` (on its server):
+/// each channel's ID and name.
+fn move_menu_targets(
+    view: &WeakEntity<ChatView>,
+    channel: &str,
+    user: &str,
+    cx: &App,
+) -> Vec<(String, String)> {
+    let Some(view) = view.upgrade() else {
+        return Vec::new();
+    };
+    let store = &view.read(cx).store;
+    let Some(server) = store.channel_server(channel) else {
+        return Vec::new();
+    };
+    let Some(call) = store.voice_channel_of(server, user) else {
+        return Vec::new();
+    };
+    crate::profile::move_targets(store, server, call)
+        .into_iter()
+        .filter_map(|id| match store.channel(&id)? {
+            Channel::TextChannel { name, .. } => Some((id.clone(), name.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
 /// A person's menu item as shown; `None` for a separator.
 fn user_menu_label(item: UserMenuItem) -> Option<(&'static str, IconName)> {
     Some(match item {
@@ -11169,6 +11313,12 @@ fn user_menu_label(item: UserMenuItem) -> Option<(&'static str, IconName)> {
         UserMenuItem::MakeGroupOwner => ("Make group owner…", IconName::Crown),
         UserMenuItem::EditIdentity => ("Edit identity…", IconName::UserPen),
         UserMenuItem::EditRoles => ("Edit roles…", IconName::IdCard),
+        UserMenuItem::ServerMute(true) => ("Server mute", IconName::MicOff),
+        UserMenuItem::ServerMute(false) => ("Server unmute", IconName::Mic),
+        UserMenuItem::ServerDeafen(true) => ("Server deafen", IconName::HeadphoneOff),
+        UserMenuItem::ServerDeafen(false) => ("Server undeafen", IconName::Headphones),
+        UserMenuItem::MoveTo => ("Move to", IconName::Volume2),
+        UserMenuItem::DisconnectVoice => ("Disconnect from call", IconName::PhoneOff),
         UserMenuItem::TimeOut => ("Time out…", IconName::Clock),
         UserMenuItem::EndTimeout => ("End timeout…", IconName::Clock),
         UserMenuItem::Kick => ("Kick…", IconName::UserX),

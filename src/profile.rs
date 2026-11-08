@@ -272,6 +272,16 @@ pub enum UserMenuItem {
     EditIdentity,
     /// Change their roles on the server the menu was opened in.
     EditRoles,
+    /// Server mute them (`true`) or unmute them, while they're in one of
+    /// the server's calls.
+    ServerMute(bool),
+    /// Server deafen them (`true`) or undeafen them.
+    ServerDeafen(bool),
+    /// Move them to another of the server's voice channels (a submenu of
+    /// [`move_targets`]).
+    MoveTo,
+    /// Take them out of their call.
+    DisconnectVoice,
     /// Time them out on the server the menu was opened in (a dialog asks
     /// for how long).
     TimeOut,
@@ -295,6 +305,28 @@ impl UserMenuItem {
     pub fn is_destructive(self) -> bool {
         matches!(self, Self::Kick | Self::Ban)
     }
+}
+
+/// The voice channels of `server` someone in `call` can be moved to, in
+/// the server's order: the others the user may join (Connect), as Stoat
+/// checks.
+pub fn move_targets(store: &ChatStore, server: &str, call: &str) -> Vec<String> {
+    let Some(server) = store.server(server) else {
+        return Vec::new();
+    };
+    server
+        .channels
+        .iter()
+        .filter(|id| id.as_str() != call)
+        .filter(|id| {
+            matches!(
+                store.channel(id),
+                Some(Channel::TextChannel { voice: Some(_), .. })
+            )
+        })
+        .filter(|id| crate::permissions::can_connect(store, store.me(), id))
+        .cloned()
+        .collect()
 }
 
 /// A change to how the user relates to someone.
@@ -356,8 +388,9 @@ fn standing_actions(store: &ChatStore, user: &str) -> Vec<RelationshipAction> {
 
 /// The menu for `user`, as seen from `channel`, in the web client's order:
 /// Profile, Message, Create group with (RuSToat's own, for friends),
-/// Mention; Edit identity and Edit roles; Remove from group and Make group
-/// owner; Time out (or End timeout), Kick and Ban; the friend requests;
+/// Mention; Edit identity and Edit roles; Server mute, Server deafen, Move
+/// to and Disconnect (while they're in one of the server's calls); Remove
+/// from group and Make group owner; Time out (or End timeout), Kick and Ban; the friend requests;
 /// Remove friend and Block or Unblock; then the copy items. Message
 /// follows [`can_message`]; Mention is only for others, in server channels
 /// and groups (where the message box can mention them). Remove from group
@@ -396,6 +429,7 @@ pub fn user_menu(store: &ChatStore, user: &str, channel: Option<&str>) -> Vec<Us
         membership.extend([RemoveFromGroup, MakeGroupOwner]);
     }
     let mut server_items = Vec::new();
+    let mut voice = Vec::new();
     let mut moderation = Vec::new();
     if let Some(server) = channel.and_then(|channel| store.channel_server(channel)) {
         let allowed = crate::permissions::moderation(store, server, user);
@@ -406,6 +440,21 @@ pub fn user_menu(store: &ChatStore, user: &str, channel: Option<&str>) -> Vec<Us
             }
             if allowed.roles {
                 server_items.push(EditRoles);
+            }
+        }
+        if let Some(call) = store.voice_channel_of(server, user) {
+            let member = store.member(server, user);
+            if allowed.mute {
+                voice.push(ServerMute(member.is_none_or(|m| m.can_publish)));
+            }
+            if allowed.deafen {
+                voice.push(ServerDeafen(member.is_none_or(|m| m.can_receive)));
+            }
+            if allowed.move_members {
+                if !move_targets(store, server, call).is_empty() {
+                    voice.push(MoveTo);
+                }
+                voice.push(DisconnectVoice);
             }
         }
         if allowed.timeout {
@@ -432,6 +481,7 @@ pub fn user_menu(store: &ChatStore, user: &str, channel: Option<&str>) -> Vec<Us
     let groups = [
         people,
         server_items,
+        voice,
         membership,
         moderation,
         requests,

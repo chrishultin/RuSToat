@@ -107,8 +107,8 @@ mod tests {
     }
 
     /// Every icon the app draws, so none renders blank. The person and
-    /// message menus, profile card, Friends page and category headings use
-    /// these.
+    /// message menus (moderation included), profile card, Friends page and
+    /// category headings use these.
     #[test]
     fn people_icons_load() {
         for icon in [
@@ -116,20 +116,28 @@ mod tests {
             IconName::ChevronDown,
             IconName::ChevronRight,
             IconName::CircleUser,
+            IconName::Clock,
             IconName::Copy,
             IconName::Crown,
             IconName::Ellipsis,
+            IconName::HeadphoneOff,
+            IconName::Headphones,
             IconName::IdCard,
             IconName::Link,
             IconName::Mail,
             IconName::MessageCircle,
+            IconName::Mic,
+            IconName::MicOff,
+            IconName::PhoneOff,
             IconName::ShieldCheck,
             IconName::TextQuote,
             IconName::UserCheck,
             IconName::UserMinus,
+            IconName::UserPen,
             IconName::UserPlus,
             IconName::UserX,
             IconName::Users,
+            IconName::Volume2,
         ] {
             let path = icon.path();
             assert!(AppAssets.load(&path).unwrap().is_some(), "{path} missing");

@@ -1,13 +1,13 @@
 //! What a person's profile card shows (`profile::profile_card`).
 
 use chrono::{TimeZone, Utc};
-use revolt_permissions::DEFAULT_PERMISSION_SERVER;
+use revolt_permissions::{ChannelPermission, DEFAULT_PERMISSION_SERVER};
 use serde_json::{Value, json};
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::api::models::{MutualResponse, RelationshipStatus};
 use stoat_gpui::profile::{
     CardRole, MutualKind, RelationshipAction, UserMenuItem, can_message, dm_with, friend_buttons,
-    mutuals, overflow_text, profile_card, shows_mutuals, user_menu,
+    move_targets, mutuals, overflow_text, profile_card, shows_mutuals, user_menu,
 };
 use stoat_gpui::store::{ChatStore, PresenceKind};
 
@@ -36,6 +36,14 @@ fn member(user: &str, roles: &[&str], extra: Value) -> Value {
         .unwrap()
         .extend(extra.as_object().unwrap().clone());
     member
+}
+
+/// Someone in a call, as Stoat sends it.
+fn voice_state(user: &str) -> Value {
+    json!({
+        "id": user, "joined_at": "2026-11-08T12:00:00.000Z",
+        "is_receiving": true, "is_publishing": true, "screensharing": false, "camera": false
+    })
 }
 
 fn role(id: &str, name: &str, rank: i64, colour: Option<&str>) -> Value {
@@ -70,7 +78,8 @@ fn store_owned_by(owner: &str) -> ChatStore {
             user("u-lapsed", json!({}))
         ],
         "servers": [{
-            "_id": "srv", "owner": owner, "name": "Test Server", "channels": ["ch"],
+            "_id": "srv", "owner": owner, "name": "Test Server",
+            "channels": ["ch", "ch-voice", "ch-lounge", "ch-locked"],
             "default_permissions": *DEFAULT_PERMISSION_SERVER as i64,
             "approximate_member_count": 4,
             "roles": {
@@ -81,6 +90,12 @@ fn store_owned_by(owner: &str) -> ChatStore {
         }],
         "channels": [
             { "channel_type": "TextChannel", "_id": "ch", "server": "srv", "name": "general" },
+            { "channel_type": "TextChannel", "_id": "ch-voice", "server": "srv", "name": "Voice", "voice": {} },
+            { "channel_type": "TextChannel", "_id": "ch-lounge", "server": "srv", "name": "Lounge", "voice": {} },
+            {
+                "channel_type": "TextChannel", "_id": "ch-locked", "server": "srv", "name": "Locked", "voice": {},
+                "default_permissions": { "a": 0, "d": ChannelPermission::Connect as u64 }
+            },
             { "channel_type": "DirectMessage", "_id": "dm", "active": true, "recipients": ["u-me", ADA] },
             // Never messaged, so closed.
             { "channel_type": "DirectMessage", "_id": "dm-closed", "active": false, "recipients": ["u-closed", "u-me"] },
@@ -89,6 +104,10 @@ fn store_owned_by(owner: &str) -> ChatStore {
                 "recipients": ["u-me", ADA, "u-bob"]
             }
         ],
+        "voice_states": [{
+            "id": "ch-voice",
+            "participants": [voice_state(ADA), voice_state("u-blocked"), voice_state("u-me")]
+        }],
         "members": [
             member("u-me", &[], json!({})),
             member(ADA, &["plain", "admin", "fancy", "deleted-role"], json!({
@@ -96,7 +115,7 @@ fn store_owned_by(owner: &str) -> ChatStore {
             })),
             member("u-bob", &[], json!({ "nickname": "   " })),
             member("u-plain", &[], json!({})),
-            member("u-blocked", &[], json!({})),
+            member("u-blocked", &[], json!({ "can_publish": false, "can_receive": false })),
             member("u-timed", &[], json!({ "timeout": "2999-01-01T00:00:00.000Z" })),
             member("u-lapsed", &[], json!({ "timeout": "2001-01-01T00:00:00.000Z" }))
         ]
@@ -467,6 +486,77 @@ mod menu {
         let store = store_owned_by("u-plain");
         let menu = user_menu(&store, ADA, Some("ch"));
         assert!(!menu.contains(&EditIdentity) && !menu.contains(&EditRoles));
+    }
+
+    #[test]
+    fn someone_in_a_call_can_be_muted_deafened_moved_and_disconnected() {
+        let store = store();
+        let menu = user_menu(&store, ADA, Some("ch"));
+        let voice: Vec<_> = menu
+            .iter()
+            .copied()
+            .filter(|item| {
+                matches!(
+                    item,
+                    ServerMute(_) | ServerDeafen(_) | MoveTo | DisconnectVoice
+                )
+            })
+            .collect();
+        assert_eq!(
+            voice,
+            [
+                ServerMute(true),
+                ServerDeafen(true),
+                MoveTo,
+                DisconnectVoice
+            ]
+        );
+        // After the server items, before the moderation group.
+        let at = |item| menu.iter().position(|i| *i == item).unwrap();
+        assert!(at(EditRoles) < at(ServerMute(true)));
+        assert!(at(DisconnectVoice) < at(TimeOut));
+        // From the call's own channel too, as its participant rows open it.
+        assert!(user_menu(&store, ADA, Some("ch-voice")).contains(&DisconnectVoice));
+    }
+
+    #[test]
+    fn a_server_muted_and_deafened_member_offers_undoing_it() {
+        let menu = user_menu(&store(), "u-blocked", Some("ch"));
+        assert!(menu.contains(&ServerMute(false)) && menu.contains(&ServerDeafen(false)));
+    }
+
+    #[test]
+    fn voice_items_need_a_call_a_server_and_the_permissions() {
+        let store = store();
+        // Not in a call, themselves, or outside the server.
+        for (user, channel) in [
+            ("u-plain", Some("ch")),
+            ("u-me", Some("ch")),
+            (ADA, Some("grp")),
+            (ADA, None),
+        ] {
+            let menu = user_menu(&store, user, channel);
+            assert!(
+                !menu.contains(&DisconnectVoice) && !menu.contains(&ServerMute(true)),
+                "{user} {channel:?}"
+            );
+        }
+        // A plain member has none of the voice permissions.
+        let store = store_owned_by("u-plain");
+        assert!(!user_menu(&store, ADA, Some("ch")).contains(&DisconnectVoice));
+    }
+
+    #[test]
+    fn move_to_offers_the_servers_other_voice_channels_the_user_can_join() {
+        // The owner may join every one.
+        assert_eq!(
+            move_targets(&store(), "srv", "ch-voice"),
+            ["ch-lounge", "ch-locked"]
+        );
+        // A plain member can't join the locked one.
+        let store = store_owned_by("u-plain");
+        assert_eq!(move_targets(&store, "srv", "ch-voice"), ["ch-lounge"]);
+        assert!(move_targets(&store, "nowhere", "ch-voice").is_empty());
     }
 
     #[test]

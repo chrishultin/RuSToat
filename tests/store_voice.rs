@@ -240,3 +240,12 @@ fn deleting_a_channel_or_leaving_its_server_drops_its_list() {
     store.remove_server("srv-alpha");
     assert!(store.voice_participants("ch-voice").is_empty());
 }
+
+#[test]
+fn a_users_call_on_a_server_is_found() {
+    let store = store();
+    let server = store.channel_server("ch-voice").unwrap().to_string();
+    assert_eq!(store.voice_channel_of(&server, "u-ada"), Some("ch-voice"));
+    assert_eq!(store.voice_channel_of(&server, "u-carol"), None);
+    assert_eq!(store.voice_channel_of("another-server", "u-ada"), None);
+}

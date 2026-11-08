@@ -4,7 +4,7 @@
 
 use revolt_result::ErrorType;
 use serde_json::json;
-use stoat_gpui::api::models::{DataBanCreate, DataMemberEdit};
+use stoat_gpui::api::models::{DataBanCreate, DataMemberEdit, FieldsMember};
 use stoat_gpui::api::{ApiError, StoatClient};
 use stoat_gpui::moderation::{
     end_timeout_edit, moderation_error_text, timeout_edit, timeout_until,
@@ -344,4 +344,85 @@ async fn taking_every_role_away_sends_an_empty_list() {
         .edit_member("srv", "u-ada", &edit)
         .await
         .unwrap();
+}
+
+/// Stoat's answer to a voice edit of `u-ada`.
+fn ada() -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(member(json!({
+        "_id": { "server": "srv", "user": "u-ada" }
+    })))
+}
+
+#[tokio::test]
+async fn voice_moderation_sends_one_field_each() {
+    let cases = [
+        (
+            DataMemberEdit {
+                can_publish: Some(false),
+                ..empty_member_edit()
+            },
+            json!({ "can_publish": false }),
+        ),
+        (
+            DataMemberEdit {
+                can_receive: Some(true),
+                ..empty_member_edit()
+            },
+            json!({ "can_receive": true }),
+        ),
+        (
+            DataMemberEdit {
+                voice_channel: Some("ch-lounge".into()),
+                ..empty_member_edit()
+            },
+            json!({ "voice_channel": "ch-lounge" }),
+        ),
+        (
+            DataMemberEdit {
+                remove: vec![FieldsMember::VoiceChannel],
+                ..empty_member_edit()
+            },
+            json!({ "remove": ["VoiceChannel"] }),
+        ),
+    ];
+    for (edit, body) in cases {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/servers/srv/members/u-ada"))
+            .and(body_json(body))
+            .respond_with(ada())
+            .expect(1)
+            .mount(&server)
+            .await;
+        client(&server)
+            .edit_member("srv", "u-ada", &edit)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn moving_someone_who_left_the_call_says_so() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/servers/srv/members/u-ada"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_body_json(json!({ "type": "NotConnected", "location": "x" })),
+        )
+        .mount(&server)
+        .await;
+
+    let edit = DataMemberEdit {
+        voice_channel: Some("ch-lounge".into()),
+        ..empty_member_edit()
+    };
+    let err = client(&server)
+        .edit_member("srv", "u-ada", &edit)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        moderation_error_text(&err, "x"),
+        "They're no longer in a call."
+    );
 }

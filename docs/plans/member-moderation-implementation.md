@@ -132,3 +132,48 @@ Deferred to the end:
 - remove its server avatar;
 - give it a role, then take it away;
 - check that a role above yours is disabled.
+
+## Chunk 4: Voice moderation
+
+### Changes Made
+- `src/store.rs`: `ChatStore::voice_channel_of(server, user)`, which of a server's voice channels someone is in a call in.
+- `src/profile.rs`:
+  - `UserMenuItem::{ServerMute(bool), ServerDeafen(bool), MoveTo, DisconnectVoice}` in a new voice group, after the server items and before group membership. The group appears only while the target is in one of the server's calls.
+  - The bool is the action: `true` mutes or deafens, `false` undoes it. It's read from the cached member's `can_publish` / `can_receive`, which default to on.
+  - Mute and deafen follow Mute Members and Deafen Members.
+  - Move to (only if there's somewhere to go) and Disconnect follow Move Members.
+  - `move_targets(store, server, call)`: the server's other voice channels, in its order, that the user may Connect to.
+- `src/ui/chat.rs`:
+  - Labels: "Server mute" / "Server unmute" (`MicOff` / `Mic`), "Server deafen" / "Server undeafen" (`HeadphoneOff` / `Headphones`), "Move to" (`Volume2`), "Disconnect from call" (`PhoneOff`).
+  - `ChatView::edit_voice` sends the edit at once through `run_member_action`, and a refusal toasts.
+  - `ChatView::move_member` sends `voice_channel`.
+  - `People::menu` turns `MoveTo` into a real submenu (`submenu_with_icon`) of channel names from `move_menu_targets`.
+  - Voice participant rows get `.context_menu(people.menu(..))`, with the call's channel as context, through a new `people` parameter to `render_voice_participant`.
+- `src/assets.rs`: `people_icons_load` also checks the moderation icons (Clock, UserPen, Mic/MicOff, Headphones/HeadphoneOff, PhoneOff, Volume2).
+- Tests:
+  - `tests/profile.rs`: the fixture gains voice channels `ch-voice`, `ch-lounge` and `ch-locked` (Connect denied by default), with ADA, `u-blocked` (server muted and deafened) and `u-me` in `ch-voice`. Four tests:
+    - the items and where their group sits;
+    - the unmute and undeafen labels;
+    - absence (not in a call, themselves, outside a server, no permission);
+    - `move_targets` for the owner and for a plain member.
+  - `tests/store_voice.rs`: `voice_channel_of`.
+  - `tests/api_members.rs`: the four bodies (`can_publish`, `can_receive`, `voice_channel`, `remove: ["VoiceChannel"]`); `NotConnected` gives "They're no longer in a call."
+
+### Divergences
+- **No `UserMenuItem` carries the move's destination.** `MoveTo` only marks where the submenu goes, its arm in `on_user_menu` does nothing, and the submenu's items call `move_member` directly.
+- **Mute, deafen and disconnect act at once, without asking**, as the web client does. The plan named no confirmation for them.
+- **Live effect of a server mute (checked statically).** Nothing can panic: `Controls` only calls `mute()` / `unmute()` on its publication and has no unwraps. If LiveKit force-unpublishes the microphone, a later server unmute won't republish it, so the target probably needs to rejoin to be heard again. That fix is milestone 34 material, as the plan says; the manual pass should confirm it.
+- Chunk 5 is unaffected.
+
+### Verification Performed
+- `cargo test`: 1124 passed, 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt drift is unchanged (`client.rs` 3, `chat.rs` 17, `store.rs` 14). `assets.rs`, `tests/store_voice.rs` and the other clean files are still clean.
+
+### Manual Validation
+Deferred to the end, with both accounts in a voice channel and the web client:
+- server mute, then unmute;
+- server deafen, then undeafen;
+- move to the other channel;
+- disconnect;
+- check whether unmuting needs a rejoin.
