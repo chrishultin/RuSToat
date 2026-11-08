@@ -21,6 +21,8 @@ gpui_kit::assets::icon_assets!(
         FileImage,
         FileMusic,
         FileVideoCamera,
+        FolderMinus,
+        FolderPlus,
         Hash,
         House,
         IdCard,
@@ -128,6 +130,22 @@ mod tests {
     #[test]
     fn safety_icons_load() {
         for icon in [IconName::UserX, IconName::TriangleAlert] {
+            let path = icon.path();
+            assert!(AppAssets.load(&path).unwrap().is_some(), "{path} missing");
+        }
+    }
+
+    /// The rail's folders and the folder items in its menus.
+    #[test]
+    fn folder_icons_load() {
+        for icon in [
+            IconName::Folder,
+            IconName::FolderOpen,
+            IconName::FolderPlus,
+            IconName::FolderMinus,
+            IconName::Pencil,
+            IconName::Trash,
+        ] {
             let path = icon.path();
             assert!(AppAssets.load(&path).unwrap().is_some(), "{path} missing");
         }

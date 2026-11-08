@@ -52,7 +52,7 @@ use crate::notify::{self, Delivery, Level, MuteFor, Notice, NotificationSettings
 use crate::places::{Place, Places, PlacesFile};
 use crate::profile::{RelationshipAction, UserMenuItem};
 use crate::profile_edit::ImageLimits;
-use crate::rail::{self, Ordering, RailEntry, ServerFolders};
+use crate::rail::{self, Folder, Ordering, RailEntry, ServerFolders};
 use crate::runtime::spawn_io;
 use crate::safety::{LinkCheck, SafetyFile, SafetySettings, classify, is_own_instance, origin};
 use crate::search::{
@@ -90,8 +90,8 @@ use crate::ui::profile_card::{
 };
 use crate::ui::server_dialogs::{
     CREATE_CHANNEL_DIALOG_WIDTH, CREATE_SERVER_DIALOG_WIDTH, CreateChannelDialog,
-    CreateServerDialog, INFO_DIALOG_WIDTH, InfoContent, InfoPlaceholder, NAME_DIALOG_WIDTH,
-    NameDialog, render_info,
+    CreateServerDialog, EditFolderDialog, INFO_DIALOG_WIDTH, InfoContent, InfoPlaceholder,
+    NAME_DIALOG_WIDTH, NameDialog, render_info,
 };
 
 actions!(
@@ -3675,10 +3675,6 @@ impl ChatView {
     /// nothing writes nothing. If the write fails, what was held before
     /// comes back (unless a later write is on its way, or a newer copy has
     /// landed) and a toast says so.
-    #[expect(
-        dead_code,
-        reason = "the folder menus and rail dragging will write through it"
-    )]
     fn update_rail(
         &mut self,
         change: impl FnOnce(&mut Ordering, &mut ServerFolders),
@@ -3742,6 +3738,112 @@ impl ChatView {
             .ok();
         })
         .detach();
+    }
+
+    /// Change the rail's folders through one of [`rail`]'s edits, which
+    /// is given the rail as drawn now (see [`Self::update_rail`]).
+    fn edit_rail(
+        &mut self,
+        edit: impl FnOnce(&mut Ordering, &mut ServerFolders, &[RailEntry]),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let entries = self.store.rail_entries();
+        self.update_rail(
+            |ordering, folders| edit(ordering, folders, &entries),
+            window,
+            cx,
+        );
+    }
+
+    /// Save the Edit folder dialog: the folder's name and colour.
+    pub(crate) fn edit_folder(
+        &mut self,
+        folder: String,
+        name: String,
+        colour: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_rail(
+            |_, folders| {
+                folders.rename_folder(&folder, &name);
+                folders.recolour_folder(&folder, colour.as_deref());
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Open the Edit folder dialog, its name field focused. Nothing if the
+    /// folder's gone.
+    fn open_edit_folder(&mut self, folder: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(folder) = self.store.server_folders().folder(&folder).cloned() else {
+            return;
+        };
+        let weak = cx.entity().downgrade();
+        let dialog = cx.new(|cx| EditFolderDialog::new(weak, &folder, window, cx));
+        let first_build = std::cell::Cell::new(true);
+        window.open_dialog(cx, move |modal, window, cx| {
+            if first_build.replace(false) {
+                let input = dialog.read(cx).input().read(cx).focus_handle(cx);
+                window.focus(&input, cx);
+            }
+            modal
+                .title("Edit folder")
+                .w(px(NAME_DIALOG_WIDTH))
+                .child(dialog.clone())
+        });
+    }
+
+    /// A folder's right-click menu: Edit folder…, and Delete folder (at
+    /// once, as in the web client: its servers stay where they are).
+    fn folder_menu(&self, folder: &str, cx: &Context<Self>) -> MenuBuilder {
+        let view = cx.entity().downgrade();
+        let folder = folder.to_string();
+        Rc::new(move |menu, _, _| {
+            let edit = {
+                let (view, folder) = (view.clone(), folder.clone());
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    view.update(cx, |this, cx| {
+                        this.open_edit_folder(folder.clone(), window, cx)
+                    })
+                    .ok();
+                }
+            };
+            let delete = {
+                let (view, folder) = (view.clone(), folder.clone());
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    view.update(cx, |this, cx| {
+                        this.edit_rail(
+                            |ordering, folders, entries| {
+                                rail::delete_folder(ordering, folders, entries, &folder)
+                            },
+                            window,
+                            cx,
+                        )
+                    })
+                    .ok();
+                }
+            };
+            menu.item(
+                PopupMenuItem::new("Edit folder…")
+                    .icon(IconName::Pencil)
+                    .on_click(edit),
+            )
+            .separator()
+            .item(
+                PopupMenuItem::element(|_, cx| {
+                    let danger = cx.theme().danger;
+                    h_flex()
+                        .gap_2()
+                        .text_color(danger)
+                        .child(Icon::new(IconName::Trash).text_color(danger))
+                        .child("Delete folder")
+                })
+                .on_click(delete),
+            )
+        })
     }
 
     /// A channel's, DM's or group's right-click menu: Mute Channel (for how
@@ -4358,7 +4460,9 @@ impl ChatView {
         Some(category.title.clone())
     }
 
-    /// A server's right-click menu: Mark as read; Edit identity…; Mute Server (for how
+    /// A server's right-click menu: Mark as read; Edit identity…; Add to
+    /// folder (another folder, or a new one) and Remove from folder (if in
+    /// one); Mute Server (for how
     /// long), or Unmute Server and until when it's muted; its Notifications
     /// level; Leave server… unless the user owns it; Copy server ID.
     fn server_menu(&self, server: &str, cx: &Context<Self>) -> MenuBuilder {
@@ -4372,6 +4476,17 @@ impl ChatView {
             let mute = store.server_mute_until(&server);
             let level = store.notification_settings().server_level(&server);
             let leavable = this.read(cx).may_leave(&server);
+            let in_folder = store.server_folders().folder_of(&server).is_some();
+            let other_folders: Vec<(String, String)> = store
+                .rail_entries()
+                .into_iter()
+                .filter_map(|entry| match entry {
+                    RailEntry::Folder { folder, .. } if !folder.servers.contains(&server) => {
+                        Some((folder.id, folder.name))
+                    }
+                    _ => None,
+                })
+                .collect();
             let mark_read = {
                 let (view, server) = (view.clone(), server.clone());
                 move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
@@ -4411,6 +4526,7 @@ impl ChatView {
                 ),
                 None => menu,
             };
+            let menu = folder_items(menu, &view, &server, in_folder, other_folders, window, cx);
             let menu = match mute {
                 None => {
                     let mute: SetMute = {
@@ -7340,12 +7456,19 @@ impl ChatView {
     }
 
     /// ⌘⌥↑/⌘⌥↓: open the place `step` away in the rail (Home, then the
-    /// servers), wrapping round at the ends.
+    /// servers), wrapping round at the ends. Servers in closed folders are
+    /// passed over (from one of them, it's the next past its folder).
     fn move_server(&mut self, step: isize, cx: &mut Context<Self>) {
         if self.shortcuts_blocked(cx) {
             cx.propagate();
             return;
         }
+        let entries = self.store.rail_entries();
+        let folded: HashSet<&String> = entries
+            .iter()
+            .filter(|entry| matches!(entry, RailEntry::Folder { folder, .. } if folder.collapsed))
+            .flat_map(RailEntry::servers)
+            .collect();
         let places: Vec<Place> = std::iter::once(Place::Home)
             .chain(
                 self.store
@@ -7354,7 +7477,8 @@ impl ChatView {
                     .map(|s| Place::Server(s.id)),
             )
             .collect();
-        if let Some(place) = crate::nav::neighbour(&places, Some(&self.place), step, |_| true) {
+        let shown = |place: &Place| !matches!(place, Place::Server(id) if folded.contains(id));
+        if let Some(place) = crate::nav::neighbour(&places, Some(&self.place), step, shown) {
             self.select_place(place.clone(), cx);
         }
     }
@@ -7521,14 +7645,19 @@ impl ChatView {
             cx.listener(|this, _, _, cx| this.select_place(Place::Home, cx)),
             cx,
         );
-        // Folders are drawn as their servers, in their place.
         let servers: Vec<_> = self
             .store
             .rail_entries()
-            .iter()
-            .flat_map(RailEntry::servers)
-            .filter_map(|id| self.store.server_entry(id))
-            .map(|server| self.render_rail_server(&server, cx))
+            .into_iter()
+            .filter_map(|entry| match entry {
+                RailEntry::Server(id) => self
+                    .store
+                    .server_entry(&id)
+                    .map(|server| self.render_rail_server(&server, cx)),
+                RailEntry::Folder { folder, servers } => {
+                    Some(self.render_rail_folder(&folder, &servers, cx))
+                }
+            })
             .collect();
         let has_servers = !servers.is_empty();
         let add = self.render_rail_add(cx);
@@ -7580,6 +7709,92 @@ impl ChatView {
             cx.listener(move |this, _, _, cx| this.select_place(place.clone(), cx)),
             cx,
         )
+    }
+
+    /// A folder in the rail; a click opens or closes it. Closed: up to
+    /// four of its servers' icons on a circle tinted with its colour, its
+    /// servers' mentions summed in a badge, the unread pill if any is
+    /// unread, and the selected marker if the open server is in it. Open: a
+    /// folder icon in its colour, then its servers, on a strip tinted with
+    /// it.
+    fn render_rail_folder(&self, folder: &Folder, servers: &[String], cx: &Context<Self>) -> Div {
+        let theme = cx.theme();
+        let servers: Vec<ServerEntry> = servers
+            .iter()
+            .filter_map(|id| self.store.server_entry(id))
+            .collect();
+        let colour = folder
+            .colour
+            .as_deref()
+            .and_then(rail::parse_colour)
+            .map(Hsla::from);
+        let name = match folder.name.as_str() {
+            "" => "Folder",
+            name => name,
+        };
+        let id = SharedString::from(format!("rail-{}", folder.id));
+        let menu = self.folder_menu(&folder.id, cx);
+        let toggle = {
+            let folder = folder.id.clone();
+            cx.listener(move |this, _, window, cx| {
+                let folder = folder.clone();
+                this.update_rail(|_, folders| folders.toggle_folder(&folder), window, cx)
+            })
+        };
+        let face = |content: AnyElement| {
+            rail_icon(id.clone(), content, name.to_string(), false, cx)
+                .on_click(toggle)
+                .context_menu(move |popup, window, cx| menu(popup, window, cx))
+        };
+
+        if folder.collapsed {
+            let selected = servers
+                .iter()
+                .any(|s| self.place == Place::Server(s.id.clone()));
+            let unread = servers.iter().any(|s| s.unread);
+            let mentions = servers.iter().map(|s| s.mentions).sum();
+            let preview = folder_preview(&servers, &self.media, cx);
+            // The tint over the circle's own colour, so hovering still
+            // shows as it does on a server.
+            let tint = colour.map(|colour| theme.secondary.blend(colour.opacity(0.3)));
+            let face = face(preview.into_any_element()).when_some(tint, |face, tint| face.bg(tint));
+            return rail_slot(face.into_any_element(), selected, unread, mentions, cx);
+        }
+
+        let icon = Icon::new(IconName::FolderOpen)
+            .size(px(24.))
+            .when_some(colour, |icon, colour| icon.text_color(colour));
+        let strip = colour.map_or(theme.foreground.opacity(0.1), |colour| colour.opacity(0.18));
+        v_flex()
+            .relative()
+            .w_full()
+            .flex_none()
+            .gap_2()
+            .py(px(6.))
+            // Behind the icons, narrower than the rail so the pills on its
+            // edge stay outside it.
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(6.))
+                    .right(px(6.))
+                    .rounded_xl()
+                    .bg(strip),
+            )
+            .child(rail_slot(
+                face(icon.into_any_element()).into_any_element(),
+                false,
+                false,
+                0,
+                cx,
+            ))
+            .children(
+                servers
+                    .iter()
+                    .map(|server| self.render_rail_server(server, cx)),
+            )
     }
 
     /// The rail's "+": a menu to create a server or join one.
@@ -8933,6 +9148,8 @@ const MUTED_ICON_OPACITY: f32 = 0.3;
 const NOTIFICATIONS_FAILED_TEXT: &str = "Couldn't save notification settings.";
 /// A server order or folder change Stoat didn't take.
 const RAIL_FAILED_TEXT: &str = "Couldn't save the server list. Try again.";
+/// Each server's icon in a closed folder's two-by-two preview.
+const FOLDER_PREVIEW_ICON: f32 = 18.;
 
 /// A change to the user's own status.
 enum StatusChange {
@@ -11433,6 +11650,52 @@ fn server_icon(server: &ServerEntry, media: &MediaUrls, selected: bool) -> AnyEl
     }
 }
 
+/// A closed folder's face: up to four of its servers' icons, two by two.
+/// A server without an icon shows its initial on a small circle.
+fn folder_preview(servers: &[ServerEntry], media: &MediaUrls, cx: &App) -> Div {
+    let theme = cx.theme();
+    let (bg, fg) = (theme.background, theme.foreground);
+    let icons = servers.iter().take(4).map(|server| {
+        let initial = server
+            .initials
+            .chars()
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        let placeholder = move || {
+            div()
+                .size(px(FOLDER_PREVIEW_ICON))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(bg)
+                .text_color(fg)
+                .text_size(px(10.))
+                .child(initial.clone())
+                .into_any_element()
+        };
+        match server.icon.as_ref().and_then(|icon| media.file(icon)) {
+            Some(url) => img(SharedUri::from(url))
+                .id(SharedString::from(format!("folder-preview-{}", server.id)))
+                .size(px(FOLDER_PREVIEW_ICON))
+                .rounded_full()
+                .object_fit(ObjectFit::Cover)
+                .with_loading(placeholder.clone())
+                .with_fallback(placeholder)
+                .into_any_element(),
+            None => placeholder(),
+        }
+    });
+    div()
+        .w(px(2. * FOLDER_PREVIEW_ICON + 2.))
+        .flex()
+        .flex_wrap()
+        .justify_center()
+        .gap(px(2.))
+        .children(icons)
+}
+
 /// A right-click menu item that copies an ID (a channel's, a category's).
 fn copy_id_item(label: &'static str, id: String) -> PopupMenuItem {
     PopupMenuItem::new(label)
@@ -11569,6 +11832,10 @@ fn open_name_dialog(
 pub(crate) type MenuBuilder =
     Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>;
 
+/// One of [`rail`]'s edits to the folders, given the rail as drawn (see
+/// [`ChatView::edit_rail`]).
+type RailEdit = Rc<dyn Fn(&mut Ordering, &mut ServerFolders, &[RailEntry])>;
+
 /// Mutes something in the notification settings, until a time (ms since
 /// the epoch) or until unmuted.
 type SetMute = Rc<dyn Fn(&mut NotificationSettings, Option<i64>)>;
@@ -11593,6 +11860,79 @@ fn notifications_item(
             })
             .ok();
         })
+}
+
+/// A server menu's folder items: Add to folder (a submenu of `others`,
+/// the rail's folders but its own, as (ID, name), then New folder) and, if
+/// it's `in_folder`, Remove from folder.
+fn folder_items(
+    menu: PopupMenu,
+    view: &WeakEntity<ChatView>,
+    server: &str,
+    in_folder: bool,
+    others: Vec<(String, String)>,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    // An item making one of the rail's edits when picked.
+    let edit_item = {
+        let view = view.clone();
+        move |label: SharedString, edit: RailEdit| {
+            let view = view.clone();
+            PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                let edit = edit.clone();
+                view.update(cx, |this, cx| {
+                    this.edit_rail(|o, f, entries| edit(o, f, entries), window, cx)
+                })
+                .ok();
+            })
+        }
+    };
+    let add = {
+        let (server, edit_item) = (server.to_string(), edit_item.clone());
+        move |menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
+            let menu = others.iter().fold(menu, |menu, (id, name)| {
+                let label = if name.is_empty() {
+                    "Unnamed folder".into()
+                } else {
+                    name.clone().into()
+                };
+                let (server, id) = (server.clone(), id.clone());
+                menu.item(edit_item(
+                    label,
+                    Rc::new(move |o, f, entries| rail::add_to_folder(o, f, entries, &server, &id)),
+                ))
+            });
+            let server = server.clone();
+            menu.item(
+                edit_item(
+                    "New folder".into(),
+                    Rc::new(move |o, f, entries| {
+                        rail::new_folder_with(o, f, entries, &server, rail::new_folder_id())
+                    }),
+                )
+                .icon(IconName::FolderPlus),
+            )
+        }
+    };
+    let menu = menu.submenu_with_icon(
+        Some(Icon::new(IconName::Folder)),
+        "Add to folder",
+        window,
+        cx,
+        add,
+    );
+    if !in_folder {
+        return menu;
+    }
+    let server = server.to_string();
+    menu.item(
+        edit_item(
+            "Remove from folder".into(),
+            Rc::new(move |o, f, entries| rail::remove_from_folder(o, f, entries, &server)),
+        )
+        .icon(IconName::FolderMinus),
+    )
 }
 
 /// A Mute submenu: each duration, from when it's picked.
@@ -11653,9 +11993,6 @@ pub(crate) fn rail_button(
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> Div {
-    let theme = cx.theme();
-    let marker = theme.foreground;
-    let badge_ring = theme.sidebar;
     let button = rail_icon(id, content, tooltip, selected, cx).on_click(on_click);
     // Right-click: e.g. "Mark as read" on servers.
     let button = match menu {
@@ -11664,7 +12001,15 @@ pub(crate) fn rail_button(
             .context_menu(move |popup, window, cx| menu(popup, window, cx))
             .into_any_element(),
     };
+    rail_slot(button, selected, unread, mentions, cx)
+}
 
+/// A rail item's row: `button` centred, with a marker on the left edge
+/// (tall when `selected`, a short pill when `unread`) and a mention badge.
+fn rail_slot(button: AnyElement, selected: bool, unread: bool, mentions: usize, cx: &App) -> Div {
+    let theme = cx.theme();
+    let marker = theme.foreground;
+    let badge_ring = theme.sidebar;
     div()
         .relative()
         .w_full()

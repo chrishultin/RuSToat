@@ -4,19 +4,23 @@
 //! category": a name, and the server's categories are sent again with it.
 //! Server and channel info: the banner, icon, name and description. The
 //! naming rules, the category edits and the error texts are in
-//! [`crate::server_edit`].
+//! [`crate::server_edit`]. "Edit folder": a rail folder's name and colour.
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::radio::{Radio, RadioGroup};
 use gpui_kit::component::text::TextView;
-use gpui_kit::component::{ActiveTheme, Disableable, Icon, WindowExt, h_flex, v_flex};
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{
+    ActiveTheme, Disableable, Icon, Selectable, Sizable, WindowExt, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::api::StoatClient;
 use crate::invites::is_official_app;
+use crate::rail::{Folder, PALETTE, parse_colour};
 use crate::runtime::spawn_io;
 use crate::server_edit::{
     AUP_URL, NAME_MAX, categories_error_text, create_channel_error_text, create_server_error_text,
@@ -561,6 +565,183 @@ impl Render for NameDialog {
                             .label(action)
                             .loading(self.saving)
                             .disabled(self.saving || !valid)
+                            .on_click(move |_, window, cx| {
+                                entity.update(cx, |this, cx| this.save(window, cx)).ok();
+                            }),
+                    ),
+            )
+    }
+}
+
+/// A colour swatch in Edit folder, and the ring round the chosen one.
+const SWATCH: f32 = 24.;
+const SWATCH_RING: f32 = 30.;
+/// Swatches to a row, so the palette's twelve make two even rows.
+const SWATCHES_PER_ROW: f32 = 6.;
+const SWATCH_GAP: f32 = 4.;
+
+/// The Edit folder dialog's content: the folder's name and colour, saved
+/// together (through [`ChatView::edit_folder`]) by Save or Enter.
+pub struct EditFolderDialog {
+    chat: WeakEntity<ChatView>,
+    folder: String,
+    input: Entity<InputState>,
+    /// As it'll be written: a palette colour, the one set elsewhere, or
+    /// none.
+    colour: Option<String>,
+    /// A colour the folder had from elsewhere, not in the palette, shown
+    /// as a swatch after it (if it can be drawn).
+    other: Option<String>,
+    _input: Subscription,
+}
+
+impl EditFolderDialog {
+    /// The dialog for `folder`, starting with its name and colour.
+    pub fn new(
+        chat: WeakEntity<ChatView>,
+        folder: &Folder,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(folder.name.clone()));
+        let subscription = cx.subscribe_in(&input, window, |this, _, event, window, cx| {
+            if let InputEvent::PressEnter { .. } = event {
+                this.save(window, cx);
+            }
+        });
+        let other = folder.colour.clone().filter(|colour| {
+            !PALETTE
+                .iter()
+                .any(|(_, hex)| hex.eq_ignore_ascii_case(colour))
+        });
+        Self {
+            chat,
+            folder: folder.id.clone(),
+            input,
+            colour: folder.colour.clone(),
+            other,
+            _input: subscription,
+        }
+    }
+
+    /// The field, to focus when the dialog opens.
+    pub fn input(&self) -> &Entity<InputState> {
+        &self.input
+    }
+
+    /// Save the name and colour, and close. They show at once; a failed
+    /// write puts them back with a toast.
+    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.input.read(cx).value().trim().to_string();
+        let (folder, colour) = (self.folder.clone(), self.colour.clone());
+        if let Some(chat) = self.chat.upgrade() {
+            chat.update(cx, |chat, cx| {
+                chat.edit_folder(folder, name, colour, window, cx)
+            });
+        }
+        window.close_dialog(cx);
+    }
+
+    /// A swatch for `colour` (named `name` in its tooltip), ringed if it's
+    /// the chosen one; a click chooses it.
+    fn swatch(
+        &self,
+        ix: usize,
+        name: SharedString,
+        colour: &str,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        let chosen = self
+            .colour
+            .as_deref()
+            .is_some_and(|c| c.eq_ignore_ascii_case(colour));
+        let ring = cx.theme().foreground;
+        let fill = parse_colour(colour).map(Hsla::from).unwrap_or_default();
+        let colour = colour.to_string();
+        div()
+            .id(("folder-colour", ix))
+            .size(px(SWATCH_RING))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .border_2()
+            .border_color(if chosen { ring } else { transparent_black() })
+            .cursor_pointer()
+            .tooltip(move |window, cx| Tooltip::new(name.clone()).build(window, cx))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.colour = Some(colour.clone());
+                cx.notify();
+            }))
+            .child(div().size(px(SWATCH)).rounded_full().bg(fill))
+    }
+}
+
+impl Render for EditFolderDialog {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let entity = cx.entity().downgrade();
+        let other = self
+            .other
+            .clone()
+            .filter(|colour| parse_colour(colour).is_some());
+        let swatches: Vec<_> = PALETTE
+            .iter()
+            .enumerate()
+            .map(|(ix, (name, hex))| self.swatch(ix, (*name).into(), hex, cx))
+            .chain(
+                other.map(|colour| self.swatch(PALETTE.len(), colour.clone().into(), &colour, cx)),
+            )
+            .collect();
+
+        v_flex()
+            .gap_3()
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(field_label("Name", cx))
+                    .child(Input::new(&self.input)),
+            )
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(field_label("Folder colour", cx))
+                    .child(
+                        h_flex()
+                            .flex_wrap()
+                            .gap(px(SWATCH_GAP))
+                            .w(px(
+                                SWATCHES_PER_ROW * (SWATCH_RING + SWATCH_GAP) - SWATCH_GAP
+                            ))
+                            .children(swatches),
+                    )
+                    .child(
+                        h_flex().child(
+                            Button::new("folder-no-colour")
+                                .small()
+                                .outline()
+                                .label("No colour")
+                                .selected(self.colour.is_none())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.colour = None;
+                                    cx.notify();
+                                })),
+                        ),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .justify_end()
+                    .child(
+                        Button::new("cancel-edit-folder")
+                            .outline()
+                            .label("Cancel")
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("edit-folder-save")
+                            .primary()
+                            .label("Save")
                             .on_click(move |_, window, cx| {
                                 entity.update(cx, |this, cx| this.save(window, cx)).ok();
                             }),
