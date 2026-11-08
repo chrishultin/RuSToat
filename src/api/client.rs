@@ -873,6 +873,33 @@ impl StoatClient {
         .await
     }
 
+    /// `PUT /channels/{group}/recipients/{user}`: add `user` (the user's
+    /// friend) to a group (Invite Others). Stoat sends `ChannelGroupJoin`
+    /// and a "user added" message to the group, then `ChannelCreate` to
+    /// them.
+    pub async fn add_group_member(&self, group: &str, user: &str) -> Result<(), ApiError> {
+        self.send_raw(
+            Method::PUT,
+            &format!("/channels/{group}/recipients/{user}"),
+            None::<&()>,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// `DELETE /channels/{group}/recipients/{user}`: take `user` out of a
+    /// group (its owner only). Stoat sends `ChannelGroupLeave` (to them
+    /// too) and a "user removed" message to the group.
+    pub async fn remove_group_member(&self, group: &str, user: &str) -> Result<(), ApiError> {
+        self.send_raw(
+            Method::DELETE,
+            &format!("/channels/{group}/recipients/{user}"),
+            None::<&()>,
+        )
+        .await
+        .map(|_| ())
+    }
+
     /// `POST /servers/{server}/channels`: a new text channel called `name`
     /// (a voice channel if `voice`), needing Manage Channels across the
     /// server. Stoat adds it at the end of the server's list, in no

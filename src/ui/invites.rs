@@ -395,12 +395,14 @@ struct Created {
     summary: String,
 }
 
-/// "Invite people to {server}": how long a new invite to one channel lasts
-/// and how often it works, then its link to copy.
+/// "Invite people to {server}" (or "{group}"): how long a new invite to
+/// one channel lasts and how often it works, then its link to copy.
 pub struct CreateInviteDialog {
     client: StoatClient,
     channel: String,
-    channel_name: String,
+    /// The server channel's name, for "To #{name}". `None` for a group,
+    /// which the title already names.
+    channel_name: Option<String>,
     /// The web client's address, for the link.
     app: Option<String>,
     expiries: Vec<Expiry>,
@@ -416,8 +418,9 @@ impl CreateInviteDialog {
     /// what Stoat's web client always makes: never expiring, no limit.
     pub fn new(chat: &ChatView, channel: String, max_days: Option<u32>) -> Self {
         let channel_name = match chat.store().channel(&channel) {
-            Some(Channel::TextChannel { name, .. }) => name.clone(),
-            _ => "channel".into(),
+            Some(Channel::TextChannel { name, .. }) => Some(name.clone()),
+            Some(Channel::Group { .. }) => None,
+            _ => Some("channel".into()),
         };
         Self {
             client: chat.client().clone(),
@@ -611,20 +614,22 @@ impl Render for CreateInviteDialog {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (muted, danger) = (theme.muted_foreground, theme.danger);
-        let heading = div()
-            .text_sm()
-            .text_color(muted)
-            .child(format!("To #{}", self.channel_name));
+        let heading = self.channel_name.as_ref().map(|name| {
+            div()
+                .text_sm()
+                .text_color(muted)
+                .child(format!("To #{name}"))
+        });
         if let Some(created) = &self.created {
             return v_flex()
                 .gap_3()
-                .child(heading)
+                .children(heading)
                 .child(self.render_created(created, cx));
         }
         let entity = cx.entity().downgrade();
         v_flex()
             .gap_3()
-            .child(heading)
+            .children(heading)
             .child(self.picker(
                 "invite-expiry",
                 "Expire after",

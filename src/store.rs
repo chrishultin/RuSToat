@@ -2538,6 +2538,12 @@ impl ChatStore {
         crate::permissions::can_invite(self, &self.me, channel)
     }
 
+    /// Whether the user may add people to the group `channel` (see
+    /// [`crate::permissions::can_add_to_group`]).
+    pub fn can_add_to_group(&self, channel: &str) -> bool {
+        crate::permissions::can_add_to_group(self, &self.me, channel)
+    }
+
     /// Whether the user may delete `channel` (see
     /// [`crate::permissions::can_manage_channel`]).
     pub fn can_manage_channel(&self, channel: &str) -> bool {

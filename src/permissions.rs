@@ -134,10 +134,21 @@ pub fn can_mention_everyone(store: &ChatStore, user: &str, channel: &str) -> boo
         )
 }
 
-/// Whether `user` may create invites to `channel`: only server channels
-/// here (group invites come with group management), with Invite Others.
+/// Whether `user` may create invites to `channel`: server channels and
+/// groups, with Invite Others (which a group's members have by default).
+/// DMs and Saved Notes have it too, but Stoat makes no invites to them.
 pub fn can_invite(store: &ChatStore, user: &str, channel: &str) -> bool {
-    in_server(store, channel)
+    (in_server(store, channel) || in_group(store, channel))
+        && has(
+            channel_permissions(store, user, channel),
+            ChannelPermission::InviteOthers,
+        )
+}
+
+/// Whether `user` may add people to `channel`: only groups, with Invite
+/// Others, as Stoat checks. Every member may by default.
+pub fn can_add_to_group(store: &ChatStore, user: &str, channel: &str) -> bool {
+    in_group(store, channel)
         && has(
             channel_permissions(store, user, channel),
             ChannelPermission::InviteOthers,
@@ -176,6 +187,10 @@ pub fn can_send_embeds(store: &ChatStore, user: &str, channel: &str) -> bool {
 
 fn in_server(store: &ChatStore, channel: &str) -> bool {
     matches!(store.channel(channel), Some(Channel::TextChannel { .. }))
+}
+
+fn in_group(store: &ChatStore, channel: &str) -> bool {
+    matches!(store.channel(channel), Some(Channel::Group { .. }))
 }
 
 /// The store, asked the questions `revolt-permissions` has about `user`

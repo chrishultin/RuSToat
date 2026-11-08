@@ -88,3 +88,46 @@ Deferred to the batched manual pass. Steps:
 4. Create with nobody picked: a group of one opens.
 5. Create is disabled with a blank name or one over 32 characters; Enter in the name creates.
 6. Light and dark themes: the picker's rows, checkboxes and hover are readable.
+
+## Chunk 3: Add and remove group members, and group invites
+
+### Changes Made
+- `src/api/client.rs`: `add_group_member(group, user)` (`PUT /channels/{group}/recipients/{user}`) and `remove_group_member(group, user)` (`DELETE`, same path), both without a body, returning `()`.
+- `src/permissions.rs`: `can_invite` allows groups as well as server channels (not DMs or Saved Notes, whose defaults also hold Invite Others). New `can_add_to_group(store, user, channel)`: a group, with Invite Others. `src/store.rs`: `ChatStore::can_add_to_group(channel)`.
+- `src/groups.rs`: `add_limit(group_size, members)` (how many more a group takes, 0 when full); `add_member_error_text(err, name)` ("Couldn't add {name}: {why}", with Missing Permission as "You can't add people to this group.", and "Couldn't add {name}. Try again." when there's no better reason); `remove_member_error_text(err, name)` (Missing Permission as "Only the group's owner can remove members.", else `group_error_text`).
+- `src/ui/group_dialogs.rs`:
+  - `FriendPicker` gains `search()`, `name_of(user)` and `exclude(users, limit, cx)` (drops people who've just joined from the list and the picks).
+  - `AddMembersDialog` (`ADD_MEMBERS_DIALOG_WIDTH` 420 px, titled "Add friends to group"): the picker without the group's members, limited to `add_limit`; the error under it; Close and Add (disabled with nobody picked, spinning while adding). Add sends one `PUT` per person in pick order (Assumption 4): `AlreadyInGroup` is passed over, the first other refusal stops it and names the person, those added leave the list and the rest stay picked. With no refusal the dialog closes. Each success shows in the group at once through `ChatView::group_member_added`, and the requests carry on if the dialog is closed meanwhile.
+- `src/ui/chat.rs`:
+  - `group_member_added(channel, user, cx) -> bool` and `group_member_removed(channel, user, cx) -> bool`: chunk 1's `ChannelGroupJoin` and `ChannelGroupLeave` (someone else) handling moved into these, now shared with adding and removing.
+  - The header: "Add friends to group" (ghost, `IconName::UserPlus`) in groups where `can_add_to_group`, opening `open_add_members(channel)` with the search focused. Create invite shows in groups too, with `IconName::Link` there so the two differ (server channels keep `UserPlus`).
+  - `channel_menu`: Create invite… for any channel `can_invite` allows, so groups get it.
+  - `open_create_invite` accepts groups: "Invite people to {group}".
+  - `confirm_remove_member(channel, user)` (Assumption 5): "Remove {name}?", "Are you sure you want to remove {name} from {group}?", Cancel and Danger "Remove", with milestone 19's waiting footer (`removing_member` disables both buttons and Escape while Stoat answers). `remove_member` applies it locally on success and closes; `NotInGroup` counts as done; other refusals are a toast and the confirmation stays.
+  - `UserMenuItem::RemoveFromGroup` closes the card and opens the confirmation. Label "Remove from group…", `IconName::UserMinus`.
+- `src/ui/invites.rs`: `CreateInviteDialog.channel_name` is `None` for a group, which drops the "To #channel" line.
+- `src/profile.rs`: `UserMenuItem::RemoveFromGroup`, in a section of its own after Profile…Mention, when the menu's channel is a group the user owns (`is_group_owner`), the person isn't the user, and they're in it.
+- Tests: `tests/api_groups.rs` (`PUT` and `DELETE /channels/g1/recipients/u1` with empty bodies; `AlreadyInGroup` and `NotFriends` stay `Api` errors); `tests/permissions.rs` (`can_invite` and `can_add_to_group` in a group by default, not when its permissions drop Invite Others, always for its owner, not for a non-member; neither in a DM or Saved Notes; no adding in a server channel; replacing "invites to DMs and groups are not offered"); `tests/profile.rs` (the owner's full menu for a member has Remove from group in its own section; not on yourself, someone outside the group, or from another channel; not for a plain member); `src/groups.rs` unit tests (`add_limit`, the adding and removing error texts).
+
+### Divergences
+- **The adding loop is `AddMembersDialog::add`,** not a `ChatView::add_members`, so the dialog can show the error and keep the remaining picks. The store side is `ChatView::group_member_added`, called once per success.
+- **Added people are applied locally at once,** like removals (Assumption 5), so they appear in the member list before their `ChannelGroupJoin` (which then changes nothing).
+- **The add picker's limit is the group's room** (`group_size` minus its members, 100 by default), not chunk 2's 49 for new groups; a full group shows "This group is full."
+- **Remove from group is only offered for people in the group,** so it doesn't show on a message author who has since left (Stoat would answer `NotInGroup`). A `NotInGroup` answer is treated as done, as `NotFound` is for deleting a channel.
+- **Removing has its own Missing Permission text,** "Only the group's owner can remove members." (Assumption 11 only gives one for adding).
+- **Remove from group is a plain menu item,** not red, as Remove friend and Block are. It sits in its own section after Mention (chunk 4's Make group owner can join it).
+- **Create invite… in the channel menu keeps `IconName::UserPlus`;** only the header's button switches to `Link` on groups, where it sits beside Add friends.
+
+### Verification Performed
+- `cargo test --lib groups::`: 9 passed. `cargo test --test api_groups`: 8 passed. `--test permissions` and `--test profile`: pass, with two more tests each.
+- `cargo test`: 984 passed, 0 failed (973 before).
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt `Diff in` counts: `src/api/client.rs` 3, `src/ui/chat.rs` 17 and `src/store.rs` 15, unchanged (hand-formatted). `src/permissions.rs`, `src/profile.rs`, `src/groups.rs`, `src/ui/group_dialogs.rs`, `src/ui/invites.rs`, `tests/api_groups.rs`, `tests/permissions.rs` and `tests/profile.rs` 0.
+
+### Manual Validation
+Deferred to the batched manual pass. Steps:
+1. In a group, the header shows "Add friends to group" (person with a plus) and Create invite (a link). Add two friends: both appear in the member list at once, and the group shows the "added" messages. The picker leaves out people already in the group.
+2. Make one add fail (for example, a friend who unfriends you while the dialog is open): the error names them, anyone added before stays added and leaves the list, the rest stay picked.
+3. As owner, right-click a member (in the member list, and on one of their messages): "Remove from group…" asks "Remove {name}?", and Remove takes them out; the web client shows the removal. It isn't offered on yourself, in a group you don't own, or for them in another channel.
+4. Create an invite for a group from its header and from its menu: the title is "Invite people to {group}" with no "To #…" line. Join it from another account.
+5. DMs and Saved Notes offer neither button nor Create invite….

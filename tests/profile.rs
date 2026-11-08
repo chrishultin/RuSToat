@@ -303,6 +303,57 @@ mod menu {
         );
     }
 
+    #[test]
+    fn the_group_owner_can_remove_other_members() {
+        let store = store();
+        assert_eq!(
+            user_menu(&store, "u-bob", Some("grp")),
+            [
+                Profile,
+                Message,
+                CreateGroupWith,
+                Mention,
+                Separator,
+                RemoveFromGroup,
+                Separator,
+                Relationship(RemoveFriend),
+                Relationship(Block),
+                Separator,
+                CopyUsername,
+                CopyUserId
+            ]
+        );
+        assert!(user_menu(&store, ADA, Some("grp")).contains(&RemoveFromGroup));
+        // Not themselves, nor anyone outside the group.
+        assert!(!user_menu(&store, "u-me", Some("grp")).contains(&RemoveFromGroup));
+        assert!(!user_menu(&store, "u-plain", Some("grp")).contains(&RemoveFromGroup));
+        // Only in the group's own menus.
+        for channel in [Some("ch"), Some("dm"), None] {
+            assert!(
+                !user_menu(&store, "u-bob", channel).contains(&RemoveFromGroup),
+                "{channel:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plain_member_of_a_group_removes_nobody() {
+        let mut store = store();
+        store.add_channel(
+            serde_json::from_value(json!({
+                "channel_type": "Group", "_id": "grp-ada", "name": "Ada's", "owner": ADA,
+                "recipients": [ADA, "u-me", "u-bob"]
+            }))
+            .unwrap(),
+        );
+        for user in [ADA, "u-bob", "u-me"] {
+            assert!(
+                !user_menu(&store, user, Some("grp-ada")).contains(&RemoveFromGroup),
+                "{user}"
+            );
+        }
+    }
+
     /// `u-plain`, related to the user by `relationship`.
     fn related(relationship: &str) -> ChatStore {
         let mut store = store();

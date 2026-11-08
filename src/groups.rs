@@ -25,6 +25,13 @@ pub fn new_group_limit(group_size: Option<u32>) -> usize {
     NEW_GROUP_MAX.min(size.saturating_sub(1))
 }
 
+/// How many more people a group with `members` members can take, where
+/// groups hold `group_size`: none once it's full.
+pub fn add_limit(group_size: Option<u32>, members: usize) -> usize {
+    let size = usize::try_from(group_size.unwrap_or(DEFAULT_GROUP_SIZE)).unwrap_or(usize::MAX);
+    size.saturating_sub(members)
+}
+
 /// The user's friends, sorted by name, who can be picked: everyone but
 /// those in `exclude` (a group's members, when adding to it). Stoat only
 /// lets the user put friends in a group.
@@ -93,6 +100,36 @@ pub fn group_error_text(err: &ApiError, name: Option<&str>, fallback: &str) -> S
 /// Why `POST /channels/create` was refused.
 pub fn create_group_error_text(err: &ApiError) -> String {
     group_error_text(err, None, "Couldn't create the group. Try again.")
+}
+
+/// Why `PUT /channels/{id}/recipients/{user}` was refused, naming the
+/// person (`name`) it was for: "Couldn't add {name}: {why}".
+pub fn add_member_error_text(err: &ApiError, name: &str) -> String {
+    let fallback = format!("Couldn't add {name}. Try again.");
+    let why = match err.error_type() {
+        Some(ErrorType::MissingPermission { .. }) => "You can't add people to this group.".into(),
+        _ => group_error_text(err, Some(name), &fallback),
+    };
+    if why == fallback {
+        why
+    } else {
+        format!("Couldn't add {name}: {why}")
+    }
+}
+
+/// Why `DELETE /channels/{id}/recipients/{user}` was refused; `name` is
+/// the person. (`NotInGroup` isn't a refusal: they're already out.)
+pub fn remove_member_error_text(err: &ApiError, name: &str) -> String {
+    match err.error_type() {
+        Some(ErrorType::MissingPermission { .. }) => {
+            "Only the group's owner can remove members.".into()
+        }
+        _ => group_error_text(
+            err,
+            Some(name),
+            &format!("Couldn't remove {name}. Try again."),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -171,6 +208,15 @@ mod tests {
     }
 
     #[test]
+    fn a_group_takes_people_until_its_full() {
+        assert_eq!(add_limit(None, 3), 97);
+        assert_eq!(add_limit(Some(10), 4), 6);
+        assert_eq!(add_limit(Some(10), 10), 0);
+        // Fuller than the instance now allows: still none.
+        assert_eq!(add_limit(Some(10), 12), 0);
+    }
+
+    #[test]
     fn the_limit_is_said_in_words() {
         assert_eq!(limit_text(49), "You can add at most 49 people.");
         assert_eq!(limit_text(1), "You can add at most 1 person.");
@@ -209,6 +255,51 @@ mod tests {
         assert_eq!(
             create_group_error_text(&api_error(ErrorType::InternalError)),
             "Couldn't create the group. Try again."
+        );
+    }
+
+    #[test]
+    fn adding_refusals_name_the_person() {
+        let missing = api_error(ErrorType::MissingPermission {
+            permission: "InviteOthers".into(),
+        });
+        assert_eq!(
+            add_member_error_text(&missing, "ada"),
+            "Couldn't add ada: You can't add people to this group."
+        );
+        assert_eq!(
+            add_member_error_text(&api_error(ErrorType::NotFriends), "ada"),
+            "Couldn't add ada: You can only add your friends to a group."
+        );
+        assert_eq!(
+            add_member_error_text(&api_error(ErrorType::GroupTooLarge { max: 100 }), "ada"),
+            "Couldn't add ada: Groups can have at most 100 members."
+        );
+        let limited = ApiError::RateLimited {
+            retry_after_ms: Some(2000),
+        };
+        assert_eq!(
+            add_member_error_text(&limited, "ada"),
+            "Couldn't add ada: Stoat is limiting changes. Try again in 2 s."
+        );
+        assert_eq!(
+            add_member_error_text(&api_error(ErrorType::NotFound), "ada"),
+            "Couldn't add ada. Try again."
+        );
+    }
+
+    #[test]
+    fn removing_refusals_say_why() {
+        let missing = api_error(ErrorType::MissingPermission {
+            permission: "ManageChannel".into(),
+        });
+        assert_eq!(
+            remove_member_error_text(&missing, "ada"),
+            "Only the group's owner can remove members."
+        );
+        assert_eq!(
+            remove_member_error_text(&api_error(ErrorType::InternalError), "ada"),
+            "Couldn't remove ada. Try again."
         );
     }
 }

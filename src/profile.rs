@@ -162,6 +162,9 @@ pub enum UserMenuItem {
     CreateGroupWith,
     /// Put a mention of them in the message box.
     Mention,
+    /// Take them out of the group the menu was opened in (its owner only,
+    /// after asking).
+    RemoveFromGroup,
     /// Change how the user relates to them (friend requests, blocks).
     Relationship(RelationshipAction),
     Separator,
@@ -229,10 +232,12 @@ fn standing_actions(store: &ChatStore, user: &str) -> Vec<RelationshipAction> {
 
 /// The menu for `user`, as seen from `channel`, in the web client's order:
 /// Profile, Message, Create group with (RuSToat's own, for friends),
-/// Mention; the friend requests; Remove friend and Block or Unblock; then
-/// the copy items. Message follows [`can_message`]; Mention is only for
-/// others, in server channels and groups (where the message box can
-/// mention them). Groups are split by separators.
+/// Mention; Remove from group; the friend requests; Remove friend and
+/// Block or Unblock; then the copy items. Message follows [`can_message`];
+/// Mention is only for others, in server channels and groups (where the
+/// message box can mention them). Remove from group is for the owner of
+/// the group `channel`, on its other members. Groups are split by
+/// separators.
 pub fn user_menu(store: &ChatStore, user: &str, channel: Option<&str>) -> Vec<UserMenuItem> {
     use UserMenuItem::*;
     let me = user == store.me();
@@ -254,6 +259,13 @@ pub fn user_menu(store: &ChatStore, user: &str, channel: Option<&str>) -> Vec<Us
     if mentionable && !me {
         people.push(Mention);
     }
+    let mut membership = Vec::new();
+    if let Some(channel) = channel.filter(|channel| store.is_group_owner(channel))
+        && !me
+        && store.lists_member(channel, user)
+    {
+        membership.push(RemoveFromGroup);
+    }
     let requests = friend_buttons(store, user)
         .into_iter()
         .map(Relationship)
@@ -262,7 +274,13 @@ pub fn user_menu(store: &ChatStore, user: &str, channel: Option<&str>) -> Vec<Us
         .into_iter()
         .map(Relationship)
         .collect();
-    let groups = [people, requests, standing, vec![CopyUsername, CopyUserId]];
+    let groups = [
+        people,
+        membership,
+        requests,
+        standing,
+        vec![CopyUsername, CopyUserId],
+    ];
     let mut items = Vec::new();
     for group in groups.into_iter().filter(|group| !group.is_empty()) {
         if !items.is_empty() {

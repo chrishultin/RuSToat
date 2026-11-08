@@ -7,9 +7,9 @@ use revolt_permissions::{
 use serde_json::{Value, json};
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::permissions::{
-    can_bypass_slowmode, can_change_avatar, can_change_nickname, can_invite, can_manage_channel,
-    can_manage_channels, can_mention_everyone, can_mention_roles, can_pin, can_send_embeds,
-    can_view, channel_permissions, has, server_permissions,
+    can_add_to_group, can_bypass_slowmode, can_change_avatar, can_change_nickname, can_invite,
+    can_manage_channel, can_manage_channels, can_mention_everyone, can_mention_roles, can_pin,
+    can_send_embeds, can_view, channel_permissions, has, server_permissions,
 };
 use stoat_gpui::store::ChatStore;
 
@@ -585,11 +585,39 @@ fn members_can_invite_by_default_unless_a_channel_takes_it_away() {
 }
 
 #[test]
-fn invites_to_dms_and_groups_are_not_offered() {
+fn group_members_can_invite_and_add_people_unless_the_group_takes_it_away() {
     let store = conversations();
+    // Unset: Stoat's defaults include Invite Others.
+    assert!(can_invite(&store, "u-me", "grp"));
+    assert!(can_add_to_group(&store, "u-me", "grp"));
+    assert!(store.can_invite("grp"));
+    assert!(store.can_add_to_group("grp"));
+    // Look-only.
+    assert!(!can_invite(&store, "u-me", "grp-quiet"));
+    assert!(!can_add_to_group(&store, "u-me", "grp-quiet"));
+    // Its owner can do everything, whatever it says.
+    assert!(can_invite(&store, "u-me", "grp-mine"));
+    assert!(can_add_to_group(&store, "u-me", "grp-mine"));
+    // Not in the group.
+    assert!(!can_invite(&store, "u-blocked", "grp"));
+}
+
+#[test]
+fn invites_to_dms_and_saved_notes_are_not_offered() {
+    let store = conversations();
+    // Both have Invite Others among their permissions, but Stoat makes no
+    // invites to them.
     assert!(!can_invite(&store, "u-me", "dm-friend"));
-    assert!(!can_invite(&store, "u-me", "grp-mine"));
     assert!(!can_invite(&store, "u-me", "ch-saved"));
+    assert!(!can_add_to_group(&store, "u-me", "dm-friend"));
+    assert!(!can_add_to_group(&store, "u-me", "ch-saved"));
+    assert!(!can_add_to_group(&store, "u-me", "nope"));
+}
+
+#[test]
+fn server_channels_are_not_groups_to_add_to() {
+    let store = server_store();
+    assert!(!can_add_to_group(&store, "u-owner", "ch-open"));
 }
 
 #[test]

@@ -1,6 +1,6 @@
 //! "Create a new group": a name, and friends picked from a list, and
-//! Stoat makes the group with them in it. The list ([`FriendPicker`]) is
-//! a dialog's part of its own, to serve adding friends to a group too. The
+//! Stoat makes the group with them in it. "Add friends to group": friends
+//! picked from the same list ([`FriendPicker`]), added one by one. The
 //! rules and the error texts are in [`crate::groups`].
 
 use std::rc::Rc;
@@ -13,10 +13,11 @@ use gpui_kit::component::{ActiveTheme, Disableable, Icon, Sizable, WindowExt, h_
 use gpui_kit::*;
 
 use crate::api::StoatClient;
+use crate::api::models::Channel;
 use crate::friends::FriendRow;
 use crate::groups::{
-    create_group_error_text, filter_friends, limit_text, new_group_limit, pickable_friends,
-    toggle_pick,
+    add_limit, add_member_error_text, create_group_error_text, filter_friends, limit_text,
+    new_group_limit, pickable_friends, toggle_pick,
 };
 use crate::runtime::spawn_io;
 use crate::server_edit::valid_name;
@@ -26,6 +27,8 @@ use crate::ui::server_dialogs::{field_label, name_field};
 
 /// Create a new group's width.
 pub const CREATE_GROUP_DIALOG_WIDTH: f32 = 420.;
+/// Add friends to group's width.
+pub const ADD_MEMBERS_DIALOG_WIDTH: f32 = 420.;
 
 /// The height of the picker's list, which scrolls.
 const PICKER_HEIGHT: f32 = 260.;
@@ -103,6 +106,30 @@ impl FriendPicker {
     /// Who's picked, in the order they were.
     pub fn picked(&self) -> &[String] {
         &self.picked
+    }
+
+    /// The search field, to focus when the dialog opens.
+    pub fn search(&self) -> &Entity<InputState> {
+        &self.search
+    }
+
+    /// `user`'s name as the list shows it, if they're in it.
+    pub fn name_of(&self, user: &str) -> Option<&str> {
+        self.friends
+            .iter()
+            .find(|friend| friend.user_id == user)
+            .map(|friend| friend.name.as_str())
+    }
+
+    /// Take `users` out of the list and the picks (they've joined the
+    /// group), leaving room for `limit` people.
+    pub fn exclude(&mut self, users: &[String], limit: usize, cx: &mut Context<Self>) {
+        self.friends
+            .retain(|friend| !users.contains(&friend.user_id));
+        self.picked.retain(|user| !users.contains(user));
+        self.picked.truncate(limit);
+        self.limit = limit;
+        cx.notify();
     }
 
     /// Stop picking (while a request is out), or start again.
@@ -387,6 +414,180 @@ impl Render for CreateGroupDialog {
                             .disabled(self.creating || !valid)
                             .on_click(move |_, window, cx| {
                                 entity.update(cx, |this, cx| this.create(window, cx)).ok();
+                            }),
+                    ),
+            )
+    }
+}
+
+/// The Add friends to group dialog's content, for one account and group.
+pub struct AddMembersDialog {
+    chat: WeakEntity<ChatView>,
+    client: StoatClient,
+    group: String,
+    picker: Entity<FriendPicker>,
+    /// How many more the group can take.
+    limit: usize,
+    adding: bool,
+    error: Option<String>,
+    _picker: Subscription,
+}
+
+impl AddMembersDialog {
+    /// The dialog for adding `chat`'s user's friends to `group`, listing
+    /// those who aren't in it yet.
+    pub fn new(
+        chat: &ChatView,
+        weak: WeakEntity<ChatView>,
+        group: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let members = match chat.store().channel(&group) {
+            Some(Channel::Group { recipients, .. }) => recipients.clone(),
+            _ => Vec::new(),
+        };
+        let limit = add_limit(chat.group_size(), members.len());
+        let picker = cx.new(|cx| FriendPicker::new(chat.store(), &members, &[], limit, window, cx));
+        let picks = cx.subscribe(&picker, |this, _, _: &PicksChanged, cx| {
+            this.error = None;
+            cx.notify();
+        });
+        Self {
+            chat: weak,
+            client: chat.client().clone(),
+            group,
+            picker,
+            limit,
+            adding: false,
+            error: None,
+            _picker: picks,
+        }
+    }
+
+    /// The picker's search field, to focus when the dialog opens.
+    pub fn search(&self, cx: &App) -> Entity<InputState> {
+        self.picker.read(cx).search().clone()
+    }
+
+    /// Add the picked friends, one request each in the order they were
+    /// picked, each shown in the group as Stoat takes them. Someone
+    /// already in it is passed over. The first refusal stops it and says
+    /// whom it was for; those added leave the list, and the rest stay
+    /// picked. Otherwise the dialog closes.
+    fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = self.picker.read(cx).picked().to_vec();
+        if self.adding || picked.is_empty() {
+            return;
+        }
+        let users: Vec<(String, String)> = {
+            let picker = self.picker.read(cx);
+            picked
+                .into_iter()
+                .map(|user| {
+                    let name = picker.name_of(&user).unwrap_or(&user).to_string();
+                    (user, name)
+                })
+                .collect()
+        };
+        self.adding = true;
+        self.error = None;
+        self.picker
+            .update(cx, |picker, cx| picker.set_disabled(true, cx));
+        cx.notify();
+        let (client, group, chat) = (self.client.clone(), self.group.clone(), self.chat.clone());
+        cx.spawn_in(window, async move |this, cx| {
+            let mut added = Vec::new();
+            let mut error = None;
+            for (user, name) in users {
+                let result = spawn_io({
+                    let (client, group, user) = (client.clone(), group.clone(), user.clone());
+                    async move { client.add_group_member(&group, &user).await }
+                })
+                .await;
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err))
+                        if matches!(
+                            err.error_type(),
+                            Some(revolt_result::ErrorType::AlreadyInGroup)
+                        ) => {}
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't add {user} to group {group}: {err:?}");
+                        error = Some(add_member_error_text(&err, &name));
+                        break;
+                    }
+                    Err(err) => {
+                        log::warn!("add group member task failed: {err:?}");
+                        error = Some(format!("Couldn't add {name}. Try again."));
+                        break;
+                    }
+                }
+                // In the member list at once; `ChannelGroupJoin` repeats it.
+                // This carries on if the dialog is closed meanwhile.
+                cx.update(|_, cx| {
+                    if let Some(chat) = chat.upgrade() {
+                        chat.update(cx, |chat, cx| {
+                            chat.group_member_added(&group, user.clone(), cx)
+                        });
+                    }
+                })
+                .ok();
+                added.push(user);
+            }
+            this.update_in(cx, |this, window, cx| {
+                this.adding = false;
+                this.limit = this.limit.saturating_sub(added.len());
+                let limit = this.limit;
+                this.picker.update(cx, |picker, cx| {
+                    picker.exclude(&added, limit, cx);
+                    picker.set_disabled(false, cx);
+                });
+                match error {
+                    None => window.close_dialog(cx),
+                    Some(error) => this.error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
+impl Render for AddMembersDialog {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let none = self.picker.read(cx).picked().is_empty();
+        let danger = cx.theme().danger;
+        let entity = cx.entity().downgrade();
+
+        v_flex()
+            .gap_3()
+            .child(self.picker.clone())
+            .children(
+                self.error
+                    .clone()
+                    .map(|error| div().text_sm().text_color(danger).child(error)),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .justify_end()
+                    .child(
+                        Button::new("cancel-add-members")
+                            .outline()
+                            .label("Close")
+                            .disabled(self.adding)
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("add-members-submit")
+                            .primary()
+                            .label("Add")
+                            .loading(self.adding)
+                            .disabled(self.adding || none)
+                            .on_click(move |_, window, cx| {
+                                entity.update(cx, |this, cx| this.add(window, cx)).ok();
                             }),
                     ),
             )

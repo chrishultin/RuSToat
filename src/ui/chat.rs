@@ -72,7 +72,9 @@ use crate::ui::composer::{Composer, ComposerEvent, file_icon};
 use crate::ui::emoji_picker::emoji_grid;
 use crate::ui::friends::{RowButtons, render_add_friend, render_friends_page};
 use crate::ui::gif_picker::GifCache;
-use crate::ui::group_dialogs::{CREATE_GROUP_DIALOG_WIDTH, CreateGroupDialog};
+use crate::ui::group_dialogs::{
+    ADD_MEMBERS_DIALOG_WIDTH, AddMembersDialog, CREATE_GROUP_DIALOG_WIDTH, CreateGroupDialog,
+};
 use crate::ui::identity_dialog::{IDENTITY_DIALOG_WIDTH, IdentityEditor};
 use crate::ui::invites::{CREATE_DIALOG_WIDTH, CreateInviteDialog, JOIN_DIALOG_WIDTH, JoinDialog};
 use crate::ui::markup::{
@@ -291,6 +293,9 @@ pub struct ChatView {
     /// The channel whose "Delete {name}?" confirmation is waiting for Stoat
     /// to answer: its buttons are disabled until then.
     deleting_channel: Option<String>,
+    /// The group and member whose "Remove {name}?" confirmation is waiting
+    /// for Stoat to answer, likewise.
+    removing_member: Option<(String, String)>,
     /// The category whose "Delete {TITLE}?" confirmation is waiting for
     /// Stoat to answer, likewise.
     deleting_category: Option<String>,
@@ -745,6 +750,7 @@ impl ChatView {
             safety,
             link_prompt: None,
             deleting_channel: None,
+            removing_member: None,
             deleting_category: None,
             leave_prompt: None,
             age_gate_tick: None,
@@ -1025,15 +1031,9 @@ impl ChatView {
             }
             ConnectionEvent::Event(ServerEvent::ChannelGroupJoin { channel, user }) => {
                 log::debug!("live: {user} added to group {channel}");
-                if !self.store.add_recipient(&channel, &user) {
+                if !self.group_member_added(&channel, user, cx) {
                     return;
                 }
-                // Members already in the group get no user object for them.
-                if !self.store.knows_user(&user) {
-                    self.fetch_user(user, cx);
-                }
-                self.refresh_suggestions(cx);
-                self.forget_member_lists();
             }
             ConnectionEvent::Event(ServerEvent::ChannelGroupLeave { channel, user }) => {
                 log::debug!("live: {user} left group {channel}");
@@ -1041,11 +1041,9 @@ impl ChatView {
                     // Removed, or left on another device: Stoat sends no
                     // `ChannelDelete` for it.
                     self.channel_deleted(&channel, cx);
-                } else if !self.store.remove_recipient(&channel, &user) {
+                } else if !self.group_member_removed(&channel, &user, cx) {
                     return;
                 }
-                self.refresh_suggestions(cx);
-                self.forget_member_lists();
             }
             ConnectionEvent::Event(ServerEvent::ChannelStartTyping { channel, user }) => {
                 self.typing.start(&channel, &user, std::time::Instant::now());
@@ -1366,6 +1364,40 @@ impl ChatView {
             .ok();
         })
         .detach();
+    }
+
+    /// `user` is now in the group `channel` (its `ChannelGroupJoin`, or the
+    /// user added them). Whether they're new to it.
+    pub fn group_member_added(
+        &mut self,
+        channel: &str,
+        user: String,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.store.add_recipient(channel, &user) {
+            return false;
+        }
+        // Members already in the group get no user object for them.
+        if !self.store.knows_user(&user) {
+            self.fetch_user(user, cx);
+        }
+        self.refresh_suggestions(cx);
+        self.forget_member_lists();
+        cx.notify();
+        true
+    }
+
+    /// `user` (not the user) is out of the group `channel` (its
+    /// `ChannelGroupLeave`, or the user removed them). Whether they were
+    /// in it.
+    fn group_member_removed(&mut self, channel: &str, user: &str, cx: &mut Context<Self>) -> bool {
+        if !self.store.remove_recipient(channel, user) {
+            return false;
+        }
+        self.refresh_suggestions(cx);
+        self.forget_member_lists();
+        cx.notify();
+        true
     }
 
     /// After a (re)connect or a permission change, forget selections that
@@ -3474,9 +3506,9 @@ impl ChatView {
     /// A channel's, DM's or group's right-click menu: Mute Channel (for how
     /// long), or Unmute Channel and until when it's muted; its
     /// Notifications level, led by its default (the server's level, or
-    /// All for DMs and groups); Create invite…, Create channel… (in this
-    /// channel's category), Create category… and Delete channel… where
-    /// allowed; Copy channel ID. A channel in a muted server still offers
+    /// All for DMs and groups); Create invite… (server channels and
+    /// groups), Create channel… (in this channel's category), Create
+    /// category… and Delete channel… where allowed; Copy channel ID. A channel in a muted server still offers
     /// Mute Channel: the server's mute is what silences it.
     fn channel_menu(&self, channel: &ChannelEntry, cx: &Context<Self>) -> MenuBuilder {
         let view = cx.entity().downgrade();
@@ -3487,7 +3519,7 @@ impl ChatView {
                 return menu;
             };
             let store = &this.read(cx).store;
-            let invitable = in_server && store.can_invite(&channel_id);
+            let invitable = store.can_invite(&channel_id);
             let deletable = in_server && store.can_manage_channel(&channel_id);
             // Creating takes Manage Channels across the server, not on this
             // channel.
@@ -4519,6 +4551,12 @@ impl ChatView {
                 self.close_card(false, window, cx);
                 self.open_create_group(Some(user), window, cx);
             }
+            UserMenuItem::RemoveFromGroup => {
+                if let Some(channel) = channel {
+                    self.close_card(false, window, cx);
+                    self.confirm_remove_member(channel, user, window, cx);
+                }
+            }
             UserMenuItem::Mention => {
                 let Some(channel) = channel else {
                     return;
@@ -4899,22 +4937,26 @@ impl ChatView {
         self.group_size
     }
 
-    /// "Invite people to {server}": create an invite to `channel` and copy
-    /// its link.
+    /// "Invite people to {server}" (or "{group}"): create an invite to
+    /// `channel`, a server channel or a group, and copy its link.
     pub fn open_create_invite(
         &mut self,
         channel: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(server) = self
-            .store
-            .channel_server(&channel)
-            .and_then(|server| self.store.server(server))
-        else {
-            return;
+        let place = match self.store.channel(&channel) {
+            Some(Channel::Group { name, .. }) => name.clone(),
+            _ => match self
+                .store
+                .channel_server(&channel)
+                .and_then(|server| self.store.server(server))
+            {
+                Some(server) => server.name.clone(),
+                None => return,
+            },
         };
-        let title = SharedString::from(format!("Invite people to {}", server.name));
+        let title = SharedString::from(format!("Invite people to {place}"));
         let max_days = self.invite_max_days;
         let dialog = cx.new(|_| CreateInviteDialog::new(self, channel, max_days));
         window.open_dialog(cx, move |modal, _, _| {
@@ -5098,6 +5140,161 @@ impl ChatView {
         log::debug!("created group {id}");
         self.store.add_channel(channel);
         self.open_channel(&id, cx);
+    }
+
+    /// "Add friends to group": pick friends who aren't in the group
+    /// `channel` yet, and add them one by one.
+    fn open_add_members(&mut self, channel: String, window: &mut Window, cx: &mut Context<Self>) {
+        let weak = cx.entity().downgrade();
+        let dialog = cx.new(|cx| AddMembersDialog::new(self, weak, channel, window, cx));
+        let first_build = std::cell::Cell::new(true);
+        window.open_dialog(cx, move |modal, window, cx| {
+            if first_build.replace(false) {
+                let search = dialog.read(cx).search(cx).read(cx).focus_handle(cx);
+                window.focus(&search, cx);
+            }
+            modal
+                .title("Add friends to group")
+                .w(px(ADD_MEMBERS_DIALOG_WIDTH))
+                .child(dialog.clone())
+        });
+    }
+
+    /// Ask before taking `user` out of the group `channel`: "Remove
+    /// {name}?". Once Remove is chosen, the buttons wait, disabled, for
+    /// Stoat's answer.
+    fn confirm_remove_member(
+        &mut self,
+        channel: String,
+        user: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(Channel::Group { name: group, .. }) = self.store.channel(&channel) else {
+            return;
+        };
+        let name = self
+            .store
+            .user(&user)
+            .map(|person| display_name(person).to_string())
+            .unwrap_or_else(|| "them".into());
+        let title: SharedString = format!("Remove {name}?").into();
+        let description: SharedString =
+            format!("Are you sure you want to remove {name} from {group}?").into();
+        let view = cx.entity().downgrade();
+        let pending = (channel, user);
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let busy = view
+                .upgrade()
+                .is_some_and(|view| view.read(cx).removing_member.as_ref() == Some(&pending));
+            let remove = {
+                let (view, (channel, user)) = (view.clone(), pending.clone());
+                move |window: &mut Window, cx: &mut App| {
+                    view.update(cx, |this, cx| {
+                        this.remove_member(channel.clone(), user.clone(), window, cx)
+                    })
+                    .ok();
+                }
+            };
+            alert
+                .title(title.clone())
+                .description(description.clone())
+                .keyboard(!busy)
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("remove-member-cancel")
+                                .label("Cancel")
+                                .disabled(busy)
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("remove-member-ok")
+                                .with_variant(ButtonVariant::Danger)
+                                .label("Remove")
+                                .loading(busy)
+                                .disabled(busy)
+                                .on_click({
+                                    let remove = remove.clone();
+                                    move |_, window, cx| remove(window, cx)
+                                }),
+                        ),
+                )
+                .on_ok(move |_, window, cx| {
+                    if !busy {
+                        remove(window, cx);
+                    }
+                    false
+                })
+        });
+    }
+
+    /// Take `user` out of the group `channel` (the confirmation's Remove).
+    /// On Stoat's answer they go here at once (`ChannelGroupLeave` repeats
+    /// it) and the confirmation closes; `NotInGroup` means they're already
+    /// out. Otherwise the confirmation stays and a toast says why.
+    fn remove_member(
+        &mut self,
+        channel: String,
+        user: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.removing_member.is_some() {
+            return;
+        }
+        self.removing_member = Some((channel.clone(), user.clone()));
+        window.refresh();
+        let request = spawn_io({
+            let (client, channel, user) = (self.client.clone(), channel.clone(), user.clone());
+            async move { client.remove_group_member(&channel, &user).await }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.removing_member = None;
+                let name = this
+                    .store
+                    .user(&user)
+                    .map(|person| display_name(person).to_string())
+                    .unwrap_or_else(|| "them".into());
+                let error = match result {
+                    Ok(Ok(())) => None,
+                    // Already out (removed elsewhere, or left): what we
+                    // wanted.
+                    Ok(Err(err))
+                        if matches!(
+                            err.error_type(),
+                            Some(revolt_result::ErrorType::NotInGroup)
+                        ) =>
+                    {
+                        None
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't remove {user} from {channel}: {err:?}");
+                        Some(crate::groups::remove_member_error_text(&err, &name))
+                    }
+                    Err(err) => {
+                        log::warn!("remove member task failed: {err:?}");
+                        Some(format!("Couldn't remove {name}. Try again."))
+                    }
+                };
+                match error {
+                    None => {
+                        log::debug!("removed {user} from group {channel}");
+                        this.group_member_removed(&channel, &user, cx);
+                        window.close_dialog(cx);
+                    }
+                    Some(error) => window.push_notification(Notification::error(error), cx),
+                }
+                window.refresh();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// "Create channel" in `server`, put in `category` when it's asked for
@@ -7030,17 +7227,41 @@ impl ChatView {
             // Right side: search in every channel, but DMs and Saved Notes
             // have no member list to toggle.
             .when(usable, |el| el.child(search_box))
-            // Invites, in server channels where the user may make them.
+            // Adding friends, in groups where the user may.
+            .when_some(
+                channel
+                    .as_ref()
+                    .filter(|c| usable && self.store.can_add_to_group(&c.id))
+                    .map(|c| c.id.clone()),
+                |el, id| {
+                    el.child(
+                        Button::new("add-to-group")
+                            .ghost()
+                            .icon(IconName::UserPlus)
+                            .tooltip("Add friends to group")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_add_members(id.clone(), window, cx)
+                            })),
+                    )
+                },
+            )
+            // Invites, in server channels and groups where the user may
+            // make them. A group's is a link, as its Add friends is the
+            // person with a plus.
             .when_some(
                 channel
                     .as_ref()
                     .filter(|c| usable && self.store.can_invite(&c.id))
-                    .map(|c| c.id.clone()),
-                |el, id| {
+                    .map(|c| (c.id.clone(), c.kind == ChannelKind::Group)),
+                |el, (id, group)| {
                     el.child(
                         Button::new("create-invite")
                             .ghost()
-                            .icon(IconName::UserPlus)
+                            .icon(if group {
+                                IconName::Link
+                            } else {
+                                IconName::UserPlus
+                            })
                             .tooltip("Create invite")
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.open_create_invite(id.clone(), window, cx)
@@ -8745,6 +8966,7 @@ fn user_menu_label(item: UserMenuItem) -> Option<(&'static str, IconName)> {
         UserMenuItem::Message => ("Message", IconName::MessageCircle),
         UserMenuItem::CreateGroupWith => ("Create group with…", IconName::Users),
         UserMenuItem::Mention => ("Mention", IconName::AtSign),
+        UserMenuItem::RemoveFromGroup => ("Remove from group…", IconName::UserMinus),
         UserMenuItem::CopyUsername => ("Copy username", IconName::Copy),
         UserMenuItem::CopyUserId => ("Copy user ID", IconName::IdCard),
         UserMenuItem::Relationship(action) => relationship_label(action),

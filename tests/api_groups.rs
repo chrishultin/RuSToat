@@ -1,11 +1,12 @@
 //! Groups against a mock Stoat API: `POST /channels/create` (create a
-//! group).
+//! group), and `PUT` and `DELETE /channels/{id}/recipients/{user}` (add
+//! and remove a member).
 
 use revolt_result::ErrorType;
 use serde_json::json;
 use stoat_gpui::api::models::Channel;
 use stoat_gpui::api::{ApiError, StoatClient};
-use wiremock::matchers::{body_json, header, method, path};
+use wiremock::matchers::{body_json, body_string, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn client(server: &MockServer) -> StoatClient {
@@ -97,6 +98,79 @@ async fn too_large_a_group_is_an_api_error() {
     let err = client(&server).create_group("Trip", &[]).await.unwrap_err();
     assert!(
         matches!(err.error_type(), Some(ErrorType::GroupTooLarge { max: 50 })),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn adding_a_member_sends_no_body() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/channels/g1/recipients/u1"))
+        .and(header("x-session-token", "tok"))
+        .and(body_string(""))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client(&server).add_group_member("g1", "u1").await.unwrap();
+}
+
+#[tokio::test]
+async fn removing_a_member_sends_no_body() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/channels/g1/recipients/u1"))
+        .and(header("x-session-token", "tok"))
+        .and(body_string(""))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client(&server)
+        .remove_group_member("g1", "u1")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn adding_someone_already_in_the_group_is_an_api_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/channels/g1/recipients/u1"))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({ "type": "AlreadyInGroup" })))
+        .mount(&server)
+        .await;
+
+    let err = client(&server)
+        .add_group_member("g1", "u1")
+        .await
+        .unwrap_err();
+    assert!(matches!(&err, ApiError::Api(_)), "{err:?}");
+    assert!(
+        matches!(err.error_type(), Some(ErrorType::AlreadyInGroup)),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn adding_a_stranger_is_an_api_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/channels/g1/recipients/u-stranger"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({ "type": "NotFriends" })))
+        .mount(&server)
+        .await;
+
+    let err = client(&server)
+        .add_group_member("g1", "u-stranger")
+        .await
+        .unwrap_err();
+    assert!(matches!(&err, ApiError::Api(_)), "{err:?}");
+    assert!(
+        matches!(err.error_type(), Some(ErrorType::NotFriends)),
         "{err:?}"
     );
 }
