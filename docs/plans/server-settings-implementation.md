@@ -70,3 +70,50 @@ _Started: 2026-11-09_
 
 ### Manual Validation
 Deferred to the end (rename, clear the description, switch servers, and a member without permissions).
+
+## Chunk 2: Icon and banner
+
+### Changes Made
+- `src/api/client.rs`:
+  - `FileSizeLimits` gains `icons` and `banners`;
+  - `DEFAULT_ICON_SIZE_LIMIT` (2.5 MB) and `DEFAULT_BANNER_SIZE_LIMIT` (6 MB);
+  - `RootConfig::icon_size_limit()` / `banner_size_limit()` take the stricter of the two account limits, else the default.
+- `src/api/mod.rs`: re-exports the two defaults (hand-edited).
+- `src/profile_edit.rs`: `ImageLimits` gains `server_icon` and `server_banner`, set by `Default` and `from_root`.
+- `src/ui/profile_editor.rs`:
+  - `upload_image(client, file_server, tag, path)` and `Preview::of(image, tag, media, fallback)` take the file server's tag instead of an `ImageKind`. Profile callers pass `ImageKind::…tag()`.
+  - `banner_preview(id, preview, cx)` is `pub(crate)` and takes its element ID. It was already a 232:100 strip.
+- `src/ui/identity_dialog.rs`: its two calls pass `ImageKind::Avatar.tag()`.
+- `src/server_settings.rs`:
+  - `ServerImage { Icon, Banner }` with `tag()` (`icons` / `banners`) and `limit(ImageLimits)`;
+  - `OverviewForm` gains `icon` and `banner: ProfileImage`, filled by `of`;
+  - `new_files()` and `has_changes(&Server)`;
+  - `changes` sends a new uploaded ID as `icon` / `banner` (no remove), a removed image as `remove: [Icon/Banner]`, and leaves out a picked file until it's uploaded.
+- `src/ui/server_settings.rs`, `OverviewPage`:
+  - `icon` / `banner: ImageSlot` rows above the name, using milestone 15's `render_image_row`, `avatar_preview` (round) and `banner_preview`;
+  - Change… goes through `prompt_for_image` with the server limits;
+  - live-follow and Reset cover the images;
+  - Save uploads new files first ("Uploading…"), then computes `changes` against the server as it is then, and sends one `PATCH`;
+  - a failed upload or `PATCH` toasts and keeps the form (`save_failed`).
+- Tests:
+  - `tests/server_settings.rs`, 6 new: the images from the server; a new icon sends its ID without a remove; removed images go in `remove`; unchanged images are left out; a picked image waits for its upload; tags and limits.
+  - `tests/api_upload.rs`: `root_config_gives_the_server_icon_and_banner_limits` (`icons` 2.5 MB from `root.json`, `banners` defaulting to 6 MB, the stricter account limit, and the defaults with no limits). `a_server_icon_is_uploaded_then_saved_by_its_id` uploads to `/icons`, then sends `PATCH /servers/srv` `{"icon":"f-icon"}`. The existing limits test gains the two new fields.
+  - `tests/api_servers.rs`: the chunk 1 edit test builds its form with `..OverviewForm::of(..)`.
+
+### Divergences
+- **`ImageKind` wasn't widened.** A parallel `ServerImage` lives in `src/server_settings.rs`, as the plan allowed. Widening would have put meaningless server arms in three of the profile editor's matches. Instead, `upload_image` and `Preview::of` now take a tag. Profile banners still go to `backgrounds`; `avatars_and_banners_go_to_their_own_tags` still passes.
+- **The limits tests are in `tests/api_upload.rs`**, where the avatar and banner limits already were. The plan said `tests/api_instance.rs`.
+- **`tests/api_upload.rs` started with 10 rustfmt hunks**, not 0 as the plan's formatting note implied for unlisted files. I formatted it whole by mistake, then restored it from HEAD and reapplied only this chunk's changes. Its new code is hand-formatted, and the count stays at 10.
+- No look-ahead changes. Chunk 3 adds system messages to the same `OverviewForm` and `changes`.
+
+### Verification Performed
+- `cargo test --test server_settings --test api_upload`: 15 + 14 passed.
+- `cargo test`: 1145 passed, 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt:
+  - drift unchanged: `src/api/client.rs` 3, `tests/api_upload.rs` 10;
+  - clean files still clean: `src/profile_edit.rs`, `src/ui/profile_editor.rs`, `src/ui/identity_dialog.rs`, `tests/api_servers.rs`;
+  - new files clean: `src/server_settings.rs`, `src/ui/server_settings.rs`, `tests/server_settings.rs`.
+
+### Manual Validation
+Deferred to the end (PNG and animated GIF icons, a banner, removing both, and a 3 MB icon refused).

@@ -1,15 +1,18 @@
 //! A server's settings: who may see which page of the Server Settings
-//! window, what its Overview form sends, and why Stoat refused, in words.
+//! window, what its Overview form sends (name, description, icon and
+//! banner), and why Stoat refused, in words.
 //! Plain data with no GPUI, so it's unit-testable. The window is
 //! [`crate::ui::server_settings`].
+
+use std::path::Path;
 
 use revolt_permissions::ChannelPermission;
 use revolt_result::ErrorType;
 
 use crate::api::ApiError;
-use crate::api::models::{DataEditServer, FieldsServer, Server};
+use crate::api::models::{DataEditServer, FieldsServer, File, Server};
 use crate::permissions::{has, server_permissions};
-use crate::profile_edit::error_text;
+use crate::profile_edit::{ImageLimits, ProfileImage, error_text};
 use crate::server_edit::valid_name;
 use crate::store::ChatStore;
 
@@ -59,20 +62,54 @@ pub fn access(store: &ChatStore, server: &str) -> Access {
     }
 }
 
-/// The Overview form's text fields, as typed. A missing description is the
+/// Which of a server's images a row edits: where it's uploaded, and its
+/// size limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerImage {
+    Icon,
+    Banner,
+}
+
+impl ServerImage {
+    /// The file server's tag.
+    pub fn tag(self) -> &'static str {
+        match self {
+            ServerImage::Icon => "icons",
+            ServerImage::Banner => "banners",
+        }
+    }
+
+    pub fn limit(self, limits: ImageLimits) -> u64 {
+        match self {
+            ServerImage::Icon => limits.server_icon,
+            ServerImage::Banner => limits.server_banner,
+        }
+    }
+}
+
+/// The Overview form, as typed and picked. A missing description is the
 /// empty string.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OverviewForm {
     pub name: String,
     pub description: String,
+    pub icon: ProfileImage,
+    pub banner: ProfileImage,
 }
 
 impl OverviewForm {
     /// The form filled with `server`'s values.
     pub fn of(server: &Server) -> Self {
+        let image = |file: &Option<File>| {
+            file.as_ref().map_or(ProfileImage::None, |file| {
+                ProfileImage::Current(file.id.clone())
+            })
+        };
         Self {
             name: server.name.clone(),
             description: server.description.clone().unwrap_or_default(),
+            icon: image(&server.icon),
+            banner: image(&server.banner),
         }
     }
 
@@ -83,9 +120,29 @@ impl OverviewForm {
             && self.description.trim().chars().count() <= DESCRIPTION_MAX
     }
 
+    /// The files picked to upload before saving.
+    pub fn new_files(&self) -> Vec<(ServerImage, &Path)> {
+        [
+            (ServerImage::Icon, self.icon.new_file()),
+            (ServerImage::Banner, self.banner.new_file()),
+        ]
+        .into_iter()
+        .filter_map(|(kind, path)| Some((kind, path?)))
+        .collect()
+    }
+
+    /// Whether Save has anything to do: a change to send, or a file to
+    /// upload first.
+    pub fn has_changes(&self, server: &Server) -> bool {
+        !self.new_files().is_empty() || self.changes(server).is_some()
+    }
+
     /// The `PATCH /servers/{id}` that turns `server` into this form: only
-    /// what changed, trimmed, with a blank description removed. `None` when
-    /// nothing changed, or the form isn't valid.
+    /// what changed, trimmed, with a blank description or a removed image
+    /// in `remove`. A picked image is left out until it's uploaded (and
+    /// then it's [`ProfileImage::Current`] with its new ID, which replaces
+    /// the old one without a remove). `None` when nothing changed, or the
+    /// form isn't valid.
     pub fn changes(&self, server: &Server) -> Option<DataEditServer> {
         if !self.is_valid() {
             return None;
@@ -104,7 +161,29 @@ impl OverviewForm {
                 edit.description = Some(description.to_string());
             }
         }
+        let stored = Self::of(server);
+        match image_change(&stored.icon, &self.icon) {
+            Some(Some(id)) => edit.icon = Some(id),
+            Some(None) => edit.remove.push(FieldsServer::Icon),
+            None => {}
+        }
+        match image_change(&stored.banner, &self.banner) {
+            Some(Some(id)) => edit.banner = Some(id),
+            Some(None) => edit.remove.push(FieldsServer::Banner),
+            None => {}
+        }
         (edit != empty_server_edit()).then_some(edit)
+    }
+}
+
+/// How an image changed from `stored`: `None` if it didn't (or it's
+/// picked and not uploaded yet), `Some(None)` if it was removed,
+/// `Some(Some(id))` for a new one.
+fn image_change(stored: &ProfileImage, edited: &ProfileImage) -> Option<Option<String>> {
+    match edited {
+        ProfileImage::New(_) => None,
+        ProfileImage::Current(id) => (stored != edited).then(|| Some(id.clone())),
+        ProfileImage::None => (*stored != ProfileImage::None).then_some(None),
     }
 }
 

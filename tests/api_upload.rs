@@ -297,7 +297,9 @@ fn root_config_gives_the_avatar_and_banner_limits() {
         ImageLimits::from_root(&root),
         ImageLimits {
             avatar: 4_000_000,
-            background: 6_000_000
+            background: 6_000_000,
+            server_icon: 2_500_000,
+            server_banner: 6_000_000,
         }
     );
 
@@ -317,4 +319,103 @@ fn root_config_gives_the_avatar_and_banner_limits() {
     let root: RootConfig = serde_json::from_value(value).unwrap();
     assert_eq!(ImageLimits::from_root(&root), ImageLimits::default());
     assert_eq!(ImageLimits::default().avatar, 4_000_000);
+}
+
+#[test]
+fn root_config_gives_the_server_icon_and_banner_limits() {
+    use stoat_gpui::profile_edit::ImageLimits;
+    // The fixture has `icons` but no `banners`: a 6 MB default.
+    let root: RootConfig = serde_json::from_value(fixture("root.json")).unwrap();
+    assert_eq!(root.icon_size_limit(), 2_500_000);
+    assert_eq!(root.banner_size_limit(), 6_000_000);
+
+    // The stricter of the two account limits, `banners` too if it's sent.
+    let mut value = fixture("root.json");
+    let limits = &mut value["features"]["limits"];
+    limits["new_user"]["file_upload_size_limits"]["icons"] = json!(1_000_000);
+    limits["default"]["file_upload_size_limits"]["banners"] = json!(8_000_000);
+    let root: RootConfig = serde_json::from_value(value).unwrap();
+    assert_eq!(root.icon_size_limit(), 1_000_000);
+    assert_eq!(root.banner_size_limit(), 8_000_000);
+
+    // Without limits at all, both defaults.
+    let mut value = fixture("root.json");
+    value["features"].as_object_mut().unwrap().remove("limits");
+    let root: RootConfig = serde_json::from_value(value).unwrap();
+    let defaults = ImageLimits::default();
+    assert_eq!(root.icon_size_limit(), defaults.server_icon);
+    assert_eq!(root.banner_size_limit(), defaults.server_banner);
+    assert_eq!(
+        (defaults.server_icon, defaults.server_banner),
+        (2_500_000, 6_000_000)
+    );
+}
+
+#[tokio::test]
+async fn a_server_icon_is_uploaded_then_saved_by_its_id() {
+    use stoat_gpui::api::models::Server;
+    use stoat_gpui::profile_edit::ProfileImage;
+    use stoat_gpui::server_settings::{OverviewForm, ServerImage};
+
+    let autumn = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/icons"))
+        .and(header("x-session-token", "tok"))
+        .and(header_regex(
+            "content-type",
+            "^multipart/form-data; boundary=",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "f-icon" })))
+        .expect(1)
+        .mount(&autumn)
+        .await;
+    let api = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/servers/srv"))
+        .and(body_json(json!({ "icon": "f-icon" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "_id": "srv", "owner": "u-me", "name": "Lounge", "channels": [],
+            "default_permissions": 0, "approximate_member_count": 1,
+            "icon": { "_id": "f-icon", "tag": "icons", "filename": "icon.png",
+                      "metadata": { "type": "Image", "width": 64, "height": 64 },
+                      "content_type": "image/png", "size": 6 }
+        })))
+        .expect(1)
+        .mount(&api)
+        .await;
+
+    let server: Server = serde_json::from_value(json!({
+        "_id": "srv", "owner": "u-me", "name": "Lounge", "channels": [],
+        "default_permissions": 0, "approximate_member_count": 1
+    }))
+    .unwrap();
+    let (_dir, file) = temp_file("icon.png", b"\x89PNG\r\n");
+    let mut form = OverviewForm::of(&server);
+    form.icon = ProfileImage::New(file.clone());
+    // Picked but not uploaded: there's something to save, but nothing to
+    // send yet.
+    assert!(form.has_changes(&server));
+    assert_eq!(form.changes(&server), None);
+
+    let client = client(&api.uri());
+    let [(kind, path)] = form.new_files()[..] else {
+        panic!("one file to upload");
+    };
+    assert_eq!(kind, ServerImage::Icon);
+    let id = client
+        .upload_file(
+            &autumn.uri(),
+            kind.tag(),
+            "icon.png",
+            "image/png",
+            path,
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+    form.icon = ProfileImage::Current(id);
+    let edit = form.changes(&server).unwrap();
+    assert!(edit.remove.is_empty());
+    let saved = client.edit_server("srv", &edit).await.unwrap();
+    assert_eq!(saved.icon.map(|icon| icon.id).as_deref(), Some("f-icon"));
 }

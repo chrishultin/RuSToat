@@ -317,7 +317,12 @@ async fn editing_a_server_sends_only_what_changed() {
     .unwrap();
     let form = OverviewForm {
         name: "Lounge".into(),
+        ..OverviewForm::of(&before)
+    };
+    assert_eq!(form.description, "About us");
+    let form = OverviewForm {
         description: String::new(),
+        ..form
     };
     let edit = form.changes(&before).unwrap();
     let saved = client(&server).edit_server("srv", &edit).await.unwrap();

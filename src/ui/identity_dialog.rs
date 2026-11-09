@@ -208,7 +208,7 @@ impl IdentityEditor {
                 let uploaded = spawn_io(upload_image(
                     client.clone(),
                     file_server,
-                    ImageKind::Avatar,
+                    ImageKind::Avatar.tag(),
                     path,
                 ));
                 match uploaded.await {
@@ -288,7 +288,12 @@ impl Render for IdentityEditor {
             let global = Preview::Url(store.user_avatar_url(&self.me));
             let preview = avatar_preview(
                 "identity-avatar-preview",
-                Preview::of(&self.avatar.image, ImageKind::Avatar, store.media(), global),
+                Preview::of(
+                    &self.avatar.image,
+                    ImageKind::Avatar.tag(),
+                    store.media(),
+                    global,
+                ),
                 name,
                 cx,
             );

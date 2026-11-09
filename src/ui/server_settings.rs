@@ -11,6 +11,8 @@
 //! the server leaves the store (deleted, left, kicked or banned), when the
 //! user may see no page of it any more, or when the account signs out.
 
+use std::path::PathBuf;
+
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
@@ -19,14 +21,19 @@ use gpui_kit::component::setting::{SelectIndex, SettingGroup, SettingItem, Setti
 use gpui_kit::component::{ActiveTheme, Disableable, Sizable, WindowExt, h_flex, v_flex};
 use gpui_kit::*;
 
+use crate::api::ApiError;
 use crate::api::models::Server;
+use crate::profile_edit::{ImageLimits, ProfileImage};
 use crate::runtime::spawn_io;
 use crate::server_settings::{
-    Access, DESCRIPTION_MAX, NAME_MAX, OverviewForm, access, save_error_text,
+    Access, DESCRIPTION_MAX, NAME_MAX, OverviewForm, ServerImage, access, save_error_text,
 };
 use crate::themes;
 use crate::ui::chat::ChatView;
-use crate::ui::profile_editor::field;
+use crate::ui::profile_editor::{
+    ImageSlot, Preview, avatar_preview, banner_preview, field, prompt_for_image, render_image_row,
+    upload_image,
+};
 
 /// Rows the description field grows between before it scrolls.
 const DESCRIPTION_ROWS: (usize, usize) = (3, 10);
@@ -233,7 +240,7 @@ impl Render for ServerSettingsView {
     }
 }
 
-/// Overview: the server's name and description.
+/// Overview: the server's icon, banner, name and description.
 fn overview_page(view: &ServerSettingsView, cx: &mut App) -> Option<SettingPage> {
     if !view.access(cx).overview {
         return None;
@@ -248,23 +255,35 @@ fn overview_page(view: &ServerSettingsView, cx: &mut App) -> Option<SettingPage>
                     "overview",
                     "name",
                     "description",
+                    "icon",
+                    "banner",
                 ]),
             )),
     )
 }
 
-/// The Overview form: the server's name and description, saved together
-/// with one `PATCH /servers/{id}` (see [`OverviewForm::changes`]).
+/// What a Save is doing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Saving {
+    Uploading,
+    Sending,
+}
+
+/// The Overview form: the server's icon, banner, name and description,
+/// saved together with one `PATCH /servers/{id}` (see
+/// [`OverviewForm::changes`]). New images are uploaded first, unchanged.
 pub struct OverviewPage {
     chat: WeakEntity<ChatView>,
     server: String,
     name: Entity<InputState>,
     description: Entity<TextareaState>,
+    icon: ImageSlot,
+    banner: ImageSlot,
     /// The server's values the fields were last filled with. A field still
     /// showing its value is untouched, and follows changes made elsewhere;
     /// once it's edited, it keeps the edit.
     filled: OverviewForm,
-    saving: bool,
+    saving: Option<Saving>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -292,8 +311,10 @@ impl OverviewPage {
             server,
             name,
             description,
+            icon: ImageSlot::default(),
+            banner: ImageSlot::default(),
             filled: OverviewForm::default(),
-            saving: false,
+            saving: None,
             _subscriptions: subscriptions,
         };
         this.reset(window, cx);
@@ -311,7 +332,21 @@ impl OverviewPage {
         OverviewForm {
             name: self.name.read(cx).value().to_string(),
             description: self.description.read(cx).value().to_string(),
+            icon: self.icon.image.clone(),
+            banner: self.banner.image.clone(),
         }
+    }
+
+    /// Whether Save can send the form: every field and image fine,
+    /// something changed, and not already saving.
+    fn can_save(&self, edited: &OverviewForm, cx: &App) -> bool {
+        self.saving.is_none()
+            && edited.is_valid()
+            && self.icon.problem.is_none()
+            && self.banner.problem.is_none()
+            && self
+                .current(cx)
+                .is_some_and(|server| edited.has_changes(&server))
     }
 
     /// Fill every field with the server's values.
@@ -326,6 +361,8 @@ impl OverviewPage {
         self.description.update(cx, |input, cx| {
             input.set_value(form.description.clone(), window, cx)
         });
+        self.icon = slot(form.icon.clone());
+        self.banner = slot(form.banner.clone());
         self.filled = form;
         cx.notify();
     }
@@ -353,75 +390,242 @@ impl OverviewPage {
             self.description
                 .update(cx, |input, cx| input.set_value(description, window, cx));
         }
+        if edited.icon == self.filled.icon && self.icon.problem.is_none() {
+            self.icon = slot(now.icon.clone());
+        }
+        if edited.banner == self.filled.banner && self.banner.problem.is_none() {
+            self.banner = slot(now.banner.clone());
+        }
         self.filled = now;
         cx.notify();
     }
 
-    /// Send what changed. Stoat's answer shows at once, in the main window
-    /// too; a refusal says why in a toast, and the form keeps the edit.
+    fn slot(&mut self, kind: ServerImage) -> &mut ImageSlot {
+        match kind {
+            ServerImage::Icon => &mut self.icon,
+            ServerImage::Banner => &mut self.banner,
+        }
+    }
+
+    /// Change… on an image row.
+    fn pick_image(&mut self, kind: ServerImage, window: &mut Window, cx: &mut Context<Self>) {
+        let limits = self
+            .chat
+            .upgrade()
+            .map(|chat| chat.read(cx).image_limits())
+            .unwrap_or_default();
+        prompt_for_image(window, cx, move |this: &mut Self, path, _| {
+            this.slot(kind).pick(path, kind.limit(limits));
+        });
+    }
+
+    /// Send what changed: upload any new images first, then one `PATCH`
+    /// with their IDs, only if every upload worked. Stoat's answer shows at
+    /// once, in the main window too; a failure says why in a toast, and the
+    /// form keeps the edit.
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.saving {
+        let edited = self.edited(cx);
+        if !self.can_save(&edited, cx) {
             return;
         }
-        let (Some(chat), Some(server)) = (self.chat.upgrade(), self.current(cx)) else {
+        let Some(chat) = self.chat.upgrade() else {
             return;
         };
-        let Some(edit) = self.edited(cx).changes(&server) else {
-            return;
+        let (client, file_server) = {
+            let chat = chat.read(cx);
+            let file_server = chat.store().media().file_server().map(str::to_string);
+            (chat.client().clone(), file_server)
         };
-        self.saving = true;
-        cx.notify();
-        let request = spawn_io({
-            let (client, id) = (chat.read(cx).client().clone(), self.server.clone());
-            async move { client.edit_server(&id, &edit).await }
+        let uploads: Vec<(ServerImage, PathBuf)> = edited
+            .new_files()
+            .into_iter()
+            .map(|(kind, path)| (kind, path.to_path_buf()))
+            .collect();
+        let file_server = match (file_server, uploads.is_empty()) {
+            (Some(server), _) => server,
+            (None, true) => String::new(),
+            (None, false) => {
+                window.push_notification(
+                    Notification::error("Couldn't upload: Stoat's file server isn't known yet."),
+                    cx,
+                );
+                return;
+            }
+        };
+        self.saving = Some(if uploads.is_empty() {
+            Saving::Sending
+        } else {
+            Saving::Uploading
         });
+        cx.notify();
+        let id = self.server.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let result = request.await;
-            this.update_in(cx, |this, window, cx| {
-                this.saving = false;
-                match result {
-                    Ok(Ok(saved)) => {
-                        if let Some(chat) = this.chat.upgrade() {
-                            chat.update(cx, |chat, cx| chat.server_edited(&saved, cx));
-                        }
-                        this.reset(window, cx);
-                        window.push_notification(Notification::success("Saved."), cx);
+            let mut edited = edited;
+            for (kind, path) in uploads {
+                let upload = spawn_io(upload_image(
+                    client.clone(),
+                    file_server.clone(),
+                    kind.tag(),
+                    path,
+                ));
+                let uploaded = match upload.await {
+                    Ok(Ok(uploaded)) => uploaded,
+                    failed => {
+                        let failed = failed.map(|result| result.map(|_| ()));
+                        this.update_in(cx, |this, window, cx| this.save_failed(failed, window, cx))
+                            .ok();
+                        return;
                     }
-                    Ok(Err(err)) => {
-                        log::warn!("couldn't save server {}: {err:?}", this.server);
-                        window.push_notification(Notification::error(save_error_text(&err)), cx);
-                    }
-                    Err(err) => {
-                        log::warn!("server save task failed: {err:?}");
-                        window.push_notification(
-                            Notification::error("Couldn't save the server's settings."),
-                            cx,
-                        );
-                    }
+                };
+                match kind {
+                    ServerImage::Icon => edited.icon = ProfileImage::Current(uploaded),
+                    ServerImage::Banner => edited.banner = ProfileImage::Current(uploaded),
                 }
+            }
+            // Against the server as it is now, which may have changed while
+            // the images uploaded.
+            let Ok(edit) = this.update(cx, |this, cx| {
+                this.saving = Some(Saving::Sending);
                 cx.notify();
+                this.current(cx).and_then(|server| edited.changes(&server))
+            }) else {
+                return;
+            };
+            let Some(edit) = edit else {
+                this.update(cx, |this, cx| {
+                    this.saving = None;
+                    cx.notify();
+                })
+                .ok();
+                return;
+            };
+            let request = spawn_io(async move { client.edit_server(&id, &edit).await });
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| match result {
+                Ok(Ok(saved)) => {
+                    this.saving = None;
+                    if let Some(chat) = this.chat.upgrade() {
+                        chat.update(cx, |chat, cx| chat.server_edited(&saved, cx));
+                    }
+                    this.reset(window, cx);
+                    window.push_notification(Notification::success("Saved."), cx);
+                }
+                failed => this.save_failed(failed.map(|result| result.map(|_| ())), window, cx),
             })
             .ok();
         })
         .detach();
+    }
+
+    /// An upload or the `PATCH` failed: say why, and keep what was edited.
+    fn save_failed(
+        &mut self,
+        result: Result<Result<(), ApiError>, impl std::fmt::Debug>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.saving = None;
+        let text = match result {
+            Ok(Err(err)) => {
+                log::warn!("couldn't save server {}: {err:?}", self.server);
+                save_error_text(&err)
+            }
+            Ok(Ok(())) => return,
+            Err(err) => {
+                log::warn!("server save task failed: {err:?}");
+                "Couldn't save the server's settings.".into()
+            }
+        };
+        window.push_notification(Notification::error(text), cx);
+        cx.notify();
+    }
+
+    /// The icon's and banner's rows.
+    fn render_images(&self, cx: &mut Context<Self>) -> Option<[AnyElement; 2]> {
+        let chat = self.chat.upgrade()?;
+        let chat = chat.read(cx);
+        let store = chat.store();
+        let limits = chat.image_limits();
+        let media = store.media();
+        let name = store
+            .server(&self.server)
+            .map(|server| server.name.as_str())
+            .unwrap_or_default();
+        let icon = avatar_preview(
+            "server-icon-preview",
+            Preview::of(
+                &self.icon.image,
+                ServerImage::Icon.tag(),
+                media,
+                Preview::Empty,
+            ),
+            name,
+            cx,
+        );
+        let banner = banner_preview(
+            "server-banner-preview",
+            Preview::of(
+                &self.banner.image,
+                ServerImage::Banner.tag(),
+                media,
+                Preview::Empty,
+            ),
+            cx,
+        );
+        Some([
+            self.image_row(ServerImage::Icon, icon, limits, cx),
+            self.image_row(ServerImage::Banner, banner, limits, cx),
+        ])
+    }
+
+    fn image_row(
+        &self,
+        kind: ServerImage,
+        preview: AnyElement,
+        limits: ImageLimits,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let (id, label, slot) = match kind {
+            ServerImage::Icon => ("server-icon", "Server icon", &self.icon),
+            ServerImage::Banner => ("server-banner", "Server banner", &self.banner),
+        };
+        render_image_row(
+            id,
+            label,
+            preview,
+            slot,
+            kind.limit(limits),
+            self.saving.is_some(),
+            cx.listener(move |this, _, window, cx| this.pick_image(kind, window, cx)),
+            cx.listener(move |this, _, _, cx| {
+                this.slot(kind).remove();
+                cx.notify();
+            }),
+            cx,
+        )
+    }
+}
+
+/// An image slot showing `image`, with nothing wrong.
+fn slot(image: ProfileImage) -> ImageSlot {
+    ImageSlot {
+        image,
+        problem: None,
     }
 }
 
 impl Render for OverviewPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let edited = self.edited(cx);
-        let server = self.current(cx);
-        let changed = edited != self.filled;
-        let can_save = !self.saving
-            && server
-                .as_ref()
-                .is_some_and(|server| edited.changes(server).is_some());
+        let saving = self.saving.is_some();
+        let changed =
+            edited != self.filled || self.icon.problem.is_some() || self.banner.problem.is_some();
+        let can_save = self.can_save(&edited, cx);
+        let images = self.render_images(cx);
         let name_count = edited.name.trim().chars().count();
         let name = field(
             "Server name",
-            Input::new(&self.name)
-                .disabled(self.saving)
-                .into_any_element(),
+            Input::new(&self.name).disabled(saving).into_any_element(),
             name_count,
             NAME_MAX,
             (name_count == 0).then(|| "A server needs a name.".to_string()),
@@ -430,7 +634,7 @@ impl Render for OverviewPage {
         let description = field(
             "Server description",
             Textarea::new(&self.description)
-                .disabled(self.saving)
+                .disabled(saving)
                 .into_any_element(),
             edited.description.trim().chars().count(),
             DESCRIPTION_MAX,
@@ -440,6 +644,7 @@ impl Render for OverviewPage {
         v_flex()
             .w_full()
             .gap_4()
+            .children(images.into_iter().flatten())
             .child(name)
             .child(description)
             .child(
@@ -451,15 +656,18 @@ impl Render for OverviewPage {
                             .label("Reset")
                             .outline()
                             .small()
-                            .disabled(!changed || self.saving)
+                            .disabled(!changed || saving)
                             .on_click(cx.listener(|this, _, window, cx| this.reset(window, cx))),
                     )
                     .child(
                         Button::new("overview-save")
-                            .label("Save")
+                            .label(match self.saving {
+                                Some(Saving::Uploading) => "Uploading…",
+                                _ => "Save",
+                            })
                             .primary()
                             .small()
-                            .loading(self.saving)
+                            .loading(saving)
                             .disabled(!can_save)
                             .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
                     ),

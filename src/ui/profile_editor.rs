@@ -139,11 +139,12 @@ pub(crate) fn prompt_for_image<V: 'static>(
     .detach();
 }
 
-/// Upload a picked image as it is, for `kind`. Returns its file ID.
+/// Upload a picked image as it is, under the file server's `tag` (see
+/// [`ImageKind::tag`]). Returns its file ID.
 pub(crate) async fn upload_image(
     client: StoatClient,
     file_server: String,
-    kind: ImageKind,
+    tag: &'static str,
     path: PathBuf,
 ) -> Result<String, ApiError> {
     let name = path
@@ -152,14 +153,7 @@ pub(crate) async fn upload_image(
         .unwrap_or_else(|| "image".into());
     let content_type = check_image(&path, 0, u64::MAX).unwrap_or("application/octet-stream");
     client
-        .upload_file(
-            &file_server,
-            kind.tag(),
-            &name,
-            content_type,
-            &path,
-            |_, _| {},
-        )
+        .upload_file(&file_server, tag, &name, content_type, &path, |_, _| {})
         .await
 }
 
@@ -174,19 +168,17 @@ pub(crate) enum Preview {
 }
 
 impl Preview {
-    /// The preview for `image`: a file on the file server by its ID, a
-    /// picked file, or else `fallback`.
+    /// The preview for `image`: a file on the file server by its ID (under
+    /// `tag`), a picked file, or else `fallback`.
     pub(crate) fn of(
         image: &ProfileImage,
-        kind: ImageKind,
+        tag: &str,
         media: &crate::media::MediaUrls,
         fallback: Preview,
     ) -> Preview {
         match image {
             ProfileImage::New(path) => Preview::File(path.clone()),
-            ProfileImage::Current(id) => media
-                .file_by_id(kind.tag(), id)
-                .map_or(fallback, Preview::Url),
+            ProfileImage::Current(id) => media.file_by_id(tag, id).map_or(fallback, Preview::Url),
             ProfileImage::None => fallback,
         }
     }
@@ -231,8 +223,9 @@ pub(crate) fn avatar_preview(
     }
 }
 
-/// A banner preview: a centre-cropped 232:100 strip.
-fn banner_preview(preview: Preview, cx: &App) -> AnyElement {
+/// A banner preview: a centre-cropped 232:100 strip, as the web client
+/// shows a profile's or a server's.
+pub(crate) fn banner_preview(id: &'static str, preview: Preview, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let (w, h) = BANNER_PREVIEW;
     let frame = |el: Div| {
@@ -244,7 +237,7 @@ fn banner_preview(preview: Preview, cx: &App) -> AnyElement {
     };
     let image = |source: ImageSource, fallback: SharedString| {
         img(source)
-            .id("profile-banner-preview")
+            .id(id)
             .size_full()
             .object_fit(ObjectFit::Cover)
             .with_fallback(move || unpreviewable(fallback.clone()))
@@ -608,7 +601,7 @@ impl ProfileEditor {
                 let upload = spawn_io(upload_image(
                     client.clone(),
                     file_server.clone(),
-                    kind,
+                    kind.tag(),
                     path,
                 ));
                 let id = match upload.await {
@@ -732,12 +725,23 @@ impl ProfileEditor {
         let default_avatar = Preview::Url(media.default_avatar(&self.me));
         let avatar = avatar_preview(
             "profile-avatar-preview",
-            Preview::of(&self.avatar.image, ImageKind::Avatar, media, default_avatar),
+            Preview::of(
+                &self.avatar.image,
+                ImageKind::Avatar.tag(),
+                media,
+                default_avatar,
+            ),
             name,
             cx,
         );
         let banner = banner_preview(
-            Preview::of(&self.banner.image, ImageKind::Banner, media, Preview::Empty),
+            "profile-banner-preview",
+            Preview::of(
+                &self.banner.image,
+                ImageKind::Banner.tag(),
+                media,
+                Preview::Empty,
+            ),
             cx,
         );
         Some([

@@ -127,6 +127,12 @@ pub struct FileSizeLimits {
     /// Largest profile banner.
     #[serde(default)]
     pub backgrounds: Option<u64>,
+    /// Largest server icon.
+    #[serde(default)]
+    pub icons: Option<u64>,
+    /// Largest server banner (Stoat 0.16.2 doesn't send it).
+    #[serde(default)]
+    pub banners: Option<u64>,
 }
 
 /// Used when `GET /` doesn't say: Stoat's own defaults (20 MB, 5 files).
@@ -135,6 +141,9 @@ pub const DEFAULT_MAX_ATTACHMENTS: usize = 5;
 /// Stoat's defaults for avatars (4 MB) and profile banners (6 MB).
 pub const DEFAULT_AVATAR_SIZE_LIMIT: u64 = 4_000_000;
 pub const DEFAULT_BACKGROUND_SIZE_LIMIT: u64 = 6_000_000;
+/// Stoat's defaults for server icons (2.5 MB) and server banners (6 MB).
+pub const DEFAULT_ICON_SIZE_LIMIT: u64 = 2_500_000;
+pub const DEFAULT_BANNER_SIZE_LIMIT: u64 = 6_000_000;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServiceFeature {
@@ -173,6 +182,20 @@ impl RootConfig {
     pub fn background_size_limit(&self) -> u64 {
         self.stricter_size_limit(|l| l.backgrounds)
             .unwrap_or(DEFAULT_BACKGROUND_SIZE_LIMIT)
+    }
+
+    /// Largest server icon, in bytes, chosen the same way, else
+    /// [`DEFAULT_ICON_SIZE_LIMIT`].
+    pub fn icon_size_limit(&self) -> u64 {
+        self.stricter_size_limit(|l| l.icons)
+            .unwrap_or(DEFAULT_ICON_SIZE_LIMIT)
+    }
+
+    /// Largest server banner, in bytes, chosen the same way, else
+    /// [`DEFAULT_BANNER_SIZE_LIMIT`].
+    pub fn banner_size_limit(&self) -> u64 {
+        self.stricter_size_limit(|l| l.banners)
+            .unwrap_or(DEFAULT_BANNER_SIZE_LIMIT)
     }
 
     /// The stricter of the two account limits on one kind of file, if
