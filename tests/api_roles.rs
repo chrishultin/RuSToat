@@ -1,14 +1,14 @@
 //! A server's roles against a mock Stoat API, from Server Settings' Roles
 //! page: `POST /servers/{id}/roles` (create one), `PATCH
-//! /servers/{id}/roles/{role}` (edit one) and `DELETE
-//! /servers/{id}/roles/{role}` (delete one).
+//! /servers/{id}/roles/{role}` (edit one, after uploading its icon to the
+//! file server) and `DELETE /servers/{id}/roles/{role}` (delete one).
 
 use revolt_result::ErrorType;
 use serde_json::json;
 use stoat_gpui::api::StoatClient;
 use stoat_gpui::api::models::DataEditRole;
 use stoat_gpui::roles::{create_error_text, delete_error_text, edit_error_text, empty_role_edit};
-use wiremock::matchers::{body_json, body_string, header, method, path};
+use wiremock::matchers::{body_json, body_string, header, header_regex, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn client(server: &MockServer) -> StoatClient {
@@ -206,4 +206,112 @@ async fn deleting_a_role_already_gone_is_not_found() {
         matches!(err.error_type(), Some(ErrorType::NotFound)),
         "{err:?}"
     );
+}
+
+#[tokio::test]
+async fn a_role_icon_is_uploaded_then_saved_by_its_id() {
+    use stoat_gpui::api::models::Role;
+    use stoat_gpui::profile_edit::ProfileImage;
+    use stoat_gpui::roles::RoleForm;
+
+    let autumn = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/icons"))
+        .and(header("x-session-token", "tok"))
+        .and(header_regex(
+            "content-type",
+            "^multipart/form-data; boundary=",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "f-icon" })))
+        .expect(1)
+        .mount(&autumn)
+        .await;
+    let api = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/servers/srv/roles/r1"))
+        .and(body_json(json!({ "icon": "f-icon" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "_id": "r1", "name": "Mods", "rank": 1, "permissions": { "a": 0, "d": 0 },
+            "icon": { "_id": "f-icon", "tag": "icons", "filename": "icon.png",
+                      "metadata": { "type": "Image", "width": 64, "height": 64 },
+                      "content_type": "image/png", "size": 6 }
+        })))
+        .expect(1)
+        .mount(&api)
+        .await;
+
+    let role: Role = serde_json::from_value(json!({
+        "_id": "r1", "name": "Mods", "rank": 1, "permissions": { "a": 0, "d": 0 }
+    }))
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("icon.png");
+    std::fs::write(&file, b"\x89PNG\r\n").unwrap();
+    let mut form = RoleForm::of(&role);
+    form.icon = ProfileImage::New(file.clone());
+    assert!(form.has_changes(&role));
+    assert_eq!(form.changes(&role), None);
+
+    let client = client(&api);
+    let path = form.new_file().unwrap().to_path_buf();
+    let id = client
+        .upload_file(
+            &autumn.uri(),
+            "icons",
+            "icon.png",
+            "image/png",
+            &path,
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+    form.icon = ProfileImage::Current(id);
+    let edit = form.changes(&role).unwrap();
+    assert!(edit.remove.is_empty());
+    let saved = client.edit_role("srv", "r1", &edit).await.unwrap();
+    assert_eq!(saved.icon.map(|icon| icon.id).as_deref(), Some("f-icon"));
+}
+
+#[tokio::test]
+async fn removing_a_colour_and_icon_sends_both_in_remove() {
+    use stoat_gpui::api::models::FieldsRole;
+
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/servers/srv/roles/r1"))
+        .and(body_json(json!({ "remove": ["Colour", "Icon"] })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "_id": "r1", "name": "Mods", "rank": 1, "permissions": { "a": 0, "d": 0 }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let edit = DataEditRole {
+        remove: vec![FieldsRole::Colour, FieldsRole::Icon],
+        ..empty_role_edit()
+    };
+    client(&server).edit_role("srv", "r1", &edit).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_new_colour_is_sent_as_hex() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/servers/srv/roles/r1"))
+        .and(body_json(json!({ "colour": "#3e63dd" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "_id": "r1", "name": "Mods", "rank": 1, "colour": "#3e63dd",
+            "permissions": { "a": 0, "d": 0 }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let edit = DataEditRole {
+        colour: Some("#3e63dd".into()),
+        ..empty_role_edit()
+    };
+    let saved = client(&server).edit_role("srv", "r1", &edit).await.unwrap();
+    assert_eq!(saved.colour.as_deref(), Some("#3e63dd"));
 }

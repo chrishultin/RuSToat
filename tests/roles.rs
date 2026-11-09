@@ -8,6 +8,7 @@ use stoat_gpui::api::ApiError;
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::api::models::{FieldsRole, PartialRole, Role};
 use stoat_gpui::permissions::RoleLock;
+use stoat_gpui::profile_edit::ProfileImage;
 use stoat_gpui::roles::{
     ColourChoice, ROLE_NAME_MAX, RoleForm, RoleRow, check_role_name, create_error_text,
     delete_error_text, edit_error_text, empty_role_edit, hex_of, may_delete, may_edit, role_rows,
@@ -281,6 +282,7 @@ fn an_unchanged_form_sends_nothing() {
             name: "Members".into(),
             hoist: true,
             colour: ColourChoice::Hex("#e5484d".into()),
+            icon: ProfileImage::Current("f-icon".into()),
         }
     );
     assert_eq!(RoleForm::of(&role).changes(&role), None);
@@ -331,6 +333,7 @@ fn an_invalid_name_sends_nothing() {
             name: name.to_string(),
             hoist: false,
             colour: ColourChoice::None,
+            icon: ProfileImage::None,
         };
         assert!(!form.is_valid());
         assert_eq!(form.changes(&members_role()), None, "{name:?}");
@@ -577,4 +580,76 @@ fn a_removed_colour_saved_clears_it_in_the_store() {
     assert_eq!(store.server("srv").unwrap().roles["members"].colour, None);
     let rows = role_rows(&store, "srv");
     assert_eq!(rows[3].colour, None);
+}
+
+#[test]
+fn the_form_starts_with_the_roles_icon() {
+    assert_eq!(
+        RoleForm::of(&members_role()).icon,
+        ProfileImage::Current("f-icon".into())
+    );
+    let fans = store("u-owner").server("srv").unwrap().roles["fans"].clone();
+    assert_eq!(RoleForm::of(&fans).icon, ProfileImage::None);
+}
+
+#[test]
+fn a_new_icon_is_sent_by_its_id_without_a_remove() {
+    let form = RoleForm {
+        icon: ProfileImage::Current("f-new".into()),
+        ..RoleForm::of(&members_role())
+    };
+    assert_eq!(
+        form.changes(&members_role()).unwrap(),
+        stoat_gpui::api::models::DataEditRole {
+            icon: Some("f-new".into()),
+            ..empty_role_edit()
+        }
+    );
+}
+
+#[test]
+fn a_removed_icon_is_in_remove() {
+    let form = RoleForm {
+        icon: ProfileImage::None,
+        ..RoleForm::of(&members_role())
+    };
+    assert_eq!(
+        form.changes(&members_role()).unwrap(),
+        stoat_gpui::api::models::DataEditRole {
+            remove: vec![FieldsRole::Icon],
+            ..empty_role_edit()
+        }
+    );
+    // Removing both sends both, in one edit.
+    let bare = RoleForm {
+        colour: ColourChoice::None,
+        ..form
+    };
+    assert_eq!(
+        bare.changes(&members_role()).unwrap().remove,
+        [FieldsRole::Colour, FieldsRole::Icon]
+    );
+}
+
+#[test]
+fn a_picked_icon_waits_for_its_upload() {
+    let picked = RoleForm {
+        icon: ProfileImage::New("/tmp/icon.png".into()),
+        ..RoleForm::of(&members_role())
+    };
+    assert_eq!(
+        picked.new_file(),
+        Some(std::path::Path::new("/tmp/icon.png"))
+    );
+    assert!(picked.has_changes(&members_role()));
+    assert_eq!(picked.changes(&members_role()), None);
+    // With a rename, the name goes now and the icon after its upload.
+    let renamed = RoleForm {
+        name: "Regulars".into(),
+        ..picked
+    };
+    let edit = renamed.changes(&members_role()).unwrap();
+    assert_eq!(edit.icon, None);
+    assert!(edit.remove.is_empty());
+    assert!(!RoleForm::of(&members_role()).has_changes(&members_role()));
 }

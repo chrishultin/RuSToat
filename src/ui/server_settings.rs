@@ -11,7 +11,7 @@
 //! the server leaves the store (deleted, left, kicked or banned), when the
 //! user may see no page of it any more, or when the account signs out.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use revolt_result::ErrorType;
 
@@ -54,7 +54,7 @@ use crate::ui::invites::{CREATE_DIALOG_WIDTH, CreateInviteDialog, InviteCreated}
 use crate::ui::moderation_dialogs::{MemberActionRequest, confirm_member_action_then};
 use crate::ui::profile_editor::{
     ImageSlot, Preview, avatar_preview, banner_preview, field, prompt_for_image, render_image_row,
-    upload_image,
+    square_preview, upload_image,
 };
 use crate::ui::server_dialogs::name_field;
 
@@ -1199,8 +1199,9 @@ impl Render for CreateRoleDialog {
 /// Roles page goes back to its list.
 pub struct BackToRoles;
 
-/// One role's editor, in the Roles page: its name, colour and hoisting,
-/// saved together with one `PATCH` (see [`RoleForm::changes`]); "Copy role ID";
+/// One role's editor, in the Roles page: its name, colour, icon and
+/// hoisting, saved together with one `PATCH` (see [`RoleForm::changes`]),
+/// a new icon uploaded first; "Copy role ID";
 /// and "Delete role…". Untouched fields follow changes made elsewhere. A
 /// role the user can't change (rank) opens read-only, and a bot's can't be
 /// deleted.
@@ -1211,6 +1212,7 @@ pub struct RoleEditor {
     name: Entity<InputState>,
     hoist: bool,
     colour: ColourChoice,
+    icon: ImageSlot,
     /// The colour picker. Only its changes set [`Self::colour`], so a hex
     /// value shown in it never reads as an edit.
     picker: Entity<ColorPickerState>,
@@ -1258,6 +1260,7 @@ impl RoleEditor {
             name,
             hoist: false,
             colour: ColourChoice::None,
+            icon: ImageSlot::default(),
             picker,
             filled: RoleForm::default(),
             saving: None,
@@ -1293,17 +1296,20 @@ impl RoleEditor {
             name: self.name.read(cx).value().to_string(),
             hoist: self.hoist,
             colour: self.colour.clone(),
+            icon: self.icon.image.clone(),
         }
     }
 
-    /// Whether Save can send the form: the user may change the role,
-    /// something changed, and not already saving.
+    /// Whether Save can send the form: the user may change the role, the
+    /// name and icon are fine, something changed, and not already saving.
     fn can_save(&self, edited: &RoleForm, cx: &App) -> bool {
         self.saving.is_none()
             && self.rights(cx).0
+            && edited.is_valid()
+            && self.icon.problem.is_none()
             && self
                 .current(cx)
-                .is_some_and(|role| edited.changes(&role).is_some())
+                .is_some_and(|role| edited.has_changes(&role))
     }
 
     /// Fill every field with the role's values.
@@ -1317,6 +1323,7 @@ impl RoleEditor {
         });
         self.hoist = form.hoist;
         self.set_colour(form.colour.clone(), window, cx);
+        self.icon = slot(form.icon.clone());
         self.filled = form;
         cx.notify();
     }
@@ -1359,59 +1366,163 @@ impl RoleEditor {
         if edited.colour == self.filled.colour && now.colour != self.filled.colour {
             self.set_colour(now.colour.clone(), window, cx);
         }
+        if edited.icon == self.filled.icon && self.icon.problem.is_none() {
+            self.icon = slot(now.icon.clone());
+        }
         self.filled = now;
         cx.notify();
     }
 
-    /// Send what changed in one `PATCH`. Stoat's answer shows at once, in
-    /// the main window too; a refusal says why in a toast, and the form
+    /// Change… on the icon's row.
+    fn pick_icon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let limit = self
+            .chat
+            .upgrade()
+            .map(|chat| chat.read(cx).image_limits())
+            .unwrap_or_default()
+            .server_icon;
+        prompt_for_image(window, cx, move |this: &mut Self, path, _| {
+            this.icon.pick(path, limit);
+        });
+    }
+
+    /// Send what changed: upload a new icon first, then one `PATCH` with
+    /// its ID, only if the upload worked. Stoat's answer shows at once, in
+    /// the main window too; a failure says why in a toast, and the form
     /// keeps the edit.
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let edited = self.edited(cx);
         if !self.can_save(&edited, cx) {
             return;
         }
-        let (Some(chat), Some(edit)) = (
-            self.chat.upgrade(),
-            self.current(cx).and_then(|role| edited.changes(&role)),
-        ) else {
+        let Some(chat) = self.chat.upgrade() else {
             return;
         };
-        self.saving = Some(Saving::Sending);
-        cx.notify();
-        let request = spawn_io({
-            let client = chat.read(cx).client().clone();
-            let (server, role) = (self.server.clone(), self.role.clone());
-            async move { client.edit_role(&server, &role, &edit).await }
+        let (client, file_server) = {
+            let chat = chat.read(cx);
+            let file_server = chat.store().media().file_server().map(str::to_string);
+            (chat.client().clone(), file_server)
+        };
+        let upload = edited.new_file().map(Path::to_path_buf);
+        let file_server = match (file_server, &upload) {
+            (Some(server), _) => server,
+            (None, None) => String::new(),
+            (None, Some(_)) => {
+                window.push_notification(
+                    Notification::error("Couldn't upload: Stoat's file server isn't known yet."),
+                    cx,
+                );
+                return;
+            }
+        };
+        self.saving = Some(match upload {
+            Some(_) => Saving::Uploading,
+            None => Saving::Sending,
         });
+        cx.notify();
+        let (server, role) = (self.server.clone(), self.role.clone());
         cx.spawn_in(window, async move |this, cx| {
-            let result = request.await;
-            this.update_in(cx, |this, window, cx| {
-                this.saving = None;
-                match result {
-                    Ok(Ok(saved)) => {
-                        let server = this.server.clone();
-                        this.chat
-                            .update(cx, |chat, cx| chat.role_saved(&server, &saved, cx))
+            let mut edited = edited;
+            if let Some(path) = upload {
+                let tag = ServerImage::Icon.tag();
+                match spawn_io(upload_image(client.clone(), file_server, tag, path)).await {
+                    Ok(Ok(uploaded)) => edited.icon = ProfileImage::Current(uploaded),
+                    failed => {
+                        let failed = failed.map(|result| result.map(|_| ()));
+                        this.update_in(cx, |this, window, cx| this.save_failed(failed, window, cx))
                             .ok();
-                        this.reset(window, cx);
-                        window.push_notification(Notification::success("Saved."), cx);
-                    }
-                    Ok(Err(err)) => {
-                        log::warn!("couldn't save role {}: {err:?}", this.role);
-                        window.push_notification(Notification::error(edit_error_text(&err)), cx);
-                    }
-                    Err(err) => {
-                        log::warn!("role save task failed: {err:?}");
-                        window
-                            .push_notification(Notification::error("Couldn't save the role."), cx);
+                        return;
                     }
                 }
+            }
+            // Against the role as it is now, which may have changed while
+            // the icon uploaded.
+            let Ok(edit) = this.update(cx, |this, cx| {
+                this.saving = Some(Saving::Sending);
                 cx.notify();
+                this.current(cx).and_then(|role| edited.changes(&role))
+            }) else {
+                return;
+            };
+            let Some(edit) = edit else {
+                this.update(cx, |this, cx| {
+                    this.saving = None;
+                    cx.notify();
+                })
+                .ok();
+                return;
+            };
+            let request = spawn_io(async move { client.edit_role(&server, &role, &edit).await });
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| match result {
+                Ok(Ok(saved)) => {
+                    this.saving = None;
+                    let server = this.server.clone();
+                    this.chat
+                        .update(cx, |chat, cx| chat.role_saved(&server, &saved, cx))
+                        .ok();
+                    this.reset(window, cx);
+                    window.push_notification(Notification::success("Saved."), cx);
+                }
+                failed => this.save_failed(failed.map(|result| result.map(|_| ())), window, cx),
             })
             .ok();
         })
         .detach();
+    }
+
+    /// The upload or the `PATCH` failed: say why, and keep what was edited.
+    fn save_failed(
+        &mut self,
+        result: Result<Result<(), ApiError>, impl std::fmt::Debug>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.saving = None;
+        let text = match result {
+            Ok(Err(err)) => {
+                log::warn!("couldn't save role {}: {err:?}", self.role);
+                edit_error_text(&err)
+            }
+            Ok(Ok(())) => return,
+            Err(err) => {
+                log::warn!("role save task failed: {err:?}");
+                "Couldn't save the role.".into()
+            }
+        };
+        window.push_notification(Notification::error(text), cx);
+        cx.notify();
+    }
+
+    /// The icon's row: a square preview, Change… and Remove.
+    fn render_icon(&self, editable: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let chat = self.chat.upgrade()?;
+        let chat = chat.read(cx);
+        let limit = chat.image_limits().server_icon;
+        let preview = square_preview(
+            "role-icon-preview",
+            Preview::of(
+                &self.icon.image,
+                ServerImage::Icon.tag(),
+                chat.store().media(),
+                Preview::Empty,
+            ),
+            cx,
+        );
+        Some(render_image_row(
+            "role-icon",
+            "Role icon",
+            preview,
+            &self.icon,
+            limit,
+            self.saving.is_some() || !editable,
+            cx.listener(|this, _, window, cx| this.pick_icon(window, cx)),
+            cx.listener(|this, _, _, cx| {
+                this.icon.remove();
+                cx.notify();
+            }),
+            cx,
+        ))
     }
 
     fn copy_id(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1574,8 +1685,9 @@ impl Render for RoleEditor {
         let (editable, deletable) = self.rights(cx);
         let edited = self.edited(cx);
         let saving = self.saving.is_some();
-        let changed = edited != self.filled;
+        let changed = edited != self.filled || self.icon.problem.is_some();
         let can_save = self.can_save(&edited, cx);
+        let icon = self.render_icon(editable, cx);
         let colour = role.colour.as_deref().and_then(solid_colour);
         let muted = cx.theme().muted_foreground;
         let name_count = edited.name.trim().chars().count();
@@ -1644,6 +1756,7 @@ impl Render for RoleEditor {
                 editable,
                 cx,
             ))
+            .children(icon)
             .child(hoist)
             .when(editable, |this| {
                 this.child(
@@ -1662,7 +1775,10 @@ impl Render for RoleEditor {
                         )
                         .child(
                             Button::new("role-save")
-                                .label("Save")
+                                .label(match self.saving {
+                                    Some(Saving::Uploading) => "Uploading…",
+                                    _ => "Save",
+                                })
                                 .primary()
                                 .small()
                                 .loading(saving)

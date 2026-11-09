@@ -9,15 +9,17 @@
 //! (the owner outranks everyone). A bot's role can be edited but not
 //! deleted.
 
+use std::path::Path;
+
 use gpui_kit::{Hsla, Rgba};
 use revolt_result::ErrorType;
 
 use crate::api::ApiError;
 use crate::api::models::{DataEditRole, FieldsRole, PartialRole, Role};
 use crate::permissions::{RoleLock, acting_rank};
-use crate::profile_edit::error_text;
+use crate::profile_edit::{ProfileImage, error_text};
 use crate::rail::parse_colour;
-use crate::server_settings::access;
+use crate::server_settings::{access, image_change};
 use crate::store::{ChatStore, solid_colour};
 
 /// The longest role name Stoat takes, in characters.
@@ -150,6 +152,8 @@ pub struct RoleForm {
     /// Shown separately in the member list.
     pub hoist: bool,
     pub colour: ColourChoice,
+    /// Uploaded with the tag `icons`, within the server icon's limit.
+    pub icon: ProfileImage,
 }
 
 /// A role's colour as the editor holds it.
@@ -212,7 +216,21 @@ impl RoleForm {
             name: role.name.clone(),
             hoist: role.hoist,
             colour: ColourChoice::of(role.colour.as_deref()),
+            icon: role.icon.as_ref().map_or(ProfileImage::None, |icon| {
+                ProfileImage::Current(icon.id.clone())
+            }),
         }
+    }
+
+    /// The icon picked to upload before saving, if one was.
+    pub fn new_file(&self) -> Option<&Path> {
+        self.icon.new_file()
+    }
+
+    /// Whether Save has anything to do: a change to send, or an icon to
+    /// upload first.
+    pub fn has_changes(&self, role: &Role) -> bool {
+        self.new_file().is_some() || self.changes(role).is_some()
     }
 
     /// Whether the name is 1 to [`ROLE_NAME_MAX`] characters (trimmed), so
@@ -223,9 +241,12 @@ impl RoleForm {
 
     /// The `PATCH /servers/{id}/roles/{role}` that turns `role` into this
     /// form: only what changed, the name trimmed, a picked colour as
-    /// `#rrggbb` and no colour in `remove`. Custom CSS is never sent: it's
-    /// only ever the role's own, unchanged. `None` when nothing changed, or
-    /// the form isn't valid.
+    /// `#rrggbb`, and no colour or a removed icon in `remove`. Custom CSS is
+    /// never sent: it's only ever the role's own, unchanged. A picked icon
+    /// is left out until it's uploaded (and then it's
+    /// [`ProfileImage::Current`] with its new ID, which replaces the old
+    /// one without a remove). `None` when nothing changed, or the form
+    /// isn't valid.
     pub fn changes(&self, role: &Role) -> Option<DataEditRole> {
         let name = check_role_name(&self.name)?;
         let mut edit = empty_role_edit();
@@ -241,6 +262,11 @@ impl RoleForm {
                 ColourChoice::Hex(hex) => edit.colour = Some(hex.clone()),
                 ColourChoice::Custom(_) => {}
             }
+        }
+        match image_change(&Self::of(role).icon, &self.icon) {
+            Some(Some(id)) => edit.icon = Some(id),
+            Some(None) => edit.remove.push(FieldsRole::Icon),
+            None => {}
         }
         (edit != empty_role_edit()).then_some(edit)
     }

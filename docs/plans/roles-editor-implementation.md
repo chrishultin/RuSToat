@@ -138,3 +138,39 @@ Look-ahead: chunk 4 adds `icon` to `RoleForm` beside `colour`, and the existing 
 
 ### Manual Validation
 Deferred to the end-of-milestone pass (plan's Manual Tests 3, 4 and 9). Also check there that the picker's popover isn't clipped inside the settings page; if it is, switch to `ColorSelect` or another anchor.
+
+## Chunk 4: Role icon
+
+### Changes Made
+- `src/roles.rs`:
+  - `RoleForm` gains `icon: ProfileImage` (`Current(file ID)` from the role, or `None`), with `new_file()` and `has_changes(&Role)`, which is true for a new file to upload or a change to send;
+  - `changes` uses milestone 23's `image_change` rule: a new uploaded ID goes in `icon` with no remove, a removed icon is `remove: ["Icon"]`, and a picked file is left out until it's uploaded.
+- `src/server_settings.rs`: `image_change` is `pub(crate)` so both forms share it.
+- `src/ui/profile_editor.rs`: a new `square_preview(id, Preview, cx)`, 64 px with rounded corners and centre-cropped. With no icon it shows "No icon"; a file it can't draw shows the file's name. The avatar and banner previews are unchanged.
+- `src/ui/server_settings.rs`, `RoleEditor`:
+  - gains `icon: ImageSlot`, with `pick_icon` (checked against `ImageLimits.server_icon`, the `icons` limit) and `render_icon`;
+  - `render_icon` uses `render_image_row`: "Role icon", the square preview, Change… and Remove, all disabled when the role is read-only or saving. It sits between the colour and Hoist.
+  - `reset` and `follow` handle the icon as `OverviewPage` does, and an image problem enables Reset.
+  - `can_save` also needs a valid name, no icon problem and `has_changes`.
+  - `save` now uploads a new icon first (`Saving::Uploading`, with Save reading "Uploading…"), then works out the `PATCH` against the role as it is now and sends it (`Saving::Sending`). If the file server isn't known, it toasts and sends nothing.
+  - `save_failed` toasts `edit_error_text` and keeps the form dirty after a failed upload or edit.
+  - The list rows have drawn icons since chunk 1.
+- `tests/roles.rs`: 4 new tests: the form starts with the role's icon; a new icon is sent by ID with no remove; a removed icon is in `remove` (and removing both colour and icon sends both); a picked icon waits for its upload, though a rename goes ahead without it.
+- `tests/api_roles.rs`: 3 new tests:
+  - an icon upload to `/icons` (multipart, with the token), then `PATCH /servers/srv/roles/r1` with exactly `{"icon":"f-icon"}`;
+  - `{"remove":["Colour","Icon"]}`;
+  - `{"colour":"#3e63dd"}`.
+
+### Divergences
+- `square_preview` is a new function, not a shape parameter on `avatar_preview`, so existing callers are untouched. It's 64 px, smaller than the 80 px avatar preview.
+- The upload-then-edit test is in `tests/api_roles.rs`, not `tests/api_upload.rs`, which keeps `api_upload.rs`'s 10 drift hunks out of the picture. Two extra wiremock tests cover chunk 3's colour bodies.
+
+Look-ahead: chunk 5 touches only the list and adds new functions, so nothing here affects it. No plan amendments.
+
+### Verification Performed
+- `cargo test --test roles --test api_roles`: 31 and 12 passed.
+- Full suite: `cargo test` gave 1,225 passed, 0 failed. `cargo clippy --all-targets -- -D warnings` is clean.
+- Rustfmt: `src/ui/server_settings.rs`, `src/ui/profile_editor.rs`, `src/server_settings.rs`, `src/roles.rs`, `tests/roles.rs` and `tests/api_roles.rs` are clean.
+
+### Manual Validation
+Deferred to the end-of-milestone pass (plan's Manual Test 3, and chunk 4's checks: set a PNG, remove it, and a 3 MB file refused before upload).

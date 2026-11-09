@@ -327,7 +327,7 @@ pub fn system_channel_choices(store: &ChatStore, server: &str) -> Vec<(String, S
 /// How an image changed from `stored`: `None` if it didn't (or it's
 /// picked and not uploaded yet), `Some(None)` if it was removed,
 /// `Some(Some(id))` for a new one.
-fn image_change(stored: &ProfileImage, edited: &ProfileImage) -> Option<Option<String>> {
+pub(crate) fn image_change(stored: &ProfileImage, edited: &ProfileImage) -> Option<Option<String>> {
     match edited {
         ProfileImage::New(_) => None,
         ProfileImage::Current(id) => (stored != edited).then(|| Some(id.clone())),

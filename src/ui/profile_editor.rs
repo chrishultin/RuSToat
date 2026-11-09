@@ -33,6 +33,8 @@ const BIO_ROWS: (usize, usize) = (3, 10);
 
 /// The avatar preview's size.
 pub(crate) const AVATAR_PREVIEW: f32 = 80.;
+/// A square preview's side: a role's icon.
+const SQUARE_PREVIEW: f32 = 64.;
 /// The banner preview: the web client's 232:100, at 1.5×.
 const BANNER_PREVIEW: (f32, f32) = (348., 150.);
 
@@ -261,6 +263,45 @@ pub(crate) fn banner_preview(id: &'static str, preview: Preview, cx: &App) -> An
             .text_sm()
             .text_color(theme.muted_foreground)
             .child("No banner")
+            .into_any_element(),
+    }
+}
+
+/// A square preview with rounded corners, centre-cropped: a role's icon.
+pub(crate) fn square_preview(id: &'static str, preview: Preview, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let frame = |el: Div| {
+        el.size(px(SQUARE_PREVIEW))
+            .flex_none()
+            .rounded_md()
+            .overflow_hidden()
+    };
+    let image = |source: ImageSource, fallback: SharedString| {
+        img(source)
+            .id(id)
+            .size_full()
+            .object_fit(ObjectFit::Cover)
+            .with_fallback(move || unpreviewable(fallback.clone()))
+            .into_any_element()
+    };
+    match preview {
+        Preview::Url(url) => frame(div())
+            .child(image(SharedUri::from(url).into(), "Icon".into()))
+            .into_any_element(),
+        Preview::File(path) => {
+            let label = file_label(&path);
+            frame(div())
+                .child(image(path.into(), label))
+                .into_any_element()
+        }
+        Preview::Empty => frame(div())
+            .bg(theme.secondary)
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .child("No icon")
             .into_any_element(),
     }
 }
