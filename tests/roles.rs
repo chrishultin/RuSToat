@@ -9,8 +9,9 @@ use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::api::models::{FieldsRole, PartialRole, Role};
 use stoat_gpui::permissions::RoleLock;
 use stoat_gpui::roles::{
-    ROLE_NAME_MAX, RoleForm, RoleRow, check_role_name, create_error_text, delete_error_text,
-    edit_error_text, empty_role_edit, may_delete, may_edit, role_rows, role_update,
+    ColourChoice, ROLE_NAME_MAX, RoleForm, RoleRow, check_role_name, create_error_text,
+    delete_error_text, edit_error_text, empty_role_edit, hex_of, may_delete, may_edit, role_rows,
+    role_update,
 };
 use stoat_gpui::store::ChatStore;
 
@@ -279,13 +280,14 @@ fn an_unchanged_form_sends_nothing() {
         RoleForm {
             name: "Members".into(),
             hoist: true,
+            colour: ColourChoice::Hex("#e5484d".into()),
         }
     );
     assert_eq!(RoleForm::of(&role).changes(&role), None);
     // Spaces around the name aren't a change.
     let spaced = RoleForm {
         name: " Members ".into(),
-        hoist: true,
+        ..RoleForm::of(&role)
     };
     assert_eq!(spaced.changes(&role), None);
 }
@@ -294,7 +296,7 @@ fn an_unchanged_form_sends_nothing() {
 fn a_rename_sends_only_the_name_trimmed() {
     let form = RoleForm {
         name: "  Regulars ".into(),
-        hoist: true,
+        ..RoleForm::of(&members_role())
     };
     let edit = form.changes(&members_role()).unwrap();
     assert_eq!(
@@ -309,8 +311,8 @@ fn a_rename_sends_only_the_name_trimmed() {
 #[test]
 fn toggling_hoist_sends_only_hoist() {
     let form = RoleForm {
-        name: "Members".into(),
         hoist: false,
+        ..RoleForm::of(&members_role())
     };
     let edit = form.changes(&members_role()).unwrap();
     assert_eq!(
@@ -328,6 +330,7 @@ fn an_invalid_name_sends_nothing() {
         let form = RoleForm {
             name: name.to_string(),
             hoist: false,
+            colour: ColourChoice::None,
         };
         assert!(!form.is_valid());
         assert_eq!(form.changes(&members_role()), None, "{name:?}");
@@ -440,4 +443,138 @@ fn an_edit_applied_then_its_event_is_consistent() {
     };
     assert!(store.apply_role_update(&server, &role_id, *data, &clear));
     assert_eq!(store.server("srv").unwrap().roles["members"], saved);
+}
+
+#[test]
+fn solid_hex_colours_are_picked_and_anything_else_is_custom() {
+    assert_eq!(ColourChoice::of(None), ColourChoice::None);
+    assert_eq!(
+        ColourChoice::of(Some("#E5484D")),
+        ColourChoice::Hex("#e5484d".into())
+    );
+    assert_eq!(
+        ColourChoice::of(Some(" #fa0 ")),
+        ColourChoice::Hex("#ffaa00".into())
+    );
+    for css in ["linear-gradient(red, blue)", "red", "#ff000080", "var(--x)"] {
+        assert_eq!(
+            ColourChoice::of(Some(css)),
+            ColourChoice::Custom(css.into()),
+            "{css}"
+        );
+    }
+    // A colour name is still drawn as the solid colour it is.
+    assert_eq!(
+        ColourChoice::Custom("red".into()).solid().as_deref(),
+        Some("#ff0000")
+    );
+    assert_eq!(
+        ColourChoice::Custom("linear-gradient(red, blue)".into()).solid(),
+        None
+    );
+    assert_eq!(
+        ColourChoice::Hex("#e5484d".into()).solid().as_deref(),
+        Some("#e5484d")
+    );
+}
+
+#[test]
+fn every_palette_colour_round_trips_through_the_picker() {
+    for (name, hex) in stoat_gpui::rail::PALETTE {
+        let rgba = stoat_gpui::rail::parse_colour(hex).unwrap();
+        let hsla = gpui_kit::Hsla::from(rgba);
+        assert_eq!(hex_of(hsla), hex.to_lowercase(), "{name}");
+    }
+    // Every grey step too, where rounding would show.
+    for step in 0..=255u32 {
+        let hex = format!("#{step:02x}{step:02x}{step:02x}");
+        let hsla = gpui_kit::Hsla::from(stoat_gpui::rail::parse_colour(&hex).unwrap());
+        assert_eq!(hex_of(hsla), hex);
+    }
+}
+
+#[test]
+fn picking_another_colour_sends_it() {
+    let form = RoleForm {
+        colour: ColourChoice::Hex("#3e63dd".into()),
+        ..RoleForm::of(&members_role())
+    };
+    assert_eq!(
+        form.changes(&members_role()).unwrap(),
+        stoat_gpui::api::models::DataEditRole {
+            colour: Some("#3e63dd".into()),
+            ..empty_role_edit()
+        }
+    );
+}
+
+#[test]
+fn the_same_colour_in_another_case_is_no_change() {
+    let mut role = members_role();
+    role.colour = Some("#E5484D".into());
+    let form = RoleForm {
+        colour: ColourChoice::Hex("#e5484d".into()),
+        ..RoleForm::of(&role)
+    };
+    assert_eq!(form.changes(&role), None);
+}
+
+#[test]
+fn no_colour_removes_it() {
+    let form = RoleForm {
+        colour: ColourChoice::None,
+        ..RoleForm::of(&members_role())
+    };
+    assert_eq!(
+        form.changes(&members_role()).unwrap(),
+        stoat_gpui::api::models::DataEditRole {
+            remove: vec![FieldsRole::Colour],
+            ..empty_role_edit()
+        }
+    );
+}
+
+#[test]
+fn a_custom_colour_survives_a_rename() {
+    let fans = store("u-owner").server("srv").unwrap().roles["fans"].clone();
+    let form = RoleForm::of(&fans);
+    assert_eq!(
+        form.colour,
+        ColourChoice::Custom("linear-gradient(red, blue)".into())
+    );
+    assert_eq!(form.changes(&fans), None);
+    let renamed = RoleForm {
+        name: "Superfans".into(),
+        ..form
+    };
+    assert_eq!(
+        renamed.changes(&fans).unwrap(),
+        stoat_gpui::api::models::DataEditRole {
+            name: Some("Superfans".into()),
+            ..empty_role_edit()
+        }
+    );
+    // Replacing it with a picked colour sends that.
+    let picked = RoleForm {
+        colour: ColourChoice::Hex("#30a46c".into()),
+        ..RoleForm::of(&fans)
+    };
+    assert_eq!(
+        picked.changes(&fans).unwrap().colour.as_deref(),
+        Some("#30a46c")
+    );
+}
+
+#[test]
+fn a_removed_colour_saved_clears_it_in_the_store() {
+    let mut store = store("u-owner");
+    let saved = Role {
+        colour: None,
+        ..members_role()
+    };
+    let (data, clear) = role_update(&saved);
+    assert!(store.apply_role_update("srv", "members", data, &clear));
+    assert_eq!(store.server("srv").unwrap().roles["members"].colour, None);
+    let rows = role_rows(&store, "srv");
+    assert_eq!(rows[3].colour, None);
 }

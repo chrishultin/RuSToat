@@ -1,19 +1,22 @@
 //! A server's roles as the Server Settings window's Roles page lists and
-//! edits them: the rows highest first, what the user may do with each, and
-//! why Stoat refused, in words. Plain data with no GPUI, so it's
-//! unit-testable. The page is [`crate::ui::server_settings`].
+//! edits them: the rows highest first, what the user may do with each, the
+//! editor's form and what it sends, and why Stoat refused, in words. Plain
+//! data with no views (only GPUI's colour types), so it's unit-testable.
+//! The page is [`crate::ui::server_settings`].
 //!
 //! Stoat's rules (0.16.2): every role route needs Manage Role, and a role
 //! may be edited or deleted only if it ranks below the user's best role
 //! (the owner outranks everyone). A bot's role can be edited but not
 //! deleted.
 
+use gpui_kit::{Hsla, Rgba};
 use revolt_result::ErrorType;
 
 use crate::api::ApiError;
 use crate::api::models::{DataEditRole, FieldsRole, PartialRole, Role};
 use crate::permissions::{RoleLock, acting_rank};
 use crate::profile_edit::error_text;
+use crate::rail::parse_colour;
 use crate::server_settings::access;
 use crate::store::{ChatStore, solid_colour};
 
@@ -140,12 +143,66 @@ pub fn role_update(role: &Role) -> (PartialRole, Vec<FieldsRole>) {
     (partial, clear)
 }
 
-/// The role editor's form, as typed and ticked.
+/// The role editor's form, as typed, ticked and picked.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RoleForm {
     pub name: String,
     /// Shown separately in the member list.
     pub hoist: bool,
+    pub colour: ColourChoice,
+}
+
+/// A role's colour as the editor holds it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ColourChoice {
+    /// No colour.
+    #[default]
+    None,
+    /// A solid colour, as lower-case `#rrggbb`.
+    Hex(String),
+    /// CSS RuSToat can't pick (a gradient, a colour name, `#rrggbbaa`), set
+    /// by another client. It's kept as it is unless another is picked.
+    Custom(String),
+}
+
+impl ColourChoice {
+    /// The choice for a role's CSS `colour`: `#rgb` and `#rrggbb` are
+    /// [`ColourChoice::Hex`] (normalised), anything else is custom.
+    pub fn of(colour: Option<&str>) -> Self {
+        match colour {
+            None => ColourChoice::None,
+            Some(css) => match parse_colour(css) {
+                Some(colour) => ColourChoice::Hex(rgba_hex(colour)),
+                None => ColourChoice::Custom(css.to_string()),
+            },
+        }
+    }
+
+    /// The colour to draw, as `#rrggbb`, if it's a solid colour: a picked
+    /// one, or custom CSS that happens to be solid (a colour name).
+    pub fn solid(&self) -> Option<String> {
+        match self {
+            ColourChoice::None => None,
+            ColourChoice::Hex(hex) => Some(hex.clone()),
+            ColourChoice::Custom(css) => solid_colour(css),
+        }
+    }
+}
+
+/// `colour` as lower-case `#rrggbb`, rounded to the nearest step and
+/// ignoring transparency: what RuSToat writes as a role's colour.
+pub fn hex_of(colour: Hsla) -> String {
+    rgba_hex(colour.to_rgb())
+}
+
+fn rgba_hex(colour: Rgba) -> String {
+    let channel = |value: f32| (value.clamp(0., 1.) * 255.).round() as u8;
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        channel(colour.r),
+        channel(colour.g),
+        channel(colour.b)
+    )
 }
 
 impl RoleForm {
@@ -154,6 +211,7 @@ impl RoleForm {
         Self {
             name: role.name.clone(),
             hoist: role.hoist,
+            colour: ColourChoice::of(role.colour.as_deref()),
         }
     }
 
@@ -164,8 +222,10 @@ impl RoleForm {
     }
 
     /// The `PATCH /servers/{id}/roles/{role}` that turns `role` into this
-    /// form: only what changed, the name trimmed. `None` when nothing
-    /// changed, or the form isn't valid.
+    /// form: only what changed, the name trimmed, a picked colour as
+    /// `#rrggbb` and no colour in `remove`. Custom CSS is never sent: it's
+    /// only ever the role's own, unchanged. `None` when nothing changed, or
+    /// the form isn't valid.
     pub fn changes(&self, role: &Role) -> Option<DataEditRole> {
         let name = check_role_name(&self.name)?;
         let mut edit = empty_role_edit();
@@ -174,6 +234,13 @@ impl RoleForm {
         }
         if self.hoist != role.hoist {
             edit.hoist = Some(self.hoist);
+        }
+        if self.colour != ColourChoice::of(role.colour.as_deref()) {
+            match &self.colour {
+                ColourChoice::None => edit.remove.push(FieldsRole::Colour),
+                ColourChoice::Hex(hex) => edit.colour = Some(hex.clone()),
+                ColourChoice::Custom(_) => {}
+            }
         }
         (edit != empty_role_edit()).then_some(edit)
     }

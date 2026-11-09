@@ -18,6 +18,7 @@ use revolt_result::ErrorType;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
@@ -31,10 +32,11 @@ use crate::api::ApiError;
 use crate::api::models::{Role, Server};
 use crate::links::invite_link;
 use crate::profile_edit::{ImageLimits, ProfileImage};
-use crate::rail::parse_colour;
+use crate::rail::{PALETTE, parse_colour};
 use crate::roles::{
-    ROLE_NAME_MAX, RoleForm, RoleRow, check_role_name, create_error_text,
-    delete_error_text as delete_role_error_text, edit_error_text, may_delete, may_edit, role_rows,
+    ColourChoice, ROLE_NAME_MAX, RoleForm, RoleRow, check_role_name, create_error_text,
+    delete_error_text as delete_role_error_text, edit_error_text, hex_of, may_delete, may_edit,
+    role_rows,
 };
 use crate::runtime::spawn_io;
 use crate::server_settings::{
@@ -1197,8 +1199,8 @@ impl Render for CreateRoleDialog {
 /// Roles page goes back to its list.
 pub struct BackToRoles;
 
-/// One role's editor, in the Roles page: its name and hoisting, saved
-/// together with one `PATCH` (see [`RoleForm::changes`]); "Copy role ID";
+/// One role's editor, in the Roles page: its name, colour and hoisting,
+/// saved together with one `PATCH` (see [`RoleForm::changes`]); "Copy role ID";
 /// and "Delete role…". Untouched fields follow changes made elsewhere. A
 /// role the user can't change (rank) opens read-only, and a bot's can't be
 /// deleted.
@@ -1208,6 +1210,10 @@ pub struct RoleEditor {
     role: String,
     name: Entity<InputState>,
     hoist: bool,
+    colour: ColourChoice,
+    /// The colour picker. Only its changes set [`Self::colour`], so a hex
+    /// value shown in it never reads as an edit.
+    picker: Entity<ColorPickerState>,
     /// The role's values the fields were last filled with. A field still
     /// showing its value is untouched, and follows changes made elsewhere;
     /// once it's edited, it keeps the edit.
@@ -1229,10 +1235,18 @@ impl RoleEditor {
         cx: &mut Context<Self>,
     ) -> Self {
         let name = cx.new(|cx| InputState::new(window, cx));
+        let picker = cx.new(|cx| ColorPickerState::new(window, cx));
         let subscriptions = vec![
             cx.subscribe_in(&name, window, |this, _, event, window, cx| match event {
                 InputEvent::PressEnter { .. } => this.save(window, cx),
                 _ => cx.notify(),
+            }),
+            cx.subscribe(&picker, |this, _, event: &ColorPickerEvent, cx| {
+                let ColorPickerEvent::Change(value) = event;
+                this.colour = value.map_or(ColourChoice::None, |colour| {
+                    ColourChoice::Hex(hex_of(colour))
+                });
+                cx.notify();
             }),
             cx.observe_in(chat, window, |this, _, window, cx| this.follow(window, cx)),
         ];
@@ -1243,6 +1257,8 @@ impl RoleEditor {
             role,
             name,
             hoist: false,
+            colour: ColourChoice::None,
+            picker,
             filled: RoleForm::default(),
             saving: None,
             focus_name,
@@ -1276,6 +1292,7 @@ impl RoleEditor {
         RoleForm {
             name: self.name.read(cx).value().to_string(),
             hoist: self.hoist,
+            colour: self.colour.clone(),
         }
     }
 
@@ -1299,7 +1316,22 @@ impl RoleEditor {
             input.set_value(form.name.clone(), window, cx)
         });
         self.hoist = form.hoist;
+        self.set_colour(form.colour.clone(), window, cx);
         self.filled = form;
+        cx.notify();
+    }
+
+    /// Set the colour, and show it in the picker (a custom one as none).
+    fn set_colour(&mut self, colour: ColourChoice, window: &mut Window, cx: &mut Context<Self>) {
+        let shown = match &colour {
+            ColourChoice::Hex(hex) => parse_colour(hex).map(Hsla::from),
+            _ => None,
+        };
+        self.picker.update(cx, |picker, cx| match shown {
+            Some(shown) => picker.set_value(shown, window, cx),
+            None => picker.clear_value(window, cx),
+        });
+        self.colour = colour;
         cx.notify();
     }
 
@@ -1323,6 +1355,9 @@ impl RoleEditor {
         }
         if edited.hoist == self.filled.hoist {
             self.hoist = now.hoist;
+        }
+        if edited.colour == self.filled.colour && now.colour != self.filled.colour {
+            self.set_colour(now.colour.clone(), window, cx);
         }
         self.filled = now;
         cx.notify();
@@ -1428,6 +1463,84 @@ impl RoleEditor {
         confirm_member_action_then(request, action, after, window, cx);
     }
 
+    /// "Role colour": the picker (the rail's palette, or a hex value) and
+    /// "No colour", or just the colour when the role can't be changed; a
+    /// note for a colour set elsewhere that can't be picked; and the name
+    /// in the colour, on the theme's background.
+    fn render_colour(&self, name: &str, editable: bool, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let solid = self.colour.solid();
+        let control = if editable {
+            let featured = PALETTE
+                .iter()
+                .filter_map(|(_, hex)| parse_colour(hex).map(Hsla::from))
+                .collect();
+            h_flex()
+                .gap_2()
+                .child(
+                    ColorPicker::new(&self.picker)
+                        .featured_colors(featured)
+                        .small(),
+                )
+                .child(
+                    Button::new("role-no-colour")
+                        .label("No colour")
+                        .outline()
+                        .small()
+                        .disabled(self.saving.is_some() || self.colour == ColourChoice::None)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.set_colour(ColourChoice::None, window, cx)
+                        })),
+                )
+                .into_any_element()
+        } else {
+            colour_dot(solid.as_deref(), cx).into_any_element()
+        };
+        let custom = match &self.colour {
+            ColourChoice::Custom(css) => Some(
+                h_flex()
+                    .gap_2()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(colour_dot(solid.as_deref(), cx))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .child(format!("Custom colour (set elsewhere): {css}")),
+                    ),
+            ),
+            _ => None,
+        };
+        let preview = div()
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .text_sm()
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(
+                solid
+                    .as_deref()
+                    .and_then(parse_colour)
+                    .map_or(theme.foreground, Hsla::from),
+            )
+            .child(name.to_string());
+        v_flex()
+            .gap_1()
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child("Role colour"),
+            )
+            .child(h_flex().gap_3().child(control).child(preview))
+            .children(custom)
+            .into_any_element()
+    }
+
     /// Why the role can't be changed, or deleted, if it can't.
     fn render_lock(&self, editable: bool, deletable: bool, cx: &App) -> Option<AnyElement> {
         let text = if !editable {
@@ -1523,6 +1636,14 @@ impl Render for RoleEditor {
             )
             .children(self.render_lock(editable, deletable, cx))
             .child(name)
+            .child(self.render_colour(
+                match edited.name.trim() {
+                    "" => &role.name,
+                    typed => typed,
+                },
+                editable,
+                cx,
+            ))
             .child(hoist)
             .when(editable, |this| {
                 this.child(

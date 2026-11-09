@@ -97,3 +97,44 @@ Look-ahead: chunks 3 and 4 extend `RoleForm` and `RoleEditor` as planned, and ch
 
 ### Manual Validation
 Deferred to the end-of-milestone pass (plan's Manual Tests 3, 5 and 7, plus chunk 2's read-only check as a lower moderator). Also check there that the name field takes focus when the editor opens, and that the scroll position is sensible when switching between the list and the editor.
+
+## Chunk 3: Role colour
+
+### Changes Made
+- `src/roles.rs`:
+  - `ColourChoice { None, Hex(String), Custom(String) }` with `of(Option<&str>)`. `#rgb` and `#rrggbb` that `rail::parse_colour` reads become `Hex`, normalised to lower-case `#rrggbb`; anything else is `Custom`. `solid()` gives the colour to draw: a hex, or custom CSS that `store::solid_colour` can still draw, such as "red".
+  - `hex_of(Hsla)` goes through `Hsla::to_rgb()` and rounds each channel; it ignores alpha.
+  - `RoleForm` gains `colour: ColourChoice`. `changes` sends `colour: "#rrggbb"` for a new hex and `remove: ["Colour"]` for None, and never sends custom CSS. Choices are compared after normalising, so an unchanged colour sends nothing.
+  - The module doc now says "no views (only GPUI's colour types)".
+- `src/ui/server_settings.rs`, `RoleEditor`:
+  - gains `colour: ColourChoice` and a `ColorPickerState`. Only `ColorPickerEvent::Change` sets `colour` (through `hex_of`), and `set_colour` writes the picker with `set_value` / `clear_value`, which emit nothing. So opening a role or following a live change never counts as an edit. `reset` and `follow` handle the colour like the other fields.
+  - `render_colour` draws "Role colour" with:
+    - `ColorPicker` (small), whose featured colours are `rail::PALETTE`, plus "No colour" (disabled when there's none or while saving);
+    - for a read-only role, just the colour dot;
+    - a "Custom colour (set elsewhere): {css}" note with a dot when the colour is custom;
+    - a preview of the name as typed, in the colour, on the theme's background with a border.
+  - It sits between the name and Hoist.
+- `tests/roles.rs`: 7 new tests:
+  - `ColourChoice::of` for `#E5484D`, ` #fa0 `, a gradient, `red`, `#ff000080` and `var(--x)`, and `solid()`;
+  - `hex_of` round-trips every palette colour and all 256 grey steps;
+  - another hex is sent, and the same hex in another case isn't a change;
+  - None sends `remove: [Colour]`;
+  - a custom gradient survives a rename (only `name` is sent), and picking a hex replaces it;
+  - a saved role without a colour clears it in the store and on its row.
+  - The existing form tests now build forms with `..RoleForm::of(&role)`.
+
+### Divergences
+- `hex_of` rounds where gpui-component's `Colorize::to_hex` truncates, which is the round-trip risk the plan raised. The grey-step test covers it.
+- The preview uses the name as typed (falling back to the saved name when the field is blank), not just the saved name.
+- `ColourChoice` has `solid()`, so a custom CSS colour name still draws as its colour in the dot and the preview.
+- No `ColorSelect` or anchor change yet: whether the picker's popover is clipped by the settings page can only be seen by running the app, so it's on the manual list.
+
+Look-ahead: chunk 4 adds `icon` to `RoleForm` beside `colour`, and the existing tests' `..RoleForm::of(&role)` pattern absorbs it. No plan amendments.
+
+### Verification Performed
+- `cargo test --test roles`: 27 passed.
+- Full suite: `cargo test` gave 1,218 passed, 0 failed. `cargo clippy --all-targets -- -D warnings` is clean.
+- Rustfmt: `src/ui/server_settings.rs`, `src/roles.rs` and `tests/roles.rs` are clean.
+
+### Manual Validation
+Deferred to the end-of-milestone pass (plan's Manual Tests 3, 4 and 9). Also check there that the picker's popover isn't clipped inside the settings page; if it is, switch to `ColorSelect` or another anchor.
