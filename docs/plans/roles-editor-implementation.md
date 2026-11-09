@@ -174,3 +174,99 @@ Look-ahead: chunk 5 touches only the list and adds new functions, so nothing her
 
 ### Manual Validation
 Deferred to the end-of-milestone pass (plan's Manual Test 3, and chunk 4's checks: set a PNG, remove it, and a 3 MB file refused before upload).
+
+Note: chunk 4's commit was delayed. `git commit` hung twice waiting on the SSH signing prompt (`commit.gpgsign`, with a key held by a macOS app). Chunk 4 stayed staged and untouched while chunk 5 was built in the working tree, and was committed on its own (`15a437e`) once signing went through.
+
+## Chunk 5: Drag roles to reorder
+
+### Changes Made
+- `src/roles.rs`:
+  - `RoleDrop { Before(String), After(String) }`;
+  - `role_order(store, server)` (the list's IDs, highest first);
+  - `reorder(order, dragged, &RoleDrop) -> Option<Vec<String>>`, `None` for unknown roles, beside itself, or a drop that changes nothing;
+  - `may_reorder(store, server, old, new)`, which mirrors `roles_edit_positions.rs`: Manage Role; every role exactly once (no missing, extra or repeated IDs); the owner may do anything; otherwise every role ranked at or above the user's `acting_rank` keeps its position. A member with no roles has `i64::MAX`, so they can move nothing, as Stoat's `None` top rank;
+  - `draggable` (same as `may_edit`; a bot's role moves like any other);
+  - `reorder_error_text` (`NotElevated`, `InvalidOperation`, `MissingPermission`).
+- `src/api/client.rs`: `edit_role_ranks(server, &[String]) -> Server`, sending `{"ranks":[…]}` (signature hand-wrapped).
+- `src/ui/chat.rs`: `ChatView::roles_reordered(server, ranks, cx)` runs `apply_role_ranks` and then `server_permissions_changed`. The rail's `with_drop_mark`, `DropMark`, `DragPreview` and `DRAGGED_OPACITY` were already `pub(crate)`, so nothing else changed there.
+- `src/ui/server_settings.rs`, `RolesPage`:
+  - gains `drag: Option<RoleDragState { dragged, target }>` and `reordering: Option<Task<()>>`;
+  - rows the user may drag (and only while no order is being saved) are `on_drag` sources carrying `RoleDrag { id }`, with a `DragPreview` pill showing the colour dot and name. The dragged row fades to `DRAGGED_OPACITY`;
+  - each row is wrapped in a `relative` div through `with_drop_mark` and takes `on_drag_move`. The row's top half targets `Before`, its bottom half `After`, and the target is kept only if `reorder` gives a new order that `may_reorder` accepts;
+  - the list (`gap_2`, which the drop lines are centred in, with rows now `py_1`) clears the target when the pointer leaves it, handles `on_drop`, and forgets the drag on `on_mouse_up_out`;
+  - a drop applies the new order to the store at once through `roles_reordered` and sends one `PATCH …/roles/ranks`. Success changes nothing more, since the `ServerRoleRanksUpdate` that follows agrees. A refusal re-applies the order from before the drop and toasts `reorder_error_text`;
+  - while the order is being saved, the header reads "Saving the order…" and no row is draggable. Otherwise it reads "Roles higher in the list outrank those below them. Drag one to move it.";
+  - clicking a row still opens its editor, because a drag starts only after a few pixels and cancels the click.
+- `tests/roles.rs`: 14 new tests:
+  - `role_order`;
+  - `reorder` before and after, and its no-op and unknown cases;
+  - `may_reorder`:
+    - the owner may move anything;
+    - a moderator may reorder the roles below them, including a bot's;
+    - nobody may move their own role, a higher one, or a lower one into a place at or above theirs;
+    - an order missing a role, repeating one, or with an extra one is refused;
+    - without Manage Role nothing moves;
+  - `draggable` matches;
+  - reorder error texts;
+  - store: our order then the same `ServerRoleRanksUpdate` is one consistent order, and a later one from someone else wins;
+  - a refused order is put back.
+- `tests/api_roles.rs`: 2 new tests: `PATCH /servers/srv/roles/ranks` sends exactly `{"ranks":["r-a","r-c","r-b"]}` and parses the `Server`; `NotElevated` reads as its text.
+
+### Divergences
+- `reorder` takes `&RoleDrop`, and a `role_order` helper was added for the list's order.
+- `may_reorder` also rejects repeated IDs and needs Manage Role. Stoat's length-plus-contains check rejects repeats in effect too.
+- Putting the order back after a refusal re-applies the order shown before the drop. If someone else's reorder arrived during the request, it's overwritten locally until the next `ServerRoleRanksUpdate`. That race is narrow, and Stoat's state is unaffected.
+- **No edge auto-scroll** while dragging. Each row's `on_drag_move` uses window bounds, so rows scrolled into view still take drops, but long lists have to be dragged in stages or scrolled with the wheel. Left as a follow-up, as the plan allowed.
+- The list's spacing changed (rows `py_1` with `gap_2`) so the rail's drop line sits centred between rows.
+- The store tests are in `tests/roles.rs`, not `tests/store_roles.rs`, beside the reorder logic.
+
+### Verification Performed
+- `cargo test --test roles --test api_roles`: 42 and 14 passed.
+- Full suite: `cargo test` gave 1,238 passed, 0 failed. `cargo clippy --all-targets -- -D warnings` is clean.
+- Rustfmt drift, final: `src/ui/chat.rs` 17, `src/store.rs` 14, `src/api/client.rs` 3, `src/api/events.rs` 3 and `tests/api_upload.rs` 10, all unchanged. `src/server_settings.rs`, `src/ui/server_settings.rs`, `src/ui/profile_editor.rs`, `src/permissions.rs`, `src/assets.rs` and `tests/server_settings.rs` are clean, and so are the new `src/roles.rs`, `tests/roles.rs` and `tests/api_roles.rs`.
+
+### Manual Validation
+Deferred to the end-of-milestone pass (plan's Manual Test 6, and chunk 5's checks: drag from bottom to top as the owner; as a mid-rank moderator, no drag handles or drop lines at or above their role; dragging off the list changes nothing).
+
+## Summary
+
+_Completed: 2026-11-09_
+
+### Chunks Completed
+1. Roles page: list and create (`12ebac9`)
+2. Role editor: name, hoist, delete (`d17d7ba`)
+3. Role colour (`35900dd`)
+4. Role icon (`15a437e`)
+5. Drag roles to reorder (this commit)
+
+### Divergences
+- `role_partial` became `role_update(&Role) -> (PartialRole, Vec<FieldsRole>)`, so that saving a role without a colour or icon clears it in the store (chunk 1).
+- Rank locks take priority over Managed in the list (chunk 1).
+- Opening the new role's editor after Create arrived with chunk 2.
+- Hoist is a checkbox (chunk 2).
+- `may_edit` and `may_reorder` also need Manage Role. Losing Manage Role while editing returns the page to its list (chunk 2).
+- `hex_of` rounds where gpui-component's `to_hex` truncates. Custom CSS colour names still draw (chunk 3).
+- `square_preview` is a new 64 px helper (chunk 4).
+- The upload-then-edit and store tests are in `tests/api_roles.rs` and `tests/roles.rs` rather than `tests/api_upload.rs` and `tests/store_roles.rs` (chunks 1, 4 and 5).
+- There's no edge auto-scroll while dragging. A refused reorder re-applies the order from before the drop (chunk 5).
+- Chunk 4's commit was delayed by a signing prompt; see the note above.
+
+### Definition of Done
+- [x] The Roles page lists every role highest first, with colour, icon, hoist note and lock reason. It shows for Manage Role or the owner, and "Server settings…" is offered with only Manage Role. Covered by unit tests; to be confirmed manually.
+- [x] Create role adds a role (name 1–32) at the bottom and opens it. `TooManyRoles` reads plainly.
+- [x] The role editor saves name, hoist, colour (palette or hex `#rrggbb`, or none) and icon (`icons`, within its limit, set or removed). It sends only what changed, keeps custom CSS colours unless changed, and follows live edits.
+- [x] Delete role is offered for unmanaged roles below the user's rank (any unmanaged role for the owner), confirms, and removes the role everywhere at once.
+- [x] Dragging reorders roles with one `PATCH …/roles/ranks` per drop, only where Stoat's rank rule allows. The change shows at once, and is put back on refusal.
+- [x] Roles the user can't edit (rank) open read-only and say why. A bot's role says it can be edited but not deleted.
+- [x] Stoat's refusals become plain toasts: `MissingPermission`, `NotElevated`, `InvalidOperation`, `TooManyRoles`, and `NotFound` (already deleted counts as done; an edit's says Stoat couldn't find something).
+- [x] `cargo test` (1,238 passed) and `cargo clippy --all-targets -- -D warnings` pass. No touched file's rustfmt drift grew, and the new files are clean.
+- [x] The roadmap links this plan.
+
+### Remaining Manual Steps
+The plan's Manual Tests 1–9 haven't been run. They need two accounts, the web client, and a test server owned by the first account. Points to watch, gathered from the chunks:
+- the sidebar doesn't jump when the window opens for an owner;
+- the name field takes focus when the editor opens, and switching between the list and the editor scrolls sensibly;
+- the colour picker's popover isn't clipped inside the settings page (if it is, switch to `ColorSelect` or another anchor);
+- a 3 MB icon is refused before upload;
+- dragging feels right without edge auto-scroll;
+- drop lines, locks, the picker and the previews are readable in both themes.

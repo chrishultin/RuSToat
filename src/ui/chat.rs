@@ -7401,6 +7401,18 @@ impl ChatView {
         cx.notify();
     }
 
+    /// The user reordered `server`'s roles to `ranks` (highest first, from
+    /// Server Settings), or a refused order is being put back: show it now
+    /// (member list sections, name colours, permissions), without waiting
+    /// for its `ServerRoleRanksUpdate`.
+    pub fn roles_reordered(&mut self, server: &str, ranks: &[String], cx: &mut Context<Self>) {
+        if !self.store.apply_role_ranks(server, ranks) {
+            return;
+        }
+        self.server_permissions_changed(server, cx);
+        cx.notify();
+    }
+
     /// Server info, from the server's name above the channel list: its
     /// banner, icon, name and description.
     fn open_server_info(&mut self, server: String, window: &mut Window, cx: &mut Context<Self>) {

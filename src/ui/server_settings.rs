@@ -12,6 +12,7 @@
 //! user may see no page of it any more, or when the account signs out.
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use revolt_result::ErrorType;
 
@@ -34,9 +35,9 @@ use crate::links::invite_link;
 use crate::profile_edit::{ImageLimits, ProfileImage};
 use crate::rail::{PALETTE, parse_colour};
 use crate::roles::{
-    ColourChoice, ROLE_NAME_MAX, RoleForm, RoleRow, check_role_name, create_error_text,
-    delete_error_text as delete_role_error_text, edit_error_text, hex_of, may_delete, may_edit,
-    role_rows,
+    ColourChoice, ROLE_NAME_MAX, RoleDrop, RoleForm, RoleRow, check_role_name, create_error_text,
+    delete_error_text as delete_role_error_text, draggable, edit_error_text, hex_of, may_delete,
+    may_edit, may_reorder, reorder, reorder_error_text, role_order, role_rows,
 };
 use crate::runtime::spawn_io;
 use crate::server_settings::{
@@ -48,7 +49,7 @@ use crate::server_settings::{
 };
 use crate::store::solid_colour;
 use crate::themes;
-use crate::ui::chat::{ChatView, avatar};
+use crate::ui::chat::{ChatView, DRAGGED_OPACITY, DragPreview, DropMark, avatar, with_drop_mark};
 use crate::ui::confirm_dialog::{ConfirmRequest, confirm_then};
 use crate::ui::invites::{CREATE_DIALOG_WIDTH, CreateInviteDialog, InviteCreated};
 use crate::ui::moderation_dialogs::{MemberActionRequest, confirm_member_action_then};
@@ -851,11 +852,16 @@ fn roles_page(view: &ServerSettingsView, cx: &mut App) -> Option<SettingPage> {
 /// The Roles page: the server's roles, highest first, each with its colour,
 /// icon, whether it's hoisted, and a lock if the user can't change it; and
 /// "Create role…". Clicking a role opens its editor in the same page, with
-/// a way back. It follows the store, which live role events keep.
+/// a way back; dragging one moves it, where Stoat would allow. It follows
+/// the store, which live role events keep.
 pub struct RolesPage {
     chat: WeakEntity<ChatView>,
     server: String,
     mode: RolesMode,
+    /// A role being dragged in the list.
+    drag: Option<RoleDragState>,
+    /// A new order being sent: no other drag starts until Stoat answers.
+    reordering: Option<Task<()>>,
     _chat: Subscription,
     _editor: Option<Subscription>,
     _create: Option<Subscription>,
@@ -865,6 +871,20 @@ pub struct RolesPage {
 enum RolesMode {
     List,
     Editing(Entity<RoleEditor>),
+}
+
+/// What a role carries while it's dragged in the list.
+#[derive(Clone)]
+struct RoleDrag {
+    id: String,
+}
+
+/// A drag in the role list: what's dragged and where it would land.
+struct RoleDragState {
+    dragged: String,
+    /// `None` off the list, or where Stoat wouldn't take the order (or it
+    /// wouldn't change).
+    target: Option<RoleDrop>,
 }
 
 impl RolesPage {
@@ -878,6 +898,8 @@ impl RolesPage {
             chat: chat.downgrade(),
             server,
             mode: RolesMode::List,
+            drag: None,
+            reordering: None,
             _chat: cx.observe_in(chat, window, |this, _, window, cx| this.follow(window, cx)),
             _editor: None,
             _create: None,
@@ -941,9 +963,156 @@ impl RolesPage {
         open_focused_dialog("Create role".into(), dialog, focus, window, cx);
     }
 
+    /// The roles' IDs as the list shows them, highest first.
+    fn order(&self, cx: &App) -> Vec<String> {
+        self.chat
+            .upgrade()
+            .map(|chat| role_order(chat.read(cx).store(), &self.server))
+            .unwrap_or_default()
+    }
+
+    /// The drag in the list, while there is one.
+    fn dragging(&self, cx: &App) -> Option<&RoleDragState> {
+        self.drag.as_ref().filter(|_| cx.has_active_drag())
+    }
+
+    fn start_drag(&mut self, id: String, cx: &mut Context<Self>) {
+        self.drag = Some(RoleDragState {
+            dragged: id,
+            target: None,
+        });
+        cx.notify();
+    }
+
+    /// Forget the drag: dropped, cancelled, or ended off the list.
+    fn end_drag(&mut self, cx: &mut Context<Self>) {
+        if self.drag.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Show where the drag would land, if that's changed.
+    fn set_target(&mut self, target: Option<RoleDrop>, cx: &mut Context<Self>) {
+        if let Some(drag) = &mut self.drag
+            && drag.target != target
+        {
+            drag.target = target;
+            cx.notify();
+        }
+    }
+
+    /// The drag moved, as the list sees it: off the list, a drop does
+    /// nothing. (The list's own listener runs before its rows'.)
+    fn list_drag_moved(&mut self, event: &DragMoveEvent<RoleDrag>, cx: &mut Context<Self>) {
+        if !event.bounds.contains(&event.event.position) {
+            self.set_target(None, cx);
+        }
+    }
+
+    /// The drag moved, as the row `hovered` sees it: over its top half it
+    /// would land above it, over its bottom half below, if Stoat would take
+    /// that order. Anywhere else, there's no drop line.
+    fn drag_over(
+        &mut self,
+        hovered: &str,
+        event: &DragMoveEvent<RoleDrag>,
+        cx: &mut Context<Self>,
+    ) {
+        let position = event.event.position;
+        if !event.bounds.contains(&position) {
+            return;
+        }
+        let Some(chat) = self.chat.upgrade() else {
+            return;
+        };
+        let fraction = (position.y - event.bounds.origin.y) / event.bounds.size.height;
+        let target = if fraction < 0.5 {
+            RoleDrop::Before(hovered.to_string())
+        } else {
+            RoleDrop::After(hovered.to_string())
+        };
+        let dragged = event.drag(cx).id.clone();
+        let old = self.order(cx);
+        let allowed = reorder(&old, &dragged, &target)
+            .is_some_and(|new| may_reorder(chat.read(cx).store(), &self.server, &old, &new));
+        self.set_target(allowed.then_some(target), cx);
+    }
+
+    /// A role dropped on the list lands where its line showed: the new
+    /// order shows at once, and is sent. A refusal toasts and puts the
+    /// order back.
+    fn drop_role(&mut self, drag: &RoleDrag, window: &mut Window, cx: &mut Context<Self>) {
+        let target = self.drag.take().and_then(|drag| drag.target);
+        cx.notify();
+        let (Some(target), Some(chat)) = (target, self.chat.upgrade()) else {
+            return;
+        };
+        if self.reordering.is_some() {
+            return;
+        }
+        let old = self.order(cx);
+        let Some(new) = reorder(&old, &drag.id, &target)
+            .filter(|new| may_reorder(chat.read(cx).store(), &self.server, &old, new))
+        else {
+            return;
+        };
+        let server = self.server.clone();
+        chat.update(cx, |chat, cx| chat.roles_reordered(&server, &new, cx));
+        let request = spawn_io({
+            let client = chat.read(cx).client().clone();
+            let server = server.clone();
+            async move { client.edit_role_ranks(&server, &new).await }
+        });
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.reordering = None;
+                let text = match result {
+                    Ok(Ok(_)) => {
+                        log::info!("reordered the roles of {server}");
+                        None
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't reorder the roles of {server}: {err:?}");
+                        Some(reorder_error_text(&err))
+                    }
+                    Err(err) => {
+                        log::warn!("role reorder task failed: {err:?}");
+                        Some("Couldn't reorder the roles.".into())
+                    }
+                };
+                if let Some(text) = text {
+                    this.chat
+                        .update(cx, |chat, cx| chat.roles_reordered(&server, &old, cx))
+                        .ok();
+                    window.push_notification(Notification::error(text), cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        });
+        self.reordering = Some(task);
+    }
+
+    /// Where the drag would land beside the row `id`.
+    fn mark(&self, id: &str, cx: &App) -> Option<DropMark> {
+        match self.dragging(cx)?.target.as_ref()? {
+            RoleDrop::Before(target) if target == id => Some(DropMark::Above),
+            RoleDrop::After(target) if target == id => Some(DropMark::Below),
+            _ => None,
+        }
+    }
+
     fn render_row(&self, row: &RoleRow, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
+        let draggable = self.reordering.is_none()
+            && self
+                .chat
+                .upgrade()
+                .is_some_and(|chat| draggable(chat.read(cx).store(), &self.server, &row.id));
+        let dragged = self.dragging(cx).is_some_and(|drag| drag.dragged == row.id);
+        let mark = self.mark(&row.id, cx);
         let icon = row.icon.as_ref().and_then(|id| {
             let chat = self.chat.upgrade()?;
             chat.read(cx).store().media().file_by_id("icons", id)
@@ -952,15 +1121,16 @@ impl RolesPage {
             let id = row.id.clone();
             cx.listener(move |this, _, window, cx| this.open(id.clone(), window, cx))
         };
-        h_flex()
+        let face = h_flex()
             .id(SharedString::from(format!("role-{}", row.id)))
             .w_full()
             .gap_3()
             .px_2()
-            .py_1p5()
+            .py_1()
             .rounded_md()
             .cursor_pointer()
             .hover(|el| el.bg(theme.secondary))
+            .when(dragged, |el| el.opacity(DRAGGED_OPACITY))
             .on_click(open)
             .child(colour_dot(row.colour.as_deref(), cx))
             .child(
@@ -989,7 +1159,25 @@ impl RolesPage {
                     .text_color(muted)
                     .child(Icon::new(IconName::Lock).small())
                     .tooltip(move |window, cx| Tooltip::new(text).build(window, cx))
-            }))
+            }));
+        let face = if draggable {
+            let view = cx.entity().downgrade();
+            let preview = role_drag_face(row);
+            face.on_drag(RoleDrag { id: row.id.clone() }, move |drag, _, _, cx| {
+                let id = drag.id.clone();
+                view.update(cx, |this, cx| this.start_drag(id, cx)).ok();
+                DragPreview::new(preview.clone(), cx)
+            })
+        } else {
+            face
+        };
+        let hovered = row.id.clone();
+        with_drop_mark(div().relative().w_full().child(face), mark, cx)
+            .on_drag_move(
+                cx.listener(move |this, event: &DragMoveEvent<RoleDrag>, _, cx| {
+                    this.drag_over(&hovered, event, cx)
+                }),
+            )
             .into_any_element()
     }
 
@@ -1000,36 +1188,52 @@ impl RolesPage {
             .map(|chat| role_rows(chat.read(cx).store(), &self.server))
             .unwrap_or_default();
         let muted = cx.theme().muted_foreground;
-        let header = h_flex()
-            .w_full()
-            .gap_2()
-            .child(
+        let header =
+            h_flex()
+                .w_full()
+                .gap_2()
+                .child(div().flex_1().text_sm().text_color(muted).child(
+                    if self.reordering.is_some() {
+                        "Saving the order…"
+                    } else {
+                        "Roles higher in the list outrank those below them. Drag one to move it."
+                    },
+                ))
+                .child(
+                    Button::new("roles-create")
+                        .label("Create role…")
+                        .icon(IconName::Plus)
+                        .outline()
+                        .small()
+                        .on_click(cx.listener(|this, _, window, cx| this.create(window, cx))),
+                );
+        let body =
+            if rows.is_empty() {
                 div()
-                    .flex_1()
                     .text_sm()
                     .text_color(muted)
-                    .child("Roles higher in the list outrank those below them."),
-            )
-            .child(
-                Button::new("roles-create")
-                    .label("Create role…")
-                    .icon(IconName::Plus)
-                    .outline()
-                    .small()
-                    .on_click(cx.listener(|this, _, window, cx| this.create(window, cx))),
-            );
-        let body = if rows.is_empty() {
-            div()
-                .text_sm()
-                .text_color(muted)
-                .child("This server has no roles.")
-                .into_any_element()
-        } else {
-            v_flex()
-                .w_full()
-                .children(rows.iter().map(|row| self.render_row(row, cx)))
-                .into_any_element()
-        };
+                    .child("This server has no roles.")
+                    .into_any_element()
+            } else {
+                // `gap_2`, which the drop lines are centred in.
+                v_flex()
+                    .id("role-list")
+                    .w_full()
+                    .gap_2()
+                    .on_drag_move(cx.listener(|this, event: &DragMoveEvent<RoleDrag>, _, cx| {
+                        this.list_drag_moved(event, cx)
+                    }))
+                    .on_drop(cx.listener(|this, drag: &RoleDrag, window, cx| {
+                        this.drop_role(drag, window, cx)
+                    }))
+                    // Dropped off the list: nothing happens.
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| this.end_drag(cx)),
+                    )
+                    .children(rows.iter().map(|row| self.render_row(row, cx)))
+                    .into_any_element()
+            };
         v_flex()
             .w_full()
             .gap_3()
@@ -1037,6 +1241,29 @@ impl RolesPage {
             .child(body)
             .into_any_element()
     }
+}
+
+/// What follows the pointer while `row` is dragged: its colour and name on
+/// a pill.
+fn role_drag_face(row: &RoleRow) -> Rc<dyn Fn(&App) -> AnyElement> {
+    let (name, colour) = (row.name.clone(), row.colour.clone());
+    Rc::new(move |cx: &App| {
+        let theme = cx.theme();
+        h_flex()
+            .gap_2()
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .bg(theme.secondary)
+            .border_1()
+            .border_color(theme.border)
+            .text_sm()
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(theme.secondary_foreground)
+            .child(colour_dot(colour.as_deref(), cx))
+            .child(name.clone())
+            .into_any_element()
+    })
 }
 
 /// A role's icon in the list.

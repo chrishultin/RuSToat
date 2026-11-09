@@ -9,6 +9,7 @@
 //! (the owner outranks everyone). A bot's role can be edited but not
 //! deleted.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use gpui_kit::{Hsla, Rgba};
@@ -332,5 +333,89 @@ pub fn delete_error_text(err: &ApiError) -> String {
             "You don't have permission to manage roles.".into()
         }
         _ => error_text(err, "Couldn't delete the role."),
+    }
+}
+
+/// Where a dragged role would land in the list: above or below another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoleDrop {
+    Before(String),
+    After(String),
+}
+
+/// `server`'s role IDs, highest first, as the list shows them.
+pub fn role_order(store: &ChatStore, server: &str) -> Vec<String> {
+    role_rows(store, server)
+        .into_iter()
+        .map(|row| row.id)
+        .collect()
+}
+
+/// `order` with `dragged` moved to `target`. `None` if either isn't in it,
+/// or nothing would change.
+pub fn reorder(order: &[String], dragged: &str, target: &RoleDrop) -> Option<Vec<String>> {
+    let (RoleDrop::Before(beside) | RoleDrop::After(beside)) = target;
+    if beside == dragged || !order.iter().any(|id| id == dragged) {
+        return None;
+    }
+    let mut new: Vec<String> = order.iter().filter(|id| *id != dragged).cloned().collect();
+    let at = new.iter().position(|id| id == beside)?;
+    let at = match target {
+        RoleDrop::Before(_) => at,
+        RoleDrop::After(_) => at + 1,
+    };
+    new.insert(at, dragged.to_string());
+    (new != order).then_some(new)
+}
+
+/// Whether Stoat would take `new` as `server`'s role order, from `old` (the
+/// order now): every role exactly once, and, unless the user owns the
+/// server, no role at or above their best one in a new position. So a
+/// moderator reorders only the roles below them, among the positions below
+/// them, and someone with no roles nothing.
+pub fn may_reorder(store: &ChatStore, server: &str, old: &[String], new: &[String]) -> bool {
+    let Some(known) = store.server(server) else {
+        return false;
+    };
+    let unique: HashSet<&String> = new.iter().collect();
+    if !access(store, server).roles
+        || new.len() != known.roles.len()
+        || unique.len() != new.len()
+        || !known.roles.keys().all(|id| unique.contains(id))
+    {
+        return false;
+    }
+    if known.owner == store.me() {
+        return true;
+    }
+    let ours = acting_rank(store, server);
+    let position = |order: &[String], id: &str| order.iter().position(|listed| listed == id);
+    known
+        .roles
+        .iter()
+        .filter(|(_, role)| role.rank <= ours)
+        .all(|(id, _)| position(old, id) == position(new, id))
+}
+
+/// Whether the user may drag `role` to another place: as [`may_edit`] (a
+/// bot's role moves like any other). Where it may land is
+/// [`may_reorder`]'s to say.
+pub fn draggable(store: &ChatStore, server: &str, role: &str) -> bool {
+    may_edit(store, server, role)
+}
+
+/// Why Stoat refused a new role order.
+pub fn reorder_error_text(err: &ApiError) -> String {
+    match err.error_type() {
+        Some(ErrorType::NotElevated) => {
+            "You can only move roles below your highest role, among the places below it.".into()
+        }
+        Some(ErrorType::InvalidOperation) => {
+            "The server's roles changed meanwhile. Try again.".into()
+        }
+        Some(ErrorType::MissingPermission { .. }) => {
+            "You don't have permission to manage roles.".into()
+        }
+        _ => error_text(err, "Couldn't reorder the roles."),
     }
 }

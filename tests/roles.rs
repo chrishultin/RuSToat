@@ -10,9 +10,9 @@ use stoat_gpui::api::models::{FieldsRole, PartialRole, Role};
 use stoat_gpui::permissions::RoleLock;
 use stoat_gpui::profile_edit::ProfileImage;
 use stoat_gpui::roles::{
-    ColourChoice, ROLE_NAME_MAX, RoleForm, RoleRow, check_role_name, create_error_text,
-    delete_error_text, edit_error_text, empty_role_edit, hex_of, may_delete, may_edit, role_rows,
-    role_update,
+    ColourChoice, ROLE_NAME_MAX, RoleDrop, RoleForm, RoleRow, check_role_name, create_error_text,
+    delete_error_text, draggable, edit_error_text, empty_role_edit, hex_of, may_delete, may_edit,
+    may_reorder, reorder, reorder_error_text, role_order, role_rows, role_update,
 };
 use stoat_gpui::store::ChatStore;
 
@@ -652,4 +652,184 @@ fn a_picked_icon_waits_for_its_upload() {
     assert_eq!(edit.icon, None);
     assert!(edit.remove.is_empty());
     assert!(!RoleForm::of(&members_role()).has_changes(&members_role()));
+}
+
+fn ids(order: &[&str]) -> Vec<String> {
+    order.iter().map(|id| id.to_string()).collect()
+}
+
+/// The fixture's order: admin, mods, bot, members, fans.
+fn start() -> Vec<String> {
+    ids(&["admin", "mods", "bot", "members", "fans"])
+}
+
+#[test]
+fn the_order_is_the_lists() {
+    assert_eq!(role_order(&store("u-owner"), "srv"), start());
+}
+
+#[test]
+fn reorder_moves_a_role_before_or_after_another() {
+    let order = start();
+    assert_eq!(
+        reorder(&order, "fans", &RoleDrop::Before("admin".into())),
+        Some(ids(&["fans", "admin", "mods", "bot", "members"]))
+    );
+    assert_eq!(
+        reorder(&order, "admin", &RoleDrop::After("fans".into())),
+        Some(ids(&["mods", "bot", "members", "fans", "admin"]))
+    );
+    assert_eq!(
+        reorder(&order, "members", &RoleDrop::After("mods".into())),
+        Some(ids(&["admin", "mods", "members", "bot", "fans"]))
+    );
+}
+
+#[test]
+fn a_drop_that_changes_nothing_is_none() {
+    let order = start();
+    // Beside itself, or where it already is.
+    assert_eq!(
+        reorder(&order, "bot", &RoleDrop::Before("bot".into())),
+        None
+    );
+    assert_eq!(
+        reorder(&order, "bot", &RoleDrop::After("mods".into())),
+        None
+    );
+    assert_eq!(
+        reorder(&order, "bot", &RoleDrop::Before("members".into())),
+        None
+    );
+    // Unknown roles.
+    assert_eq!(
+        reorder(&order, "r-gone", &RoleDrop::Before("admin".into())),
+        None
+    );
+    assert_eq!(
+        reorder(&order, "bot", &RoleDrop::Before("r-gone".into())),
+        None
+    );
+}
+
+#[test]
+fn the_owner_may_move_anything() {
+    let store = store("u-owner");
+    let new = ids(&["fans", "bot", "members", "mods", "admin"]);
+    assert!(may_reorder(&store, "srv", &start(), &new));
+    for role in ["admin", "mods", "bot", "members", "fans"] {
+        assert!(draggable(&store, "srv", role), "{role}");
+    }
+}
+
+#[test]
+fn a_moderator_may_reorder_the_roles_below_them() {
+    let store = store("u-mod");
+    let swapped = ids(&["admin", "mods", "members", "bot", "fans"]);
+    assert!(may_reorder(&store, "srv", &start(), &swapped));
+    let last = ids(&["admin", "mods", "fans", "bot", "members"]);
+    assert!(may_reorder(&store, "srv", &start(), &last));
+    // A bot's role below them moves like any other.
+    assert!(draggable(&store, "srv", "bot"));
+    assert!(draggable(&store, "srv", "members"));
+}
+
+#[test]
+fn nobody_moves_their_own_role_a_higher_one_or_into_their_place() {
+    let store = store("u-mod");
+    // Their own role, down.
+    let own = ids(&["admin", "bot", "mods", "members", "fans"]);
+    assert!(!may_reorder(&store, "srv", &start(), &own));
+    // A higher one.
+    let higher = ids(&["mods", "admin", "bot", "members", "fans"]);
+    assert!(!may_reorder(&store, "srv", &start(), &higher));
+    // A lower role into a place at or above theirs pushes theirs down.
+    let above = ids(&["admin", "fans", "mods", "bot", "members"]);
+    assert!(!may_reorder(&store, "srv", &start(), &above));
+    let top = ids(&["fans", "admin", "mods", "bot", "members"]);
+    assert!(!may_reorder(&store, "srv", &start(), &top));
+    assert!(!draggable(&store, "srv", "admin"));
+    assert!(!draggable(&store, "srv", "mods"));
+}
+
+#[test]
+fn an_order_missing_or_repeating_a_role_is_refused() {
+    let store = store("u-owner");
+    let missing = ids(&["admin", "mods", "bot", "members"]);
+    assert!(!may_reorder(&store, "srv", &start(), &missing));
+    let repeated = ids(&["admin", "mods", "bot", "members", "members"]);
+    assert!(!may_reorder(&store, "srv", &start(), &repeated));
+    let extra = ids(&["admin", "mods", "bot", "members", "fans", "r-gone"]);
+    assert!(!may_reorder(&store, "srv", &start(), &extra));
+}
+
+#[test]
+fn without_manage_role_nothing_moves() {
+    let store = store("u-plain");
+    let swapped = ids(&["admin", "mods", "bot", "fans", "members"]);
+    assert!(!may_reorder(&store, "srv", &start(), &swapped));
+    assert!(!draggable(&store, "srv", "fans"));
+}
+
+#[test]
+fn reorder_refusals_read_plainly() {
+    assert_eq!(
+        reorder_error_text(&api_error(json!({ "type": "NotElevated" }))),
+        "You can only move roles below your highest role, among the places below it."
+    );
+    assert_eq!(
+        reorder_error_text(&api_error(json!({ "type": "InvalidOperation" }))),
+        "The server's roles changed meanwhile. Try again."
+    );
+    assert_eq!(
+        reorder_error_text(&api_error(
+            json!({ "type": "MissingPermission", "permission": "ManageRole" })
+        )),
+        "You don't have permission to manage roles."
+    );
+    assert_eq!(
+        reorder_error_text(&api_error(json!({ "type": "InternalError" }))),
+        "Couldn't reorder the roles."
+    );
+}
+
+fn ranks_update(ranks: &[&str]) -> ServerEvent {
+    let event = json!({ "type": "ServerRoleRanksUpdate", "id": "srv", "ranks": ranks });
+    parse_frame(&event.to_string()).pop().expect("ranks update")
+}
+
+#[test]
+fn our_order_then_its_event_is_one_consistent_order() {
+    let mut store = store("u-owner");
+    let new = ids(&["fans", "admin", "mods", "bot", "members"]);
+    assert!(store.apply_role_ranks("srv", &new));
+    assert_eq!(role_order(&store, "srv"), new);
+    let ServerEvent::ServerRoleRanksUpdate { server, ranks } =
+        ranks_update(&["fans", "admin", "mods", "bot", "members"])
+    else {
+        panic!("ranks update");
+    };
+    assert!(store.apply_role_ranks(&server, &ranks));
+    assert_eq!(role_order(&store, "srv"), new);
+    let roles = &store.server("srv").unwrap().roles;
+    assert_eq!(roles["fans"].rank, 0);
+    assert_eq!(roles["members"].rank, 4);
+    // Someone else's later order wins.
+    let ServerEvent::ServerRoleRanksUpdate { server, ranks } =
+        ranks_update(&["admin", "mods", "bot", "members", "fans"])
+    else {
+        panic!("ranks update");
+    };
+    assert!(store.apply_role_ranks(&server, &ranks));
+    assert_eq!(role_order(&store, "srv"), start());
+}
+
+#[test]
+fn a_refused_order_is_put_back() {
+    let mut store = store("u-owner");
+    let old = role_order(&store, "srv");
+    let new = ids(&["members", "admin", "mods", "bot", "fans"]);
+    store.apply_role_ranks("srv", &new);
+    store.apply_role_ranks("srv", &old);
+    assert_eq!(role_order(&store, "srv"), start());
 }

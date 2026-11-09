@@ -1,13 +1,16 @@
 //! A server's roles against a mock Stoat API, from Server Settings' Roles
 //! page: `POST /servers/{id}/roles` (create one), `PATCH
 //! /servers/{id}/roles/{role}` (edit one, after uploading its icon to the
-//! file server) and `DELETE /servers/{id}/roles/{role}` (delete one).
+//! file server), `DELETE /servers/{id}/roles/{role}` (delete one) and
+//! `PATCH /servers/{id}/roles/ranks` (reorder them).
 
 use revolt_result::ErrorType;
 use serde_json::json;
 use stoat_gpui::api::StoatClient;
 use stoat_gpui::api::models::DataEditRole;
-use stoat_gpui::roles::{create_error_text, delete_error_text, edit_error_text, empty_role_edit};
+use stoat_gpui::roles::{
+    create_error_text, delete_error_text, edit_error_text, empty_role_edit, reorder_error_text,
+};
 use wiremock::matchers::{body_json, body_string, header, header_regex, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -314,4 +317,56 @@ async fn a_new_colour_is_sent_as_hex() {
     };
     let saved = client(&server).edit_role("srv", "r1", &edit).await.unwrap();
     assert_eq!(saved.colour.as_deref(), Some("#3e63dd"));
+}
+
+#[tokio::test]
+async fn reordering_sends_every_role_highest_first() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/servers/srv/roles/ranks"))
+        .and(header("x-session-token", "tok"))
+        .and(body_json(json!({ "ranks": ["r-a", "r-c", "r-b"] })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "_id": "srv", "owner": "u-me", "name": "Lounge", "channels": [],
+            "default_permissions": 0, "approximate_member_count": 1,
+            "roles": {
+                "r-a": { "_id": "r-a", "name": "A", "rank": 0, "permissions": { "a": 0, "d": 0 } },
+                "r-c": { "_id": "r-c", "name": "C", "rank": 1, "permissions": { "a": 0, "d": 0 } },
+                "r-b": { "_id": "r-b", "name": "B", "rank": 2, "permissions": { "a": 0, "d": 0 } }
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let ranks: Vec<String> = ["r-a", "r-c", "r-b"].map(String::from).into();
+    let saved = client(&server)
+        .edit_role_ranks("srv", &ranks)
+        .await
+        .unwrap();
+    assert_eq!(saved.roles["r-c"].rank, 1);
+}
+
+#[tokio::test]
+async fn reordering_above_your_role_is_refused_in_words() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/servers/srv/roles/ranks"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({ "type": "NotElevated" })))
+        .mount(&server)
+        .await;
+
+    let ranks: Vec<String> = ["r-b", "r-a"].map(String::from).into();
+    let err = client(&server)
+        .edit_role_ranks("srv", &ranks)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err.error_type(), Some(ErrorType::NotElevated)),
+        "{err:?}"
+    );
+    assert_eq!(
+        reorder_error_text(&err),
+        "You can only move roles below your highest role, among the places below it."
+    );
 }

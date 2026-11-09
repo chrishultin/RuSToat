@@ -1272,6 +1272,28 @@ impl StoatClient {
         .map(|_| ())
     }
 
+    /// `PATCH /servers/{server}/roles/ranks`: the server's roles in a new
+    /// order, highest first, every role exactly once (`InvalidOperation`
+    /// otherwise). Anyone but the owner may only move roles below their
+    /// own best one (`NotElevated`). Each role's rank becomes its index.
+    /// Stoat answers with the server; `ServerRoleRanksUpdate` follows.
+    pub async fn edit_role_ranks(
+        &self,
+        server: &str,
+        ranks: &[String],
+    ) -> Result<Server, ApiError> {
+        #[derive(Serialize)]
+        struct Ranks<'a> {
+            ranks: &'a [String],
+        }
+        self.send(
+            Method::PATCH,
+            &format!("/servers/{server}/roles/ranks"),
+            Some(&Ranks { ranks }),
+        )
+        .await
+    }
+
     /// `PATCH /servers/{server}` with `{"owner": owner}`: hand the server
     /// to another member (its owner only, with a validated MFA `ticket`,
     /// which is used up even if the transfer then fails). Bots can't own a
