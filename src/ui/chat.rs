@@ -7286,6 +7286,26 @@ impl ChatView {
         ServerSettingsWindow::open(cx.entity(), server, cx);
     }
 
+    /// The user deleted `server` (from Server Settings): drop it now,
+    /// without waiting for its `ServerDelete`, and say so in this window.
+    /// Deferred: the delete is answered in the settings window.
+    pub fn server_deleted(&mut self, server: &str, cx: &mut Context<Self>) {
+        let Some(name) = self.store.server(server).map(|s| s.name.clone()) else {
+            return;
+        };
+        self.leave_server(server, cx);
+        cx.notify();
+        let handle = self.window;
+        cx.defer(move |cx| {
+            handle
+                .update(cx, |_, window, cx| {
+                    let text = format!("Deleted {name}.");
+                    window.push_notification(Notification::success(text), cx);
+                })
+                .ok();
+        });
+    }
+
     /// Stoat answered the user's own change to a server with `saved`: show
     /// it now, without waiting for its `ServerUpdate`.
     pub fn server_edited(&mut self, saved: &Server, cx: &mut Context<Self>) {

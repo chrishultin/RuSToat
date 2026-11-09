@@ -1222,6 +1222,38 @@ impl StoatClient {
         .map(|_| ())
     }
 
+    /// `PATCH /servers/{server}` with `{"owner": owner}`: hand the server
+    /// to another member (its owner only, with a validated MFA `ticket`,
+    /// which is used up even if the transfer then fails). Bots can't own a
+    /// server (`InvalidOperation`), and someone who isn't a member is
+    /// `NotFound`. Stoat answers with the server; `ServerUpdate` follows.
+    pub async fn transfer_server(
+        &self,
+        ticket: &str,
+        server: &str,
+        owner: &str,
+    ) -> Result<Server, ApiError> {
+        #[derive(Serialize)]
+        struct Transfer<'a> {
+            owner: &'a str,
+        }
+        let path = format!("/servers/{server}");
+        let (status, bytes) = self
+            .send_with_ticket(Method::PATCH, &path, ticket, Some(&Transfer { owner }))
+            .await?;
+        parse(status, &bytes)
+    }
+
+    /// `DELETE /servers/{server}`: delete a server the user owns, for
+    /// everyone (`ServerDelete` follows). **For anyone else the same request
+    /// leaves the server** (see [`Self::leave_server`]), so only call this
+    /// for a server the user owns.
+    pub async fn delete_server(&self, server: &str) -> Result<(), ApiError> {
+        self.send_raw(Method::DELETE, &format!("/servers/{server}"), None::<&()>)
+            .await
+            .map(|_| ())
+    }
+
     /// `PUT /servers/{server}/ack`: mark every channel in `server` read.
     pub async fn ack_server(&self, server: &str) -> Result<(), ApiError> {
         self.send_raw(Method::PUT, &format!("/servers/{server}/ack"), None::<&()>)

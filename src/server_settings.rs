@@ -13,9 +13,10 @@ use revolt_result::ErrorType;
 
 use crate::api::ApiError;
 use crate::api::models::{
-    BanListResult, Channel, DataEditServer, FieldsServer, File, Invite, Server,
+    AllMemberResponse, BanListResult, Channel, DataEditServer, FieldsServer, File, Invite, Server,
     SystemMessageChannels,
 };
+use crate::media::MediaUrls;
 use crate::permissions::{has, server_permissions};
 use crate::profile_edit::{ImageLimits, ProfileImage, error_text};
 use crate::server_edit::valid_name;
@@ -509,6 +510,95 @@ pub fn unban_error_text(err: &ApiError) -> String {
         Some(ErrorType::NotFound) => "They aren't banned any more.".into(),
         Some(ErrorType::MissingPermission { .. }) => "You can't lift bans in this server.".into(),
         _ => error_text(err, "Couldn't lift the ban."),
+    }
+}
+
+/// Someone the server could be handed to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub id: String,
+    /// Their nickname here, else their display name.
+    pub name: String,
+    /// `@username#1234`.
+    pub handle: String,
+    pub avatar: String,
+}
+
+/// Who the user may hand the server to: its members (from
+/// `GET /servers/{id}/members`), but not the user and not bots (Stoat
+/// refuses those), sorted by name.
+pub fn transfer_candidates(
+    members: &AllMemberResponse,
+    me: &str,
+    media: &MediaUrls,
+) -> Vec<Candidate> {
+    let mut candidates: Vec<Candidate> = members
+        .members
+        .iter()
+        .filter(|member| member.id.user != me)
+        .filter_map(|member| {
+            let user = members.users.iter().find(|u| u.id == member.id.user)?;
+            if user.bot.is_some() {
+                return None;
+            }
+            let name = member
+                .nickname
+                .clone()
+                .filter(|nick| !nick.trim().is_empty())
+                .unwrap_or_else(|| crate::store::display_name(user).to_string());
+            Some(Candidate {
+                id: user.id.clone(),
+                name,
+                handle: format!("@{}#{}", user.username, user.discriminator),
+                avatar: user
+                    .avatar
+                    .as_ref()
+                    .and_then(|avatar| media.file(avatar))
+                    .unwrap_or_else(|| media.default_avatar(&user.id)),
+            })
+        })
+        .collect();
+    candidates.sort_by_cached_key(|c| (c.name.to_lowercase(), c.handle.to_lowercase()));
+    candidates
+}
+
+/// The candidates whose name or handle contains `query`, ignoring case. A
+/// blank query keeps them all.
+pub fn filter_candidates<'a>(candidates: &'a [Candidate], query: &str) -> Vec<&'a Candidate> {
+    let query = query.trim().to_lowercase();
+    candidates
+        .iter()
+        .filter(|c| {
+            query.is_empty()
+                || c.name.to_lowercase().contains(&query)
+                || c.handle.to_lowercase().contains(&query)
+        })
+        .collect()
+}
+
+/// Whether what's typed to confirm deleting a server is its name: exactly,
+/// case and all, apart from spaces around it.
+pub fn delete_confirmed(typed: &str, name: &str) -> bool {
+    !name.is_empty() && typed.trim() == name
+}
+
+/// Stoat's reasons for refusing a transfer, in words; `None` for anything
+/// else (such as an expired confirmation, which the confirmation dialog
+/// explains itself).
+pub fn transfer_refusal(err: &ApiError) -> Option<String> {
+    Some(match err.error_type()? {
+        ErrorType::NotOwner => "Only the server's owner can transfer it.".into(),
+        ErrorType::InvalidOperation => "Bots can't own servers.".into(),
+        ErrorType::NotFound => "They're not a member any more.".into(),
+        _ => return None,
+    })
+}
+
+/// Why Stoat refused to delete a server.
+pub fn delete_error_text(err: &ApiError) -> String {
+    match err.error_type() {
+        Some(ErrorType::NotOwner) => "Only the server's owner can delete it.".into(),
+        _ => error_text(err, "Couldn't delete the server."),
     }
 }
 

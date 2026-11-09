@@ -1,8 +1,9 @@
 //! Servers and channels against a mock Stoat API: `POST /servers/create`
 //! (create a server), `POST /servers/{id}/channels` (create a channel),
 //! `PATCH /servers/{id}` (its categories), `DELETE /channels/{id}`
-//! (delete a channel), `DELETE /servers/{id}` (leave a server), and
-//! `PATCH /servers/{id}` from Server Settings (its name and description).
+//! (delete a channel), `DELETE /servers/{id}` (leave a server), and from
+//! Server Settings: `PATCH /servers/{id}` (its name and description, or a
+//! new owner) and `DELETE /servers/{id}` (delete it).
 
 use revolt_result::ErrorType;
 use serde_json::json;
@@ -350,4 +351,62 @@ async fn editing_a_server_without_permission_says_so() {
         save_error_text(&err),
         "You don't have permission to change this server."
     );
+}
+
+#[tokio::test]
+async fn transferring_a_server_sends_the_owner_with_a_ticket() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/servers/srv"))
+        .and(header("x-session-token", "tok"))
+        .and(header("x-mfa-ticket", "ticket-1"))
+        .and(body_json(json!({ "owner": "u-ada" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "_id": "srv", "owner": "u-ada", "name": "Lounge", "channels": [],
+            "default_permissions": 0, "approximate_member_count": 2
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let saved = client(&server)
+        .transfer_server("ticket-1", "srv", "u-ada")
+        .await
+        .unwrap();
+    assert_eq!(saved.owner, "u-ada");
+}
+
+#[tokio::test]
+async fn transferring_to_a_bot_is_refused_in_words() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/servers/srv"))
+        .respond_with(
+            ResponseTemplate::new(400).set_body_json(json!({ "type": "InvalidOperation" })),
+        )
+        .mount(&server)
+        .await;
+
+    let err = client(&server)
+        .transfer_server("ticket-1", "srv", "u-bot")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        stoat_gpui::server_settings::transfer_refusal(&err).as_deref(),
+        Some("Bots can't own servers.")
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_server_sends_one_delete() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/servers/srv"))
+        .and(header("x-session-token", "tok"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client(&server).delete_server("srv").await.unwrap();
 }

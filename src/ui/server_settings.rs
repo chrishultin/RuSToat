@@ -22,6 +22,7 @@ use gpui_kit::component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::setting::{SelectIndex, SettingGroup, SettingItem, SettingPage, Settings};
 use gpui_kit::component::{ActiveTheme, Disableable, Sizable, WindowExt, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::api::ApiError;
@@ -30,13 +31,15 @@ use crate::links::invite_link;
 use crate::profile_edit::{ImageLimits, ProfileImage};
 use crate::runtime::spawn_io;
 use crate::server_settings::{
-    Access, BanRow, DESCRIPTION_MAX, InviteRow, NAME_MAX, OverviewForm, ServerImage,
-    SystemChannels, SystemMessageKind, access, ban_rows, bans_error_text, filter_bans, invite_rows,
-    invites_error_text, revoke_error_text, save_error_text, system_channel_choices,
-    unban_error_text,
+    Access, BanRow, Candidate, DESCRIPTION_MAX, InviteRow, NAME_MAX, OverviewForm, ServerImage,
+    SystemChannels, SystemMessageKind, access, ban_rows, bans_error_text, delete_confirmed,
+    delete_error_text, filter_bans, filter_candidates, invite_rows, invites_error_text,
+    revoke_error_text, save_error_text, system_channel_choices, transfer_candidates,
+    transfer_refusal, unban_error_text,
 };
 use crate::themes;
 use crate::ui::chat::{ChatView, avatar};
+use crate::ui::confirm_dialog::{ConfirmRequest, confirm_then};
 use crate::ui::invites::{CREATE_DIALOG_WIDTH, CreateInviteDialog, InviteCreated};
 use crate::ui::moderation_dialogs::{MemberActionRequest, confirm_member_action_then};
 use crate::ui::profile_editor::{
@@ -157,12 +160,13 @@ pub struct ServerSettingsView {
     overview: Entity<OverviewPage>,
     invites: Entity<InvitesPage>,
     bans: Entity<BansPage>,
+    ownership: Entity<OwnershipPage>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl ServerSettingsView {
     /// The pages, in sidebar order.
-    pub const PAGES: [ServerPageFn; 3] = [overview_page, invites_page, bans_page];
+    pub const PAGES: [ServerPageFn; 4] = [overview_page, invites_page, bans_page, ownership_page];
 
     pub fn new(
         chat: Entity<ChatView>,
@@ -192,6 +196,7 @@ impl ServerSettingsView {
         let overview = cx.new(|cx| OverviewPage::new(&chat, server.clone(), window, cx));
         let invites = cx.new(|_| InvitesPage::new(&chat, server.clone()));
         let bans = cx.new(|cx| BansPage::new(&chat, server.clone(), window, cx));
+        let ownership = cx.new(|_| OwnershipPage::new(&chat, server.clone()));
         Self {
             chat: chat.downgrade(),
             server,
@@ -202,6 +207,7 @@ impl ServerSettingsView {
             overview,
             invites,
             bans,
+            ownership,
             _subscriptions: subscriptions,
         }
     }
@@ -1391,5 +1397,517 @@ impl Render for BansPage {
             }
         };
         v_flex().w_full().gap_3().child(header).child(body)
+    }
+}
+
+/// Ownership: hand the server to someone else, or delete it. The owner's
+/// only.
+fn ownership_page(view: &ServerSettingsView, cx: &mut App) -> Option<SettingPage> {
+    if !view.access(cx).ownership {
+        return None;
+    }
+    let ownership = view.ownership.clone();
+    Some(
+        SettingPage::new("Ownership")
+            .icon(IconName::Crown)
+            .resettable(false)
+            .group(SettingGroup::new().item(
+                SettingItem::render(move |_, _, _| ownership.clone()).keywords([
+                    "ownership",
+                    "owner",
+                    "transfer",
+                    "delete server",
+                ]),
+            )),
+    )
+}
+
+/// The Ownership page: Transfer ownership… and Delete server….
+pub struct OwnershipPage {
+    chat: WeakEntity<ChatView>,
+    server: String,
+}
+
+impl OwnershipPage {
+    fn new(chat: &Entity<ChatView>, server: String) -> Self {
+        Self {
+            chat: chat.downgrade(),
+            server,
+        }
+    }
+
+    fn open_transfer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat) = self.chat.upgrade() else {
+            return;
+        };
+        let server = self.server.clone();
+        let dialog = cx.new(|cx| TransferDialog::new(chat, server, window, cx));
+        let focus = dialog.read(cx).filter.read(cx).focus_handle(cx);
+        open_focused_dialog("Transfer ownership".into(), dialog, focus, window, cx);
+    }
+
+    fn open_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat) = self.chat.upgrade() else {
+            return;
+        };
+        let Some(name) = chat
+            .read(cx)
+            .store()
+            .server(&self.server)
+            .map(|s| s.name.clone())
+        else {
+            return;
+        };
+        let server = self.server.clone();
+        let title = SharedString::from(format!("Delete {name}?"));
+        let dialog = cx.new(|cx| DeleteServerDialog::new(chat, server, name, window, cx));
+        let focus = dialog.read(cx).typed.read(cx).focus_handle(cx);
+        open_focused_dialog(title, dialog, focus, window, cx);
+    }
+}
+
+/// Open `content` as a dialog titled `title`, with `focus` focused once
+/// it's drawn (a dialog takes focus as it opens).
+fn open_focused_dialog<V: Render>(
+    title: SharedString,
+    content: Entity<V>,
+    focus: FocusHandle,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let first_build = std::cell::Cell::new(true);
+    window.open_dialog(cx, move |modal, window, cx| {
+        if first_build.replace(false) {
+            window.focus(&focus, cx);
+        }
+        modal
+            .title(title.clone())
+            .w(px(OWNERSHIP_DIALOG_WIDTH))
+            .child(content.clone())
+    });
+}
+
+/// The transfer and delete dialogs' width.
+const OWNERSHIP_DIALOG_WIDTH: f32 = 420.;
+
+impl Render for OwnershipPage {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let section = |title: &'static str, detail: &'static str, button: Button| {
+            h_flex()
+                .w_full()
+                .gap_4()
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(detail),
+                        ),
+                )
+                .child(button)
+        };
+        v_flex()
+            .w_full()
+            .gap_4()
+            .child(section(
+                "Transfer ownership",
+                "Make another member the owner. You'll keep your roles, but only they can \
+                 give it back.",
+                Button::new("ownership-transfer")
+                    .label("Transfer ownership…")
+                    .icon(IconName::Crown)
+                    .outline()
+                    .small()
+                    .on_click(cx.listener(|this, _, window, cx| this.open_transfer(window, cx))),
+            ))
+            .child(section(
+                "Delete server",
+                "Delete the server, its channels and their messages, for everyone. There's \
+                 no going back.",
+                Button::new("ownership-delete")
+                    .label("Delete server…")
+                    .icon(IconName::Trash)
+                    .danger()
+                    .small()
+                    .on_click(cx.listener(|this, _, window, cx| this.open_delete(window, cx))),
+            ))
+    }
+}
+
+/// The most members the transfer picker draws at once; typing narrows it.
+const CANDIDATES_SHOWN: usize = 200;
+
+/// "Transfer ownership": pick a member from the whole list (Stoat 0.16.2
+/// has no member search), filtered as you type, then confirm it's you.
+pub struct TransferDialog {
+    chat: WeakEntity<ChatView>,
+    server: String,
+    filter: Entity<InputState>,
+    candidates: Load<Vec<Candidate>>,
+    _filter: Subscription,
+}
+
+impl TransferDialog {
+    fn new(
+        chat: Entity<ChatView>,
+        server: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Search members"));
+        let subscription = cx.subscribe(&filter, |_, _, _: &InputEvent, cx| cx.notify());
+        let mut this = Self {
+            chat: chat.downgrade(),
+            server,
+            filter,
+            candidates: Load::Idle,
+            _filter: subscription,
+        };
+        this.load(window, cx);
+        this
+    }
+
+    fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat) = self.chat.upgrade() else {
+            return;
+        };
+        let request = spawn_io({
+            let (client, server) = (chat.read(cx).client().clone(), self.server.clone());
+            async move { client.fetch_members(&server, false).await }
+        });
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update(cx, |this, cx| {
+                this.candidates = match (result, this.chat.upgrade()) {
+                    (Ok(Ok(members)), Some(chat)) => {
+                        let store = chat.read(cx).store();
+                        Load::Loaded(transfer_candidates(&members, store.me(), store.media()))
+                    }
+                    (Ok(Err(err)), _) => {
+                        log::warn!("couldn't load members of {}: {err:?}", this.server);
+                        Load::Failed(crate::profile_edit::error_text(
+                            &err,
+                            "Couldn't load the members.",
+                        ))
+                    }
+                    _ => Load::Failed("Couldn't load the members.".into()),
+                };
+                cx.notify();
+            })
+            .ok();
+        });
+        self.candidates = Load::Loading { _task: task };
+        cx.notify();
+    }
+
+    /// `candidate` was picked: confirm it's the user, then send.
+    fn pick(&mut self, candidate: &Candidate, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat) = self.chat.upgrade() else {
+            return;
+        };
+        let Some(server_name) = chat
+            .read(cx)
+            .store()
+            .server(&self.server)
+            .map(|s| s.name.clone())
+        else {
+            return;
+        };
+        window.close_dialog(cx);
+        let client = chat.read(cx).client().clone();
+        let (server, owner, name) = (
+            self.server.clone(),
+            candidate.id.clone(),
+            candidate.name.clone(),
+        );
+        let request = ConfirmRequest {
+            title: format!("Transfer {server_name} to {name}?").into(),
+            detail: "They'll own the server. You'll keep your roles, but lose the owner's \
+                     powers. Only they can give it back."
+                .into(),
+            confirm_label: "Transfer".into(),
+            failed_text: "Couldn't transfer the server.",
+        };
+        let weak = chat.downgrade();
+        confirm_then(
+            client,
+            request,
+            move |client, ticket| {
+                Box::pin(async move {
+                    // Stoat's own refusals are explained in the toast after;
+                    // anything else (an expired ticket) by the dialog.
+                    match client.transfer_server(&ticket, &server, &owner).await {
+                        Ok(saved) => Ok(Ok(saved)),
+                        Err(err) => match transfer_refusal(&err) {
+                            Some(text) => Ok(Err(text)),
+                            None => Err(err),
+                        },
+                    }
+                })
+            },
+            move |result, window, cx| match result {
+                Ok(saved) => {
+                    weak.update(cx, |chat, cx| chat.server_edited(&saved, cx))
+                        .ok();
+                    let text = format!("{name} owns {server_name} now.");
+                    window.push_notification(Notification::success(text), cx);
+                }
+                Err(text) => window.push_notification(Notification::error(text), cx),
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn render_candidate(&self, candidate: &Candidate, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let face = avatar(
+            SharedString::from(format!("candidate-{}", candidate.id)),
+            Some(candidate.avatar.clone()),
+            &candidate.name,
+            CANDIDATE_AVATAR,
+            theme.secondary,
+            theme.secondary_foreground,
+        );
+        let pick = {
+            let candidate = candidate.clone();
+            cx.listener(move |this, _, window, cx| this.pick(&candidate, window, cx))
+        };
+        h_flex()
+            .id(SharedString::from(format!("transfer-to-{}", candidate.id)))
+            .w_full()
+            .gap_3()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .cursor_pointer()
+            .hover(|el| el.bg(theme.secondary))
+            .child(face)
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(div().truncate().text_sm().child(candidate.name.clone()))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(candidate.handle.clone()),
+                    ),
+            )
+            .on_click(pick)
+            .into_any_element()
+    }
+}
+
+/// A member's avatar in the transfer picker.
+const CANDIDATE_AVATAR: f32 = 28.;
+
+impl Render for TransferDialog {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (muted, danger) = (theme.muted_foreground, theme.danger);
+        let body = match &self.candidates {
+            Load::Idle | Load::Loading { .. } => div()
+                .text_sm()
+                .text_color(muted)
+                .child("Loading members…")
+                .into_any_element(),
+            Load::Failed(text) => h_flex()
+                .gap_2()
+                .text_sm()
+                .text_color(danger)
+                .child(text.clone())
+                .child(
+                    Button::new("transfer-retry")
+                        .label("Retry")
+                        .outline()
+                        .xsmall()
+                        .on_click(cx.listener(|this, _, window, cx| this.load(window, cx))),
+                )
+                .into_any_element(),
+            Load::Loaded(candidates) => {
+                let query = self.filter.read(cx).value().to_string();
+                let matches = filter_candidates(candidates, &query);
+                let more = matches.len().saturating_sub(CANDIDATES_SHOWN);
+                let shown: Vec<Candidate> = matches
+                    .into_iter()
+                    .take(CANDIDATES_SHOWN)
+                    .cloned()
+                    .collect();
+                if shown.is_empty() {
+                    div()
+                        .text_sm()
+                        .text_color(muted)
+                        .child(if candidates.is_empty() {
+                            "There's nobody else to hand it to."
+                        } else {
+                            "Nobody matches."
+                        })
+                        .into_any_element()
+                } else {
+                    v_flex()
+                        .id("transfer-candidates")
+                        .max_h(px(CANDIDATES_HEIGHT))
+                        .overflow_y_scroll()
+                        .children(shown.iter().map(|c| self.render_candidate(c, cx)))
+                        .when(more > 0, |this| {
+                            this.child(
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(format!("{more} more. Type to narrow the list.")),
+                            )
+                        })
+                        .into_any_element()
+                }
+            }
+        };
+        v_flex()
+            .gap_3()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child("Choose who'll own the server. Bots can't."),
+            )
+            .child(Input::new(&self.filter))
+            .child(body)
+            .child(
+                h_flex().justify_end().child(
+                    Button::new("transfer-cancel")
+                        .outline()
+                        .label("Cancel")
+                        .on_click(|_, window, cx| window.close_dialog(cx)),
+                ),
+            )
+    }
+}
+
+/// The tallest the transfer picker's list grows before it scrolls.
+const CANDIDATES_HEIGHT: f32 = 320.;
+
+/// "Delete {name}?": type the server's name, then Delete.
+pub struct DeleteServerDialog {
+    chat: WeakEntity<ChatView>,
+    server: String,
+    name: String,
+    typed: Entity<InputState>,
+    deleting: bool,
+    _typed: Subscription,
+}
+
+impl DeleteServerDialog {
+    fn new(
+        chat: Entity<ChatView>,
+        server: String,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let typed = cx.new(|cx| InputState::new(window, cx).placeholder(name.clone()));
+        let subscription = cx.subscribe(&typed, |_, _, _: &InputEvent, cx| cx.notify());
+        Self {
+            chat: chat.downgrade(),
+            server,
+            name,
+            typed,
+            deleting: false,
+            _typed: subscription,
+        }
+    }
+
+    fn confirmed(&self, cx: &App) -> bool {
+        delete_confirmed(&self.typed.read(cx).value(), &self.name)
+    }
+
+    /// Delete the server. Once Stoat agrees, it leaves the main window at
+    /// once, and with it this window closes.
+    fn delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.deleting || !self.confirmed(cx) {
+            return;
+        }
+        let Some(chat) = self.chat.upgrade() else {
+            return;
+        };
+        self.deleting = true;
+        cx.notify();
+        let request = spawn_io({
+            let (client, server) = (chat.read(cx).client().clone(), self.server.clone());
+            async move { client.delete_server(&server).await }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.deleting = false;
+                match result {
+                    Ok(Ok(())) => {
+                        log::info!("deleted server {}", this.server);
+                        window.close_dialog(cx);
+                        let server = this.server.clone();
+                        this.chat
+                            .update(cx, |chat, cx| chat.server_deleted(&server, cx))
+                            .ok();
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't delete server {}: {err:?}", this.server);
+                        window.push_notification(Notification::error(delete_error_text(&err)), cx);
+                    }
+                    Err(err) => {
+                        log::warn!("delete task failed: {err:?}");
+                        window.push_notification(
+                            Notification::error("Couldn't delete the server."),
+                            cx,
+                        );
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
+impl Render for DeleteServerDialog {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        let confirmed = self.confirmed(cx);
+        v_flex()
+            .gap_3()
+            .child(div().text_sm().text_color(muted).child(format!(
+                "Once it's deleted, there's no going back. Type the server's name, {}, to \
+                 confirm.",
+                self.name
+            )))
+            .child(Input::new(&self.typed).disabled(self.deleting))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .justify_end()
+                    .child(
+                        Button::new("delete-server-cancel")
+                            .outline()
+                            .label("Cancel")
+                            .disabled(self.deleting)
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("delete-server")
+                            .danger()
+                            .label("Delete")
+                            .loading(self.deleting)
+                            .disabled(!confirmed || self.deleting)
+                            .on_click(cx.listener(|this, _, window, cx| this.delete(window, cx))),
+                    ),
+            )
     }
 }

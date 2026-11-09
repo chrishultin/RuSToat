@@ -239,3 +239,47 @@ Deferred to the end (create from the page, copy and open the link in the web cli
 
 ### Manual Validation
 Deferred to the end (ban the second account with a reason, filter, unban, rejoin).
+
+## Chunk 6: Ownership: transfer and delete
+
+### Changes Made
+- `src/api/client.rs`:
+  - `transfer_server(ticket, server, owner) -> Server`: `PATCH /servers/{id}` with only `{"owner": …}`, through `send_with_ticket`;
+  - `delete_server(server)`: `DELETE /servers/{id}`, documented as owner-only, since for anyone else it's a leave.
+- `src/server_settings.rs`:
+  - `Candidate { id, name, handle, avatar }`;
+  - `transfer_candidates(&AllMemberResponse, me, &MediaUrls)`: leaves out yourself, bots, and members without a user. The name is the nickname, else the display name. Sorted by name, case-insensitively;
+  - `filter_candidates` (name or `@handle`, ignoring case);
+  - `delete_confirmed(typed, name)`: an exact match, trimmed, case-sensitive;
+  - `transfer_refusal(err) -> Option<String>` for `NotOwner`, `InvalidOperation` ("Bots can't own servers.") and `NotFound` ("They're not a member any more.");
+  - `delete_error_text`.
+- `src/ui/chat.rs`: `ChatView::server_deleted(server, cx)` drops the server at once (`leave_server`) and toasts "Deleted {name}." in the main window (deferred).
+- `src/ui/server_settings.rs`:
+  - `ownership_page` (Crown icon, owner only), and `OwnershipPage` with two sections: "Transfer ownership…" (outline) and "Delete server…" (danger).
+  - `TransferDialog`:
+    - fetches every member (`fetch_members(server, false)`), with a "Search members" filter;
+    - lists at most 200 matches, scrollable, with "N more. Type to narrow the list.";
+    - Loading and Failed with Retry states;
+    - picking someone closes it and opens `confirm_then` ("Transfer {server} to {name}?" with the plan's detail, button "Transfer").
+  - The transfer action returns Stoat's own refusals (`transfer_refusal`) as a result, which toasts after. Ticket problems stay the confirmation dialog's to explain.
+  - On success, `ChatView::server_edited` applies the new owner, so Ownership disappears through chunk 1's page reset (or the window closes with no page left), and a toast says "{name} owns {server} now."
+  - `DeleteServerDialog`: "Delete {name}?" and "…Type the server's name, {name}, to confirm.", a field, and a danger Delete enabled only on an exact match, busy while sending. On success it closes, and `ChatView::server_deleted` drops the server; the settings window then closes itself, as its server has left the store. A refusal toasts `delete_error_text`.
+  - `open_focused_dialog` focuses each dialog's field once it's drawn (the Sessions rename pattern).
+- Tests:
+  - `tests/api_servers.rs`: a transfer sends `{"owner":"u-ada"}` with `x-mfa-ticket`; `InvalidOperation` reads "Bots can't own servers."; a delete is one `DELETE /servers/srv`.
+  - `tests/server_settings.rs`: candidates leave out the owner and bots and sort by nickname or display name; the filter matches name or handle; `delete_confirmed` takes "My Server" and " My Server " but not "my server", "My Serve" or a blank name; refusal texts (an expired ticket is left to the dialog); after a `ServerUpdate` hands the server away, a former owner with no roles has no page left.
+
+### Divergences
+- **`confirm_then` would have turned every refusal into its generic `failed_text`.** Instead the transfer action returns `NotOwner`, `InvalidOperation` and `NotFound` as an `Ok(Err(text))` result, toasted after the dialog closes. The plan's `transfer_error_text` is `transfer_refusal`.
+- **`server_deleted` was needed**, since `leave_server` is private and doesn't toast. The plan anticipated this.
+- **Closing the window after a delete happens through chunk 1's observer** (the server leaves the store), not an explicit close.
+- No look-ahead changes. Chunk 7 is independent.
+
+### Verification Performed
+- `cargo test --test server_settings --test api_servers`: 31 + 18 passed.
+- `cargo test`: 1170 passed, 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt: `src/ui/chat.rs` stays at 17 and `src/api/client.rs` at 3; `tests/api_servers.rs` and the new files are clean.
+
+### Manual Validation
+Deferred to the end (transfer to the second account and back; delete a throwaway server).

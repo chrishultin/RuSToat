@@ -1,4 +1,5 @@
-//! A server's settings: who sees which page, and what the Overview sends.
+//! A server's settings: who sees which page, what the Overview sends, the
+//! invite and ban lists, and transferring or deleting the server.
 
 use revolt_permissions::{ChannelPermission, DEFAULT_PERMISSION_SERVER};
 use serde_json::{Value, json};
@@ -7,7 +8,8 @@ use stoat_gpui::api::models::{FieldsServer, Invite, Server};
 use stoat_gpui::profile_edit::ProfileImage;
 use stoat_gpui::server_settings::{
     Access, OverviewForm, ServerImage, SystemChannels, SystemMessageKind, access, ban_rows,
-    empty_server_edit, filter_bans, invite_rows, system_channel_choices, uses_label,
+    delete_confirmed, delete_error_text, empty_server_edit, filter_bans, filter_candidates,
+    invite_rows, system_channel_choices, transfer_candidates, transfer_refusal, uses_label,
 };
 use stoat_gpui::store::ChatStore;
 
@@ -455,4 +457,116 @@ fn bans_filter_by_name_or_reason_ignoring_case() {
     assert_eq!(names("spam"), ["zed#0002"]);
     assert_eq!(names("  "), ["Ada#0001", "u-gone", "zed#0002"]);
     assert!(names("nobody").is_empty());
+}
+
+fn members() -> stoat_gpui::api::models::AllMemberResponse {
+    let member = |id: &str, nickname: Option<&str>| {
+        json!({
+            "_id": { "server": "srv", "user": id },
+            "joined_at": "2026-01-01T00:00:00.000Z",
+            "nickname": nickname,
+        })
+    };
+    serde_json::from_value(json!({
+        "members": [
+            member("u-owner", None),
+            member("u-zed", None),
+            member("u-ada", Some("Countess")),
+            member("u-bot", None),
+            member("u-nouser", None),
+        ],
+        "users": [
+            user("u-owner"),
+            { "_id": "u-zed", "username": "zed", "discriminator": "0002", "display_name": "Zed",
+              "relationship": "None", "online": true },
+            { "_id": "u-ada", "username": "ada", "discriminator": "0001",
+              "relationship": "None", "online": true },
+            { "_id": "u-bot", "username": "helper", "discriminator": "0003", "bot": { "owner": "u-zed" },
+              "relationship": "None", "online": true },
+        ],
+    }))
+    .unwrap()
+}
+
+#[test]
+fn candidates_leave_out_the_owner_and_bots() {
+    let store = store("u-owner");
+    let candidates = transfer_candidates(&members(), "u-owner", store.media());
+    let names: Vec<(&str, &str)> = candidates
+        .iter()
+        .map(|c| (c.name.as_str(), c.handle.as_str()))
+        .collect();
+    // By name: a nickname, else the display name.
+    assert_eq!(names, [("Countess", "@ada#0001"), ("Zed", "@zed#0002")]);
+    assert!(
+        candidates[0]
+            .avatar
+            .ends_with("/users/u-ada/default_avatar")
+    );
+}
+
+#[test]
+fn candidates_filter_by_name_or_handle() {
+    let store = store("u-owner");
+    let candidates = transfer_candidates(&members(), "u-owner", store.media());
+    let ids = |query: &str| -> Vec<String> {
+        filter_candidates(&candidates, query)
+            .into_iter()
+            .map(|c| c.id.clone())
+            .collect()
+    };
+    assert_eq!(ids("COUNT"), ["u-ada"]);
+    assert_eq!(ids("@zed"), ["u-zed"]);
+    assert_eq!(ids(""), ["u-ada", "u-zed"]);
+}
+
+#[test]
+fn deleting_needs_the_exact_name() {
+    assert!(delete_confirmed("My Server", "My Server"));
+    assert!(delete_confirmed(" My Server ", "My Server"));
+    assert!(!delete_confirmed("my server", "My Server"));
+    assert!(!delete_confirmed("My Serve", "My Server"));
+    assert!(!delete_confirmed("", ""));
+}
+
+fn api_error(error_type: revolt_result::ErrorType) -> stoat_gpui::api::ApiError {
+    stoat_gpui::api::ApiError::Api(revolt_result::Error {
+        error_type,
+        location: None,
+    })
+}
+
+#[test]
+fn transfer_and_delete_refusals_read_plainly() {
+    use revolt_result::ErrorType;
+    let refusal = |error_type| transfer_refusal(&api_error(error_type));
+    assert_eq!(
+        refusal(ErrorType::NotOwner).as_deref(),
+        Some("Only the server's owner can transfer it.")
+    );
+    assert_eq!(
+        refusal(ErrorType::NotFound).as_deref(),
+        Some("They're not a member any more.")
+    );
+    // An expired ticket is the confirmation dialog's to explain.
+    assert_eq!(refusal(ErrorType::InvalidToken), None);
+    assert_eq!(
+        delete_error_text(&api_error(ErrorType::NotOwner)),
+        "Only the server's owner can delete it."
+    );
+}
+
+#[test]
+fn ownership_goes_with_the_server() {
+    let mut store = store("u-owner");
+    assert!(access(&store, "srv").ownership);
+    let Some(ServerEvent::ServerUpdate { id, data, clear }) = parse_frame(
+        &json!({ "type": "ServerUpdate", "id": "srv", "data": { "owner": "u-admin" } }).to_string(),
+    )
+    .pop() else {
+        panic!("ServerUpdate");
+    };
+    store.apply_server_update(&id, *data, &clear);
+    // The former owner has no roles, so nothing is left to show them.
+    assert!(!access(&store, "srv").any());
 }
