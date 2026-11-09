@@ -7390,6 +7390,17 @@ impl ChatView {
         cx.notify();
     }
 
+    /// The user deleted `role` on `server` (from Server Settings): take it
+    /// off the server, its members and channel overrides now, without
+    /// waiting for its `ServerRoleDelete`.
+    pub fn role_deleted(&mut self, server: &str, role: &str, cx: &mut Context<Self>) {
+        if !self.store.apply_role_delete(server, role) {
+            return;
+        }
+        self.server_permissions_changed(server, cx);
+        cx.notify();
+    }
+
     /// Server info, from the server's name above the channel list: its
     /// banner, icon, name and description.
     fn open_server_info(&mut self, server: String, window: &mut Window, cx: &mut Context<Self>) {

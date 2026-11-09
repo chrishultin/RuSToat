@@ -1,5 +1,6 @@
 //! A server's roles as the Roles page shows and edits them: the rows and
-//! their locks, role names, and Stoat's refusals in words.
+//! their locks, role names, the editor's form and who may use it, and
+//! Stoat's refusals in words.
 
 use revolt_permissions::{ChannelPermission, DEFAULT_PERMISSION_SERVER};
 use serde_json::{Value, json};
@@ -8,7 +9,8 @@ use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::api::models::{FieldsRole, PartialRole, Role};
 use stoat_gpui::permissions::RoleLock;
 use stoat_gpui::roles::{
-    ROLE_NAME_MAX, RoleRow, check_role_name, create_error_text, role_rows, role_update,
+    ROLE_NAME_MAX, RoleForm, RoleRow, check_role_name, create_error_text, delete_error_text,
+    edit_error_text, empty_role_edit, may_delete, may_edit, role_rows, role_update,
 };
 use stoat_gpui::store::ChatStore;
 
@@ -263,4 +265,179 @@ fn a_created_role_then_its_event_is_one_role() {
     assert_eq!(roles["testers"], role);
     let rows = role_rows(&store, "srv");
     assert_eq!(rows.last().map(|row| row.id.as_str()), Some("testers"));
+}
+
+fn members_role() -> Role {
+    store("u-owner").server("srv").unwrap().roles["members"].clone()
+}
+
+#[test]
+fn an_unchanged_form_sends_nothing() {
+    let role = members_role();
+    assert_eq!(
+        RoleForm::of(&role),
+        RoleForm {
+            name: "Members".into(),
+            hoist: true,
+        }
+    );
+    assert_eq!(RoleForm::of(&role).changes(&role), None);
+    // Spaces around the name aren't a change.
+    let spaced = RoleForm {
+        name: " Members ".into(),
+        hoist: true,
+    };
+    assert_eq!(spaced.changes(&role), None);
+}
+
+#[test]
+fn a_rename_sends_only_the_name_trimmed() {
+    let form = RoleForm {
+        name: "  Regulars ".into(),
+        hoist: true,
+    };
+    let edit = form.changes(&members_role()).unwrap();
+    assert_eq!(
+        edit,
+        stoat_gpui::api::models::DataEditRole {
+            name: Some("Regulars".into()),
+            ..empty_role_edit()
+        }
+    );
+}
+
+#[test]
+fn toggling_hoist_sends_only_hoist() {
+    let form = RoleForm {
+        name: "Members".into(),
+        hoist: false,
+    };
+    let edit = form.changes(&members_role()).unwrap();
+    assert_eq!(
+        edit,
+        stoat_gpui::api::models::DataEditRole {
+            hoist: Some(false),
+            ..empty_role_edit()
+        }
+    );
+}
+
+#[test]
+fn an_invalid_name_sends_nothing() {
+    for name in ["  ", &"x".repeat(33)] {
+        let form = RoleForm {
+            name: name.to_string(),
+            hoist: false,
+        };
+        assert!(!form.is_valid());
+        assert_eq!(form.changes(&members_role()), None, "{name:?}");
+    }
+}
+
+#[test]
+fn the_owner_may_edit_any_role_and_delete_all_but_a_bots() {
+    let store = store("u-owner");
+    for role in ["admin", "mods", "bot", "members", "fans"] {
+        assert!(may_edit(&store, "srv", role), "{role}");
+        assert_eq!(may_delete(&store, "srv", role), role != "bot", "{role}");
+    }
+}
+
+#[test]
+fn a_moderator_may_edit_and_delete_only_below_their_role() {
+    let store = store("u-mod");
+    for role in ["admin", "mods"] {
+        assert!(!may_edit(&store, "srv", role), "{role}");
+        assert!(!may_delete(&store, "srv", role), "{role}");
+    }
+    // A bot's role below them can be edited, not deleted.
+    assert!(may_edit(&store, "srv", "bot"));
+    assert!(!may_delete(&store, "srv", "bot"));
+    for role in ["members", "fans"] {
+        assert!(may_edit(&store, "srv", role), "{role}");
+        assert!(may_delete(&store, "srv", role), "{role}");
+    }
+}
+
+#[test]
+fn without_manage_role_or_a_role_nothing_may_be_edited() {
+    let store = store("u-plain");
+    assert!(!may_edit(&store, "srv", "fans"));
+    assert!(!may_delete(&store, "srv", "fans"));
+    let owner = self::store("u-owner");
+    assert!(!may_edit(&owner, "srv", "r-unknown"));
+    assert!(!may_edit(&owner, "srv-unknown", "fans"));
+}
+
+#[test]
+fn a_moderator_whose_role_moves_below_one_loses_it() {
+    let mut store = store("u-mod");
+    assert!(may_edit(&store, "srv", "members"));
+    store.apply_role_ranks(
+        "srv",
+        &["admin", "members", "mods", "bot", "fans"].map(String::from),
+    );
+    assert!(!may_edit(&store, "srv", "members"));
+}
+
+#[test]
+fn edit_and_delete_refusals_read_plainly() {
+    let not_elevated = api_error(json!({ "type": "NotElevated" }));
+    assert_eq!(
+        edit_error_text(&not_elevated),
+        "That role ranks at or above your highest role."
+    );
+    assert_eq!(
+        delete_error_text(&not_elevated),
+        "That role ranks at or above your highest role."
+    );
+    let missing = api_error(json!({ "type": "MissingPermission", "permission": "ManageRole" }));
+    assert_eq!(
+        edit_error_text(&missing),
+        "You don't have permission to manage roles."
+    );
+    assert_eq!(
+        delete_error_text(&missing),
+        "You don't have permission to manage roles."
+    );
+    assert_eq!(
+        delete_error_text(&api_error(json!({ "type": "InvalidOperation" }))),
+        "Roles that belong to a bot can't be deleted."
+    );
+    assert_eq!(
+        edit_error_text(&api_error(json!({ "type": "InternalError" }))),
+        "Couldn't save the role."
+    );
+    assert_eq!(
+        delete_error_text(&api_error(json!({ "type": "InternalError" }))),
+        "Couldn't delete the role."
+    );
+}
+
+#[test]
+fn an_edit_applied_then_its_event_is_consistent() {
+    let mut store = store("u-owner");
+    let saved = Role {
+        name: "Regulars".into(),
+        hoist: false,
+        ..members_role()
+    };
+    let (data, clear) = role_update(&saved);
+    assert!(store.apply_role_update("srv", "members", data, &clear));
+    // Stoat's event carries only what changed.
+    let event = json!({
+        "type": "ServerRoleUpdate", "id": "srv", "role_id": "members",
+        "data": { "name": "Regulars", "hoist": false }, "clear": []
+    });
+    let Some(ServerEvent::ServerRoleUpdate {
+        server,
+        role_id,
+        data,
+        clear,
+    }) = parse_frame(&event.to_string()).pop()
+    else {
+        panic!("role update");
+    };
+    assert!(store.apply_role_update(&server, &role_id, *data, &clear));
+    assert_eq!(store.server("srv").unwrap().roles["members"], saved);
 }

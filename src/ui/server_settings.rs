@@ -17,6 +17,7 @@ use revolt_result::ErrorType;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
@@ -27,11 +28,14 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::api::ApiError;
-use crate::api::models::Server;
+use crate::api::models::{Role, Server};
 use crate::links::invite_link;
 use crate::profile_edit::{ImageLimits, ProfileImage};
 use crate::rail::parse_colour;
-use crate::roles::{RoleRow, check_role_name, create_error_text, role_rows};
+use crate::roles::{
+    ROLE_NAME_MAX, RoleForm, RoleRow, check_role_name, create_error_text,
+    delete_error_text as delete_role_error_text, edit_error_text, may_delete, may_edit, role_rows,
+};
 use crate::runtime::spawn_io;
 use crate::server_settings::{
     Access, BanRow, Candidate, DESCRIPTION_MAX, InviteRow, NAME_MAX, OverviewForm, ServerImage,
@@ -40,6 +44,7 @@ use crate::server_settings::{
     revoke_error_text, save_error_text, system_channel_choices, transfer_candidates,
     transfer_refusal, unban_error_text,
 };
+use crate::store::solid_colour;
 use crate::themes;
 use crate::ui::chat::{ChatView, avatar};
 use crate::ui::confirm_dialog::{ConfirmRequest, confirm_then};
@@ -205,7 +210,7 @@ impl ServerSettingsView {
         ];
         let title = window_title(chat.read(cx).store().server(&server));
         let overview = cx.new(|cx| OverviewPage::new(&chat, server.clone(), window, cx));
-        let roles = cx.new(|cx| RolesPage::new(&chat, server.clone(), cx));
+        let roles = cx.new(|cx| RolesPage::new(&chat, server.clone(), window, cx));
         let invites = cx.new(|_| InvitesPage::new(&chat, server.clone()));
         let bans = cx.new(|cx| BansPage::new(&chat, server.clone(), window, cx));
         let ownership = cx.new(|_| OwnershipPage::new(&chat, server.clone()));
@@ -843,29 +848,93 @@ fn roles_page(view: &ServerSettingsView, cx: &mut App) -> Option<SettingPage> {
 
 /// The Roles page: the server's roles, highest first, each with its colour,
 /// icon, whether it's hoisted, and a lock if the user can't change it; and
-/// "Create role…". It follows the store, which live role events keep.
+/// "Create role…". Clicking a role opens its editor in the same page, with
+/// a way back. It follows the store, which live role events keep.
 pub struct RolesPage {
     chat: WeakEntity<ChatView>,
     server: String,
+    mode: RolesMode,
     _chat: Subscription,
+    _editor: Option<Subscription>,
+    _create: Option<Subscription>,
+}
+
+/// What the Roles page shows.
+enum RolesMode {
+    List,
+    Editing(Entity<RoleEditor>),
 }
 
 impl RolesPage {
-    fn new(chat: &Entity<ChatView>, server: String, cx: &mut Context<Self>) -> Self {
+    fn new(
+        chat: &Entity<ChatView>,
+        server: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
             chat: chat.downgrade(),
             server,
-            _chat: cx.observe(chat, |_, _, cx| cx.notify()),
+            mode: RolesMode::List,
+            _chat: cx.observe_in(chat, window, |this, _, window, cx| this.follow(window, cx)),
+            _editor: None,
+            _create: None,
         }
     }
 
-    /// "Create role": a name, then Create.
+    /// The store changed: if the role being edited was deleted (elsewhere:
+    /// the user's own delete goes back first), or the user may no longer
+    /// manage roles, go back to the list.
+    fn follow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let RolesMode::Editing(editor) = &self.mode
+            && let Some(chat) = self.chat.upgrade()
+        {
+            let store = chat.read(cx).store();
+            let role = editor.read(cx).role.clone();
+            let exists = store
+                .server(&self.server)
+                .is_some_and(|server| server.roles.contains_key(&role));
+            if !exists {
+                window.push_notification(Notification::info("That role was deleted."), cx);
+                self.back(cx);
+            } else if !access(store, &self.server).roles {
+                self.back(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Open `role`'s editor.
+    fn open(&mut self, role: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat) = self.chat.upgrade() else {
+            return;
+        };
+        let server = self.server.clone();
+        let editor = cx.new(|cx| RoleEditor::new(&chat, server, role, window, cx));
+        self._editor = Some(cx.subscribe(&editor, |this, _, _: &BackToRoles, cx| this.back(cx)));
+        self.mode = RolesMode::Editing(editor);
+        cx.notify();
+    }
+
+    /// Back to the list, dropping the editor and anything unsaved in it.
+    fn back(&mut self, cx: &mut Context<Self>) {
+        self.mode = RolesMode::List;
+        self._editor = None;
+        cx.notify();
+    }
+
+    /// "Create role": a name, then Create, which opens the new role.
     fn create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(chat) = self.chat.upgrade() else {
             return;
         };
         let server = self.server.clone();
         let dialog = cx.new(|cx| CreateRoleDialog::new(chat, server, window, cx));
+        self._create = Some(cx.subscribe_in(
+            &dialog,
+            window,
+            |this, _, created: &RoleCreated, window, cx| this.open(created.0.clone(), window, cx),
+        ));
         let focus = dialog.read(cx).input.read(cx).focus_handle(cx);
         open_focused_dialog("Create role".into(), dialog, focus, window, cx);
     }
@@ -877,6 +946,10 @@ impl RolesPage {
             let chat = self.chat.upgrade()?;
             chat.read(cx).store().media().file_by_id("icons", id)
         });
+        let open = {
+            let id = row.id.clone();
+            cx.listener(move |this, _, window, cx| this.open(id.clone(), window, cx))
+        };
         h_flex()
             .id(SharedString::from(format!("role-{}", row.id)))
             .w_full()
@@ -884,6 +957,9 @@ impl RolesPage {
             .px_2()
             .py_1p5()
             .rounded_md()
+            .cursor_pointer()
+            .hover(|el| el.bg(theme.secondary))
+            .on_click(open)
             .child(colour_dot(row.colour.as_deref(), cx))
             .child(
                 div()
@@ -914,28 +990,8 @@ impl RolesPage {
             }))
             .into_any_element()
     }
-}
 
-/// A role's icon in the list.
-const ROLE_ICON: f32 = 18.;
-/// A role's colour dot.
-const COLOUR_DOT: f32 = 12.;
-
-/// A role's colour as a dot, or a dashed circle with no colour (or one
-/// that isn't a solid colour).
-fn colour_dot(colour: Option<&str>, cx: &App) -> Div {
-    let dot = div().size(px(COLOUR_DOT)).flex_none().rounded_full();
-    match colour.and_then(parse_colour) {
-        Some(colour) => dot.bg(colour),
-        None => dot
-            .border_1()
-            .border_dashed()
-            .border_color(cx.theme().muted_foreground),
-    }
-}
-
-impl Render for RolesPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_list(&self, cx: &mut Context<Self>) -> AnyElement {
         let rows = self
             .chat
             .upgrade()
@@ -972,12 +1028,44 @@ impl Render for RolesPage {
                 .children(rows.iter().map(|row| self.render_row(row, cx)))
                 .into_any_element()
         };
-        v_flex().w_full().gap_3().child(header).child(body)
+        v_flex()
+            .w_full()
+            .gap_3()
+            .child(header)
+            .child(body)
+            .into_any_element()
+    }
+}
+
+/// A role's icon in the list.
+const ROLE_ICON: f32 = 18.;
+/// A role's colour dot.
+const COLOUR_DOT: f32 = 12.;
+
+/// A role's colour as a dot, or a dashed circle with no colour (or one
+/// that isn't a solid colour).
+fn colour_dot(colour: Option<&str>, cx: &App) -> Div {
+    let dot = div().size(px(COLOUR_DOT)).flex_none().rounded_full();
+    match colour.and_then(parse_colour) {
+        Some(colour) => dot.bg(colour),
+        None => dot
+            .border_1()
+            .border_dashed()
+            .border_color(cx.theme().muted_foreground),
+    }
+}
+
+impl Render for RolesPage {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        match &self.mode {
+            RolesMode::List => self.render_list(cx),
+            RolesMode::Editing(editor) => editor.clone().into_any_element(),
+        }
     }
 }
 
 /// "Create role": its name, then Create. The new role shows at once, at
-/// the bottom of the list.
+/// the bottom of the list, and its editor opens ([`RoleCreated`]).
 pub struct CreateRoleDialog {
     chat: WeakEntity<ChatView>,
     server: String,
@@ -1014,8 +1102,9 @@ impl CreateRoleDialog {
         }
     }
 
-    /// Create the role with the typed name. Success closes the dialog and
-    /// adds the role to the store; a refusal says why and keeps it open.
+    /// Create the role with the typed name. Success closes the dialog, adds
+    /// the role to the store and opens it; a refusal says why and keeps the
+    /// dialog open.
     fn create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.creating {
             return;
@@ -1045,6 +1134,7 @@ impl CreateRoleDialog {
                             .update(cx, |chat, cx| chat.role_saved(&server, &created.role, cx))
                             .ok();
                         window.close_dialog(cx);
+                        cx.emit(RoleCreated(created.id));
                     }
                     Ok(Err(err)) => {
                         log::warn!("couldn't create a role in {}: {err:?}", this.server);
@@ -1062,6 +1152,11 @@ impl CreateRoleDialog {
         .detach();
     }
 }
+
+/// A role was created, by its ID.
+pub struct RoleCreated(pub String);
+
+impl EventEmitter<RoleCreated> for CreateRoleDialog {}
 
 impl Render for CreateRoleDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1095,6 +1190,395 @@ impl Render for CreateRoleDialog {
                             .on_click(cx.listener(|this, _, window, cx| this.create(window, cx))),
                     ),
             )
+    }
+}
+
+/// The role editor's "‹ Roles", or its role was deleted from it: the
+/// Roles page goes back to its list.
+pub struct BackToRoles;
+
+/// One role's editor, in the Roles page: its name and hoisting, saved
+/// together with one `PATCH` (see [`RoleForm::changes`]); "Copy role ID";
+/// and "Delete role…". Untouched fields follow changes made elsewhere. A
+/// role the user can't change (rank) opens read-only, and a bot's can't be
+/// deleted.
+pub struct RoleEditor {
+    chat: WeakEntity<ChatView>,
+    server: String,
+    role: String,
+    name: Entity<InputState>,
+    hoist: bool,
+    /// The role's values the fields were last filled with. A field still
+    /// showing its value is untouched, and follows changes made elsewhere;
+    /// once it's edited, it keeps the edit.
+    filled: RoleForm,
+    saving: Option<Saving>,
+    /// Focus the name once the editor is first drawn.
+    focus_name: bool,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl EventEmitter<BackToRoles> for RoleEditor {}
+
+impl RoleEditor {
+    fn new(
+        chat: &Entity<ChatView>,
+        server: String,
+        role: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let name = cx.new(|cx| InputState::new(window, cx));
+        let subscriptions = vec![
+            cx.subscribe_in(&name, window, |this, _, event, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.save(window, cx),
+                _ => cx.notify(),
+            }),
+            cx.observe_in(chat, window, |this, _, window, cx| this.follow(window, cx)),
+        ];
+        let focus_name = may_edit(chat.read(cx).store(), &server, &role);
+        let mut this = Self {
+            chat: chat.downgrade(),
+            server,
+            role,
+            name,
+            hoist: false,
+            filled: RoleForm::default(),
+            saving: None,
+            focus_name,
+            _subscriptions: subscriptions,
+        };
+        this.reset(window, cx);
+        this
+    }
+
+    /// The role as the store has it now.
+    fn current(&self, cx: &App) -> Option<Role> {
+        let chat = self.chat.upgrade()?;
+        let store = chat.read(cx).store();
+        store.server(&self.server)?.roles.get(&self.role).cloned()
+    }
+
+    /// Whether the user may change the role, and delete it, now.
+    fn rights(&self, cx: &App) -> (bool, bool) {
+        let Some(chat) = self.chat.upgrade() else {
+            return (false, false);
+        };
+        let store = chat.read(cx).store();
+        (
+            may_edit(store, &self.server, &self.role),
+            may_delete(store, &self.server, &self.role),
+        )
+    }
+
+    /// The form as edited.
+    fn edited(&self, cx: &App) -> RoleForm {
+        RoleForm {
+            name: self.name.read(cx).value().to_string(),
+            hoist: self.hoist,
+        }
+    }
+
+    /// Whether Save can send the form: the user may change the role,
+    /// something changed, and not already saving.
+    fn can_save(&self, edited: &RoleForm, cx: &App) -> bool {
+        self.saving.is_none()
+            && self.rights(cx).0
+            && self
+                .current(cx)
+                .is_some_and(|role| edited.changes(&role).is_some())
+    }
+
+    /// Fill every field with the role's values.
+    fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(role) = self.current(cx) else {
+            return;
+        };
+        let form = RoleForm::of(&role);
+        self.name.update(cx, |input, cx| {
+            input.set_value(form.name.clone(), window, cx)
+        });
+        self.hoist = form.hoist;
+        self.filled = form;
+        cx.notify();
+    }
+
+    /// The role changed (here or elsewhere): untouched fields take its new
+    /// values, edited ones keep theirs. (A deleted role is the page's to
+    /// notice.)
+    fn follow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(role) = self.current(cx) else {
+            return;
+        };
+        let now = RoleForm::of(&role);
+        if now == self.filled {
+            cx.notify();
+            return;
+        }
+        let edited = self.edited(cx);
+        if edited.name == self.filled.name && now.name != self.filled.name {
+            let name = now.name.clone();
+            self.name
+                .update(cx, |input, cx| input.set_value(name, window, cx));
+        }
+        if edited.hoist == self.filled.hoist {
+            self.hoist = now.hoist;
+        }
+        self.filled = now;
+        cx.notify();
+    }
+
+    /// Send what changed in one `PATCH`. Stoat's answer shows at once, in
+    /// the main window too; a refusal says why in a toast, and the form
+    /// keeps the edit.
+    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let edited = self.edited(cx);
+        if !self.can_save(&edited, cx) {
+            return;
+        }
+        let (Some(chat), Some(edit)) = (
+            self.chat.upgrade(),
+            self.current(cx).and_then(|role| edited.changes(&role)),
+        ) else {
+            return;
+        };
+        self.saving = Some(Saving::Sending);
+        cx.notify();
+        let request = spawn_io({
+            let client = chat.read(cx).client().clone();
+            let (server, role) = (self.server.clone(), self.role.clone());
+            async move { client.edit_role(&server, &role, &edit).await }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.saving = None;
+                match result {
+                    Ok(Ok(saved)) => {
+                        let server = this.server.clone();
+                        this.chat
+                            .update(cx, |chat, cx| chat.role_saved(&server, &saved, cx))
+                            .ok();
+                        this.reset(window, cx);
+                        window.push_notification(Notification::success("Saved."), cx);
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't save role {}: {err:?}", this.role);
+                        window.push_notification(Notification::error(edit_error_text(&err)), cx);
+                    }
+                    Err(err) => {
+                        log::warn!("role save task failed: {err:?}");
+                        window
+                            .push_notification(Notification::error("Couldn't save the role."), cx);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn copy_id(&self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(self.role.clone()));
+        window.push_notification(Notification::success("Copied the role ID."), cx);
+    }
+
+    /// Delete the role, once confirmed. When Stoat agrees (or says it's
+    /// already gone), the page goes back to the list and the role leaves
+    /// the store at once.
+    fn delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(chat), Some(role)) = (self.chat.upgrade(), self.current(cx)) else {
+            return;
+        };
+        let client = chat.read(cx).client().clone();
+        let request = MemberActionRequest {
+            title: format!("Delete {}?", role.name).into(),
+            detail: "Members with it lose it, and so does every channel's override for it.".into(),
+            ok_label: "Delete",
+            danger: true,
+            failed_text: "Couldn't delete the role.".into(),
+        };
+        let (server, id) = (self.server.clone(), self.role.clone());
+        let action = {
+            let (server, id) = (server.clone(), id.clone());
+            Box::pin(async move { client.delete_role(&server, &id).await })
+        };
+        let editor = cx.entity().downgrade();
+        let chat = chat.downgrade();
+        let name = role.name;
+        let after = Box::new(
+            move |result: Result<(), ApiError>, window: &mut Window, cx: &mut App| match result {
+                Err(err) if !matches!(err.error_type(), Some(ErrorType::NotFound)) => {
+                    log::warn!("couldn't delete role {id}: {err:?}");
+                    window.push_notification(Notification::error(delete_role_error_text(&err)), cx);
+                }
+                _ => {
+                    log::info!("deleted role {id} in {server}");
+                    // Back first, so the page doesn't take this for a
+                    // delete made elsewhere.
+                    editor.update(cx, |_, cx| cx.emit(BackToRoles)).ok();
+                    chat.update(cx, |chat, cx| chat.role_deleted(&server, &id, cx))
+                        .ok();
+                    let text = format!("Deleted {name}.");
+                    window.push_notification(Notification::success(text), cx);
+                }
+            },
+        );
+        confirm_member_action_then(request, action, after, window, cx);
+    }
+
+    /// Why the role can't be changed, or deleted, if it can't.
+    fn render_lock(&self, editable: bool, deletable: bool, cx: &App) -> Option<AnyElement> {
+        let text = if !editable {
+            "This role ranks at or above your highest role, so you can't change it."
+        } else if !deletable {
+            "A bot manages this role. You can edit it, but not delete it."
+        } else {
+            return None;
+        };
+        Some(
+            h_flex()
+                .gap_2()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(Icon::new(IconName::Lock).small())
+                .child(text)
+                .into_any_element(),
+        )
+    }
+}
+
+impl Render for RoleEditor {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.focus_name) {
+            let focus = self.name.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+        }
+        let Some(role) = self.current(cx) else {
+            return div().into_any_element();
+        };
+        let (editable, deletable) = self.rights(cx);
+        let edited = self.edited(cx);
+        let saving = self.saving.is_some();
+        let changed = edited != self.filled;
+        let can_save = self.can_save(&edited, cx);
+        let colour = role.colour.as_deref().and_then(solid_colour);
+        let muted = cx.theme().muted_foreground;
+        let name_count = edited.name.trim().chars().count();
+        let name = field(
+            "Role name",
+            Input::new(&self.name)
+                .disabled(saving || !editable)
+                .into_any_element(),
+            name_count,
+            ROLE_NAME_MAX,
+            (name_count == 0).then(|| "A role needs a name.".to_string()),
+            cx,
+        );
+        let hoist = v_flex()
+            .gap_1()
+            .child(
+                Checkbox::new("role-hoist")
+                    .label("Hoist role")
+                    .checked(self.hoist)
+                    .disabled(saving || !editable)
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.hoist = *checked;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .pl_6()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("Display members with this role separately in the member list."),
+            );
+        v_flex()
+            .w_full()
+            .gap_4()
+            .child(
+                h_flex().child(
+                    Button::new("roles-back")
+                        .label("Roles")
+                        .icon(IconName::ChevronLeft)
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(BackToRoles))),
+                ),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(colour_dot(colour.as_deref(), cx))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_lg()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(role.name.clone()),
+                    ),
+            )
+            .children(self.render_lock(editable, deletable, cx))
+            .child(name)
+            .child(hoist)
+            .when(editable, |this| {
+                this.child(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("role-reset")
+                                .label("Reset")
+                                .outline()
+                                .small()
+                                .disabled(!changed || saving)
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.reset(window, cx)),
+                                ),
+                        )
+                        .child(
+                            Button::new("role-save")
+                                .label("Save")
+                                .primary()
+                                .small()
+                                .loading(saving)
+                                .disabled(!can_save)
+                                .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
+                        ),
+                )
+            })
+            .child(
+                h_flex()
+                    .gap_2()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        Button::new("role-copy-id")
+                            .label("Copy role ID")
+                            .icon(IconName::Copy)
+                            .outline()
+                            .small()
+                            .on_click(cx.listener(|this, _, window, cx| this.copy_id(window, cx))),
+                    )
+                    .when(deletable, |this| {
+                        this.child(
+                            Button::new("role-delete")
+                                .label("Delete role…")
+                                .icon(IconName::Trash)
+                                .danger()
+                                .small()
+                                .disabled(saving)
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.delete(window, cx)),
+                                ),
+                        )
+                    }),
+            )
+            .into_any_element()
     }
 }
 

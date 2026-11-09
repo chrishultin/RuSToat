@@ -11,9 +11,10 @@
 use revolt_result::ErrorType;
 
 use crate::api::ApiError;
-use crate::api::models::{FieldsRole, PartialRole, Role};
+use crate::api::models::{DataEditRole, FieldsRole, PartialRole, Role};
 use crate::permissions::{RoleLock, acting_rank};
 use crate::profile_edit::error_text;
+use crate::server_settings::access;
 use crate::store::{ChatStore, solid_colour};
 
 /// The longest role name Stoat takes, in characters.
@@ -137,4 +138,106 @@ pub fn role_update(role: &Role) -> (PartialRole, Vec<FieldsRole>) {
         clear.push(FieldsRole::Icon);
     }
     (partial, clear)
+}
+
+/// The role editor's form, as typed and ticked.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RoleForm {
+    pub name: String,
+    /// Shown separately in the member list.
+    pub hoist: bool,
+}
+
+impl RoleForm {
+    /// The form filled with `role`'s values.
+    pub fn of(role: &Role) -> Self {
+        Self {
+            name: role.name.clone(),
+            hoist: role.hoist,
+        }
+    }
+
+    /// Whether the name is 1 to [`ROLE_NAME_MAX`] characters (trimmed), so
+    /// Save can send it.
+    pub fn is_valid(&self) -> bool {
+        check_role_name(&self.name).is_some()
+    }
+
+    /// The `PATCH /servers/{id}/roles/{role}` that turns `role` into this
+    /// form: only what changed, the name trimmed. `None` when nothing
+    /// changed, or the form isn't valid.
+    pub fn changes(&self, role: &Role) -> Option<DataEditRole> {
+        let name = check_role_name(&self.name)?;
+        let mut edit = empty_role_edit();
+        if name != role.name.trim() {
+            edit.name = Some(name);
+        }
+        if self.hoist != role.hoist {
+            edit.hoist = Some(self.hoist);
+        }
+        (edit != empty_role_edit()).then_some(edit)
+    }
+}
+
+/// A `DataEditRole` that changes nothing (it has no `Default`).
+pub fn empty_role_edit() -> DataEditRole {
+    DataEditRole {
+        name: None,
+        colour: None,
+        hoist: None,
+        rank: None,
+        icon: None,
+        remove: Vec::new(),
+    }
+}
+
+/// Whether the user may edit `role` on `server`, as Stoat checks: Manage
+/// Role, and the role ranking below their best one (the owner may edit
+/// any). A bot's role may be edited.
+pub fn may_edit(store: &ChatStore, server: &str, role: &str) -> bool {
+    let Some(role) = store
+        .server(server)
+        .and_then(|server| server.roles.get(role))
+    else {
+        return false;
+    };
+    access(store, server).roles && role.rank > acting_rank(store, server)
+}
+
+/// Whether the user may delete `role` on `server`: as [`may_edit`], and not
+/// a bot's.
+pub fn may_delete(store: &ChatStore, server: &str, role: &str) -> bool {
+    may_edit(store, server, role)
+        && store
+            .server(server)
+            .and_then(|server| server.roles.get(role))
+            .is_some_and(|role| role.owner.is_none())
+}
+
+/// Why Stoat refused to save a role.
+pub fn edit_error_text(err: &ApiError) -> String {
+    match err.error_type() {
+        Some(ErrorType::NotElevated) => "That role ranks at or above your highest role.".into(),
+        Some(ErrorType::MissingPermission { .. }) => {
+            "You don't have permission to manage roles.".into()
+        }
+        Some(ErrorType::NotFound) => "Stoat couldn't find something in that change.".into(),
+        Some(ErrorType::FailedValidation { .. }) => {
+            format!("Role names are 1–{ROLE_NAME_MAX} characters.")
+        }
+        _ => error_text(err, "Couldn't save the role."),
+    }
+}
+
+/// Why Stoat refused to delete a role. (`NotFound` isn't a refusal: it's
+/// already gone.)
+pub fn delete_error_text(err: &ApiError) -> String {
+    match err.error_type() {
+        Some(ErrorType::NotElevated) => "That role ranks at or above your highest role.".into(),
+        Some(ErrorType::InvalidOperation) => "Roles that belong to a bot can't be deleted.".into(),
+        Some(ErrorType::MissingPermission { .. }) => {
+            "You don't have permission to manage roles.".into()
+        }
+        _ => error_text(err, "Couldn't delete the role."),
+    }
 }

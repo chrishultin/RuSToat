@@ -41,3 +41,59 @@ Look-ahead: none of the remaining chunks depends on the `role_partial` name, and
 
 ### Manual Validation
 Deferred to the end-of-milestone manual pass (plan's Manual Tests 1, 2 and 8). One thing to watch there: the sidebar shouldn't jump for an owner, who has Roles from the first render.
+
+## Chunk 2: Role editor: name, hoist, delete
+
+### Changes Made
+- `src/roles.rs`:
+  - `RoleForm { name, hoist }` with `of`, `is_valid` and `changes(&Role) -> Option<DataEditRole>`. `changes` sends only what changed and trims the name; it gives `None` when nothing changed or the name is invalid;
+  - `empty_role_edit()`;
+  - `may_edit(store, server, role)`: `Access.roles`, and the role ranking below `acting_rank`, so the owner may edit any role and a bot's role can be edited. `may_delete` is the same, plus not a bot's role;
+  - `edit_error_text` (`NotElevated`, `MissingPermission`, `NotFound`, `FailedValidation`) and `delete_error_text` (`NotElevated`, `InvalidOperation`, `MissingPermission`).
+- `src/api/client.rs`: `edit_role(server, role, &DataEditRole) -> Role`, whose body goes through `edit_body` so nulls and an empty `remove` are dropped, and `delete_role(server, role)`. `DataEditRole` and `Role` were added to the model import, hand-wrapped.
+- `src/ui/chat.rs`: `ChatView::role_deleted(server, role, cx)` runs `apply_role_delete` and then `server_permissions_changed`.
+- `src/ui/server_settings.rs`:
+  - `RolesPage` gains `RolesMode::{List, Editing(Entity<RoleEditor>)}`, `open`, `back` and `follow`. It now observes with the window, so `follow` can toast. Rows are clickable (with a hover background) and open the editor.
+  - `follow` goes back to the list with an info toast, "That role was deleted.", when the edited role leaves the store. It goes back silently when the user loses Manage Role, which drops the editor and any unsaved edit.
+  - `CreateRoleDialog` emits `RoleCreated(id)` after `role_saved`, and the page opens that role's editor.
+  - `RoleEditor` has:
+    - "‹ Roles" (emits `BackToRoles`);
+    - a heading with the role's colour dot and name;
+    - a lock note when the role can't be changed (rank) or can't be deleted (a bot's);
+    - "Role name" (the `field` helper with a counter; Enter saves);
+    - a "Hoist role" checkbox with the web client's description;
+    - Reset and Save, shown only when the role is editable;
+    - "Copy role ID";
+    - "Delete role…", shown only when deletable.
+  - The editor's fields follow live changes until they're touched (`filled`, as `OverviewPage` does). Its rights are worked out on every render, so a role that moves to or above the user's rank turns read-only at once. The name field takes focus on first draw when the role is editable.
+  - Save sends one `PATCH`, applies Stoat's answer through `role_saved`, resets the form and toasts "Saved."; a refusal toasts `edit_error_text` and keeps the edit.
+  - Delete confirms through `confirm_member_action_then` ("Delete {name}?", "Members with it lose it, and so does every channel's override for it."). Success or `NotFound` emits `BackToRoles` first, so the page doesn't take it for a delete made elsewhere, then `role_deleted` and a "Deleted {name}." toast.
+- `tests/roles.rs`: 9 new tests:
+  - `RoleForm::changes`: unchanged, spaces only, a rename (trimmed), hoist alone, invalid names;
+  - `may_edit` and `may_delete` for the owner, a moderator (above, own role, a bot's role below, below), a plain member, and unknown roles or servers;
+  - a moderator losing edit rights when a role moves above them;
+  - edit and delete error texts;
+  - an edit applied locally, then its partial `ServerRoleUpdate`, stays consistent.
+- `tests/api_roles.rs`: 6 new tests:
+  - `PATCH /servers/srv/roles/r1` sends exactly `{"name":"Mods"}`, and exactly `{"hoist":false}` (no `rank`, no `remove`);
+  - `NotElevated` reads as its text;
+  - `DELETE` is sent once with no body;
+  - `InvalidOperation` reads as "Roles that belong to a bot can't be deleted.";
+  - an already-deleted role is `NotFound`.
+
+### Divergences
+- **Hoist is a checkbox**, gpui-component's `Checkbox` as used elsewhere in RuSToat, rather than a switch. The web client uses a checkbox too.
+- `may_edit` also needs `Access.roles` (Manage Role and a known membership), so it answers fully on its own. Stoat checks the same.
+- `edit_error_text` also covers `NotFound` (an icon ID Stoat doesn't know, from chunk 4) and `FailedValidation`.
+- Losing Manage Role while editing returns the page to its list (as well as hiding the page through milestone 23's keyed reset). This answers the plan's "stale Save" risk. A Save already in flight still reaches Stoat, which decides; its answer goes nowhere if the editor is gone.
+- `delete_error_text` is imported into `ui/server_settings.rs` as `delete_role_error_text`, because the server's own `delete_error_text` is already imported there.
+
+Look-ahead: chunks 3 and 4 extend `RoleForm` and `RoleEditor` as planned, and chunk 4's upload uses the shared `Saving` enum, which already has `Uploading`. No plan amendments.
+
+### Verification Performed
+- `cargo test --test roles --test api_roles`: 20 and 9 passed.
+- Full suite: `cargo test` gave 1,211 passed, 0 failed. `cargo clippy --all-targets -- -D warnings` is clean.
+- Rustfmt drift: `src/ui/chat.rs` 17 and `src/api/client.rs` 3 are unchanged. `src/ui/server_settings.rs`, `src/roles.rs`, `tests/roles.rs` and `tests/api_roles.rs` are clean.
+
+### Manual Validation
+Deferred to the end-of-milestone pass (plan's Manual Tests 3, 5 and 7, plus chunk 2's read-only check as a lower moderator). Also check there that the name field takes focus when the editor opens, and that the scroll position is sensible when switching between the list and the editor.

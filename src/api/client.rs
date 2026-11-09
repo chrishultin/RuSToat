@@ -5,12 +5,12 @@ use reqwest::{Client, Method};
 use revolt_models::v0::{
     AccountInfo, AllMemberResponse, BanListResult, BulkMessageResponse, Category, Channel,
     CreateServerLegacyResponse, CreateVoiceUserResponse, DataBanCreate, DataChangeEmail,
-    DataChangePassword, DataEditMessage, DataEditServer, DataEditSession, DataEditUser, DataLogin,
-    DataMemberEdit, DataMessageSearch, DataMessageSend, DataSendFriendRequest, Emoji, FieldsUser,
-    Invite, InviteJoinResponse, InviteResponse, MFAResponse, MFATicket, Member, Message,
-    MessageSort, MultiFactorStatus, MutualResponse, NewRoleResponse, OptionsQueryMessages,
-    Presence, ReplyIntent, ResponseLogin, ResponseTotpSecret, Server, ServerBan, SessionInfo, User,
-    UserProfile, UserStatus,
+    DataChangePassword, DataEditMessage, DataEditRole, DataEditServer, DataEditSession,
+    DataEditUser, DataLogin, DataMemberEdit, DataMessageSearch, DataMessageSend,
+    DataSendFriendRequest, Emoji, FieldsUser, Invite, InviteJoinResponse, InviteResponse,
+    MFAResponse, MFATicket, Member, Message, MessageSort, MultiFactorStatus, MutualResponse,
+    NewRoleResponse, OptionsQueryMessages, Presence, ReplyIntent, ResponseLogin,
+    ResponseTotpSecret, Role, Server, ServerBan, SessionInfo, User, UserProfile, UserStatus,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -1238,6 +1238,38 @@ impl StoatClient {
             Some(&CreateRole { name }),
         )
         .await
+    }
+
+    /// `PATCH /servers/{server}/roles/{role}`: change a role's name, colour,
+    /// hoisting or icon (Manage Role, and the role ranking below the
+    /// user's best; the owner may edit any). Unset fields are left out,
+    /// and `remove` too when it's empty. Stoat answers with the role;
+    /// `ServerRoleUpdate` follows.
+    pub async fn edit_role(
+        &self,
+        server: &str,
+        role: &str,
+        edit: &DataEditRole,
+    ) -> Result<Role, ApiError> {
+        let body = edit_body(serde_json::to_value(edit).expect("role edit serialises"));
+        self.send(
+            Method::PATCH,
+            &format!("/servers/{server}/roles/{role}"),
+            Some(&body),
+        )
+        .await
+    }
+
+    /// `DELETE /servers/{server}/roles/{role}`: delete a role (as
+    /// [`Self::edit_role`], and never a bot's). `ServerRoleDelete` follows.
+    pub async fn delete_role(&self, server: &str, role: &str) -> Result<(), ApiError> {
+        self.send_raw(
+            Method::DELETE,
+            &format!("/servers/{server}/roles/{role}"),
+            None::<&()>,
+        )
+        .await
+        .map(|_| ())
     }
 
     /// `PATCH /servers/{server}` with `{"owner": owner}`: hand the server
