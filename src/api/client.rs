@@ -937,6 +937,25 @@ impl StoatClient {
             .await
     }
 
+    /// `GET /servers/{server}/invites`: every invite to the server's
+    /// channels (Manage Server). They carry IDs only: no user or channel.
+    pub async fn fetch_server_invites(&self, server: &str) -> Result<Vec<Invite>, ApiError> {
+        self.send(
+            Method::GET,
+            &format!("/servers/{server}/invites"),
+            None::<&()>,
+        )
+        .await
+    }
+
+    /// `DELETE /invites/{code}`: revoke an invite (its creator, or Manage
+    /// Server). An unknown code is `NotFound`. No event follows.
+    pub async fn delete_invite(&self, code: &str) -> Result<(), ApiError> {
+        self.send_raw(Method::DELETE, &format!("/invites/{code}"), None::<&()>)
+            .await
+            .map(|_| ())
+    }
+
     /// `POST /channels/{channel}/invites`: a new invite to `channel`, used
     /// at most `max_uses` times (1 to 100) and lasting until `expires` (an
     /// RFC 3339 time, see [`crate::invites::expires_at`]). Neither: one

@@ -6,17 +6,20 @@
 
 use std::path::Path;
 
+use chrono::{DateTime, Utc};
+use iso8601_timestamp::Timestamp;
 use revolt_permissions::ChannelPermission;
 use revolt_result::ErrorType;
 
 use crate::api::ApiError;
 use crate::api::models::{
-    Channel, DataEditServer, FieldsServer, File, Server, SystemMessageChannels,
+    Channel, DataEditServer, FieldsServer, File, Invite, Server, SystemMessageChannels,
 };
 use crate::permissions::{has, server_permissions};
 use crate::profile_edit::{ImageLimits, ProfileImage, error_text};
 use crate::server_edit::valid_name;
 use crate::store::ChatStore;
+use crate::time::relative_time;
 
 pub use crate::server_edit::NAME_MAX;
 
@@ -324,6 +327,110 @@ fn image_change(stored: &ProfileImage, edited: &ProfileImage) -> Option<Option<S
         ProfileImage::New(_) => None,
         ProfileImage::Current(id) => (stored != edited).then(|| Some(id.clone())),
         ProfileImage::None => (*stored != ProfileImage::None).then_some(None),
+    }
+}
+
+/// One row of the Invites page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InviteRow {
+    pub code: String,
+    /// Who made it, by ID.
+    pub creator: String,
+    /// Their display name, or "Unknown user" if they aren't cached.
+    pub creator_name: String,
+    /// Their avatar, if they're cached.
+    pub creator_avatar: Option<String>,
+    /// "#general", or "Unknown channel".
+    pub channel: String,
+    /// "3 uses", "1 use", "3 / 10 uses".
+    pub uses: String,
+    /// "Never expires", "Expires in 3 days".
+    pub expiry: String,
+}
+
+/// The Invites page's rows for `invites` (as `GET /servers/{id}/invites`
+/// returns them), in Stoat's order: codes say nothing of when they were
+/// made. Invites that have expired by `now` are left out (Stoat lists
+/// them until they're cleaned up), and so is anything but a server invite.
+pub fn invite_rows(store: &ChatStore, invites: &[Invite], now: DateTime<Utc>) -> Vec<InviteRow> {
+    invites
+        .iter()
+        .filter_map(|invite| {
+            let Invite::Server {
+                code,
+                creator,
+                channel,
+                max_uses,
+                uses,
+                expires,
+                ..
+            } = invite
+            else {
+                return None;
+            };
+            let expires = expires.as_ref().and_then(timestamp_utc);
+            if expires.is_some_and(|at| at <= now) {
+                return None;
+            }
+            let user = store.user(creator);
+            Some(InviteRow {
+                code: code.clone(),
+                creator: creator.clone(),
+                creator_name: user.map_or_else(
+                    || "Unknown user".into(),
+                    |user| crate::store::display_name(user).to_string(),
+                ),
+                creator_avatar: user.map(|_| store.user_avatar_url(creator)),
+                channel: match store.channel(channel) {
+                    Some(Channel::TextChannel { name, .. }) => format!("#{name}"),
+                    _ => "Unknown channel".into(),
+                },
+                uses: uses_label(*uses, *max_uses),
+                expiry: match expires {
+                    Some(at) => format!("Expires {}", relative_time(&at, &now)),
+                    None => "Never expires".into(),
+                },
+            })
+        })
+        .collect()
+}
+
+/// How often an invite has been used, out of how many: "3 uses", "1 use",
+/// "3 / 10 uses".
+pub fn uses_label(uses: u64, max_uses: Option<u64>) -> String {
+    match max_uses {
+        Some(max) => format!("{uses} / {max} uses"),
+        None if uses == 1 => "1 use".into(),
+        None => format!("{uses} uses"),
+    }
+}
+
+/// One of Stoat's timestamps, as a time.
+fn timestamp_utc(timestamp: &Timestamp) -> Option<DateTime<Utc>> {
+    let serde_json::Value::String(text) = serde_json::to_value(timestamp).ok()? else {
+        return None;
+    };
+    DateTime::parse_from_rfc3339(&text)
+        .ok()
+        .map(|at| at.with_timezone(&Utc))
+}
+
+/// Why the invites couldn't be listed.
+pub fn invites_error_text(err: &ApiError) -> String {
+    match err.error_type() {
+        Some(ErrorType::MissingPermission { .. }) => {
+            "You don't have permission to see this server's invites.".into()
+        }
+        _ => error_text(err, "Couldn't load the invites."),
+    }
+}
+
+/// Why Stoat refused to revoke an invite. (`NotFound` isn't a refusal:
+/// it's already gone.)
+pub fn revoke_error_text(err: &ApiError) -> String {
+    match err.error_type() {
+        Some(ErrorType::MissingPermission { .. }) => "You can't revoke this invite.".into(),
+        _ => error_text(err, "Couldn't revoke the invite."),
     }
 }
 

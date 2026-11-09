@@ -1,5 +1,7 @@
 //! Invites against a mock Stoat API: `GET /invites/{code}` (look one up),
-//! `POST /invites/{code}` (join) and `POST /channels/{id}/invites` (create).
+//! `POST /invites/{code}` (join), `POST /channels/{id}/invites` (create),
+//! and Server Settings' `GET /servers/{id}/invites` (list) and
+//! `DELETE /invites/{code}` (revoke).
 
 use revolt_result::ErrorType;
 use serde_json::json;
@@ -219,5 +221,82 @@ async fn creating_without_permission_is_an_api_error() {
     assert!(
         matches!(err.error_type(), Some(ErrorType::MissingPermission { .. })),
         "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_servers_invites_are_listed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/servers/srv/invites"))
+        .and(header("x-session-token", "tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {
+                "type": "Server", "_id": "abc", "server": "srv", "creator": "u-ada",
+                "channel": "ch-lobby", "uses": 3
+            },
+            {
+                "type": "Server", "_id": "def", "server": "srv", "creator": "u-bob",
+                "channel": "ch-lobby", "uses": 1, "max_uses": 10,
+                "expires": "2026-11-16T12:00:00.000Z"
+            }
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let invites = client(&server).fetch_server_invites("srv").await.unwrap();
+    let [
+        Invite::Server {
+            code,
+            max_uses: None,
+            expires: None,
+            uses: 3,
+            ..
+        },
+        Invite::Server {
+            max_uses: Some(10),
+            expires: Some(_),
+            ..
+        },
+    ] = &invites[..]
+    else {
+        panic!("two server invites: {invites:?}");
+    };
+    assert_eq!(code, "abc");
+}
+
+#[tokio::test]
+async fn revoking_an_invite_sends_one_delete() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/invites/abc"))
+        .and(header("x-session-token", "tok"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client(&server).delete_invite("abc").await.unwrap();
+}
+
+#[tokio::test]
+async fn listing_invites_without_permission_says_so() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/servers/srv/invites"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "type": "MissingPermission", "permission": "ManageServer"
+        })))
+        .mount(&server)
+        .await;
+
+    let err = client(&server)
+        .fetch_server_invites("srv")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        stoat_gpui::server_settings::invites_error_text(&err),
+        "You don't have permission to see this server's invites."
     );
 }

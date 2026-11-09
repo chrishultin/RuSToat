@@ -151,3 +151,52 @@ Deferred to the end (PNG and animated GIF icons, a banner, removing both, and a 
 
 ### Manual Validation
 Deferred to the end (point "User joined" at a channel and have the second account join; turn "User left" off and have it leave).
+
+## Chunk 4: Invites page
+
+### Changes Made
+- `src/api/client.rs`: `fetch_server_invites(server) -> Vec<Invite>` (`GET /servers/{id}/invites`) and `delete_invite(code)` (`DELETE /invites/{code}`).
+- `src/server_settings.rs`:
+  - `InviteRow { code, creator, creator_name, creator_avatar, channel, uses, expiry }`.
+  - `invite_rows(store, invites, now)`:
+    - keeps Stoat's order, since codes carry no creation time;
+    - skips `Invite::Group`, and invites that have expired by `now`;
+    - uses "Unknown user" (no avatar) for an uncached creator, and "Unknown channel" for an unknown channel;
+    - expiry is "Never expires", or "Expires in 3 days" through `time::relative_time`.
+  - `uses_label`: "1 use", "3 uses", "3 / 10 uses".
+  - `timestamp_utc` (a Stoat `Timestamp` to `chrono`, through its JSON string, as `permissions::is_timed_out` does).
+  - `invites_error_text` and `revoke_error_text`.
+- `src/ui/moderation_dialogs.rs`: `confirm_member_action_then(request, action, after, …)` and `AfterAction`. It is the same confirmation, but Stoat's answer goes to `after` once the dialog has closed, instead of the usual refusal toast. `confirm_member_action` is unchanged for milestone 22's callers; both share `open_confirmation`.
+- `src/ui/invites.rs`: `CreateInviteDialog` emits `InviteCreated` when Stoat makes the invite.
+- `src/ui/chat.rs`: `first_invitable_channel` is now `pub`, and there's a new `invite_max_days()` accessor.
+- `src/ui/server_settings.rs`:
+  - a generic `Load<T> { Idle, Loading, Loaded, Failed(text) }`;
+  - `invites_page` (Link icon, Manage Server);
+  - `InvitesPage`:
+    - fetched the first time the page may be shown (`load_once`, from `ServerSettingsView::render`);
+    - a header with "Create invite…" (disabled with no channel to invite to) and Refresh;
+    - rows: the creator's avatar and name, "#channel · code", uses and expiry, Copy link (a link from `web_app`, else the code, with a toast), and a red Revoke;
+    - Revoke confirms with `confirm_member_action_then` ("Revoke invite {code}?"). The row is removed on success or `NotFound`; any other refusal toasts `revoke_error_text`;
+    - "Create invite…" opens `CreateInviteDialog` in the settings window for `first_invitable_channel`, and refreshes the list on `InviteCreated`;
+    - Loading, Failed with Retry, and "This server has no invites." states.
+- Tests:
+  - `tests/api_invites.rs`: a list with and without `max_uses` / `expires`; a revoke is one `DELETE /invites/abc`; a `MissingPermission` on the list becomes its text.
+  - `tests/server_settings.rs`: rows name the creator and channel (unknown ones too), with uses and relative expiry; expired and group invites are left out; `uses_label`.
+
+### Divergences
+- **`confirm_member_action` couldn't report success**, but the page must drop the revoked row. I added `confirm_member_action_then` beside it rather than changing milestone 22's callers.
+- **`CreateInviteDialog` needed only an event** (`InviteCreated`). It doesn't depend on the main window.
+- **Uses read "3 uses" / "3 / 10 uses"** rather than the plan's bare "3" / "3 / 10".
+- **Look-ahead:** chunk 5 (Bans) will reuse `Load<T>`, `load_once` and `confirm_member_action_then`. The plan's approach is unchanged; no amendment needed.
+
+### Verification Performed
+- `cargo test --test server_settings --test api_invites`: 24 + 12 passed.
+- `cargo test`: 1157 passed, 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt:
+  - drift unchanged: `src/ui/chat.rs` 17, `src/api/client.rs` 3;
+  - still clean: `src/ui/invites.rs`, `src/ui/moderation_dialogs.rs`, `tests/api_invites.rs`;
+  - new files clean.
+
+### Manual Validation
+Deferred to the end (create from the page, copy and open the link in the web client, revoke, and a Ban-Members-only account doesn't see Invites).

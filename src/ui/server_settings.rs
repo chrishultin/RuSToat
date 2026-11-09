@@ -13,6 +13,8 @@
 
 use std::path::PathBuf;
 
+use revolt_result::ErrorType;
+
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
@@ -24,14 +26,18 @@ use gpui_kit::*;
 
 use crate::api::ApiError;
 use crate::api::models::Server;
+use crate::links::invite_link;
 use crate::profile_edit::{ImageLimits, ProfileImage};
 use crate::runtime::spawn_io;
 use crate::server_settings::{
-    Access, DESCRIPTION_MAX, NAME_MAX, OverviewForm, ServerImage, SystemChannels,
-    SystemMessageKind, access, save_error_text, system_channel_choices,
+    Access, DESCRIPTION_MAX, InviteRow, NAME_MAX, OverviewForm, ServerImage, SystemChannels,
+    SystemMessageKind, access, invite_rows, invites_error_text, revoke_error_text, save_error_text,
+    system_channel_choices,
 };
 use crate::themes;
-use crate::ui::chat::ChatView;
+use crate::ui::chat::{ChatView, avatar};
+use crate::ui::invites::{CREATE_DIALOG_WIDTH, CreateInviteDialog, InviteCreated};
+use crate::ui::moderation_dialogs::{MemberActionRequest, confirm_member_action_then};
 use crate::ui::profile_editor::{
     ImageSlot, Preview, avatar_preview, banner_preview, field, prompt_for_image, render_image_row,
     upload_image,
@@ -148,12 +154,13 @@ pub struct ServerSettingsView {
     /// The window's title, as last set.
     title: String,
     overview: Entity<OverviewPage>,
+    invites: Entity<InvitesPage>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl ServerSettingsView {
     /// The pages, in sidebar order.
-    pub const PAGES: [ServerPageFn; 1] = [overview_page];
+    pub const PAGES: [ServerPageFn; 2] = [overview_page, invites_page];
 
     pub fn new(
         chat: Entity<ChatView>,
@@ -181,6 +188,7 @@ impl ServerSettingsView {
         ];
         let title = window_title(chat.read(cx).store().server(&server));
         let overview = cx.new(|cx| OverviewPage::new(&chat, server.clone(), window, cx));
+        let invites = cx.new(|_| InvitesPage::new(&chat, server.clone()));
         Self {
             chat: chat.downgrade(),
             server,
@@ -189,6 +197,7 @@ impl ServerSettingsView {
             page_key: 0,
             title,
             overview,
+            invites,
             _subscriptions: subscriptions,
         }
     }
@@ -226,6 +235,11 @@ impl Render for ServerSettingsView {
         if title != self.title {
             window.set_window_title(&title);
             self.title = title;
+        }
+        // Lists are fetched the first time they may be shown.
+        if self.access(cx).invites {
+            self.invites
+                .update(cx, |page, cx| page.load_once(window, cx));
         }
         let pages: Vec<Option<SettingPage>> =
             self.pages.iter().map(|page| page(self, cx)).collect();
@@ -778,5 +792,342 @@ impl Render for OverviewPage {
                             .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
                     ),
             )
+    }
+}
+
+/// Where loading one of the window's lists is at.
+enum Load<T> {
+    /// Not asked for yet.
+    Idle,
+    Loading {
+        _task: Task<()>,
+    },
+    Loaded(T),
+    /// Why it couldn't be loaded.
+    Failed(String),
+}
+
+/// Invites: every invite to the server, with who made it and to where.
+fn invites_page(view: &ServerSettingsView, cx: &mut App) -> Option<SettingPage> {
+    if !view.access(cx).invites {
+        return None;
+    }
+    let invites = view.invites.clone();
+    Some(
+        SettingPage::new("Invites")
+            .icon(IconName::Link)
+            .resettable(false)
+            .group(
+                SettingGroup::new().item(
+                    SettingItem::render(move |_, _, _| invites.clone())
+                        .keywords(["invites", "invite", "links", "revoke"]),
+                ),
+            ),
+    )
+}
+
+/// The Invites page: the server's invites, each with Copy link and Revoke,
+/// and "Create invite…". Stoat sends no event for invites, so the list is
+/// changed here after a revoke, and fetched again after a create.
+pub struct InvitesPage {
+    chat: WeakEntity<ChatView>,
+    server: String,
+    invites: Load<Vec<InviteRow>>,
+    _create: Option<Subscription>,
+}
+
+impl InvitesPage {
+    fn new(chat: &Entity<ChatView>, server: String) -> Self {
+        Self {
+            chat: chat.downgrade(),
+            server,
+            invites: Load::Idle,
+            _create: None,
+        }
+    }
+
+    /// Fetch the list, unless that's already been done.
+    fn load_once(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.invites, Load::Idle) {
+            self.refresh(window, cx);
+        }
+    }
+
+    /// Fetch the list again.
+    fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat) = self.chat.upgrade() else {
+            return;
+        };
+        let request = spawn_io({
+            let (client, server) = (chat.read(cx).client().clone(), self.server.clone());
+            async move { client.fetch_server_invites(&server).await }
+        });
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update(cx, |this, cx| {
+                this.invites = match result {
+                    Ok(Ok(invites)) => {
+                        log::debug!("{} invites to {}", invites.len(), this.server);
+                        match this.chat.upgrade() {
+                            Some(chat) => Load::Loaded(invite_rows(
+                                chat.read(cx).store(),
+                                &invites,
+                                chrono::Utc::now(),
+                            )),
+                            None => Load::Idle,
+                        }
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't load invites to {}: {err:?}", this.server);
+                        Load::Failed(invites_error_text(&err))
+                    }
+                    Err(err) => {
+                        log::warn!("invites task failed: {err:?}");
+                        Load::Failed("Couldn't load the invites.".into())
+                    }
+                };
+                cx.notify();
+            })
+            .ok();
+        });
+        self.invites = Load::Loading { _task: task };
+        cx.notify();
+    }
+
+    /// The channel "Create invite…" makes an invite to: the first one the
+    /// user may invite to.
+    fn invite_channel(&self, cx: &App) -> Option<String> {
+        let chat = self.chat.upgrade()?;
+        chat.read(cx).first_invitable_channel(&self.server)
+    }
+
+    /// "Invite people to {server}", in this window; the list is fetched
+    /// again once it's made one.
+    fn create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(chat), Some(channel)) = (self.chat.upgrade(), self.invite_channel(cx)) else {
+            return;
+        };
+        let (built, title) = {
+            let chat = chat.read(cx);
+            let Some(name) = chat.store().server(&self.server).map(|s| s.name.clone()) else {
+                return;
+            };
+            let built = CreateInviteDialog::new(chat, channel, chat.invite_max_days());
+            (
+                built,
+                SharedString::from(format!("Invite people to {name}")),
+            )
+        };
+        let dialog = cx.new(|_| built);
+        self._create = Some(cx.subscribe_in(
+            &dialog,
+            window,
+            |this, _, _: &InviteCreated, window, cx| this.refresh(window, cx),
+        ));
+        window.open_dialog(cx, move |modal, _, _| {
+            modal
+                .title(title.clone())
+                .w(px(CREATE_DIALOG_WIDTH))
+                .child(dialog.clone())
+        });
+    }
+
+    /// Copy an invite's link (or its code, if the web client's address
+    /// isn't known).
+    fn copy(&self, row: &InviteRow, window: &mut Window, cx: &mut Context<Self>) {
+        let app = self
+            .chat
+            .upgrade()
+            .and_then(|chat| chat.read(cx).web_app().map(str::to_string));
+        let (text, toast) = match app {
+            Some(app) => (invite_link(&app, &row.code), "Copied the invite link."),
+            None => (row.code.clone(), "Copied the invite code."),
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        window.push_notification(Notification::success(toast), cx);
+    }
+
+    /// Revoke an invite, once confirmed. Its row goes when Stoat agrees, or
+    /// says it's already gone.
+    fn revoke(&mut self, row: &InviteRow, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat) = self.chat.upgrade() else {
+            return;
+        };
+        let client = chat.read(cx).client().clone();
+        let code = row.code.clone();
+        let request = MemberActionRequest {
+            title: format!("Revoke invite {code}?").into(),
+            detail: "Its link will stop working. Anyone who joined with it stays.".into(),
+            ok_label: "Revoke",
+            danger: true,
+            failed_text: "Couldn't revoke the invite.".into(),
+        };
+        let page = cx.entity().downgrade();
+        let action = {
+            let code = code.clone();
+            Box::pin(async move { client.delete_invite(&code).await })
+        };
+        let after = Box::new(
+            move |result: Result<(), ApiError>, window: &mut Window, cx: &mut App| match result {
+                Err(err) if !matches!(err.error_type(), Some(ErrorType::NotFound)) => {
+                    log::warn!("couldn't revoke invite {code}: {err:?}");
+                    window.push_notification(Notification::error(revoke_error_text(&err)), cx);
+                }
+                _ => {
+                    page.update(cx, |page, cx| {
+                        if let Load::Loaded(rows) = &mut page.invites {
+                            rows.retain(|row| row.code != code);
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            },
+        );
+        confirm_member_action_then(request, action, after, window, cx);
+    }
+
+    fn render_row(&self, row: &InviteRow, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let face = avatar(
+            SharedString::from(format!("invite-creator-{}", row.code)),
+            row.creator_avatar.clone(),
+            &row.creator_name,
+            INVITE_AVATAR,
+            theme.secondary,
+            theme.secondary_foreground,
+        );
+        let copy = {
+            let row = row.clone();
+            cx.listener(move |this, _, window, cx| this.copy(&row, window, cx))
+        };
+        let revoke = {
+            let row = row.clone();
+            cx.listener(move |this, _, window, cx| this.revoke(&row, window, cx))
+        };
+        h_flex()
+            .w_full()
+            .gap_3()
+            .py_1()
+            .child(face)
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(row.creator_name.clone()),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(format!("{} · {}", row.channel, row.code)),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .items_end()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(row.uses.clone())
+                    .child(row.expiry.clone()),
+            )
+            .child(
+                Button::new(SharedString::from(format!("invite-copy-{}", row.code)))
+                    .icon(IconName::Copy)
+                    .ghost()
+                    .small()
+                    .tooltip("Copy link")
+                    .on_click(copy),
+            )
+            .child(
+                Button::new(SharedString::from(format!("invite-revoke-{}", row.code)))
+                    .icon(IconName::Trash)
+                    .ghost()
+                    .small()
+                    .text_color(theme.danger)
+                    .tooltip("Revoke")
+                    .on_click(revoke),
+            )
+            .into_any_element()
+    }
+}
+
+/// The invite creator's avatar.
+const INVITE_AVATAR: f32 = 28.;
+
+impl Render for InvitesPage {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (muted, danger) = (theme.muted_foreground, theme.danger);
+        let can_create = self.invite_channel(cx).is_some();
+        let header = h_flex()
+            .w_full()
+            .gap_2()
+            .child(
+                div()
+                    .flex_1()
+                    .text_sm()
+                    .text_color(muted)
+                    .child("Anyone with one of these links can join."),
+            )
+            .child(
+                Button::new("invites-create")
+                    .label("Create invite…")
+                    .icon(IconName::UserPlus)
+                    .outline()
+                    .small()
+                    .disabled(!can_create)
+                    .on_click(cx.listener(|this, _, window, cx| this.create(window, cx))),
+            )
+            .child(
+                Button::new("invites-refresh")
+                    .icon(IconName::RefreshCw)
+                    .ghost()
+                    .small()
+                    .tooltip("Refresh")
+                    .disabled(matches!(self.invites, Load::Loading { .. }))
+                    .on_click(cx.listener(|this, _, window, cx| this.refresh(window, cx))),
+            );
+        let body = match &self.invites {
+            Load::Idle | Load::Loading { .. } => div()
+                .text_sm()
+                .text_color(muted)
+                .child("Loading invites…")
+                .into_any_element(),
+            Load::Failed(text) => h_flex()
+                .gap_2()
+                .text_sm()
+                .text_color(danger)
+                .child(text.clone())
+                .child(
+                    Button::new("invites-retry")
+                        .label("Retry")
+                        .outline()
+                        .xsmall()
+                        .on_click(cx.listener(|this, _, window, cx| this.refresh(window, cx))),
+                )
+                .into_any_element(),
+            Load::Loaded(rows) if rows.is_empty() => div()
+                .text_sm()
+                .text_color(muted)
+                .child("This server has no invites.")
+                .into_any_element(),
+            Load::Loaded(rows) => {
+                let rows = rows.clone();
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .children(rows.iter().map(|row| self.render_row(row, cx)))
+                    .into_any_element()
+            }
+        };
+        v_flex().w_full().gap_3().child(header).child(body)
     }
 }

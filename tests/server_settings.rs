@@ -3,11 +3,11 @@
 use revolt_permissions::{ChannelPermission, DEFAULT_PERMISSION_SERVER};
 use serde_json::{Value, json};
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
-use stoat_gpui::api::models::{FieldsServer, Server};
+use stoat_gpui::api::models::{FieldsServer, Invite, Server};
 use stoat_gpui::profile_edit::ProfileImage;
 use stoat_gpui::server_settings::{
     Access, OverviewForm, ServerImage, SystemChannels, SystemMessageKind, access,
-    empty_server_edit, system_channel_choices,
+    empty_server_edit, invite_rows, system_channel_choices, uses_label,
 };
 use stoat_gpui::store::ChatStore;
 
@@ -345,4 +345,64 @@ fn system_message_labels() {
         labels,
         ["User joined", "User left", "User kicked", "User banned"]
     );
+}
+
+fn invites(value: Value) -> Vec<Invite> {
+    serde_json::from_value(value).unwrap()
+}
+
+/// 2026-11-09T12:00:00Z.
+fn noon() -> chrono::DateTime<chrono::Utc> {
+    "2026-11-09T12:00:00Z".parse().unwrap()
+}
+
+#[test]
+fn invite_rows_name_the_creator_and_channel() {
+    let store = store("u-owner");
+    let rows = invite_rows(
+        &store,
+        &invites(json!([
+            { "type": "Server", "_id": "abc", "server": "srv", "creator": "u-admin", "channel": "ch-a", "uses": 3 },
+            { "type": "Server", "_id": "def", "server": "srv", "creator": "u-stranger", "channel": "ch-gone",
+              "uses": 3, "max_uses": 10, "expires": "2026-11-12T12:00:00.000Z" }
+        ])),
+        noon(),
+    );
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].code, "abc");
+    assert_eq!(rows[0].creator_name, "u-admin");
+    assert!(rows[0].creator_avatar.is_some());
+    assert_eq!(rows[0].channel, "#a");
+    assert_eq!(rows[0].uses, "3 uses");
+    assert_eq!(rows[0].expiry, "Never expires");
+    // Someone the store doesn't know, and a channel it doesn't have.
+    assert_eq!(rows[1].creator_name, "Unknown user");
+    assert_eq!(rows[1].creator_avatar, None);
+    assert_eq!(rows[1].channel, "Unknown channel");
+    assert_eq!(rows[1].uses, "3 / 10 uses");
+    assert_eq!(rows[1].expiry, "Expires in 3 days");
+}
+
+#[test]
+fn expired_and_group_invites_are_left_out() {
+    let store = store("u-owner");
+    let rows = invite_rows(
+        &store,
+        &invites(json!([
+            { "type": "Server", "_id": "old", "server": "srv", "creator": "u-admin", "channel": "ch-a",
+              "uses": 0, "expires": "2026-11-09T11:59:00.000Z" },
+            { "type": "Group", "_id": "grp", "creator": "u-admin", "channel": "grp-1", "uses": 0 },
+            { "type": "Server", "_id": "new", "server": "srv", "creator": "u-admin", "channel": "ch-a", "uses": 0 }
+        ])),
+        noon(),
+    );
+    let codes: Vec<&str> = rows.iter().map(|row| row.code.as_str()).collect();
+    assert_eq!(codes, ["new"]);
+}
+
+#[test]
+fn uses_read_naturally() {
+    assert_eq!(uses_label(1, None), "1 use");
+    assert_eq!(uses_label(0, None), "0 uses");
+    assert_eq!(uses_label(3, Some(10)), "3 / 10 uses");
 }

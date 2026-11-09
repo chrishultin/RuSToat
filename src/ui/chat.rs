@@ -6659,13 +6659,19 @@ impl ChatView {
 
     /// The first channel of `server`, in sidebar order, the user may create
     /// invites to ("Invite people…" in its menu).
-    fn first_invitable_channel(&self, server: &str) -> Option<String> {
+    pub fn first_invitable_channel(&self, server: &str) -> Option<String> {
         self.store
             .server_channels(server)
             .into_iter()
             .flat_map(|section| section.channels)
             .map(|entry| entry.id)
             .find(|channel| self.store.can_invite(channel))
+    }
+
+    /// The longest an invite may last on this instance, in days, if it
+    /// says.
+    pub fn invite_max_days(&self) -> Option<u32> {
+        self.invite_max_days
     }
 
     /// Which links are invites on this account's instance.
