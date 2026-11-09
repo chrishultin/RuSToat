@@ -117,3 +117,37 @@ Deferred to the end (rename, clear the description, switch servers, and a member
 
 ### Manual Validation
 Deferred to the end (PNG and animated GIF icons, a banner, removing both, and a 3 MB icon refused).
+
+## Chunk 3: System-message channels
+
+### Changes Made
+- `src/server_settings.rs`:
+  - `SystemMessageKind { Joined, Left, Kicked, Banned }` with `ALL` and `label()` ("User joined", "User left", "User kicked", "User banned").
+  - `SystemChannels { user_joined, user_left, user_kicked, user_banned: Option<String> }`:
+    - `of(&Server)` reads the server's channels, with any channel not in `server.channels` shown as off;
+    - `existing(&Server)` drops unknown channels;
+    - `get` / `set`, and `From<SystemChannels> for SystemMessageChannels`.
+  - `OverviewForm` gains `system`. `changes` compares the edited channels (unknown ones dropped) with the server's. A difference sends the whole object as `system_messages`, or `remove: [SystemMessages]` when every kind is off. It goes in the same `DataEditServer` as the other fields.
+  - `system_channel_choices(store, server) -> Vec<(id, name)>`: the server's channels in channel-list order (`server_channels`), voice channels included. A chosen channel the list doesn't show the user is added at the end ("Hidden channel" if its name is unknown).
+- `src/ui/server_settings.rs`, `OverviewPage`:
+  - a `system: SystemChannels` field, covered by `edited`, Reset and live-follow (per kind);
+  - a "System messages" section under the description: four rows, each an outline button "#channel ▾" or "Off ▾" with a dropdown (`DropdownMenu`, scrollable, max 320 px): Off, then every choice, the current one ticked;
+  - saved by the same Save as the rest of the form.
+- `tests/server_settings.rs`:
+  - the `srv` fixture gains three channels (`ch-b`; `ch-a` and voice `ch-voice` in a category) and `system_messages` with a deleted `ch-gone`;
+  - 6 new tests: a deleted channel shows as off and isn't sent; setting one sends the whole object without deleted channels (JSON `{"user_joined":"ch-a","user_banned":"ch-voice"}`); all off gives `remove: [SystemMessages]`; a channel picked then deleted isn't sent; choices follow channel order and include voice channels; the labels.
+
+### Divergences
+- **Voice channels are offered.** Stoat 0.16.2's `server_edit.rs` only checks that each ID is in `server.channels`, and voice channels there are text channels with chat. As the plan said, I kept them and noted it.
+- **The plan's `SystemMessagesForm` / `edit()` is `SystemChannels`**, merged into `OverviewForm::changes`, so one `DataEditServer` carries every change.
+- **Pickers are dropdown menus on outline buttons** (the `CreateInviteDialog` pattern), not gpui-component's `Select`. No select state is needed.
+- No look-ahead changes.
+
+### Verification Performed
+- `cargo test --test server_settings`: 21 passed.
+- `cargo test`: 1151 passed, 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt: the new files (`src/server_settings.rs`, `src/ui/server_settings.rs`, `tests/server_settings.rs`) are clean. No other file was touched.
+
+### Manual Validation
+Deferred to the end (point "User joined" at a channel and have the second account join; turn "User left" off and have it leave).

@@ -5,7 +5,10 @@ use serde_json::{Value, json};
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::api::models::{FieldsServer, Server};
 use stoat_gpui::profile_edit::ProfileImage;
-use stoat_gpui::server_settings::{Access, OverviewForm, ServerImage, access, empty_server_edit};
+use stoat_gpui::server_settings::{
+    Access, OverviewForm, ServerImage, SystemChannels, SystemMessageKind, access,
+    empty_server_edit, system_channel_choices,
+};
 use stoat_gpui::store::ChatStore;
 
 const MANAGE_SERVER: u64 = ChannelPermission::ManageServer as u64;
@@ -36,7 +39,10 @@ fn store(me: &str) -> ChatStore {
         "type": "Ready",
         "users": users,
         "servers": [{
-            "_id": "srv", "owner": "u-owner", "name": "Test", "channels": [],
+            "_id": "srv", "owner": "u-owner", "name": "Test",
+            "channels": ["ch-b", "ch-voice", "ch-a"],
+            "categories": [{ "id": "k", "title": "Chat", "channels": ["ch-a", "ch-voice"] }],
+            "system_messages": { "user_joined": "ch-a", "user_left": "ch-gone" },
             "approximate_member_count": 4,
             "default_permissions": *DEFAULT_PERMISSION_SERVER as i64,
             "roles": {
@@ -44,7 +50,11 @@ fn store(me: &str) -> ChatStore {
                 "banner": { "_id": "banner", "name": "Banner", "rank": 1, "permissions": { "a": BAN, "d": 0 } }
             }
         }],
-        "channels": [],
+        "channels": [
+            { "channel_type": "TextChannel", "_id": "ch-a", "server": "srv", "name": "a" },
+            { "channel_type": "TextChannel", "_id": "ch-voice", "server": "srv", "name": "talk", "voice": {} },
+            { "channel_type": "TextChannel", "_id": "ch-b", "server": "srv", "name": "b" }
+        ],
         "members": [
             member("u-owner", &[]),
             member("u-admin", &["admin"]),
@@ -254,4 +264,85 @@ fn server_images_have_their_own_tags_and_limits() {
     assert_eq!(ServerImage::Banner.tag(), "banners");
     assert_eq!(ServerImage::Icon.limit(limits), 2_500_000);
     assert_eq!(ServerImage::Banner.limit(limits), 6_000_000);
+}
+
+/// `srv` as the store fixture has it: channels `ch-b`, `ch-voice` and
+/// `ch-a`, with joins going to `ch-a` and leaves to a deleted channel.
+fn system_server() -> Server {
+    store("u-owner").server("srv").unwrap().clone()
+}
+
+#[test]
+fn a_deleted_channel_shows_as_off() {
+    let form = OverviewForm::of(&system_server());
+    assert_eq!(
+        form.system,
+        SystemChannels {
+            user_joined: Some("ch-a".into()),
+            ..SystemChannels::default()
+        }
+    );
+    assert_eq!(form.system.get(SystemMessageKind::Left), None);
+    // Untouched, so nothing is sent.
+    assert_eq!(form.changes(&system_server()), None);
+}
+
+#[test]
+fn setting_one_sends_the_whole_object_without_deleted_channels() {
+    let server = system_server();
+    let mut form = OverviewForm::of(&server);
+    form.system
+        .set(SystemMessageKind::Banned, Some("ch-voice".into()));
+    let edit = form.changes(&server).unwrap();
+    let sent = edit.system_messages.unwrap();
+    // Joins stay where they were; the deleted channel isn't sent.
+    assert_eq!(sent.user_joined.as_deref(), Some("ch-a"));
+    assert_eq!(sent.user_left, None);
+    assert_eq!(sent.user_kicked, None);
+    assert_eq!(sent.user_banned.as_deref(), Some("ch-voice"));
+    assert!(edit.remove.is_empty() && edit.name.is_none());
+    // As Stoat reads it: a missing key is off.
+    assert_eq!(
+        serde_json::to_value(&sent).unwrap(),
+        json!({ "user_joined": "ch-a", "user_banned": "ch-voice" })
+    );
+}
+
+#[test]
+fn all_off_removes_system_messages() {
+    let server = system_server();
+    let mut form = OverviewForm::of(&server);
+    form.system.set(SystemMessageKind::Joined, None);
+    let edit = form.changes(&server).unwrap();
+    assert_eq!(edit.system_messages, None);
+    assert_eq!(edit.remove, [FieldsServer::SystemMessages]);
+}
+
+#[test]
+fn a_channel_picked_then_deleted_is_not_sent() {
+    let server = system_server();
+    let mut form = OverviewForm::of(&server);
+    form.system
+        .set(SystemMessageKind::Kicked, Some("ch-gone".into()));
+    assert_eq!(form.changes(&server), None);
+}
+
+#[test]
+fn choices_follow_the_channel_list_and_include_voice_channels() {
+    let store = store("u-owner");
+    let choices = system_channel_choices(&store, "srv");
+    let ids: Vec<&str> = choices.iter().map(|(id, _)| id.as_str()).collect();
+    // Uncategorised first, then the category's order.
+    assert_eq!(ids, ["ch-b", "ch-a", "ch-voice"]);
+    assert_eq!(choices[2].1, "talk");
+    assert!(system_channel_choices(&store, "srv-unknown").is_empty());
+}
+
+#[test]
+fn system_message_labels() {
+    let labels = SystemMessageKind::ALL.map(SystemMessageKind::label);
+    assert_eq!(
+        labels,
+        ["User joined", "User left", "User kicked", "User banned"]
+    );
 }

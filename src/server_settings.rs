@@ -1,6 +1,6 @@
 //! A server's settings: who may see which page of the Server Settings
-//! window, what its Overview form sends (name, description, icon and
-//! banner), and why Stoat refused, in words.
+//! window, what its Overview form sends (name, description, icon, banner
+//! and system-message channels), and why Stoat refused, in words.
 //! Plain data with no GPUI, so it's unit-testable. The window is
 //! [`crate::ui::server_settings`].
 
@@ -10,7 +10,9 @@ use revolt_permissions::ChannelPermission;
 use revolt_result::ErrorType;
 
 use crate::api::ApiError;
-use crate::api::models::{DataEditServer, FieldsServer, File, Server};
+use crate::api::models::{
+    Channel, DataEditServer, FieldsServer, File, Server, SystemMessageChannels,
+};
 use crate::permissions::{has, server_permissions};
 use crate::profile_edit::{ImageLimits, ProfileImage, error_text};
 use crate::server_edit::valid_name;
@@ -95,6 +97,8 @@ pub struct OverviewForm {
     pub description: String,
     pub icon: ProfileImage,
     pub banner: ProfileImage,
+    /// Where each kind of system message goes.
+    pub system: SystemChannels,
 }
 
 impl OverviewForm {
@@ -110,6 +114,7 @@ impl OverviewForm {
             description: server.description.clone().unwrap_or_default(),
             icon: image(&server.icon),
             banner: image(&server.banner),
+            system: SystemChannels::of(server),
         }
     }
 
@@ -172,8 +177,143 @@ impl OverviewForm {
             Some(None) => edit.remove.push(FieldsServer::Banner),
             None => {}
         }
+        let system = self.system.existing(server);
+        if system != stored.system {
+            if system == SystemChannels::default() {
+                edit.remove.push(FieldsServer::SystemMessages);
+            } else {
+                edit.system_messages = Some(system.into());
+            }
+        }
         (edit != empty_server_edit()).then_some(edit)
     }
+}
+
+/// A kind of system message Stoat posts in a server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemMessageKind {
+    Joined,
+    Left,
+    Kicked,
+    Banned,
+}
+
+impl SystemMessageKind {
+    pub const ALL: [SystemMessageKind; 4] = [
+        SystemMessageKind::Joined,
+        SystemMessageKind::Left,
+        SystemMessageKind::Kicked,
+        SystemMessageKind::Banned,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SystemMessageKind::Joined => "User joined",
+            SystemMessageKind::Left => "User left",
+            SystemMessageKind::Kicked => "User kicked",
+            SystemMessageKind::Banned => "User banned",
+        }
+    }
+}
+
+/// Where each kind of system message goes: a channel's ID, or `None` for
+/// off.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SystemChannels {
+    pub user_joined: Option<String>,
+    pub user_left: Option<String>,
+    pub user_kicked: Option<String>,
+    pub user_banned: Option<String>,
+}
+
+impl SystemChannels {
+    /// `server`'s, with any channel it no longer has shown as off.
+    pub fn of(server: &Server) -> Self {
+        let stored = server
+            .system_messages
+            .as_ref()
+            .map(|system| Self {
+                user_joined: system.user_joined.clone(),
+                user_left: system.user_left.clone(),
+                user_kicked: system.user_kicked.clone(),
+                user_banned: system.user_banned.clone(),
+            })
+            .unwrap_or_default();
+        stored.existing(server)
+    }
+
+    /// These, without any channel `server` doesn't have: Stoat refuses the
+    /// whole edit for one it can't find.
+    pub fn existing(&self, server: &Server) -> Self {
+        let keep = |id: &Option<String>| id.clone().filter(|id| server.channels.contains(id));
+        Self {
+            user_joined: keep(&self.user_joined),
+            user_left: keep(&self.user_left),
+            user_kicked: keep(&self.user_kicked),
+            user_banned: keep(&self.user_banned),
+        }
+    }
+
+    pub fn get(&self, kind: SystemMessageKind) -> Option<&str> {
+        match kind {
+            SystemMessageKind::Joined => self.user_joined.as_deref(),
+            SystemMessageKind::Left => self.user_left.as_deref(),
+            SystemMessageKind::Kicked => self.user_kicked.as_deref(),
+            SystemMessageKind::Banned => self.user_banned.as_deref(),
+        }
+    }
+
+    pub fn set(&mut self, kind: SystemMessageKind, channel: Option<String>) {
+        let slot = match kind {
+            SystemMessageKind::Joined => &mut self.user_joined,
+            SystemMessageKind::Left => &mut self.user_left,
+            SystemMessageKind::Kicked => &mut self.user_kicked,
+            SystemMessageKind::Banned => &mut self.user_banned,
+        };
+        *slot = channel;
+    }
+}
+
+impl From<SystemChannels> for SystemMessageChannels {
+    fn from(system: SystemChannels) -> Self {
+        SystemMessageChannels {
+            user_joined: system.user_joined,
+            user_left: system.user_left,
+            user_kicked: system.user_kicked,
+            user_banned: system.user_banned,
+        }
+    }
+}
+
+/// The channels system messages can go to, as `(id, name)`: the server's
+/// channels in channel-list order (voice channels too, which have text
+/// chat, and Stoat takes any of the server's channels), then any channel
+/// already chosen that the list doesn't show the user.
+pub fn system_channel_choices(store: &ChatStore, server: &str) -> Vec<(String, String)> {
+    let mut choices: Vec<(String, String)> = store
+        .server_channels(server)
+        .into_iter()
+        .flat_map(|section| section.channels)
+        .map(|entry| (entry.id, entry.name))
+        .collect();
+    let Some(server) = store.server(server) else {
+        return choices;
+    };
+    let chosen = SystemChannels::of(server);
+    for kind in SystemMessageKind::ALL {
+        let Some(id) = chosen.get(kind) else {
+            continue;
+        };
+        if choices.iter().any(|(listed, _)| listed == id) {
+            continue;
+        }
+        let name = match store.channel(id) {
+            Some(Channel::TextChannel { name, .. }) => name.clone(),
+            _ => "Hidden channel".into(),
+        };
+        choices.push((id.to_string(), name));
+    }
+    choices
 }
 
 /// How an image changed from `stored`: `None` if it didn't (or it's

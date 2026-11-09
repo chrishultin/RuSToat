@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::setting::{SelectIndex, SettingGroup, SettingItem, SettingPage, Settings};
 use gpui_kit::component::{ActiveTheme, Disableable, Sizable, WindowExt, h_flex, v_flex};
@@ -26,7 +27,8 @@ use crate::api::models::Server;
 use crate::profile_edit::{ImageLimits, ProfileImage};
 use crate::runtime::spawn_io;
 use crate::server_settings::{
-    Access, DESCRIPTION_MAX, NAME_MAX, OverviewForm, ServerImage, access, save_error_text,
+    Access, DESCRIPTION_MAX, NAME_MAX, OverviewForm, ServerImage, SystemChannels,
+    SystemMessageKind, access, save_error_text, system_channel_choices,
 };
 use crate::themes;
 use crate::ui::chat::ChatView;
@@ -37,6 +39,8 @@ use crate::ui::profile_editor::{
 
 /// Rows the description field grows between before it scrolls.
 const DESCRIPTION_ROWS: (usize, usize) = (3, 10);
+/// The tallest a system-message channel menu grows before it scrolls.
+const SYSTEM_MENU_HEIGHT: f32 = 320.;
 
 /// Builds one page of the window, each time it renders: `None` hides it.
 pub type ServerPageFn = fn(&ServerSettingsView, &mut App) -> Option<SettingPage>;
@@ -240,7 +244,8 @@ impl Render for ServerSettingsView {
     }
 }
 
-/// Overview: the server's icon, banner, name and description.
+/// Overview: the server's icon, banner, name, description and
+/// system-message channels.
 fn overview_page(view: &ServerSettingsView, cx: &mut App) -> Option<SettingPage> {
     if !view.access(cx).overview {
         return None;
@@ -257,6 +262,7 @@ fn overview_page(view: &ServerSettingsView, cx: &mut App) -> Option<SettingPage>
                     "description",
                     "icon",
                     "banner",
+                    "system messages",
                 ]),
             )),
     )
@@ -279,6 +285,7 @@ pub struct OverviewPage {
     description: Entity<TextareaState>,
     icon: ImageSlot,
     banner: ImageSlot,
+    system: SystemChannels,
     /// The server's values the fields were last filled with. A field still
     /// showing its value is untouched, and follows changes made elsewhere;
     /// once it's edited, it keeps the edit.
@@ -313,6 +320,7 @@ impl OverviewPage {
             description,
             icon: ImageSlot::default(),
             banner: ImageSlot::default(),
+            system: SystemChannels::default(),
             filled: OverviewForm::default(),
             saving: None,
             _subscriptions: subscriptions,
@@ -334,6 +342,7 @@ impl OverviewPage {
             description: self.description.read(cx).value().to_string(),
             icon: self.icon.image.clone(),
             banner: self.banner.image.clone(),
+            system: self.system.clone(),
         }
     }
 
@@ -363,6 +372,7 @@ impl OverviewPage {
         });
         self.icon = slot(form.icon.clone());
         self.banner = slot(form.banner.clone());
+        self.system = form.system.clone();
         self.filled = form;
         cx.notify();
     }
@@ -395,6 +405,12 @@ impl OverviewPage {
         }
         if edited.banner == self.filled.banner && self.banner.problem.is_none() {
             self.banner = slot(now.banner.clone());
+        }
+        for kind in SystemMessageKind::ALL {
+            if edited.system.get(kind) == self.filled.system.get(kind) {
+                let channel = now.system.get(kind).map(str::to_string);
+                self.system.set(kind, channel);
+            }
         }
         self.filled = now;
         cx.notify();
@@ -606,6 +622,95 @@ impl OverviewPage {
     }
 }
 
+impl OverviewPage {
+    /// "System messages": where each kind goes, picked from the server's
+    /// channels or Off.
+    fn render_system_messages(&self, cx: &Context<Self>) -> AnyElement {
+        let choices = self
+            .chat
+            .upgrade()
+            .map(|chat| system_channel_choices(chat.read(cx).store(), &self.server))
+            .unwrap_or_default();
+        let theme = cx.theme();
+        v_flex()
+            .gap_2()
+            .child(
+                v_flex()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("System messages"),
+                    )
+                    .child(
+                        div().text_xs().text_color(theme.muted_foreground).child(
+                            "Where Stoat says someone joined, left, or was kicked or banned.",
+                        ),
+                    ),
+            )
+            .children(SystemMessageKind::ALL.map(|kind| {
+                let chosen = self.system.get(kind).map(str::to_string);
+                let value = match &chosen {
+                    Some(id) => choices
+                        .iter()
+                        .find(|(listed, _)| listed == id)
+                        .map_or_else(|| "Unknown channel".into(), |(_, name)| format!("#{name}")),
+                    None => "Off".into(),
+                };
+                h_flex()
+                    .justify_between()
+                    .gap_3()
+                    .child(div().text_sm().child(kind.label()))
+                    .child(
+                        Button::new(SharedString::from(format!("system-{kind:?}")))
+                            .outline()
+                            .small()
+                            .label(value)
+                            .icon(IconName::ChevronDown)
+                            .disabled(self.saving.is_some())
+                            .dropdown_menu(self.system_menu(kind, chosen, choices.clone(), cx)),
+                    )
+            }))
+            .into_any_element()
+    }
+
+    /// The menu for one kind: Off, then each channel, the chosen one ticked.
+    fn system_menu(
+        &self,
+        kind: SystemMessageKind,
+        chosen: Option<String>,
+        choices: Vec<(String, String)>,
+        cx: &Context<Self>,
+    ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+        let entity = cx.entity().downgrade();
+        move |menu, _, _| {
+            let pick = |channel: Option<String>| {
+                let entity = entity.clone();
+                move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                    entity
+                        .update(cx, |this, cx| {
+                            this.system.set(kind, channel.clone());
+                            cx.notify();
+                        })
+                        .ok();
+                }
+            };
+            let menu = menu.scrollable(true).max_h(px(SYSTEM_MENU_HEIGHT)).item(
+                PopupMenuItem::new("Off")
+                    .checked(chosen.is_none())
+                    .on_click(pick(None)),
+            );
+            choices.iter().fold(menu, |menu, (id, name)| {
+                menu.item(
+                    PopupMenuItem::new(format!("#{name}"))
+                        .checked(chosen.as_ref() == Some(id))
+                        .on_click(pick(Some(id.clone()))),
+                )
+            })
+        }
+    }
+}
+
 /// An image slot showing `image`, with nothing wrong.
 fn slot(image: ProfileImage) -> ImageSlot {
     ImageSlot {
@@ -647,6 +752,7 @@ impl Render for OverviewPage {
             .children(images.into_iter().flatten())
             .child(name)
             .child(description)
+            .child(self.render_system_messages(cx))
             .child(
                 h_flex()
                     .gap_2()
