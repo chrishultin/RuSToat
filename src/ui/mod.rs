@@ -19,6 +19,7 @@ pub mod moderation_dialogs;
 pub mod profile_card;
 pub mod profile_editor;
 pub mod server_dialogs;
+pub mod server_settings;
 pub mod sessions_page;
 pub mod settings;
 pub mod switcher;

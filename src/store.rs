@@ -3019,6 +3019,36 @@ impl ChatStore {
         true
     }
 
+    /// Stoat answered the user's own `PATCH /servers/{id}` with `saved`:
+    /// show its name, description, icon, banner, system messages and owner
+    /// now, without waiting for its `ServerUpdate` (which carries the same).
+    /// Returns false for an unknown server.
+    pub fn apply_server_edit(&mut self, saved: &Server) -> bool {
+        let mut clear = Vec::new();
+        if saved.description.is_none() {
+            clear.push(FieldsServer::Description);
+        }
+        if saved.icon.is_none() {
+            clear.push(FieldsServer::Icon);
+        }
+        if saved.banner.is_none() {
+            clear.push(FieldsServer::Banner);
+        }
+        if saved.system_messages.is_none() {
+            clear.push(FieldsServer::SystemMessages);
+        }
+        let data = PartialServer {
+            name: Some(saved.name.clone()),
+            owner: Some(saved.owner.clone()),
+            description: saved.description.clone(),
+            icon: saved.icon.clone(),
+            banner: saved.banner.clone(),
+            system_messages: saved.system_messages.clone(),
+            ..Default::default()
+        };
+        self.apply_server_update(&saved.id, data, &clear)
+    }
+
     /// `server`'s categories are now `categories`: Stoat's answer to the
     /// user's own edit, applied before its `ServerUpdate` (which carries the
     /// same list). Unknown servers are ignored.

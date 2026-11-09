@@ -98,8 +98,9 @@ use crate::ui::profile_card::{
 use crate::ui::server_dialogs::{
     CREATE_CHANNEL_DIALOG_WIDTH, CREATE_SERVER_DIALOG_WIDTH, CreateChannelDialog,
     CreateServerDialog, EditFolderDialog, INFO_DIALOG_WIDTH, InfoContent, InfoPlaceholder,
-    NAME_DIALOG_WIDTH, NameDialog, render_info,
+    NAME_DIALOG_WIDTH, NameDialog, OnSettings, render_info,
 };
+use crate::ui::server_settings::ServerSettingsWindow;
 use crate::ui::voice_global::ActiveVoice;
 use crate::voice::{EndReason, MuteState, VoiceCall, VoiceError, VoiceEvent, VoiceEvents};
 
@@ -4840,6 +4841,21 @@ impl ChatView {
                 ),
                 None => menu,
             };
+            let menu = if crate::server_settings::access(store, &server).any() {
+                let (view, server) = (view.clone(), server.clone());
+                menu.item(
+                    PopupMenuItem::new("Server settings…")
+                        .icon(IconName::Settings)
+                        .on_click(move |_, _, cx| {
+                            view.update(cx, |this, cx| {
+                                this.open_server_settings(server.clone(), cx)
+                            })
+                            .ok();
+                        }),
+                )
+            } else {
+                menu
+            };
             let menu = folder_items(menu, &view, &server, in_folder, other_folders, window, cx);
             let menu = match mute {
                 None => {
@@ -7251,6 +7267,26 @@ impl ChatView {
         self.store.set_categories(server, categories);
         self.drop_stale_selection();
         self.remember_places();
+        cx.notify();
+    }
+
+    /// Open `server`'s settings in their own window (or bring them
+    /// forward), if the user may see any of them.
+    pub fn open_server_settings(&mut self, server: String, cx: &mut Context<Self>) {
+        if !crate::server_settings::access(&self.store, &server).any() {
+            return;
+        }
+        log::debug!("opening settings for server {server}");
+        ServerSettingsWindow::open(cx.entity(), server, cx);
+    }
+
+    /// Stoat answered the user's own change to a server with `saved`: show
+    /// it now, without waiting for its `ServerUpdate`.
+    pub fn server_edited(&mut self, saved: &Server, cx: &mut Context<Self>) {
+        if !self.store.apply_server_edit(saved) {
+            return;
+        }
+        self.server_permissions_changed(&saved.id, cx);
         cx.notify();
     }
 
@@ -13053,7 +13089,23 @@ fn open_info_dialog(view: WeakEntity<ChatView>, info: Info, window: &mut Window,
             },
             hosts,
         };
-        modal.child(render_info(&content, people.link_handler(), cx))
+        let settings = match &info {
+            Info::Server(server)
+                if view.upgrade().is_some_and(|chat| {
+                    crate::server_settings::access(chat.read(cx).store(), server).any()
+                }) =>
+            {
+                let (view, server) = (view.clone(), server.clone());
+                let open: OnSettings = Rc::new(move |window, cx| {
+                    window.close_dialog(cx);
+                    view.update(cx, |this, cx| this.open_server_settings(server.clone(), cx))
+                        .ok();
+                });
+                Some(open)
+            }
+            _ => None,
+        };
+        modal.child(render_info(&content, people.link_handler(), settings, cx))
     });
 }
 

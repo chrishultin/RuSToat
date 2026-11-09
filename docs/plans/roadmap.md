@@ -122,10 +122,11 @@ Some milestones lay foundations that later ones reuse. When the earlier one's pl
 ### Milestone 22: Member moderation (M)
 - From the member menu: kick; ban (with a reason, and optionally deleting recent messages); time out or end a timeout
 - Edit a member's nickname or avatar, and their roles
-- Report a message, user or server (`POST /safety/report`)
+- Report a message, user or server (`POST /safety/report`). Deferred from milestone 22; done as milestone 23's last chunk.
 
-### Milestone 23: Server settings: overview, invites, bans (M)
-- A server settings window, reusing milestone 13's window
+### Milestone 23: Server settings: overview, invites, bans (M). Plan: [`server-settings.md`](server-settings.md)
+- A server settings window: its own window, one at a time, built on the same gpui-component `Settings` as milestone 13's
+- Also finishes milestone 22's Reports
 - Overview: name, description, icon, banner, and the channels for system messages
 - Invites: list and revoke
 - Bans: list and unban

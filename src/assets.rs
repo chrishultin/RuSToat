@@ -222,4 +222,18 @@ mod tests {
             assert!(AppAssets.load(&path).unwrap().is_some(), "{path} missing");
         }
     }
+
+    /// The Server Settings window's sidebar icons.
+    #[test]
+    fn server_settings_icons_load() {
+        for icon in [
+            IconName::Settings,
+            IconName::Link,
+            IconName::Ban,
+            IconName::Crown,
+        ] {
+            let path = icon.path();
+            assert!(AppAssets.load(&path).unwrap().is_some(), "{path} missing");
+        }
+    }
 }

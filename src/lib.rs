@@ -38,6 +38,7 @@ pub mod safety;
 pub mod search;
 pub mod security;
 pub mod server_edit;
+pub mod server_settings;
 pub mod session;
 pub mod shortcuts;
 pub mod slowmode;

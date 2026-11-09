@@ -5,11 +5,12 @@ use reqwest::{Client, Method};
 use revolt_models::v0::{
     AccountInfo, AllMemberResponse, BulkMessageResponse, Category, Channel,
     CreateServerLegacyResponse, CreateVoiceUserResponse, DataBanCreate, DataChangeEmail,
-    DataChangePassword, DataEditMessage, DataEditSession, DataEditUser, DataLogin, DataMemberEdit,
-    DataMessageSearch, DataMessageSend, DataSendFriendRequest, Emoji, FieldsUser, Invite,
-    InviteJoinResponse, InviteResponse, MFAResponse, MFATicket, Member, Message, MessageSort,
-    MultiFactorStatus, MutualResponse, OptionsQueryMessages, Presence, ReplyIntent, ResponseLogin,
-    ResponseTotpSecret, ServerBan, SessionInfo, User, UserProfile, UserStatus,
+    DataChangePassword, DataEditMessage, DataEditServer, DataEditSession, DataEditUser, DataLogin,
+    DataMemberEdit, DataMessageSearch, DataMessageSend, DataSendFriendRequest, Emoji, FieldsUser,
+    Invite, InviteJoinResponse, InviteResponse, MFAResponse, MFATicket, Member, Message,
+    MessageSort, MultiFactorStatus, MutualResponse, OptionsQueryMessages, Presence, ReplyIntent,
+    ResponseLogin, ResponseTotpSecret, Server, ServerBan, SessionInfo, User, UserProfile,
+    UserStatus,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -1121,6 +1122,20 @@ impl StoatClient {
             )
             .await?;
         Ok(edited.categories)
+    }
+
+    /// `PATCH /servers/{server}`: change the server's name, description,
+    /// icon, banner or system messages (Manage Server). Only what's set is
+    /// sent, as with [`Self::edit_user`]. Stoat answers with the whole
+    /// server, as changed; `ServerUpdate` brings the same to everyone.
+    pub async fn edit_server(
+        &self,
+        server: &str,
+        edit: &DataEditServer,
+    ) -> Result<Server, ApiError> {
+        let body = edit_body(serde_json::to_value(edit).expect("server edit serialises"));
+        self.send(Method::PATCH, &format!("/servers/{server}"), Some(&body))
+            .await
     }
 
     /// `DELETE /channels/{channel}`: delete a server channel (Manage

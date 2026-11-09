@@ -1,12 +1,14 @@
 //! Servers and channels against a mock Stoat API: `POST /servers/create`
 //! (create a server), `POST /servers/{id}/channels` (create a channel),
 //! `PATCH /servers/{id}` (its categories), `DELETE /channels/{id}`
-//! (delete a channel) and `DELETE /servers/{id}` (leave a server).
+//! (delete a channel), `DELETE /servers/{id}` (leave a server), and
+//! `PATCH /servers/{id}` from Server Settings (its name and description).
 
 use revolt_result::ErrorType;
 use serde_json::json;
 use stoat_gpui::api::models::{Category, Channel};
 use stoat_gpui::api::{ApiError, StoatClient};
+use stoat_gpui::server_settings::{OverviewForm, save_error_text};
 use wiremock::matchers::{body_json, body_string, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -284,5 +286,63 @@ async fn leaving_a_server_already_left_is_not_found() {
     assert!(
         matches!(err.error_type(), Some(ErrorType::NotFound)),
         "{err:?}"
+    );
+}
+
+fn lounge() -> serde_json::Value {
+    json!({
+        "_id": "srv", "owner": "u-me", "name": "Lounge", "channels": [],
+        "default_permissions": 0, "approximate_member_count": 1
+    })
+}
+
+#[tokio::test]
+async fn editing_a_server_sends_only_what_changed() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/servers/srv"))
+        .and(header("x-session-token", "tok"))
+        .and(body_json(
+            json!({ "name": "Lounge", "remove": ["Description"] }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(lounge()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let before: stoat_gpui::api::models::Server = serde_json::from_value(json!({
+        "_id": "srv", "owner": "u-me", "name": "Test", "description": "About us",
+        "channels": [], "default_permissions": 0, "approximate_member_count": 1
+    }))
+    .unwrap();
+    let form = OverviewForm {
+        name: "Lounge".into(),
+        description: String::new(),
+    };
+    let edit = form.changes(&before).unwrap();
+    let saved = client(&server).edit_server("srv", &edit).await.unwrap();
+    assert_eq!(saved.name, "Lounge");
+    assert_eq!(saved.description, None);
+}
+
+#[tokio::test]
+async fn editing_a_server_without_permission_says_so() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/servers/srv"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "type": "MissingPermission", "permission": "ManageServer"
+        })))
+        .mount(&server)
+        .await;
+
+    let edit = stoat_gpui::api::models::DataEditServer {
+        name: Some("Lounge".into()),
+        ..stoat_gpui::server_settings::empty_server_edit()
+    };
+    let err = client(&server).edit_server("srv", &edit).await.unwrap_err();
+    assert_eq!(
+        save_error_text(&err),
+        "You don't have permission to change this server."
     );
 }
