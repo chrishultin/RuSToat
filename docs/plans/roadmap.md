@@ -133,11 +133,12 @@ Some milestones lay foundations that later ones reuse. When the earlier one's pl
 - Transfer server ownership
 - Delete the server (owner only), confirmed by typing its name. Moved here from milestone 19.
 
-### Milestone 24: Roles editor, part 1 (M)
+### Milestone 24: Roles editor, part 1 (M). Plan: [`roles-editor.md`](roles-editor.md)
 - List roles, and create, delete or rename one
 - Colour, hoisting and icon
 - Reorder roles by rank
 - This needs `ServerRoleRanksUpdate` events, as live role edits (milestone 7) already handle
+- A Roles page in milestone 23's Server Settings window: the list, and a role's editor in the same page; drag to reorder
 
 ### Milestone 25: Roles editor, part 2: permissions (M)
 - A permission matrix for a role, and for the server's default permissions, built from `revolt-permissions`' list of permissions

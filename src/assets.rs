@@ -32,6 +32,7 @@ gpui_kit::assets::icon_assets!(
         KeyRound,
         Keyboard,
         Link,
+        Lock,
         LogOut,
         Mail,
         MessageCircle,
@@ -47,6 +48,7 @@ gpui_kit::assets::icon_assets!(
         RefreshCw,
         Reply,
         SendHorizontal,
+        Shield,
         ShieldCheck,
         Smartphone,
         TextQuote,
@@ -228,9 +230,12 @@ mod tests {
     fn server_settings_icons_load() {
         for icon in [
             IconName::Settings,
+            IconName::Shield,
             IconName::Link,
             IconName::Ban,
             IconName::Crown,
+            IconName::Lock,
+            IconName::Plus,
         ] {
             let path = icon.path();
             assert!(AppAssets.load(&path).unwrap().is_some(), "{path} missing");

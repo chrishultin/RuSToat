@@ -7373,6 +7373,23 @@ impl ChatView {
         cx.notify();
     }
 
+    /// Stoat answered the user's own new or edited role with `role`: show
+    /// it now (member list sections, name colours, permissions), without
+    /// waiting for its `ServerRoleUpdate`, which then changes nothing.
+    pub fn role_saved(
+        &mut self,
+        server: &str,
+        role: &crate::api::models::Role,
+        cx: &mut Context<Self>,
+    ) {
+        let (data, clear) = crate::roles::role_update(role);
+        if !self.store.apply_role_update(server, &role.id, data, &clear) {
+            return;
+        }
+        self.server_permissions_changed(server, cx);
+        cx.notify();
+    }
+
     /// Server info, from the server's name above the channel list: its
     /// banner, icon, name and description.
     fn open_server_info(&mut self, server: String, window: &mut Window, cx: &mut Context<Self>) {

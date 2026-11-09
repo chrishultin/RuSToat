@@ -21,7 +21,8 @@ use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, Textar
 use gpui_kit::component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::setting::{SelectIndex, SettingGroup, SettingItem, SettingPage, Settings};
-use gpui_kit::component::{ActiveTheme, Disableable, Sizable, WindowExt, h_flex, v_flex};
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{ActiveTheme, Disableable, Icon, Sizable, WindowExt, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
@@ -29,6 +30,8 @@ use crate::api::ApiError;
 use crate::api::models::Server;
 use crate::links::invite_link;
 use crate::profile_edit::{ImageLimits, ProfileImage};
+use crate::rail::parse_colour;
+use crate::roles::{RoleRow, check_role_name, create_error_text, role_rows};
 use crate::runtime::spawn_io;
 use crate::server_settings::{
     Access, BanRow, Candidate, DESCRIPTION_MAX, InviteRow, NAME_MAX, OverviewForm, ServerImage,
@@ -46,6 +49,7 @@ use crate::ui::profile_editor::{
     ImageSlot, Preview, avatar_preview, banner_preview, field, prompt_for_image, render_image_row,
     upload_image,
 };
+use crate::ui::server_dialogs::name_field;
 
 /// Rows the description field grows between before it scrolls.
 const DESCRIPTION_ROWS: (usize, usize) = (3, 10);
@@ -158,6 +162,7 @@ pub struct ServerSettingsView {
     /// The window's title, as last set.
     title: String,
     overview: Entity<OverviewPage>,
+    roles: Entity<RolesPage>,
     invites: Entity<InvitesPage>,
     bans: Entity<BansPage>,
     ownership: Entity<OwnershipPage>,
@@ -166,7 +171,13 @@ pub struct ServerSettingsView {
 
 impl ServerSettingsView {
     /// The pages, in sidebar order.
-    pub const PAGES: [ServerPageFn; 4] = [overview_page, invites_page, bans_page, ownership_page];
+    pub const PAGES: [ServerPageFn; 5] = [
+        overview_page,
+        roles_page,
+        invites_page,
+        bans_page,
+        ownership_page,
+    ];
 
     pub fn new(
         chat: Entity<ChatView>,
@@ -194,6 +205,7 @@ impl ServerSettingsView {
         ];
         let title = window_title(chat.read(cx).store().server(&server));
         let overview = cx.new(|cx| OverviewPage::new(&chat, server.clone(), window, cx));
+        let roles = cx.new(|cx| RolesPage::new(&chat, server.clone(), cx));
         let invites = cx.new(|_| InvitesPage::new(&chat, server.clone()));
         let bans = cx.new(|cx| BansPage::new(&chat, server.clone(), window, cx));
         let ownership = cx.new(|_| OwnershipPage::new(&chat, server.clone()));
@@ -205,6 +217,7 @@ impl ServerSettingsView {
             page_key: 0,
             title,
             overview,
+            roles,
             invites,
             bans,
             ownership,
@@ -804,6 +817,282 @@ impl Render for OverviewPage {
                             .loading(saving)
                             .disabled(!can_save)
                             .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
+                    ),
+            )
+    }
+}
+
+/// Roles: the server's roles, highest first, and a role's editor.
+fn roles_page(view: &ServerSettingsView, cx: &mut App) -> Option<SettingPage> {
+    if !view.access(cx).roles {
+        return None;
+    }
+    let roles = view.roles.clone();
+    Some(
+        SettingPage::new("Roles")
+            .icon(IconName::Shield)
+            .resettable(false)
+            .group(
+                SettingGroup::new().item(
+                    SettingItem::render(move |_, _, _| roles.clone())
+                        .keywords(["roles", "role", "rank", "colour", "color", "hoist"]),
+                ),
+            ),
+    )
+}
+
+/// The Roles page: the server's roles, highest first, each with its colour,
+/// icon, whether it's hoisted, and a lock if the user can't change it; and
+/// "Create role…". It follows the store, which live role events keep.
+pub struct RolesPage {
+    chat: WeakEntity<ChatView>,
+    server: String,
+    _chat: Subscription,
+}
+
+impl RolesPage {
+    fn new(chat: &Entity<ChatView>, server: String, cx: &mut Context<Self>) -> Self {
+        Self {
+            chat: chat.downgrade(),
+            server,
+            _chat: cx.observe(chat, |_, _, cx| cx.notify()),
+        }
+    }
+
+    /// "Create role": a name, then Create.
+    fn create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat) = self.chat.upgrade() else {
+            return;
+        };
+        let server = self.server.clone();
+        let dialog = cx.new(|cx| CreateRoleDialog::new(chat, server, window, cx));
+        let focus = dialog.read(cx).input.read(cx).focus_handle(cx);
+        open_focused_dialog("Create role".into(), dialog, focus, window, cx);
+    }
+
+    fn render_row(&self, row: &RoleRow, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let icon = row.icon.as_ref().and_then(|id| {
+            let chat = self.chat.upgrade()?;
+            chat.read(cx).store().media().file_by_id("icons", id)
+        });
+        h_flex()
+            .id(SharedString::from(format!("role-{}", row.id)))
+            .w_full()
+            .gap_3()
+            .px_2()
+            .py_1p5()
+            .rounded_md()
+            .child(colour_dot(row.colour.as_deref(), cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(row.name.clone()),
+            )
+            .children(icon.map(|url| {
+                img(url)
+                    .size(px(ROLE_ICON))
+                    .flex_none()
+                    .rounded_sm()
+                    .object_fit(ObjectFit::Cover)
+            }))
+            .when(row.hoist, |this| {
+                this.child(div().text_xs().text_color(muted).child("Hoisted"))
+            })
+            .children(row.lock_text().map(|text| {
+                div()
+                    .id(SharedString::from(format!("role-lock-{}", row.id)))
+                    .flex_none()
+                    .text_color(muted)
+                    .child(Icon::new(IconName::Lock).small())
+                    .tooltip(move |window, cx| Tooltip::new(text).build(window, cx))
+            }))
+            .into_any_element()
+    }
+}
+
+/// A role's icon in the list.
+const ROLE_ICON: f32 = 18.;
+/// A role's colour dot.
+const COLOUR_DOT: f32 = 12.;
+
+/// A role's colour as a dot, or a dashed circle with no colour (or one
+/// that isn't a solid colour).
+fn colour_dot(colour: Option<&str>, cx: &App) -> Div {
+    let dot = div().size(px(COLOUR_DOT)).flex_none().rounded_full();
+    match colour.and_then(parse_colour) {
+        Some(colour) => dot.bg(colour),
+        None => dot
+            .border_1()
+            .border_dashed()
+            .border_color(cx.theme().muted_foreground),
+    }
+}
+
+impl Render for RolesPage {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let rows = self
+            .chat
+            .upgrade()
+            .map(|chat| role_rows(chat.read(cx).store(), &self.server))
+            .unwrap_or_default();
+        let muted = cx.theme().muted_foreground;
+        let header = h_flex()
+            .w_full()
+            .gap_2()
+            .child(
+                div()
+                    .flex_1()
+                    .text_sm()
+                    .text_color(muted)
+                    .child("Roles higher in the list outrank those below them."),
+            )
+            .child(
+                Button::new("roles-create")
+                    .label("Create role…")
+                    .icon(IconName::Plus)
+                    .outline()
+                    .small()
+                    .on_click(cx.listener(|this, _, window, cx| this.create(window, cx))),
+            );
+        let body = if rows.is_empty() {
+            div()
+                .text_sm()
+                .text_color(muted)
+                .child("This server has no roles.")
+                .into_any_element()
+        } else {
+            v_flex()
+                .w_full()
+                .children(rows.iter().map(|row| self.render_row(row, cx)))
+                .into_any_element()
+        };
+        v_flex().w_full().gap_3().child(header).child(body)
+    }
+}
+
+/// "Create role": its name, then Create. The new role shows at once, at
+/// the bottom of the list.
+pub struct CreateRoleDialog {
+    chat: WeakEntity<ChatView>,
+    server: String,
+    input: Entity<InputState>,
+    creating: bool,
+    error: Option<String>,
+    _input: Subscription,
+}
+
+impl CreateRoleDialog {
+    fn new(
+        chat: Entity<ChatView>,
+        server: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let input = cx.new(|cx| InputState::new(window, cx));
+        let subscription =
+            cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
+                InputEvent::Change => {
+                    this.error = None;
+                    cx.notify();
+                }
+                InputEvent::PressEnter { .. } => this.create(window, cx),
+                _ => {}
+            });
+        Self {
+            chat: chat.downgrade(),
+            server,
+            input,
+            creating: false,
+            error: None,
+            _input: subscription,
+        }
+    }
+
+    /// Create the role with the typed name. Success closes the dialog and
+    /// adds the role to the store; a refusal says why and keeps it open.
+    fn create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.creating {
+            return;
+        }
+        let Some(name) = check_role_name(&self.input.read(cx).value()) else {
+            return;
+        };
+        let Some(chat) = self.chat.upgrade() else {
+            return;
+        };
+        self.creating = true;
+        self.error = None;
+        cx.notify();
+        let request = spawn_io({
+            let (client, server) = (chat.read(cx).client().clone(), self.server.clone());
+            async move { client.create_role(&server, &name).await }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.creating = false;
+                match result {
+                    Ok(Ok(created)) => {
+                        log::info!("created role {} in {}", created.id, this.server);
+                        let server = this.server.clone();
+                        this.chat
+                            .update(cx, |chat, cx| chat.role_saved(&server, &created.role, cx))
+                            .ok();
+                        window.close_dialog(cx);
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't create a role in {}: {err:?}", this.server);
+                        this.error = Some(create_error_text(&err));
+                    }
+                    Err(err) => {
+                        log::warn!("role create task failed: {err:?}");
+                        this.error = Some("Couldn't create the role.".into());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
+impl Render for CreateRoleDialog {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let valid = check_role_name(&self.input.read(cx).value()).is_some();
+        v_flex()
+            .gap_3()
+            .child(name_field(
+                "Role name",
+                &self.input,
+                self.creating,
+                self.error.clone(),
+                cx,
+            ))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .justify_end()
+                    .child(
+                        Button::new("create-role-cancel")
+                            .outline()
+                            .label("Cancel")
+                            .disabled(self.creating)
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("create-role")
+                            .primary()
+                            .label("Create")
+                            .loading(self.creating)
+                            .disabled(self.creating || !valid)
+                            .on_click(cx.listener(|this, _, window, cx| this.create(window, cx))),
                     ),
             )
     }

@@ -8,9 +8,9 @@ use revolt_models::v0::{
     DataChangePassword, DataEditMessage, DataEditServer, DataEditSession, DataEditUser, DataLogin,
     DataMemberEdit, DataMessageSearch, DataMessageSend, DataSendFriendRequest, Emoji, FieldsUser,
     Invite, InviteJoinResponse, InviteResponse, MFAResponse, MFATicket, Member, Message,
-    MessageSort, MultiFactorStatus, MutualResponse, OptionsQueryMessages, Presence, ReplyIntent,
-    ResponseLogin, ResponseTotpSecret, Server, ServerBan, SessionInfo, User, UserProfile,
-    UserStatus,
+    MessageSort, MultiFactorStatus, MutualResponse, NewRoleResponse, OptionsQueryMessages,
+    Presence, ReplyIntent, ResponseLogin, ResponseTotpSecret, Server, ServerBan, SessionInfo, User,
+    UserProfile, UserStatus,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -1220,6 +1220,24 @@ impl StoatClient {
         )
         .await
         .map(|_| ())
+    }
+
+    /// `POST /servers/{server}/roles`: a new role called `name` (Manage
+    /// Role), at the bottom of the server's roles. Past the instance's
+    /// limit Stoat refuses with `TooManyRoles`. `ServerRoleUpdate` follows.
+    pub async fn create_role(&self, server: &str, name: &str) -> Result<NewRoleResponse, ApiError> {
+        // `DataCreateRole` would also send `"rank": null`, which Stoat
+        // ignores anyway.
+        #[derive(Serialize)]
+        struct CreateRole<'a> {
+            name: &'a str,
+        }
+        self.send(
+            Method::POST,
+            &format!("/servers/{server}/roles"),
+            Some(&CreateRole { name }),
+        )
+        .await
     }
 
     /// `PATCH /servers/{server}` with `{"owner": owner}`: hand the server
