@@ -294,6 +294,8 @@ pub enum UserMenuItem {
     Ban,
     /// Change how the user relates to them (friend requests, blocks).
     Relationship(RelationshipAction),
+    /// Report them to Stoat's moderators (a dialog asks why).
+    Report,
     Separator,
     /// Copy `username#discriminator`.
     CopyUsername,
@@ -391,7 +393,8 @@ fn standing_actions(store: &ChatStore, user: &str) -> Vec<RelationshipAction> {
 /// Mention; Edit identity and Edit roles; Server mute, Server deafen, Move
 /// to and Disconnect (while they're in one of the server's calls); Remove
 /// from group and Make group owner; Time out (or End timeout), Kick and Ban; the friend requests;
-/// Remove friend and Block or Unblock; then the copy items. Message
+/// Remove friend, Block or Unblock, and Report (anyone but the user); then
+/// the copy items. Message
 /// follows [`can_message`]; Mention is only for others, in server channels
 /// and groups (where the message box can mention them). Remove from group
 /// and Make group owner are for the owner of the group `channel`, on its
@@ -474,10 +477,13 @@ pub fn user_menu(store: &ChatStore, user: &str, channel: Option<&str>) -> Vec<Us
         .into_iter()
         .map(Relationship)
         .collect();
-    let standing = standing_actions(store, user)
+    let mut standing: Vec<UserMenuItem> = standing_actions(store, user)
         .into_iter()
         .map(Relationship)
         .collect();
+    if !me {
+        standing.push(Report);
+    }
     let groups = [
         people,
         server_items,

@@ -178,9 +178,11 @@ Deferred to the end, with both accounts in a voice channel and the web client:
 - disconnect;
 - check whether unmuting needs a rejoin.
 
-## Chunk 5: Reports — not started
+## Chunk 5: Reports — done in milestone 23
 
-The user asked to commit and merge into main before chunk 5 was written, so no code exists for it. What was learnt, for whoever picks it up:
+**Implemented as chunk 7 of milestone 23** ([`server-settings.md`](server-settings.md); record in [`server-settings-implementation.md`](server-settings-implementation.md), "Chunk 7: Reports").
+
+The user asked to commit and merge into main before chunk 5 was written, so it was deferred. What was learnt then:
 - `ReportedContent`, `ContentReportReason` and `UserReportReason` are in `revolt_models::v0` (`safety_reports.rs`).
 - Stoat's `DataReportContent` is defined only in the route (`crates/delta/src/routes/safety/report_content.rs`), so the client needs its own body type:
   - `content: ReportedContent`;
@@ -199,7 +201,7 @@ _Completed (chunks 1–4): 2026-11-08_
 2. Timeouts: `d2179ec`.
 3. Edit a member's identity and roles: `7b37654`.
 4. Voice moderation: `0f85b53`.
-5. Reports: **not started**, deferred at the user's request.
+5. Reports: deferred at the user's request, then done as milestone 23's chunk 7.
 
 ### Divergences
 - The plan's `confirm_then` is the MFA dialog. `moderation_dialogs::confirm_member_action` / `run_member_action` were added instead, and the plan was amended.
@@ -235,4 +237,4 @@ Batched at the user's request, and **not yet done**. The work was merged into ma
    - disconnect (the target toasts "You were removed from the call.").
 5. With a role between the two accounts' ranks: the lower account sees no moderation items for the higher one.
 6. Both themes: the dialogs are readable, and destructive buttons stand out.
-7. Chunk 5 (Reports) remains to implement.
+7. Chunk 5 (Reports) was implemented in milestone 23 (chunk 7), and is checked with that milestone's manual tests.

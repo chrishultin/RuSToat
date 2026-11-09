@@ -305,6 +305,7 @@ mod menu {
                 Separator,
                 Relationship(RemoveFriend),
                 Relationship(Block),
+                Report,
                 Separator,
                 CopyUsername,
                 CopyUserId
@@ -347,6 +348,16 @@ mod menu {
     }
 
     #[test]
+    fn report_is_offered_for_anyone_but_yourself() {
+        let store = store();
+        for user in ["u-bob", "u-plain", "u-bot", "u-nobody"] {
+            assert!(user_menu(&store, user, None).contains(&Report), "{user}");
+        }
+        assert!(!user_menu(&store, "u-me", Some("ch")).contains(&Report));
+        assert!(!Report.is_destructive());
+    }
+
+    #[test]
     fn message_follows_can_message() {
         let store = store();
         assert!(!user_menu(&store, "u-plain", Some("ch")).contains(&Message));
@@ -367,6 +378,7 @@ mod menu {
                 Relationship(AddFriend),
                 Separator,
                 Relationship(Block),
+                Report,
                 Separator,
                 CopyUsername,
                 CopyUserId
@@ -390,6 +402,7 @@ mod menu {
                 Separator,
                 Relationship(RemoveFriend),
                 Relationship(Block),
+                Report,
                 Separator,
                 CopyUsername,
                 CopyUserId

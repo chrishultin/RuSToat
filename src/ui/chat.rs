@@ -54,6 +54,7 @@ use crate::places::{Place, Places, PlacesFile};
 use crate::profile::{RelationshipAction, UserMenuItem};
 use crate::profile_edit::ImageLimits;
 use crate::rail::{self, DropTarget, Folder, Ordering, RailEntry, ServerFolders};
+use crate::reports::ReportTarget;
 use crate::runtime::{IoTask, spawn_io};
 use crate::safety::{LinkCheck, SafetyFile, SafetySettings, classify, is_own_instance, origin};
 use crate::search::{
@@ -95,6 +96,7 @@ use crate::ui::profile_card::{
     CardBio, CardContent, MUTUALS_DIALOG_WIDTH, MutualList, MutualPick, OnLink, OnMutualPick,
     OnMutuals, render_mutuals_list, render_profile_card,
 };
+use crate::ui::report_dialog::open_report_dialog;
 use crate::ui::server_dialogs::{
     CREATE_CHANNEL_DIALOG_WIDTH, CREATE_SERVER_DIALOG_WIDTH, CreateChannelDialog,
     CreateServerDialog, EditFolderDialog, INFO_DIALOG_WIDTH, InfoContent, InfoPlaceholder,
@@ -1686,6 +1688,9 @@ impl ChatView {
                 }
             }
             RowAction::CopyId(id) => cx.write_to_clipboard(ClipboardItem::new_string(id)),
+            RowAction::Report { id, author } => {
+                self.open_report(ReportTarget::Message { id, author }, window, cx)
+            }
             RowAction::JoinInvite(code) => self.join_invite_card(&code, window, cx),
             RowAction::RetryInvite(code) => self.retry_invite(&code, cx),
             RowAction::MarkUnread(id) => self.mark_unread(channel, &id, cx),
@@ -4912,6 +4917,26 @@ impl ChatView {
             } else {
                 menu
             };
+            let reportable = crate::reports::can_report(
+                &this.read(cx).store,
+                &ReportTarget::Server { id: server.clone() },
+            );
+            let menu = if reportable {
+                let (view, server) = (view.clone(), server.clone());
+                menu.item(
+                    PopupMenuItem::new("Report server…")
+                        .icon(IconName::TriangleAlert)
+                        .on_click(move |_, window, cx| {
+                            view.update(cx, |this, cx| {
+                                let target = ReportTarget::Server { id: server.clone() };
+                                this.open_report(target, window, cx)
+                            })
+                            .ok();
+                        }),
+                )
+            } else {
+                menu
+            };
             menu.separator()
                 .item(copy_id_item("Copy server ID", server.clone()))
         })
@@ -5642,6 +5667,7 @@ impl ChatView {
             view: cx.entity().downgrade(),
             channel,
             hosts: self.invite_hosts(),
+            message: None,
         }
     }
 
@@ -5763,6 +5789,14 @@ impl ChatView {
                 }
             }
             UserMenuItem::CopyUserId => cx.write_to_clipboard(ClipboardItem::new_string(user)),
+            UserMenuItem::Report => {
+                self.close_card(false, window, cx);
+                let target = ReportTarget::User {
+                    id: user,
+                    message: None,
+                };
+                self.open_report(target, window, cx);
+            }
             UserMenuItem::Separator => {}
         }
     }
@@ -7274,6 +7308,29 @@ impl ChatView {
         self.drop_stale_selection();
         self.remember_places();
         cx.notify();
+    }
+
+    /// "Tell us what's wrong with this …": report `target` to Stoat's
+    /// moderators, if the user may.
+    fn open_report(&mut self, target: ReportTarget, window: &mut Window, cx: &mut Context<Self>) {
+        if !crate::reports::can_report(&self.store, &target) {
+            return;
+        }
+        let name = |user: &str| {
+            self.store
+                .user(user)
+                .map(|person| display_name(person).to_string())
+                .unwrap_or_else(|| "Unknown user".into())
+        };
+        let subject = match &target {
+            ReportTarget::Message { author, .. } => format!("A message from {}", name(author)),
+            ReportTarget::User { id, .. } => name(id),
+            ReportTarget::Server { id } => match self.store.server(id) {
+                Some(server) => server.name.clone(),
+                None => return,
+            },
+        };
+        open_report_dialog(self.client.clone(), target, subject.into(), window, cx);
     }
 
     /// Open `server`'s settings in their own window (or bring them
@@ -10860,6 +10917,8 @@ enum RowAction {
     /// Delete one of the user's messages, after asking (unless Shift was
     /// held: `confirmed`).
     Delete { id: String, confirmed: bool },
+    /// Report someone else's message (by ID, with its author's).
+    Report { id: String, author: String },
     /// Pin (`pin`) or unpin a message, after asking (unless Shift was held:
     /// `confirmed`).
     TogglePin {
@@ -11122,9 +11181,20 @@ pub(crate) struct People {
     channel: Option<String>,
     /// Which links lead to channels and messages here.
     hosts: InviteHosts,
+    /// The message they're shown as the author of, which a report of
+    /// them carries as context.
+    message: Option<String>,
 }
 
 impl People {
+    /// The same, for the author of `message`.
+    fn about_message(&self, message: &str) -> People {
+        People {
+            message: Some(message.to_string()),
+            ..self.clone()
+        }
+    }
+
     /// Channel mentions and links as pills, opening the channel when
     /// clicked if `clickable`.
     fn channel_pills(&self, clickable: bool) -> ChannelPills {
@@ -11318,6 +11388,21 @@ impl People {
                     } else {
                         PopupMenuItem::new(label).icon(icon)
                     };
+                    if item == UserMenuItem::Report {
+                        // With the message they were reported from, if any.
+                        let message = people.message.clone();
+                        return menu.item(entry.on_click(move |_, window, cx| {
+                            view.update(cx, |this, cx| {
+                                this.close_card(false, window, cx);
+                                let target = ReportTarget::User {
+                                    id: user.clone(),
+                                    message: message.clone(),
+                                };
+                                this.open_report(target, window, cx)
+                            })
+                            .ok();
+                        }));
+                    }
                     menu.item(entry.on_click(move |event: &ClickEvent, window, cx| {
                         let shift = event.modifiers().shift;
                         view.update(cx, |this, cx| {
@@ -11387,6 +11472,7 @@ fn user_menu_label(item: UserMenuItem) -> Option<(&'static str, IconName)> {
         UserMenuItem::Ban => ("Ban…", IconName::Ban),
         UserMenuItem::CopyUsername => ("Copy username", IconName::Copy),
         UserMenuItem::CopyUserId => ("Copy user ID", IconName::IdCard),
+        UserMenuItem::Report => ("Report user…", IconName::TriangleAlert),
         UserMenuItem::Relationship(action) => relationship_label(action),
         UserMenuItem::Separator => return None,
     })
@@ -11577,7 +11663,7 @@ fn render_message_row(
         MessageAvatar::new().child(person_target(
             format!("avatar-target-{}", message.id).into(),
             author_id,
-            people,
+            &people.about_message(&message.id),
             avatar(
                 format!("avatar-{}", message.id),
                 message.avatar.clone(),
@@ -11601,7 +11687,7 @@ fn render_message_row(
             .child(person_target(
                 format!("author-{}", message.id).into(),
                 author_id,
-                people,
+                &people.about_message(&message.id),
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
                     .when(author_id.is_some(), |el| el.hover(|el| el.underline()))
@@ -11666,6 +11752,11 @@ fn render_message_row(
     }
     // Right-click anywhere on the row (text, padding, avatar).
     let (on_action, id, mine) = (on_action.clone(), message.id.clone(), message.mine);
+    // Someone else's message (not Stoat's own) can be reported.
+    let report_author = message
+        .author_id
+        .clone()
+        .filter(|_| !mine && !message.system);
     let (can_pin, pinned) = (message.can_pin, message.pinned);
     let can_link = pickers.can_link;
     // Only messages with text can be quoted.
@@ -11757,6 +11848,16 @@ fn render_message_row(
                     })
                     .on_click(delete),
                 )
+        })
+        .when_some(report_author.clone(), |menu, author| {
+            menu.separator().item(
+                PopupMenuItem::new("Report message…")
+                    .icon(IconName::TriangleAlert)
+                    .on_click(act(RowAction::Report {
+                        id: id.clone(),
+                        author,
+                    })),
+            )
         })
     })
     .into_any_element()
@@ -13114,6 +13215,7 @@ fn open_info_dialog(view: WeakEntity<ChatView>, info: Info, window: &mut Window,
                 Info::Server(_) => None,
             },
             hosts,
+            message: None,
         };
         let settings = match &info {
             Info::Server(server)

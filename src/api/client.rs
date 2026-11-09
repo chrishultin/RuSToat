@@ -1261,6 +1261,16 @@ impl StoatClient {
             .map(|_| ())
     }
 
+    /// `POST /safety/report`: report a message, a user or a server to the
+    /// instance's moderators. Unset fields (a user report's `message_id`)
+    /// are left out.
+    pub async fn report(&self, report: &crate::reports::DataReportContent) -> Result<(), ApiError> {
+        let body = without_nulls(serde_json::to_value(report).expect("report serialises"));
+        self.send_raw(Method::POST, "/safety/report", Some(&body))
+            .await
+            .map(|_| ())
+    }
+
     /// `GET /auth/session/all`: every session of the account, this one
     /// included (Stoat doesn't say which is which).
     pub async fn fetch_sessions(&self) -> Result<Vec<SessionInfo>, ApiError> {

@@ -18,6 +18,7 @@ pub mod math;
 pub mod moderation_dialogs;
 pub mod profile_card;
 pub mod profile_editor;
+pub mod report_dialog;
 pub mod server_dialogs;
 pub mod server_settings;
 pub mod sessions_page;

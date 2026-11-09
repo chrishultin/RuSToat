@@ -283,3 +283,123 @@ Deferred to the end (ban the second account with a reason, filter, unban, rejoin
 
 ### Manual Validation
 Deferred to the end (transfer to the second account and back; delete a throwaway server).
+
+## Chunk 7: Reports (milestone 22's chunk 5)
+
+### Changes Made
+- `src/reports.rs` (new, no GPUI; registered in `src/lib.rs` by hand):
+  - `DETAIL_MAX` (1000);
+  - `ReportTarget { Message { id, author }, User { id, message }, Server { id } }` with `title()` ("Tell us what's wrong with this message/user/server") and `reasons()`;
+  - `Reason { Content(ContentReportReason), User(UserReportReason) }` with the web client's `label()`s and `is_other()`. The lists are in the web client's order, with Other (`NoneSpecified`) last;
+  - `DataReportContent { content: ReportedContent, additional_context }`, the client's own body type;
+  - `can_send` (a reason, detail ≤1000, and detail for Other);
+  - `report_body` (detail trimmed; `None` for a reason of the wrong kind);
+  - `can_report` (not yourself, not your own message, not a server you own or don't know);
+  - `report_error_text` (`CannotReportYourself`, `NotFound`, `FailedValidation`);
+  - unit tests.
+- `src/api/client.rs`: `report(&DataReportContent)` (`POST /safety/report`, nulls stripped so a user report without a message leaves `message_id` out).
+- `src/ui/report_dialog.rs` (new; registered in `src/ui/mod.rs` by hand): `open_report_dialog(client, target, subject, …)` and `ReportDialog`:
+  - what's reported (a name, or "A message from {name}");
+  - a "Reason for report" dropdown ("Please select a reason ▾", scrollable);
+  - "Give us some detail", a textarea counted to 1000, which says "Tell us what's wrong." when Other has none;
+  - a footnote that reports go to the instance's moderators;
+  - Cancel and a danger Report, enabled by `can_send`. Success closes and toasts "Thanks, your report was sent."; a refusal toasts and keeps the dialog.
+- `src/profile.rs`: `UserMenuItem::Report`, after Block / Unblock in the same group, for anyone but the user.
+- `src/ui/chat.rs`:
+  - `ChatView::open_report(target, window, cx)` (checks `can_report`, works out the subject);
+  - **message menu:** "Report message…" (TriangleAlert) at the end, after a separator, for others' non-system messages (`RowAction::Report { id, author }`);
+  - **person menu:** "Report user…". `People` gains an optional `message`, set by `about_message` on a message's avatar and name, so a user report from there carries `message_id`. Elsewhere (the member list, a card) it goes without;
+  - **server menu:** "Report server…" before Copy server ID, unless the user owns the server.
+- Tests:
+  - `tests/api_safety.rs` (new): the exact message report JSON (`{"content":{"type":"Message","id":"m1","report_reason":"SpamAbuse"},"additional_context":""}`); a user report with `message_id` and trimmed detail; a user report without one leaves it out; a server report; `CannotReportYourself` reads "You can't report yourself."; `can_report` against the `ready.json` fixture (own message, self, own server, unknown server).
+  - `tests/profile.rs`: the three exact menus gain `Report` after Block. New: Report is offered for anyone but yourself, and isn't destructive.
+  - `src/reports.rs`: every reason has a label, Other is last, and the list sizes (14 / 7); titles; `can_send`; a mismatched reason makes no report.
+- `docs/plans/member-moderation-implementation.md`: chunk 5, the summary and the remaining manual steps now point here.
+
+### Divergences
+- **`src/reports.rs`, not `src/safety.rs`**, as the plan allowed. `safety.rs` is about link safety.
+- **`People` gained an optional message** so "Report user…" from a message's author carries `message_id`. That item is handled in `People::menu` directly, since `UserMenuItem` is `Copy` and can't carry the ID through `on_user_menu`. From other places, `on_user_menu`'s `Report` arm reports without a message.
+- **The dialog shows a one-line subject** instead of the web client's rendered message or avatar.
+- No later chunks.
+
+### Verification Performed
+- `cargo test --test api_safety --test profile` and `cargo test --lib reports`: 6 + 38 + 5 passed.
+- `cargo test`: 1181 passed, 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt:
+  - `src/ui/chat.rs` stays at 17 (three import-order hunks were fixed by hand), `src/api/client.rs` at 3;
+  - `src/profile.rs` and `tests/profile.rs` are still clean;
+  - new files clean: `src/reports.rs`, `src/ui/report_dialog.rs`, `tests/api_safety.rs`.
+
+### Manual Validation
+Deferred to the end (one report of each kind on a test server; Other refused without detail).
+
+## Summary
+
+_Completed: 2026-11-09_
+
+### Chunks Completed
+1. Server Settings window with name and description: `54ca0f8`.
+2. Icon and banner: `eb3a0de`.
+3. System-message channels: `bd5ed1b`.
+4. Invites page: `8e2ae94`.
+5. Bans page: `386b14b`.
+6. Ownership (transfer and delete): `7974b2a`.
+7. Reports (milestone 22's chunk 5): this commit.
+
+### Divergences
+- Chunk 1:
+  - `open_server_settings` takes no window;
+  - the window also closes when no page is left;
+  - `apply_server_edit` takes the whole answer instead of a remove list.
+- Chunk 2:
+  - a parallel `ServerImage` instead of widening `ImageKind`, with `upload_image` / `Preview::of` now taking a tag;
+  - the limits tests are in `tests/api_upload.rs`, which had 10 rustfmt hunks to begin with (kept at 10).
+- Chunk 3:
+  - voice channels are offered, since Stoat accepts any of the server's channels;
+  - `SystemChannels` is merged into `OverviewForm::changes`;
+  - pickers are dropdown menus, not a `Select`.
+- Chunk 4:
+  - `confirm_member_action_then` added beside `confirm_member_action`;
+  - `CreateInviteDialog` emits `InviteCreated`;
+  - uses read "3 uses" / "3 / 10 uses".
+- Chunk 5: no automatic refresh after a ban from the main window (there's a Refresh button); one filter for name or reason.
+- Chunk 6:
+  - Stoat's transfer refusals are returned as a result so they toast in words;
+  - `ChatView::server_deleted` was added;
+  - the window closes through chunk 1's observer.
+- Chunk 7:
+  - `src/reports.rs` rather than `src/safety.rs`;
+  - `People` carries the message for user reports;
+  - a one-line subject in the dialog.
+
+### Definition of Done
+- [x] "Server settings…" in the server menu and the info dialog, shown with Manage Server, Ban Members, or ownership. It opens one window at a time, titled with the server's name. (Unit-tested `access`; window behaviour awaits the manual pass.)
+- [x] Overview saves name (1–32), description (≤1024, blank removes it), icon and banner (set or remove, within the limits), and the four system-message channels. Only changed fields are sent, and a deleted channel can't make the save fail.
+- [x] Invites lists every server invite with creator, channel, code, uses and expiry. Revoke removes it (confirmed), Copy link copies, and Create invite… adds one.
+- [x] Bans lists bans with user and reason, filters them, and Unban (confirmed) lifts one.
+- [x] Transfer ownership sends `owner` with an MFA ticket to a non-bot member chosen from a filtered list. Ownership pages disappear afterwards, through the keyed page reset. That it doesn't leave the sidebar on the wrong page awaits the manual pass.
+- [x] Delete server is enabled only after typing the name exactly. It deletes, closes the window, and drops the server from the rail.
+- [x] The window closes itself when its server leaves the store or its account signs out (an observer and `observe_release_in`; awaits the manual pass).
+- [x] Report message / user / server from their menus, with Stoat's reasons, never offered for yourself, your own messages, or servers you own.
+- [x] Stoat's refusals become plain toasts: `MissingPermission`, `NotOwner`, `NotFound`, `FailedValidation`, `InvalidOperation`, `CannotReportYourself`.
+- [x] `cargo test` (1181 passed) and `cargo clippy --all-targets -- -D warnings` pass. No touched file's rustfmt drift grew, and new files are clean.
+- [x] The roadmap links this plan, and milestone 22's record points to chunk 7 for Reports.
+
+Every item is built and covered by automatic tests where it can be. The visual and live-server behaviour is unconfirmed until the manual pass below.
+
+### Remaining Manual Steps
+All batched at the user's request. Run with two accounts and the web client, on a test server owned by the first account:
+1. **Overview:**
+   - rename, describe, and set an icon (static, then animated) and a banner, then remove each;
+   - check the rail, the header, the info dialog and the web client;
+   - a 3 MB icon is refused before upload.
+2. **System messages:** set and turn off each kind, and watch the second account join, leave, get kicked and get banned.
+3. **Invites:** create from the page, copy the link and open it in the web client, then revoke it (the web client's join should fail).
+4. **Bans:** ban with a reason from the member menu, Refresh, filter, unban, and rejoin.
+5. **Transfer:** to the second account and back. The pages appear and disappear without showing the wrong page.
+6. **Delete** a throwaway server: Delete stays disabled until the name matches exactly, then the window closes, the rail drops it, and the main window toasts.
+7. **Permissions:** an account with only Ban Members sees only Bans; one with neither doesn't see "Server settings…" (in the menu or the info dialog).
+8. **Self-closing:** the window closes when the server is deleted from the web client, and when you log out. Opening another server's settings closes the first.
+9. **Reports:** one of each kind (message, user from a message's avatar, server). Other is refused without detail. Use a test server, and say so in the detail.
+10. **Themes:** in both, the window, dialogs and destructive buttons are readable.
