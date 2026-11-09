@@ -200,3 +200,42 @@ Deferred to the end (point "User joined" at a channel and have the second accoun
 
 ### Manual Validation
 Deferred to the end (create from the page, copy and open the link in the web client, revoke, and a Ban-Members-only account doesn't see Invites).
+
+## Chunk 5: Bans page
+
+### Changes Made
+- `src/api/client.rs`: `fetch_bans(server) -> BanListResult` (`GET /servers/{id}/bans`) and `unban(server, user)` (`DELETE /servers/{id}/bans/{user}`). Imports `BanListResult`.
+- `src/server_settings.rs`:
+  - `BanRow { user, name, avatar, reason }`.
+  - `ban_rows(store, &BanListResult)`:
+    - joins each ban with its user on the ID, and sorts by name, case-insensitively;
+    - a ban whose user is missing keeps its row under the ID;
+    - avatars come from `store.media().file(..)`, since banned users aren't in the store;
+    - a blank reason becomes `None`.
+  - `filter_bans(rows, query)`: name or reason contains the query, ignoring case; a blank query keeps everything.
+  - `bans_error_text` and `unban_error_text` (`NotFound` reads "They aren't banned any more.").
+- `src/ui/server_settings.rs`:
+  - `bans_page` (Ban icon, Ban Members);
+  - `BansPage`:
+    - fetched the first time the page may be shown;
+    - a filter field ("Filter by name or reason") and Refresh;
+    - rows: avatar, `username#1234`, the reason or "No reason given", and Unban;
+    - Unban confirms with `confirm_member_action_then` ("Unban {name}?", "They can rejoin with an invite."). The row goes on success or `NotFound` (which also toasts); other refusals toast;
+    - Loading, Failed with Retry, "Nobody is banned from this server." and "No bans match." states.
+- Tests:
+  - `tests/api_members.rs`: the list parses, including a ban without a reason; an unban is one `DELETE /servers/srv/bans/u-ada`; `NotFound` gives "They aren't banned any more."
+  - `tests/server_settings.rs`: bans are joined and sorted, a missing user keeps its row, and a blank reason is none; the filter matches name or reason, ignoring case.
+
+### Divergences
+- **No automatic refresh after banning from the main window.** That would need the `ServerMemberLeave` reason routed to the settings window. The plan's fallback, a Refresh button, is there.
+- **A single filter field** matches name or reason (the plan's assumption 9), rather than the web client's two column filters.
+- No look-ahead changes.
+
+### Verification Performed
+- `cargo test --test server_settings --test api_members`: 26 + 18 passed.
+- `cargo test`: 1162 passed, 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt: `src/api/client.rs` stays at 3; `tests/api_members.rs` is still clean; new files are clean.
+
+### Manual Validation
+Deferred to the end (ban the second account with a reason, filter, unban, rejoin).

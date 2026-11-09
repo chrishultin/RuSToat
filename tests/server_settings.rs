@@ -6,8 +6,8 @@ use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::api::models::{FieldsServer, Invite, Server};
 use stoat_gpui::profile_edit::ProfileImage;
 use stoat_gpui::server_settings::{
-    Access, OverviewForm, ServerImage, SystemChannels, SystemMessageKind, access,
-    empty_server_edit, invite_rows, system_channel_choices, uses_label,
+    Access, OverviewForm, ServerImage, SystemChannels, SystemMessageKind, access, ban_rows,
+    empty_server_edit, filter_bans, invite_rows, system_channel_choices, uses_label,
 };
 use stoat_gpui::store::ChatStore;
 
@@ -405,4 +405,54 @@ fn uses_read_naturally() {
     assert_eq!(uses_label(1, None), "1 use");
     assert_eq!(uses_label(0, None), "0 uses");
     assert_eq!(uses_label(3, Some(10)), "3 / 10 uses");
+}
+
+fn ban_list() -> stoat_gpui::api::models::BanListResult {
+    serde_json::from_value(json!({
+        "users": [
+            { "_id": "u-zed", "username": "zed", "discriminator": "0002" },
+            {
+                "_id": "u-ada", "username": "Ada", "discriminator": "0001",
+                "avatar": {
+                    "_id": "f-ada", "tag": "avatars", "filename": "a.png",
+                    "metadata": { "type": "Image", "width": 1, "height": 1 },
+                    "content_type": "image/png", "size": 1
+                }
+            }
+        ],
+        "bans": [
+            { "_id": { "server": "srv", "user": "u-zed" }, "reason": "Posting SPAM links" },
+            { "_id": { "server": "srv", "user": "u-ada" }, "reason": "  " },
+            { "_id": { "server": "srv", "user": "u-gone" } }
+        ]
+    }))
+    .unwrap()
+}
+
+#[test]
+fn bans_are_joined_with_their_users_and_sorted() {
+    let rows = ban_rows(&store("u-owner"), &ban_list());
+    let names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
+    // A ban without its user keeps its row, under the ID.
+    assert_eq!(names, ["Ada#0001", "u-gone", "zed#0002"]);
+    assert_eq!(rows[2].reason.as_deref(), Some("Posting SPAM links"));
+    // A blank reason is no reason.
+    assert_eq!(rows[0].reason, None);
+    assert_eq!(rows[1].user, "u-gone");
+    assert_eq!(rows[1].avatar, None);
+}
+
+#[test]
+fn bans_filter_by_name_or_reason_ignoring_case() {
+    let rows = ban_rows(&store("u-owner"), &ban_list());
+    let names = |query: &str| -> Vec<String> {
+        filter_bans(&rows, query)
+            .into_iter()
+            .map(|row| row.name.clone())
+            .collect()
+    };
+    assert_eq!(names("ADA"), ["Ada#0001"]);
+    assert_eq!(names("spam"), ["zed#0002"]);
+    assert_eq!(names("  "), ["Ada#0001", "u-gone", "zed#0002"]);
+    assert!(names("nobody").is_empty());
 }

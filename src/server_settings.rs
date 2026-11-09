@@ -13,7 +13,8 @@ use revolt_result::ErrorType;
 
 use crate::api::ApiError;
 use crate::api::models::{
-    Channel, DataEditServer, FieldsServer, File, Invite, Server, SystemMessageChannels,
+    BanListResult, Channel, DataEditServer, FieldsServer, File, Invite, Server,
+    SystemMessageChannels,
 };
 use crate::permissions::{has, server_permissions};
 use crate::profile_edit::{ImageLimits, ProfileImage, error_text};
@@ -431,6 +432,83 @@ pub fn revoke_error_text(err: &ApiError) -> String {
     match err.error_type() {
         Some(ErrorType::MissingPermission { .. }) => "You can't revoke this invite.".into(),
         _ => error_text(err, "Couldn't revoke the invite."),
+    }
+}
+
+/// One row of the Bans page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BanRow {
+    /// The banned user's ID.
+    pub user: String,
+    /// `username#1234`, or their ID if Stoat didn't send the user.
+    pub name: String,
+    pub avatar: Option<String>,
+    pub reason: Option<String>,
+}
+
+/// The Bans page's rows: each ban joined with its user, sorted by name. A
+/// ban whose user is missing keeps its row under the ID, so it can still
+/// be lifted. Avatars come from the file server directly: banned users
+/// aren't in the store.
+pub fn ban_rows(store: &ChatStore, list: &BanListResult) -> Vec<BanRow> {
+    let mut rows: Vec<BanRow> = list
+        .bans
+        .iter()
+        .map(|ban| {
+            let user = list.users.iter().find(|user| user.id == ban.id.user);
+            BanRow {
+                user: ban.id.user.clone(),
+                name: user.map_or_else(
+                    || ban.id.user.clone(),
+                    |user| format!("{}#{}", user.username, user.discriminator),
+                ),
+                avatar: user
+                    .and_then(|user| user.avatar.as_ref())
+                    .and_then(|avatar| store.media().file(avatar)),
+                reason: ban
+                    .reason
+                    .as_ref()
+                    .map(|reason| reason.trim().to_string())
+                    .filter(|reason| !reason.is_empty()),
+            }
+        })
+        .collect();
+    rows.sort_by_cached_key(|row| row.name.to_lowercase());
+    rows
+}
+
+/// The rows whose name or reason contains `query`, ignoring case. A blank
+/// query keeps them all.
+pub fn filter_bans<'a>(rows: &'a [BanRow], query: &str) -> Vec<&'a BanRow> {
+    let query = query.trim().to_lowercase();
+    rows.iter()
+        .filter(|row| {
+            query.is_empty()
+                || row.name.to_lowercase().contains(&query)
+                || row
+                    .reason
+                    .as_ref()
+                    .is_some_and(|reason| reason.to_lowercase().contains(&query))
+        })
+        .collect()
+}
+
+/// Why the bans couldn't be listed.
+pub fn bans_error_text(err: &ApiError) -> String {
+    match err.error_type() {
+        Some(ErrorType::MissingPermission { .. }) => {
+            "You don't have permission to see this server's bans.".into()
+        }
+        _ => error_text(err, "Couldn't load the bans."),
+    }
+}
+
+/// Why Stoat refused to lift a ban.
+pub fn unban_error_text(err: &ApiError) -> String {
+    match err.error_type() {
+        Some(ErrorType::NotFound) => "They aren't banned any more.".into(),
+        Some(ErrorType::MissingPermission { .. }) => "You can't lift bans in this server.".into(),
+        _ => error_text(err, "Couldn't lift the ban."),
     }
 }
 

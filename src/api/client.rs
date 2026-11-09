@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use reqwest::{Client, Method};
 use revolt_models::v0::{
-    AccountInfo, AllMemberResponse, BulkMessageResponse, Category, Channel,
+    AccountInfo, AllMemberResponse, BanListResult, BulkMessageResponse, Category, Channel,
     CreateServerLegacyResponse, CreateVoiceUserResponse, DataBanCreate, DataChangeEmail,
     DataChangePassword, DataEditMessage, DataEditServer, DataEditSession, DataEditUser, DataLogin,
     DataMemberEdit, DataMessageSearch, DataMessageSend, DataSendFriendRequest, Emoji, FieldsUser,
@@ -802,6 +802,23 @@ impl StoatClient {
         let body = without_nulls(serde_json::to_value(ban).expect("ban serialises"));
         let path = format!("/servers/{server}/bans/{user}");
         self.send(Method::PUT, &path, Some(&body)).await
+    }
+
+    /// `GET /servers/{server}/bans`: everyone banned from the server, with
+    /// the reasons (Ban Members). Users and bans come as two lists, joined
+    /// on the user's ID.
+    pub async fn fetch_bans(&self, server: &str) -> Result<BanListResult, ApiError> {
+        self.send(Method::GET, &format!("/servers/{server}/bans"), None::<&()>)
+            .await
+    }
+
+    /// `DELETE /servers/{server}/bans/{user}`: lift a ban (Ban Members). A
+    /// ban that's already gone is `NotFound`. No event follows.
+    pub async fn unban(&self, server: &str, user: &str) -> Result<(), ApiError> {
+        let path = format!("/servers/{server}/bans/{user}");
+        self.send_raw(Method::DELETE, &path, None::<&()>)
+            .await
+            .map(|_| ())
     }
 
     /// Set the user's presence (Online, Idle, Focus, Busy or Invisible).

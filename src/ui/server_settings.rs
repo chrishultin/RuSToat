@@ -30,9 +30,10 @@ use crate::links::invite_link;
 use crate::profile_edit::{ImageLimits, ProfileImage};
 use crate::runtime::spawn_io;
 use crate::server_settings::{
-    Access, DESCRIPTION_MAX, InviteRow, NAME_MAX, OverviewForm, ServerImage, SystemChannels,
-    SystemMessageKind, access, invite_rows, invites_error_text, revoke_error_text, save_error_text,
-    system_channel_choices,
+    Access, BanRow, DESCRIPTION_MAX, InviteRow, NAME_MAX, OverviewForm, ServerImage,
+    SystemChannels, SystemMessageKind, access, ban_rows, bans_error_text, filter_bans, invite_rows,
+    invites_error_text, revoke_error_text, save_error_text, system_channel_choices,
+    unban_error_text,
 };
 use crate::themes;
 use crate::ui::chat::{ChatView, avatar};
@@ -155,12 +156,13 @@ pub struct ServerSettingsView {
     title: String,
     overview: Entity<OverviewPage>,
     invites: Entity<InvitesPage>,
+    bans: Entity<BansPage>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl ServerSettingsView {
     /// The pages, in sidebar order.
-    pub const PAGES: [ServerPageFn; 2] = [overview_page, invites_page];
+    pub const PAGES: [ServerPageFn; 3] = [overview_page, invites_page, bans_page];
 
     pub fn new(
         chat: Entity<ChatView>,
@@ -189,6 +191,7 @@ impl ServerSettingsView {
         let title = window_title(chat.read(cx).store().server(&server));
         let overview = cx.new(|cx| OverviewPage::new(&chat, server.clone(), window, cx));
         let invites = cx.new(|_| InvitesPage::new(&chat, server.clone()));
+        let bans = cx.new(|cx| BansPage::new(&chat, server.clone(), window, cx));
         Self {
             chat: chat.downgrade(),
             server,
@@ -198,6 +201,7 @@ impl ServerSettingsView {
             title,
             overview,
             invites,
+            bans,
             _subscriptions: subscriptions,
         }
     }
@@ -237,9 +241,13 @@ impl Render for ServerSettingsView {
             self.title = title;
         }
         // Lists are fetched the first time they may be shown.
-        if self.access(cx).invites {
+        let access = self.access(cx);
+        if access.invites {
             self.invites
                 .update(cx, |page, cx| page.load_once(window, cx));
+        }
+        if access.bans {
+            self.bans.update(cx, |page, cx| page.load_once(window, cx));
         }
         let pages: Vec<Option<SettingPage>> =
             self.pages.iter().map(|page| page(self, cx)).collect();
@@ -1126,6 +1134,260 @@ impl Render for InvitesPage {
                     .gap_1()
                     .children(rows.iter().map(|row| self.render_row(row, cx)))
                     .into_any_element()
+            }
+        };
+        v_flex().w_full().gap_3().child(header).child(body)
+    }
+}
+
+/// Bans: everyone banned from the server, and why.
+fn bans_page(view: &ServerSettingsView, cx: &mut App) -> Option<SettingPage> {
+    if !view.access(cx).bans {
+        return None;
+    }
+    let bans = view.bans.clone();
+    Some(
+        SettingPage::new("Bans")
+            .icon(IconName::Ban)
+            .resettable(false)
+            .group(
+                SettingGroup::new().item(
+                    SettingItem::render(move |_, _, _| bans.clone())
+                        .keywords(["bans", "banned", "unban", "pardon"]),
+                ),
+            ),
+    )
+}
+
+/// The Bans page: who's banned and why, filtered by name or reason, each
+/// with Unban. Stoat sends no event for bans, so a lifted one is removed
+/// here, and Refresh fetches the list again (after banning someone from
+/// the main window, say).
+pub struct BansPage {
+    chat: WeakEntity<ChatView>,
+    server: String,
+    filter: Entity<InputState>,
+    bans: Load<Vec<BanRow>>,
+    _filter: Subscription,
+}
+
+impl BansPage {
+    fn new(
+        chat: &Entity<ChatView>,
+        server: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let filter =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Filter by name or reason"));
+        let subscription = cx.subscribe(&filter, |_, _, _: &InputEvent, cx| cx.notify());
+        Self {
+            chat: chat.downgrade(),
+            server,
+            filter,
+            bans: Load::Idle,
+            _filter: subscription,
+        }
+    }
+
+    /// Fetch the list, unless that's already been done.
+    fn load_once(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.bans, Load::Idle) {
+            self.refresh(window, cx);
+        }
+    }
+
+    /// Fetch the list again.
+    fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat) = self.chat.upgrade() else {
+            return;
+        };
+        let request = spawn_io({
+            let (client, server) = (chat.read(cx).client().clone(), self.server.clone());
+            async move { client.fetch_bans(&server).await }
+        });
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update(cx, |this, cx| {
+                this.bans = match result {
+                    Ok(Ok(list)) => {
+                        log::debug!("{} bans in {}", list.bans.len(), this.server);
+                        match this.chat.upgrade() {
+                            Some(chat) => Load::Loaded(ban_rows(chat.read(cx).store(), &list)),
+                            None => Load::Idle,
+                        }
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't load bans in {}: {err:?}", this.server);
+                        Load::Failed(bans_error_text(&err))
+                    }
+                    Err(err) => {
+                        log::warn!("bans task failed: {err:?}");
+                        Load::Failed("Couldn't load the bans.".into())
+                    }
+                };
+                cx.notify();
+            })
+            .ok();
+        });
+        self.bans = Load::Loading { _task: task };
+        cx.notify();
+    }
+
+    /// Lift a ban, once confirmed. Its row goes when Stoat agrees, or says
+    /// there's no such ban any more.
+    fn unban(&mut self, row: &BanRow, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat) = self.chat.upgrade() else {
+            return;
+        };
+        let client = chat.read(cx).client().clone();
+        let (server, user) = (self.server.clone(), row.user.clone());
+        let request = MemberActionRequest {
+            title: format!("Unban {}?", row.name).into(),
+            detail: "They can rejoin with an invite.".into(),
+            ok_label: "Unban",
+            danger: false,
+            failed_text: "Couldn't lift the ban.".into(),
+        };
+        let page = cx.entity().downgrade();
+        let action = {
+            let user = user.clone();
+            Box::pin(async move { client.unban(&server, &user).await })
+        };
+        let after = Box::new(
+            move |result: Result<(), ApiError>, window: &mut Window, cx: &mut App| {
+                let gone = match &result {
+                    Ok(()) => true,
+                    Err(err) => {
+                        log::warn!("couldn't unban {user}: {err:?}");
+                        window.push_notification(Notification::error(unban_error_text(err)), cx);
+                        matches!(err.error_type(), Some(ErrorType::NotFound))
+                    }
+                };
+                if gone {
+                    page.update(cx, |page, cx| {
+                        if let Load::Loaded(rows) = &mut page.bans {
+                            rows.retain(|row| row.user != user);
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            },
+        );
+        confirm_member_action_then(request, action, after, window, cx);
+    }
+
+    fn render_row(&self, row: &BanRow, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let face = avatar(
+            SharedString::from(format!("ban-{}", row.user)),
+            row.avatar.clone(),
+            &row.name,
+            BAN_AVATAR,
+            theme.secondary,
+            theme.secondary_foreground,
+        );
+        let unban = {
+            let row = row.clone();
+            cx.listener(move |this, _, window, cx| this.unban(&row, window, cx))
+        };
+        h_flex()
+            .w_full()
+            .gap_3()
+            .py_1()
+            .child(face)
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(row.name.clone()),
+                    )
+                    .child(
+                        div().text_xs().text_color(muted).child(
+                            row.reason
+                                .clone()
+                                .unwrap_or_else(|| "No reason given".into()),
+                        ),
+                    ),
+            )
+            .child(
+                Button::new(SharedString::from(format!("unban-{}", row.user)))
+                    .label("Unban")
+                    .outline()
+                    .small()
+                    .on_click(unban),
+            )
+            .into_any_element()
+    }
+}
+
+/// A banned user's avatar.
+const BAN_AVATAR: f32 = 28.;
+
+impl Render for BansPage {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (muted, danger) = (theme.muted_foreground, theme.danger);
+        let header = h_flex()
+            .w_full()
+            .gap_2()
+            .child(div().flex_1().child(Input::new(&self.filter).small()))
+            .child(
+                Button::new("bans-refresh")
+                    .icon(IconName::RefreshCw)
+                    .ghost()
+                    .small()
+                    .tooltip("Refresh")
+                    .disabled(matches!(self.bans, Load::Loading { .. }))
+                    .on_click(cx.listener(|this, _, window, cx| this.refresh(window, cx))),
+            );
+        let body = match &self.bans {
+            Load::Idle | Load::Loading { .. } => div()
+                .text_sm()
+                .text_color(muted)
+                .child("Loading bans…")
+                .into_any_element(),
+            Load::Failed(text) => h_flex()
+                .gap_2()
+                .text_sm()
+                .text_color(danger)
+                .child(text.clone())
+                .child(
+                    Button::new("bans-retry")
+                        .label("Retry")
+                        .outline()
+                        .xsmall()
+                        .on_click(cx.listener(|this, _, window, cx| this.refresh(window, cx))),
+                )
+                .into_any_element(),
+            Load::Loaded(rows) if rows.is_empty() => div()
+                .text_sm()
+                .text_color(muted)
+                .child("Nobody is banned from this server.")
+                .into_any_element(),
+            Load::Loaded(rows) => {
+                let query = self.filter.read(cx).value().to_string();
+                let shown: Vec<BanRow> = filter_bans(rows, &query).into_iter().cloned().collect();
+                if shown.is_empty() {
+                    div()
+                        .text_sm()
+                        .text_color(muted)
+                        .child("No bans match.")
+                        .into_any_element()
+                } else {
+                    v_flex()
+                        .w_full()
+                        .gap_1()
+                        .children(shown.iter().map(|row| self.render_row(row, cx)))
+                        .into_any_element()
+                }
             }
         };
         v_flex().w_full().gap_3().child(header).child(body)
