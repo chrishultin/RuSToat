@@ -7390,6 +7390,26 @@ impl ChatView {
         cx.notify();
     }
 
+    /// Stoat took the user's own new default `permissions` for `server`:
+    /// apply them now (channel visibility, what members may do), without
+    /// waiting for its `ServerUpdate`, which then changes nothing.
+    pub fn default_permissions_saved(
+        &mut self,
+        server: &str,
+        permissions: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let data = crate::api::models::PartialServer {
+            default_permissions: Some(permissions as i64),
+            ..Default::default()
+        };
+        if !self.store.apply_server_update(server, data, &[]) {
+            return;
+        }
+        self.server_permissions_changed(server, cx);
+        cx.notify();
+    }
+
     /// The user deleted `role` on `server` (from Server Settings): take it
     /// off the server, its members and channel overrides now, without
     /// waiting for its `ServerRoleDelete`.

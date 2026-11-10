@@ -57,3 +57,39 @@ Look-ahead: chunk 3's "lock note covers both cases" is already done by `role_loc
 
 ### Manual Validation
 Deferred to the end (batched, as the user asked): the matrices match the web client as the owner, and a Manage Permissions-only account sees the page without "Create role…" or drag handles.
+
+## Chunk 2: Edit Everyone's permissions
+
+### Changes Made
+- `src/permission_matrix.rs`: the module doc now states Stoat's grant rule. New functions:
+  - `value_enabled(held, bit, Setting)`: off is always allowed, on only if held;
+  - `missing_from_default(held, value) -> Vec<&'static PermissionEntry>`: unheld permissions that are on, in list order;
+  - `missing_note(&[&PermissionEntry]) -> Option<String>`: Assumption 5's text, with "it" or "them" and "A, B and C";
+  - `default_change(stored, edited) -> Option<u64>`;
+  - `follow_value(filled, edited, now) -> u64`: per-bit live-follow;
+  - `permissions_error_text`: Assumption 7's texts.
+- `src/api/client.rs`: `set_default_permissions(server, u64) -> Server`, a `PUT /servers/{id}/permissions/default` with `revolt_permissions::DataPermissionsValue` (written out in full, so the import block, which has rustfmt drift, isn't touched).
+- `src/ui/chat.rs`: `ChatView::default_permissions_saved(server, bits, cx)` applies `PartialServer { default_permissions }` through `apply_server_update`, then `server_permissions_changed`.
+- `src/ui/server_settings.rs`:
+  - `editor_bar(actions, cx)`, shared by both editors: "‹ Roles" on the left and, if the user may save, Reset and Save on the right;
+  - `DefaultPermissionsEditor` is now editable: `filled` and `edited` (`u64`), `saving`, `rights()` (Manage Permissions, plus the bits held via `server_permissions`), `can_save`, `reset`, `follow` (through `follow_value`), `set`, and `save`. Save sends one `PUT`, applies the answer's `default_permissions` through `default_permissions_saved`, and toasts "Saved."; a refusal toasts `permissions_error_text`;
+  - the matrix's `enabled` is `value_enabled(held, …)`, and it's read-only while saving or without Manage Permissions;
+  - the missing-permissions note shows under the bar, in the danger colour with `TriangleAlert`, whenever the edited value has an unheld permission on. Save stays disabled until it's fixed.
+- `tests/permission_matrix.rs`: 6 new tests (`value_enabled`, `missing_from_default`, `missing_note` for one, two and three permissions, `default_change`, `follow_value`, and the refusal texts).
+- `tests/api_roles.rs`: 2 new wiremock tests. The `PUT` sends exactly `{"permissions": n}` with the token and parses the `Server`; `CannotGiveMissingPermissions` reads as its text.
+- `tests/store_roles.rs`: `saved_default_permissions_then_their_server_update_are_one_value`, in which `can_view` follows.
+
+### Divergences
+- **`value_enabled` takes `(held, bit, Setting)`**, not the plan's `(held, stored, edited, bit)`. Stoat checks the whole new default value against what the user holds, so the stored value doesn't change what may be chosen, and the setting being chosen (on or off) is what matters.
+- **Live-follow is per permission** (`follow_value`). Permissions the user changed keep their edit, and the rest follow, rather than the whole matrix freezing at the first touch. That's closer to how each field of the role editor follows on its own.
+- The top bar scrolls with the page: the settings page is a scrolling list, and GPUI has no sticky positioning. It sits at the top, above the matrix, as planned.
+
+Look-ahead: chunk 3 reuses `editor_bar` and `permissions_error_text`. A `follow_override` like `follow_value` will give the role's matrix the same per-permission live-follow. No plan amendments are needed.
+
+### Verification Performed
+- `cargo test --test permission_matrix --test api_roles --test store_roles`: 14, 16 and 13 passed.
+- Full suite: `cargo test` gave 1,261 passed, 0 failed. `cargo clippy --all-targets -- -D warnings` is clean.
+- Rustfmt drift: `src/ui/chat.rs` 17 and `src/api/client.rs` 3 are unchanged. The other touched files are clean.
+
+### Manual Validation
+Deferred to the end (batched): turn off Everyone's Send Messages as the owner, and check a moderator lacking Manage Server can't turn it on.

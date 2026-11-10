@@ -5,7 +5,7 @@
 use revolt_permissions::{ChannelPermission, DEFAULT_PERMISSION_SERVER};
 use serde_json::{Value, json};
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
-use stoat_gpui::api::models::Channel;
+use stoat_gpui::api::models::{Channel, PartialServer};
 use stoat_gpui::permissions::{can_pin, can_view};
 use stoat_gpui::store::{ChatStore, MemberListRow, channel_id};
 
@@ -414,6 +414,30 @@ fn default_permissions_from_a_server_update_flip_viewing() {
     assert!(can_view(&store, "u-owner", "ch-open"));
     // Nobody but the owner is left in the list.
     assert_eq!(lines(&store), ["# Online (1)", "owner"]);
+}
+
+#[test]
+fn saved_default_permissions_then_their_server_update_are_one_value() {
+    let mut store = store();
+    let without_view = *DEFAULT_PERMISSION_SERVER & !VIEW;
+    // What `ChatView::default_permissions_saved` applies from Stoat's answer.
+    let saved = PartialServer {
+        default_permissions: Some(without_view as i64),
+        ..Default::default()
+    };
+    assert!(store.apply_server_update("srv", saved, &[]));
+    assert!(!can_view(&store, "u-me", "ch-open"));
+    assert!(apply(
+        &mut store,
+        json!({
+            "type": "ServerUpdate", "id": "srv",
+            "data": { "default_permissions": without_view }
+        })
+    ));
+    let server = store.server("srv").unwrap();
+    assert_eq!(server.default_permissions, without_view as i64);
+    assert!(!can_view(&store, "u-me", "ch-open"));
+    assert!(can_view(&store, "u-owner", "ch-open"));
 }
 
 #[test]

@@ -1294,6 +1294,24 @@ impl StoatClient {
         .await
     }
 
+    /// `PUT /servers/{server}/permissions/default`: the server's default
+    /// permissions, which every member has (Manage Permissions). The user
+    /// must hold every permission `permissions` allows, not just the ones
+    /// it adds (`CannotGiveMissingPermissions`). Stoat answers with the
+    /// server; `ServerUpdate` follows.
+    pub async fn set_default_permissions(
+        &self,
+        server: &str,
+        permissions: u64,
+    ) -> Result<Server, ApiError> {
+        self.send(
+            Method::PUT,
+            &format!("/servers/{server}/permissions/default"),
+            Some(&revolt_permissions::DataPermissionsValue { permissions }),
+        )
+        .await
+    }
+
     /// `PATCH /servers/{server}` with `{"owner": owner}`: hand the server
     /// to another member (its owner only, with a validated MFA `ticket`,
     /// which is used up even if the transfer then fails). Bots can't own a

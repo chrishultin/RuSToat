@@ -1,13 +1,15 @@
 //! A server's roles against a mock Stoat API, from Server Settings' Roles
 //! page: `POST /servers/{id}/roles` (create one), `PATCH
 //! /servers/{id}/roles/{role}` (edit one, after uploading its icon to the
-//! file server), `DELETE /servers/{id}/roles/{role}` (delete one) and
-//! `PATCH /servers/{id}/roles/ranks` (reorder them).
+//! file server), `DELETE /servers/{id}/roles/{role}` (delete one),
+//! `PATCH /servers/{id}/roles/ranks` (reorder them) and
+//! `PUT /servers/{id}/permissions/default` (Everyone's permissions).
 
 use revolt_result::ErrorType;
 use serde_json::json;
 use stoat_gpui::api::StoatClient;
 use stoat_gpui::api::models::DataEditRole;
+use stoat_gpui::permission_matrix::permissions_error_text;
 use stoat_gpui::roles::{
     create_error_text, delete_error_text, edit_error_text, empty_role_edit, reorder_error_text,
 };
@@ -368,5 +370,56 @@ async fn reordering_above_your_role_is_refused_in_words() {
     assert_eq!(
         reorder_error_text(&err),
         "You can only move roles below your highest role, among the places below it."
+    );
+}
+
+#[tokio::test]
+async fn everyones_permissions_are_sent_as_one_value() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/servers/srv/permissions/default"))
+        .and(header("x-session-token", "tok"))
+        .and(body_json(json!({ "permissions": 3_145_728u64 })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "_id": "srv", "owner": "u-me", "name": "Lounge", "channels": [],
+            "default_permissions": 3_145_728u64, "approximate_member_count": 1
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let saved = client(&server)
+        .set_default_permissions("srv", 3_145_728)
+        .await
+        .unwrap();
+    assert_eq!(saved.default_permissions, 3_145_728);
+}
+
+#[tokio::test]
+async fn granting_everyone_a_permission_you_lack_is_refused_in_words() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/servers/srv/permissions/default"))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .set_body_json(json!({ "type": "CannotGiveMissingPermissions" })),
+        )
+        .mount(&server)
+        .await;
+
+    let err = client(&server)
+        .set_default_permissions("srv", u64::from(u32::MAX))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err.error_type(),
+            Some(ErrorType::CannotGiveMissingPermissions)
+        ),
+        "{err:?}"
+    );
+    assert_eq!(
+        permissions_error_text(&err),
+        "You can't grant permissions you don't have."
     );
 }

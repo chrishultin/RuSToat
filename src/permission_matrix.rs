@@ -1,11 +1,22 @@
 //! The permission matrix: every permission Stoat has, grouped and described
-//! as the Roles page shows them, and a role's setting for each (allow,
-//! neutral or deny). Plain data with no GPUI, so it's unit-testable, and
+//! as the Roles page shows them, a role's setting for each (allow, neutral
+//! or deny), which settings the user may choose, and why Stoat refused, in
+//! words. Plain data with no GPUI, so it's unit-testable, and
 //! shared by every kind of permission editor (a role's, the server's
 //! default permissions, and later a channel's overrides). The view is
 //! [`crate::ui::permission_matrix`].
+//!
+//! What the user may choose is Stoat's grant rule (0.16.2,
+//! `throw_permission_override`): for the server's default permissions,
+//! they must hold every permission the new value allows; for an override,
+//! every permission newly allowed or no longer denied. So a permission they
+//! don't hold can always be made stricter, never looser.
 
 use revolt_permissions::{ChannelPermission, Override, OverrideField};
+use revolt_result::ErrorType;
+
+use crate::api::ApiError;
+use crate::profile_edit::error_text;
 
 /// One permission as the matrix lists it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -264,4 +275,66 @@ pub fn with_setting(value: Override, bit: u64, setting: Setting) -> Override {
 /// A role's stored permissions (`{ a, d }`) as allow and deny bits.
 pub fn override_of(field: OverrideField) -> Override {
     field.into()
+}
+
+/// Whether the user, holding `held`, may set `bit` to `setting` in the
+/// server's default permissions: off always, on only if they hold it.
+/// (Stoat checks every bit the new value allows, so one they don't hold
+/// can't stay on either: see [`missing_from_default`].)
+pub fn value_enabled(held: u64, bit: u64, setting: Setting) -> bool {
+    setting != Setting::Allow || held & bit == bit
+}
+
+/// The permissions `value` gives Everyone that the user, holding `held`,
+/// doesn't have, in list order. Stoat refuses to save default permissions
+/// with any of these on.
+pub fn missing_from_default(held: u64, value: u64) -> Vec<&'static PermissionEntry> {
+    PERMISSIONS
+        .iter()
+        .filter(|entry| value & entry.bit() != 0 && held & entry.bit() == 0)
+        .collect()
+}
+
+/// Why Everyone's permissions can't be saved as they are: "You don't have
+/// Manage Server, so Everyone can't keep it. Turn it off to save." `None`
+/// when nothing's missing.
+pub fn missing_note(missing: &[&PermissionEntry]) -> Option<String> {
+    let titles: Vec<&str> = missing.iter().map(|entry| entry.title).collect();
+    let them = if titles.len() == 1 { "it" } else { "them" };
+    let titles = match titles.as_slice() {
+        [] => return None,
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    Some(format!(
+        "You don't have {titles}, so Everyone can't keep {them}. Turn {them} off to save."
+    ))
+}
+
+/// The default permissions to send, if `edited` differs from `stored`.
+pub fn default_change(stored: u64, edited: u64) -> Option<u64> {
+    (stored != edited).then_some(edited)
+}
+
+/// Permission bits as edited, after the stored value changed from `filled`
+/// to `now` (elsewhere): bits the user changed keep their edit, the rest
+/// follow.
+pub fn follow_value(filled: u64, edited: u64, now: u64) -> u64 {
+    let touched = filled ^ edited;
+    (now & !touched) | (edited & touched)
+}
+
+/// Why Stoat refused to save permissions.
+pub fn permissions_error_text(err: &ApiError) -> String {
+    match err.error_type() {
+        Some(ErrorType::CannotGiveMissingPermissions) => {
+            "You can't grant permissions you don't have.".into()
+        }
+        Some(ErrorType::NotElevated) => "That role ranks at or above your highest role.".into(),
+        Some(ErrorType::MissingPermission { .. }) => {
+            "You don't have permission to manage permissions.".into()
+        }
+        Some(ErrorType::NotFound) => "That role was deleted.".into(),
+        _ => error_text(err, "Couldn't save the permissions."),
+    }
 }

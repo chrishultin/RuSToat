@@ -32,7 +32,11 @@ use gpui_kit::*;
 use crate::api::ApiError;
 use crate::api::models::{Role, Server};
 use crate::links::invite_link;
-use crate::permission_matrix::override_of;
+use crate::permission_matrix::{
+    Setting, default_change, follow_value, missing_from_default, missing_note, override_of,
+    permissions_error_text, value_enabled,
+};
+use crate::permissions::server_permissions;
 use crate::profile_edit::{ImageLimits, ProfileImage};
 use crate::rail::{PALETTE, parse_colour};
 use crate::roles::{
@@ -2152,12 +2156,42 @@ impl Render for RoleEditor {
     }
 }
 
+/// An editor's bar at the top of the Roles page: "‹ Roles" on the left,
+/// and `actions` (Reset and Save) on the right, if the user may save.
+fn editor_bar<V: EventEmitter<BackToRoles>>(
+    actions: Option<[Button; 2]>,
+    cx: &Context<V>,
+) -> AnyElement {
+    h_flex()
+        .w_full()
+        .gap_2()
+        .child(
+            Button::new("roles-back")
+                .label("Roles")
+                .icon(IconName::ChevronLeft)
+                .ghost()
+                .small()
+                .on_click(cx.listener(|_, _, _, cx| cx.emit(BackToRoles))),
+        )
+        .child(div().flex_1())
+        .children(actions.into_iter().flatten())
+        .into_any_element()
+}
+
 /// Everyone's editor, in the Roles page: the server's default permissions,
-/// which every member has whatever their roles, as checkboxes. They follow
-/// changes made elsewhere.
+/// which every member has whatever their roles, as checkboxes, saved with
+/// one `PUT`. A permission the user doesn't have can be turned off but not
+/// on, and Stoat won't save any left on (it checks every permission the
+/// new value allows), so Save waits until they're off. Untouched
+/// permissions follow changes made elsewhere.
 pub struct DefaultPermissionsEditor {
     chat: WeakEntity<ChatView>,
     server: String,
+    /// The stored value the matrix was last filled with.
+    filled: u64,
+    /// The matrix as edited.
+    edited: u64,
+    saving: bool,
     _chat: Subscription,
 }
 
@@ -2170,11 +2204,16 @@ impl DefaultPermissionsEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self {
+        let mut this = Self {
             chat: chat.downgrade(),
             server,
-            _chat: cx.observe_in(chat, window, |_, _, _, cx| cx.notify()),
-        }
+            filled: 0,
+            edited: 0,
+            saving: false,
+            _chat: cx.observe_in(chat, window, |this, _, _, cx| this.follow(cx)),
+        };
+        this.reset(cx);
+        this
     }
 
     /// The server's default permissions as the store has them now.
@@ -2184,33 +2223,163 @@ impl DefaultPermissionsEditor {
         Some(server.default_permissions as u64)
     }
 
-    /// Whether the user may change them at all (Manage Permissions).
-    fn editable(&self, cx: &App) -> bool {
-        self.chat
-            .upgrade()
-            .is_some_and(|chat| can_manage_permissions(chat.read(cx).store(), &self.server))
+    /// Whether the user may change them at all (Manage Permissions), and
+    /// the permissions they hold.
+    fn rights(&self, cx: &App) -> (bool, u64) {
+        let Some(chat) = self.chat.upgrade() else {
+            return (false, 0);
+        };
+        let store = chat.read(cx).store();
+        (
+            can_manage_permissions(store, &self.server),
+            server_permissions(store, store.me(), &self.server),
+        )
+    }
+
+    /// Whether Save can send the matrix: the user may change it, holds
+    /// every permission it gives, something changed, and not already
+    /// saving.
+    fn can_save(&self, cx: &App) -> bool {
+        let (editable, held) = self.rights(cx);
+        !self.saving
+            && editable
+            && missing_from_default(held, self.edited).is_empty()
+            && self
+                .current(cx)
+                .is_some_and(|stored| default_change(stored, self.edited).is_some())
+    }
+
+    /// Fill the matrix with the stored value.
+    fn reset(&mut self, cx: &mut Context<Self>) {
+        if let Some(stored) = self.current(cx) {
+            self.filled = stored;
+            self.edited = stored;
+        }
+        cx.notify();
+    }
+
+    /// The store changed: untouched permissions take the new value, edited
+    /// ones keep theirs.
+    fn follow(&mut self, cx: &mut Context<Self>) {
+        if let Some(now) = self.current(cx)
+            && now != self.filled
+        {
+            self.edited = follow_value(self.filled, self.edited, now);
+            self.filled = now;
+        }
+        cx.notify();
+    }
+
+    fn set(&mut self, bit: u64, setting: Setting, cx: &mut Context<Self>) {
+        self.edited = match setting {
+            Setting::Allow => self.edited | bit,
+            _ => self.edited & !bit,
+        };
+        cx.notify();
+    }
+
+    /// Send the new value. Stoat's answer shows at once, in the main
+    /// window too; a refusal says why in a toast, and the matrix keeps the
+    /// edit.
+    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_save(cx) {
+            return;
+        }
+        let Some(chat) = self.chat.upgrade() else {
+            return;
+        };
+        let permissions = self.edited;
+        self.saving = true;
+        cx.notify();
+        let request = spawn_io({
+            let (client, server) = (chat.read(cx).client().clone(), self.server.clone());
+            async move { client.set_default_permissions(&server, permissions).await }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.saving = false;
+                let text = match result {
+                    Ok(Ok(saved)) => {
+                        log::info!("saved the default permissions of {}", this.server);
+                        let (server, bits) =
+                            (this.server.clone(), saved.default_permissions as u64);
+                        this.chat
+                            .update(cx, |chat, cx| {
+                                chat.default_permissions_saved(&server, bits, cx)
+                            })
+                            .ok();
+                        this.reset(cx);
+                        window.push_notification(Notification::success("Saved."), cx);
+                        return;
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!(
+                            "couldn't save the default permissions of {}: {err:?}",
+                            this.server
+                        );
+                        permissions_error_text(&err)
+                    }
+                    Err(err) => {
+                        log::warn!("default permissions save task failed: {err:?}");
+                        "Couldn't save the permissions.".into()
+                    }
+                };
+                window.push_notification(Notification::error(text), cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 }
 
 impl Render for DefaultPermissionsEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(stored) = self.current(cx) else {
+        if self.current(cx).is_none() {
             return div().into_any_element();
-        };
-        let editable = self.editable(cx);
+        }
+        let (editable, held) = self.rights(cx);
+        let changed = self.edited != self.filled;
+        let can_save = self.can_save(cx);
+        let missing = missing_note(&missing_from_default(held, self.edited));
+        let actions = editable.then(|| {
+            [
+                Button::new("everyone-reset")
+                    .label("Reset")
+                    .outline()
+                    .small()
+                    .disabled(!changed || self.saving)
+                    .on_click(cx.listener(|this, _, _, cx| this.reset(cx))),
+                Button::new("everyone-save")
+                    .label("Save")
+                    .primary()
+                    .small()
+                    .loading(self.saving)
+                    .disabled(!can_save)
+                    .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
+            ]
+        });
+        let view = cx.entity().downgrade();
+        let matrix = PermissionMatrix::new("default-permission", Mode::Values(self.edited))
+            .read_only(!editable || self.saving)
+            .enabled(move |bit, setting| value_enabled(held, bit, setting))
+            .on_change(move |bit, setting, _, cx| {
+                view.update(cx, |this, cx| this.set(bit, setting, cx)).ok();
+            });
+        let theme = cx.theme();
         v_flex()
             .w_full()
             .gap_4()
-            .child(
-                h_flex().child(
-                    Button::new("roles-back")
-                        .label("Roles")
-                        .icon(IconName::ChevronLeft)
-                        .ghost()
-                        .small()
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(BackToRoles))),
-                ),
-            )
+            .child(editor_bar(actions, cx))
+            .children(missing.filter(|_| editable).map(|text| {
+                h_flex()
+                    .gap_2()
+                    .text_sm()
+                    .text_color(theme.danger)
+                    .child(Icon::new(IconName::TriangleAlert).small())
+                    .child(text)
+            }))
             .child(
                 v_flex()
                     .gap_1()
@@ -2222,15 +2391,10 @@ impl Render for DefaultPermissionsEditor {
                                 .child("Everyone"),
                         ),
                     )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(
-                                "Every member has these permissions, whatever their roles. \
+                    .child(div().text_sm().text_color(theme.muted_foreground).child(
+                        "Every member has these permissions, whatever their roles. \
                                  Roles can add to them, or take them away.",
-                            ),
-                    ),
+                    )),
             )
             .when(!editable, |this| {
                 this.child(lock_note(
@@ -2238,9 +2402,7 @@ impl Render for DefaultPermissionsEditor {
                     cx,
                 ))
             })
-            .child(
-                PermissionMatrix::new("default-permission", Mode::Values(stored)).read_only(true),
-            )
+            .child(matrix)
             .into_any_element()
     }
 }
