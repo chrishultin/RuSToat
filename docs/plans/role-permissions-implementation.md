@@ -93,3 +93,66 @@ Look-ahead: chunk 3 reuses `editor_bar` and `permissions_error_text`. A `follow_
 
 ### Manual Validation
 Deferred to the end (batched): turn off Everyone's Send Messages as the owner, and check a moderator lacking Manage Server can't turn it on.
+
+## Chunk 3: Edit a role's permissions
+
+### Changes Made
+- `src/permission_matrix.rs`:
+  - `setting_enabled(held, &stored, bit, Setting)`: every setting for a held permission; for an unheld one, only settings no looser than the stored one (Deny < Neutral < Allow);
+  - `may_grant(held, &stored, &edited)`: Stoat's `throw_permission_override` check, word for word;
+  - `override_change(&stored, &edited) -> Option<Override>`;
+  - `follow_override(filled, edited, now)`: per-permission live-follow, like `follow_value`.
+- `src/roles.rs`: `RoleForm` gains `permissions: Override`. `of` fills it through `override_of`, `has_changes` counts it, and `permissions_change(&Role) -> Option<Override>` gives it separately. The doc on `changes` (the `PATCH`) says permissions are never in it.
+- `src/api/client.rs`: `set_role_permissions(server, role, &Override) -> Server`, a `PUT /servers/{id}/permissions/{role}` with `revolt_models::v0::DataSetServerRolePermission` (written out in full, so the drifted import block isn't touched).
+- `src/ui/server_settings.rs`, `RoleEditor`:
+  - it holds `permissions: Override`, and `rights()` returns `RoleRights { fields, permissions, delete, held }`;
+  - `can_save` is true when the name and icon are fine and either fields the user may change (Manage Role) or permissions they may change (Manage Permissions) differ;
+  - `reset` is now `fill(true)`. `fill(false)` refills the fields and keeps the matrix's edit, after the `PATCH` works. `follow` also follows the matrix through `follow_override`;
+  - `save` runs upload, then `PATCH` (if the fields changed and the user has Manage Role), then `PUT` (if the permissions changed and the user has Manage Permissions). Before the `PUT` it re-checks `may_grant` against the role as stored then. The `PUT`'s answer is applied through `role_saved` with the role taken from the answer's `roles`. A full success resets the form and toasts "Saved.". A failed `PATCH` stops there (`save_failed`). A failed or locally refused `PUT` goes through `permissions_failed`, which prefixes "Saved the role, but not its permissions: " when the `PATCH` went first, and keeps the matrix's edit;
+  - the matrix is editable with `may_edit_permissions` (read-only while saving), and its `enabled` is `setting_enabled(held, stored, …)` against the stored override at each render;
+  - Reset and Save moved into `editor_bar` at the top, shown with Manage Role or Manage Permissions. The old row under the fields is gone. Enter in the name field still saves.
+- `tests/permission_matrix.rs`: 7 new tests (21 in all). `setting_enabled` for held and unheld permissions from each stored setting. `may_grant` is checked against `revolt-permissions`' own `throw_permission_override` for every case over three permissions (8 held sets × 27 × 27 overrides). Each enabled single-step setting is one Stoat grants. There are also multi-step edits, `override_change` and `follow_override`.
+- `tests/roles.rs`: the `RoleForm` literals gain `permissions`, and the unchanged-form test also checks `permissions_change` and `has_changes`. There are 2 new tests: the form starts with the role's permissions, and permissions go in their own request, never the `PATCH`, while `has_changes` counts them.
+- `tests/api_roles.rs`: 3 new wiremock tests. The `PUT` sends exactly `{"permissions":{"allow","deny"}}` with the token and parses the `Server`. A rename plus new permissions are a `PATCH` then a `PUT`, with two mocks at `expect(1)` each. `NotElevated`, `CannotGiveMissingPermissions` and `NotFound` read as their texts.
+- `tests/store_roles.rs`: `saved_role_permissions_then_their_event_are_consistent_and_pinning_follows`.
+
+### Divergences
+- **The store test is in `tests/store_roles.rs`**, not `tests/roles.rs`, because `can_pin` needs channels, which only that fixture has.
+- **The `may_grant` test is checked against Stoat's own code** (`PermissionValue::throw_permission_override`, run with `futures::executor::block_on`) rather than a hand-written table.
+- **A locally refused `PUT`** (the stored override changed meanwhile, so the edit can no longer be granted) toasts "You can't grant permissions you don't have." without sending. With the `PATCH` already done, it gets the "Saved the role, but not its permissions: " prefix.
+- **The combined-save wiremock test drives the client** in the editor's order (`changes` then `edit_role`, then `permissions_change` then `set_role_permissions`) rather than the GPUI editor, which has no headless harness.
+
+### Verification Performed
+- `cargo test --test permission_matrix --test api_roles --test store_roles --test roles`: 21, 19, 14 and 49 passed.
+- Full suite: `cargo test` gave 1,274 passed, 0 failed. `cargo clippy --all-targets -- -D warnings` is clean.
+- Rustfmt drift: `src/ui/chat.rs` 17 and `src/api/client.rs` 3 are unchanged. Every other touched file is clean.
+
+### Manual Validation
+Deferred to the end (batched): deny Send Messages on a role as the owner; the moderator greying; a rename and a permission change in one Save.
+
+## Summary
+
+_Completed: 2026-11-09_
+
+### Chunks Completed
+1. Permission list and read-only matrices (`7dab5a1`)
+2. Edit Everyone's permissions (`1135c76`)
+3. Edit a role's permissions (this commit)
+
+### Divergences
+- Chunk 1: the dev-feature risk didn't apply (`num_enum` was already in the app). `role_lock_notes` was added early. A disabled option's tooltip keeps its name ("Allow: …"). The chosen Deny and Allow are coloured. The `ButtonGroup` has no group `on_click`.
+- Chunk 2: `value_enabled` takes `(held, bit, Setting)`. Live-follow is per permission. The top bar scrolls with the page (no sticky positioning in GPUI).
+- Chunk 3: the store test lives in `tests/store_roles.rs`. `may_grant` is tested against Stoat's own function. A locally refused `PUT` toasts without sending. The combined-save test drives the client.
+
+### Definition of Done
+- [x] Every `ChannelPermission` (35) is listed once, grouped and described, and `every_permission_is_listed_exactly_once` fails if `revolt-permissions` gains one.
+- [x] The Roles page shows for Manage Role or Manage Permissions. Role fields, Create, Delete and dragging need Manage Role; matrices need Manage Permissions.
+- [x] "Everyone" opens the default permissions as checkboxes. Save sends one `PUT …/permissions/default`, only when every allowed bit is held, and the change shows at once.
+- [x] A role's permissions are Deny / Neutral / Allow per permission. Unheld permissions offer only settings no looser than the stored one, and roles at or above the user's rank are read-only (the owner is exempt).
+- [x] The role editor's single Save (in a top bar) sends the upload, the `PATCH` and the `PUT` as needed, applies each at once, and reports a partial failure plainly.
+- [x] Refusals read plainly: `CannotGiveMissingPermissions`, `NotElevated`, `MissingPermission`, `NotFound`.
+- [x] `cargo test` (1,274) and `cargo clippy --all-targets -- -D warnings` pass. No touched file's rustfmt drift grew, and new files are clean.
+- [x] The roadmap links this plan (committed with chunk 1).
+
+### Remaining Manual Steps
+The plan's Manual Tests 1–8 (two accounts and the web client), batched at the end as the user asked: read; Everyone; role; combined save; greying (moderator); access; live changes; themes.

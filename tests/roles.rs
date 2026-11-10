@@ -2,7 +2,7 @@
 //! their locks, role names, the editor's form and who may use it, and
 //! Stoat's refusals in words.
 
-use revolt_permissions::{ChannelPermission, DEFAULT_PERMISSION_SERVER};
+use revolt_permissions::{ChannelPermission, DEFAULT_PERMISSION_SERVER, Override};
 use serde_json::{Value, json};
 use stoat_gpui::api::ApiError;
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
@@ -290,9 +290,12 @@ fn an_unchanged_form_sends_nothing() {
             hoist: true,
             colour: ColourChoice::Hex("#e5484d".into()),
             icon: ProfileImage::Current("f-icon".into()),
+            permissions: Override::default(),
         }
     );
     assert_eq!(RoleForm::of(&role).changes(&role), None);
+    assert_eq!(RoleForm::of(&role).permissions_change(&role), None);
+    assert!(!RoleForm::of(&role).has_changes(&role));
     // Spaces around the name aren't a change.
     let spaced = RoleForm {
         name: " Members ".into(),
@@ -341,6 +344,7 @@ fn an_invalid_name_sends_nothing() {
             hoist: false,
             colour: ColourChoice::None,
             icon: ProfileImage::None,
+            permissions: Override::default(),
         };
         assert!(!form.is_valid());
         assert_eq!(form.changes(&members_role()), None, "{name:?}");
@@ -923,4 +927,40 @@ fn lock_notes_say_what_the_user_cant_change() {
     let both = store_with("u-mod", MANAGE_ROLE | MANAGE_PERMISSIONS);
     assert!(role_lock_notes(&both, "srv", "fans").is_empty());
     assert!(role_lock_notes(&both, "srv", "r-unknown").is_empty());
+}
+
+#[test]
+fn the_form_starts_with_the_roles_permissions() {
+    let mods = store("u-owner").server("srv").unwrap().roles["mods"].clone();
+    assert_eq!(
+        RoleForm::of(&mods).permissions,
+        Override {
+            allow: MANAGE_ROLE,
+            deny: 0
+        }
+    );
+}
+
+#[test]
+fn permissions_go_in_their_own_request_not_the_patch() {
+    let role = members_role();
+    let denied = Override {
+        allow: 0,
+        deny: ChannelPermission::SendMessage as u64,
+    };
+    let form = RoleForm {
+        permissions: denied.clone(),
+        ..RoleForm::of(&role)
+    };
+    assert_eq!(form.changes(&role), None);
+    assert_eq!(form.permissions_change(&role), Some(denied.clone()));
+    assert!(form.has_changes(&role));
+    // With a rename too, the PATCH carries only the name.
+    let renamed = RoleForm {
+        name: "Regulars".into(),
+        ..form
+    };
+    let edit = renamed.changes(&role).unwrap();
+    assert_eq!(edit.name.as_deref(), Some("Regulars"));
+    assert_eq!(renamed.permissions_change(&role), Some(denied));
 }

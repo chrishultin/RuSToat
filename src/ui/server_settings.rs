@@ -14,6 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use revolt_permissions::Override;
 use revolt_result::ErrorType;
 
 use gpui_kit::assets::IconName;
@@ -33,8 +34,9 @@ use crate::api::ApiError;
 use crate::api::models::{Role, Server};
 use crate::links::invite_link;
 use crate::permission_matrix::{
-    Setting, default_change, follow_value, missing_from_default, missing_note, override_of,
-    permissions_error_text, value_enabled,
+    Setting, default_change, follow_override, follow_value, may_grant, missing_from_default,
+    missing_note, override_of, permissions_error_text, setting_enabled, value_enabled,
+    with_setting,
 };
 use crate::permissions::server_permissions;
 use crate::profile_edit::{ImageLimits, ProfileImage};
@@ -43,7 +45,8 @@ use crate::roles::{
     ColourChoice, ROLE_NAME_MAX, RoleDrop, RoleForm, RoleRow, can_manage_permissions,
     can_manage_roles, check_role_name, create_error_text,
     delete_error_text as delete_role_error_text, draggable, edit_error_text, hex_of, may_delete,
-    may_edit, may_reorder, reorder, reorder_error_text, role_lock_notes, role_order, role_rows,
+    may_edit, may_edit_permissions, may_reorder, reorder, reorder_error_text, role_lock_notes,
+    role_order, role_rows,
 };
 use crate::runtime::spawn_io;
 use crate::server_settings::{
@@ -1506,11 +1509,13 @@ impl Render for CreateRoleDialog {
 pub struct BackToRoles;
 
 /// One role's editor, in the Roles page: its name, colour, icon and
-/// hoisting, saved together with one `PATCH` (see [`RoleForm::changes`]),
-/// a new icon uploaded first; "Copy role ID";
-/// and "Delete role…". Untouched fields follow changes made elsewhere. A
-/// role the user can't change (rank) opens read-only, and a bot's can't be
-/// deleted.
+/// hoisting (Manage Role), and its permissions (Manage Permissions), saved
+/// together by one Save at the top: a new icon uploaded first, then one
+/// `PATCH` (see [`RoleForm::changes`]), then one `PUT` (see
+/// [`RoleForm::permissions_change`]); "Copy role ID"; and "Delete role…".
+/// Untouched fields and permissions follow changes made elsewhere. What the
+/// user can't change (rank, or a missing permission) is read-only, and a
+/// bot's role can't be deleted.
 pub struct RoleEditor {
     chat: WeakEntity<ChatView>,
     server: String,
@@ -1519,6 +1524,8 @@ pub struct RoleEditor {
     hoist: bool,
     colour: ColourChoice,
     icon: ImageSlot,
+    /// The permission matrix as edited.
+    permissions: Override,
     /// The colour picker. Only its changes set [`Self::colour`], so a hex
     /// value shown in it never reads as an edit.
     picker: Entity<ColorPickerState>,
@@ -1530,6 +1537,18 @@ pub struct RoleEditor {
     /// Focus the name once the editor is first drawn.
     focus_name: bool,
     _subscriptions: Vec<Subscription>,
+}
+
+/// What the user may do in a role's editor now.
+#[derive(Clone, Copy, Default)]
+struct RoleRights {
+    /// Change its name, colour, icon and hoisting.
+    fields: bool,
+    /// Change its permissions (within [`setting_enabled`]).
+    permissions: bool,
+    delete: bool,
+    /// The permissions the user holds across the server.
+    held: u64,
 }
 
 impl EventEmitter<BackToRoles> for RoleEditor {}
@@ -1567,6 +1586,7 @@ impl RoleEditor {
             hoist: false,
             colour: ColourChoice::None,
             icon: ImageSlot::default(),
+            permissions: Override::default(),
             picker,
             filled: RoleForm::default(),
             saving: None,
@@ -1584,16 +1604,18 @@ impl RoleEditor {
         store.server(&self.server)?.roles.get(&self.role).cloned()
     }
 
-    /// Whether the user may change the role, and delete it, now.
-    fn rights(&self, cx: &App) -> (bool, bool) {
+    /// What the user may do with the role now.
+    fn rights(&self, cx: &App) -> RoleRights {
         let Some(chat) = self.chat.upgrade() else {
-            return (false, false);
+            return RoleRights::default();
         };
         let store = chat.read(cx).store();
-        (
-            may_edit(store, &self.server, &self.role),
-            may_delete(store, &self.server, &self.role),
-        )
+        RoleRights {
+            fields: may_edit(store, &self.server, &self.role),
+            permissions: may_edit_permissions(store, &self.server, &self.role),
+            delete: may_delete(store, &self.server, &self.role),
+            held: server_permissions(store, store.me(), &self.server),
+        }
     }
 
     /// The form as edited.
@@ -1603,33 +1625,46 @@ impl RoleEditor {
             hoist: self.hoist,
             colour: self.colour.clone(),
             icon: self.icon.image.clone(),
+            permissions: self.permissions.clone(),
         }
     }
 
-    /// Whether Save can send the form: the user may change the role, the
-    /// name and icon are fine, something changed, and not already saving.
+    /// Whether Save can send the form: the name and icon are fine, the
+    /// user may change something that changed, and not already saving.
     fn can_save(&self, edited: &RoleForm, cx: &App) -> bool {
+        let rights = self.rights(cx);
         self.saving.is_none()
-            && self.rights(cx).0
             && edited.is_valid()
             && self.icon.problem.is_none()
-            && self
-                .current(cx)
-                .is_some_and(|role| edited.has_changes(&role))
+            && self.current(cx).is_some_and(|role| {
+                (rights.fields && (edited.new_file().is_some() || edited.changes(&role).is_some()))
+                    || (rights.permissions && edited.permissions_change(&role).is_some())
+            })
     }
 
-    /// Fill every field with the role's values.
+    /// Fill every field, and the matrix, with the role's values.
     fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.fill(true, window, cx);
+    }
+
+    /// Fill the fields with the role's values, and the matrix too if
+    /// `permissions`.
+    fn fill(&mut self, permissions: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(role) = self.current(cx) else {
             return;
         };
-        let form = RoleForm::of(&role);
+        let mut form = RoleForm::of(&role);
         self.name.update(cx, |input, cx| {
             input.set_value(form.name.clone(), window, cx)
         });
         self.hoist = form.hoist;
         self.set_colour(form.colour.clone(), window, cx);
         self.icon = slot(form.icon.clone());
+        if permissions {
+            self.permissions = form.permissions.clone();
+        } else {
+            form.permissions = self.filled.permissions.clone();
+        }
         self.filled = form;
         cx.notify();
     }
@@ -1648,9 +1683,9 @@ impl RoleEditor {
         cx.notify();
     }
 
-    /// The role changed (here or elsewhere): untouched fields take its new
-    /// values, edited ones keep theirs. (A deleted role is the page's to
-    /// notice.)
+    /// The role changed (here or elsewhere): untouched fields and
+    /// permissions take its new values, edited ones keep theirs. (A deleted
+    /// role is the page's to notice.)
     fn follow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(role) = self.current(cx) else {
             return;
@@ -1675,6 +1710,11 @@ impl RoleEditor {
         if edited.icon == self.filled.icon && self.icon.problem.is_none() {
             self.icon = slot(now.icon.clone());
         }
+        self.permissions = follow_override(
+            &self.filled.permissions,
+            &self.permissions,
+            &now.permissions,
+        );
         self.filled = now;
         cx.notify();
     }
@@ -1692,10 +1732,12 @@ impl RoleEditor {
         });
     }
 
-    /// Send what changed: upload a new icon first, then one `PATCH` with
-    /// its ID, only if the upload worked. Stoat's answer shows at once, in
-    /// the main window too; a failure says why in a toast, and the form
-    /// keeps the edit.
+    /// Send what changed, in order, each step only if it has something to
+    /// do and the one before worked: upload a new icon, then one `PATCH`
+    /// with the role's fields (and the icon's ID), then one `PUT` with its
+    /// permissions. Stoat's answers show at once, in the main window too.
+    /// A failure says why in a toast (and what was saved, if anything), and
+    /// the form keeps what wasn't saved.
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let edited = self.edited(cx);
         if !self.can_save(&edited, cx) {
@@ -1746,35 +1788,107 @@ impl RoleEditor {
             let Ok(edit) = this.update(cx, |this, cx| {
                 this.saving = Some(Saving::Sending);
                 cx.notify();
-                this.current(cx).and_then(|role| edited.changes(&role))
+                let fields = this.rights(cx).fields;
+                this.current(cx)
+                    .filter(|_| fields)
+                    .and_then(|role| edited.changes(&role))
             }) else {
                 return;
             };
-            let Some(edit) = edit else {
-                this.update(cx, |this, cx| {
-                    this.saving = None;
-                    cx.notify();
-                })
-                .ok();
+            let patched = edit.is_some();
+            if let Some(edit) = edit {
+                let request = spawn_io({
+                    let (client, server, role) = (client.clone(), server.clone(), role.clone());
+                    async move { client.edit_role(&server, &role, &edit).await }
+                });
+                let result = request.await;
+                let saved = this.update_in(cx, |this, window, cx| match result {
+                    Ok(Ok(saved)) => {
+                        let server = this.server.clone();
+                        this.chat
+                            .update(cx, |chat, cx| chat.role_saved(&server, &saved, cx))
+                            .ok();
+                        // The fields are saved; the permissions keep any
+                        // edit until their own answer.
+                        this.fill(false, window, cx);
+                        true
+                    }
+                    failed => {
+                        this.save_failed(failed.map(|result| result.map(|_| ())), window, cx);
+                        false
+                    }
+                });
+                if !matches!(saved, Ok(true)) {
+                    return;
+                }
+            }
+            // Against the role as it is now, as Stoat will check it: `None`
+            // if there's nothing to send, `Some(None)` if Stoat would refuse.
+            let Ok(put) = this.update(cx, |this, cx| {
+                let rights = this.rights(cx);
+                let role = this.current(cx)?;
+                let change = edited
+                    .permissions_change(&role)
+                    .filter(|_| rights.permissions)?;
+                let stored = override_of(role.permissions);
+                Some(may_grant(rights.held, &stored, &change).then_some(change))
+            }) else {
                 return;
             };
-            let request = spawn_io(async move { client.edit_role(&server, &role, &edit).await });
-            let result = request.await;
-            this.update_in(cx, |this, window, cx| match result {
-                Ok(Ok(saved)) => {
-                    this.saving = None;
-                    let server = this.server.clone();
-                    this.chat
-                        .update(cx, |chat, cx| chat.role_saved(&server, &saved, cx))
+            let change = match put {
+                None => {
+                    this.update_in(cx, |this, window, cx| this.saved(window, cx))
                         .ok();
-                    this.reset(window, cx);
-                    window.push_notification(Notification::success("Saved."), cx);
+                    return;
                 }
-                failed => this.save_failed(failed.map(|result| result.map(|_| ())), window, cx),
+                Some(None) => {
+                    this.update_in(cx, |this, window, cx| {
+                        let text = "You can't grant permissions you don't have.".to_string();
+                        this.permissions_failed(patched, text, window, cx)
+                    })
+                    .ok();
+                    return;
+                }
+                Some(Some(change)) => change,
+            };
+            let request = spawn_io({
+                let (server, role) = (server.clone(), role.clone());
+                async move { client.set_role_permissions(&server, &role, &change).await }
+            });
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                let text = match result {
+                    Ok(Ok(saved)) => {
+                        log::info!("saved the permissions of role {role} in {server}");
+                        if let Some(saved) = saved.roles.get(&role) {
+                            this.chat
+                                .update(cx, |chat, cx| chat.role_saved(&server, saved, cx))
+                                .ok();
+                        }
+                        this.saved(window, cx);
+                        return;
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't save the permissions of role {role}: {err:?}");
+                        permissions_error_text(&err)
+                    }
+                    Err(err) => {
+                        log::warn!("role permissions save task failed: {err:?}");
+                        "Couldn't save the permissions.".into()
+                    }
+                };
+                this.permissions_failed(patched, text, window, cx);
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Everything sent was saved: show the role as Stoat has it.
+    fn saved(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.saving = None;
+        self.reset(window, cx);
+        window.push_notification(Notification::success("Saved."), cx);
     }
 
     /// The upload or the `PATCH` failed: say why, and keep what was edited.
@@ -1795,6 +1909,26 @@ impl RoleEditor {
                 log::warn!("role save task failed: {err:?}");
                 "Couldn't save the role.".into()
             }
+        };
+        window.push_notification(Notification::error(text), cx);
+        cx.notify();
+    }
+
+    /// The `PUT` failed, or Stoat would have refused it: say why (and that
+    /// the rest was saved, if the `PATCH` went first), and keep the
+    /// permissions as edited.
+    fn permissions_failed(
+        &mut self,
+        patched: bool,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.saving = None;
+        let text = if patched {
+            format!("Saved the role, but not its permissions: {text}")
+        } else {
+            text
         };
         window.push_notification(Notification::error(text), cx);
         cx.notify();
@@ -1971,7 +2105,23 @@ impl RoleEditor {
     }
 
     /// "Permissions": the role's matrix, Deny / Neutral / Allow each.
-    fn render_permissions(&self, role: &Role, cx: &App) -> AnyElement {
+    /// A permission the user doesn't hold offers only settings no looser
+    /// than the stored one (see [`setting_enabled`]).
+    fn render_permissions(&self, role: &Role, cx: &Context<Self>) -> AnyElement {
+        let rights = self.rights(cx);
+        let stored = override_of(role.permissions);
+        let view = cx.entity().downgrade();
+        let matrix =
+            PermissionMatrix::new("role-permission", Mode::Overrides(self.permissions.clone()))
+                .read_only(!rights.permissions || self.saving.is_some())
+                .enabled(move |bit, setting| setting_enabled(rights.held, &stored, bit, setting))
+                .on_change(move |bit, setting, _, cx| {
+                    view.update(cx, |this, cx| {
+                        this.permissions = with_setting(this.permissions.clone(), bit, setting);
+                        cx.notify();
+                    })
+                    .ok();
+                });
         v_flex()
             .w_full()
             .gap_1()
@@ -1979,13 +2129,7 @@ impl RoleEditor {
             .border_t_1()
             .border_color(cx.theme().border)
             .child(section_heading("Permissions"))
-            .child(
-                PermissionMatrix::new(
-                    "role-permission",
-                    Mode::Overrides(override_of(role.permissions)),
-                )
-                .read_only(true),
-            )
+            .child(matrix)
             .into_any_element()
     }
 }
@@ -2018,11 +2162,32 @@ impl Render for RoleEditor {
         let Some(role) = self.current(cx) else {
             return div().into_any_element();
         };
-        let (editable, deletable) = self.rights(cx);
+        let rights = self.rights(cx);
+        let editable = rights.fields;
         let edited = self.edited(cx);
         let saving = self.saving.is_some();
         let changed = edited != self.filled || self.icon.problem.is_some();
         let can_save = self.can_save(&edited, cx);
+        let actions = (rights.fields || rights.permissions).then(|| {
+            [
+                Button::new("role-reset")
+                    .label("Reset")
+                    .outline()
+                    .small()
+                    .disabled(!changed || saving)
+                    .on_click(cx.listener(|this, _, window, cx| this.reset(window, cx))),
+                Button::new("role-save")
+                    .label(match self.saving {
+                        Some(Saving::Uploading) => "Uploading…",
+                        _ => "Save",
+                    })
+                    .primary()
+                    .small()
+                    .loading(saving)
+                    .disabled(!can_save)
+                    .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
+            ]
+        });
         let icon = self.render_icon(editable, cx);
         let colour = role.colour.as_deref().and_then(solid_colour);
         let muted = cx.theme().muted_foreground;
@@ -2059,16 +2224,7 @@ impl Render for RoleEditor {
         v_flex()
             .w_full()
             .gap_4()
-            .child(
-                h_flex().child(
-                    Button::new("roles-back")
-                        .label("Roles")
-                        .icon(IconName::ChevronLeft)
-                        .ghost()
-                        .small()
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(BackToRoles))),
-                ),
-            )
+            .child(editor_bar(actions, cx))
             .child(
                 h_flex()
                     .gap_2()
@@ -2094,35 +2250,6 @@ impl Render for RoleEditor {
             ))
             .children(icon)
             .child(hoist)
-            .when(editable, |this| {
-                this.child(
-                    h_flex()
-                        .gap_2()
-                        .justify_end()
-                        .child(
-                            Button::new("role-reset")
-                                .label("Reset")
-                                .outline()
-                                .small()
-                                .disabled(!changed || saving)
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.reset(window, cx)),
-                                ),
-                        )
-                        .child(
-                            Button::new("role-save")
-                                .label(match self.saving {
-                                    Some(Saving::Uploading) => "Uploading…",
-                                    _ => "Save",
-                                })
-                                .primary()
-                                .small()
-                                .loading(saving)
-                                .disabled(!can_save)
-                                .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
-                        ),
-                )
-            })
             .child(self.render_permissions(&role, cx))
             .child(
                 h_flex()
@@ -2138,7 +2265,7 @@ impl Render for RoleEditor {
                             .small()
                             .on_click(cx.listener(|this, _, window, cx| this.copy_id(window, cx))),
                     )
-                    .when(deletable, |this| {
+                    .when(rights.delete, |this| {
                         this.child(
                             Button::new("role-delete")
                                 .label("Delete role…")

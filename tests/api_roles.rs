@@ -2,14 +2,17 @@
 //! page: `POST /servers/{id}/roles` (create one), `PATCH
 //! /servers/{id}/roles/{role}` (edit one, after uploading its icon to the
 //! file server), `DELETE /servers/{id}/roles/{role}` (delete one),
-//! `PATCH /servers/{id}/roles/ranks` (reorder them) and
+//! `PATCH /servers/{id}/roles/ranks` (reorder them),
+//! `PUT /servers/{id}/permissions/{role}` (a role's permissions) and
 //! `PUT /servers/{id}/permissions/default` (Everyone's permissions).
 
+use revolt_permissions::{ChannelPermission, Override};
 use revolt_result::ErrorType;
 use serde_json::json;
 use stoat_gpui::api::StoatClient;
-use stoat_gpui::api::models::DataEditRole;
+use stoat_gpui::api::models::{DataEditRole, Role};
 use stoat_gpui::permission_matrix::permissions_error_text;
+use stoat_gpui::roles::RoleForm;
 use stoat_gpui::roles::{
     create_error_text, delete_error_text, edit_error_text, empty_role_edit, reorder_error_text,
 };
@@ -422,4 +425,150 @@ async fn granting_everyone_a_permission_you_lack_is_refused_in_words() {
         permissions_error_text(&err),
         "You can't grant permissions you don't have."
     );
+}
+
+const SEND: u64 = ChannelPermission::SendMessage as u64;
+const REACT: u64 = ChannelPermission::React as u64;
+
+/// `srv` as Stoat answers a permissions `PUT`, with `r1` allowing `allow`
+/// and denying `deny`.
+fn server_with_r1(name: &str, allow: u64, deny: u64) -> serde_json::Value {
+    json!({
+        "_id": "srv", "owner": "u-me", "name": "Lounge", "channels": [],
+        "default_permissions": 0, "approximate_member_count": 1,
+        "roles": {
+            "r1": { "_id": "r1", "name": name, "rank": 0, "permissions": { "a": allow, "d": deny } }
+        }
+    })
+}
+
+#[tokio::test]
+async fn a_roles_permissions_are_sent_as_allow_and_deny() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/servers/srv/permissions/r1"))
+        .and(header("x-session-token", "tok"))
+        .and(body_json(
+            json!({ "permissions": { "allow": REACT, "deny": SEND } }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(server_with_r1("Mods", REACT, SEND)))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let permissions = Override {
+        allow: REACT,
+        deny: SEND,
+    };
+    let saved = client(&server)
+        .set_role_permissions("srv", "r1", &permissions)
+        .await
+        .unwrap();
+    let role = &saved.roles["r1"];
+    assert_eq!(
+        (role.permissions.a, role.permissions.d),
+        (REACT as i64, SEND as i64)
+    );
+}
+
+#[tokio::test]
+async fn a_rename_and_new_permissions_are_a_patch_then_a_put() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/servers/srv/roles/r1"))
+        .and(body_json(json!({ "name": "Regulars" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "_id": "r1", "name": "Regulars", "rank": 0, "permissions": { "a": 0, "d": 0 }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/servers/srv/permissions/r1"))
+        .and(body_json(
+            json!({ "permissions": { "allow": REACT, "deny": 0 } }),
+        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(server_with_r1("Regulars", REACT, 0)),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let role: Role = serde_json::from_value(json!({
+        "_id": "r1", "name": "Mods", "rank": 0, "permissions": { "a": 0, "d": 0 }
+    }))
+    .unwrap();
+    let form = RoleForm {
+        name: "Regulars".into(),
+        permissions: Override {
+            allow: REACT,
+            deny: 0,
+        },
+        ..RoleForm::of(&role)
+    };
+    // As the role editor's Save sends them: the PATCH first, then the PUT.
+    let client = client(&server);
+    let patched = client
+        .edit_role("srv", "r1", &form.changes(&role).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(patched.name, "Regulars");
+    let change = form.permissions_change(&patched).unwrap();
+    let saved = client
+        .set_role_permissions("srv", "r1", &change)
+        .await
+        .unwrap();
+    let saved = &saved.roles["r1"];
+    assert_eq!(saved.name, "Regulars");
+    assert_eq!(saved.permissions.a, REACT as i64);
+}
+
+#[tokio::test]
+async fn role_permission_refusals_read_plainly() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/servers/srv/permissions/r-high"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({ "type": "NotElevated" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/servers/srv/permissions/r1"))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .set_body_json(json!({ "type": "CannotGiveMissingPermissions" })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/servers/srv/permissions/r-gone"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({ "type": "NotFound" })))
+        .mount(&server)
+        .await;
+
+    let client = client(&server);
+    let allow = Override {
+        allow: SEND,
+        deny: 0,
+    };
+    let text = |role: &'static str| {
+        let client = &client;
+        let allow = &allow;
+        async move {
+            let err = client
+                .set_role_permissions("srv", role, allow)
+                .await
+                .unwrap_err();
+            permissions_error_text(&err)
+        }
+    };
+    assert_eq!(
+        text("r-high").await,
+        "That role ranks at or above your highest role."
+    );
+    assert_eq!(
+        text("r1").await,
+        "You can't grant permissions you don't have."
+    );
+    assert_eq!(text("r-gone").await, "That role was deleted.");
 }

@@ -338,3 +338,35 @@ pub fn permissions_error_text(err: &ApiError) -> String {
         _ => error_text(err, "Couldn't save the permissions."),
     }
 }
+
+/// Whether the user, holding `held`, may set `bit` to `setting` in an
+/// override whose stored value is `stored`: any setting for a permission
+/// they hold; for one they don't, only settings no looser than the stored
+/// one (Deny < Neutral < Allow). So they can always revoke.
+pub fn setting_enabled(held: u64, stored: &Override, bit: u64, setting: Setting) -> bool {
+    held & bit == bit || setting <= setting_of(stored, bit)
+}
+
+/// Whether Stoat would take `edited` in place of `stored` from a user
+/// holding `held` (`throw_permission_override`): they hold every
+/// permission newly allowed, and every one no longer denied.
+pub fn may_grant(held: u64, stored: &Override, edited: &Override) -> bool {
+    let holds = |bits: u64| held & bits == bits;
+    holds(!stored.allow & edited.allow) && holds(stored.deny & !edited.deny)
+}
+
+/// The override to send, if `edited` differs from `stored`.
+pub fn override_change(stored: &Override, edited: &Override) -> Option<Override> {
+    (stored != edited).then(|| edited.clone())
+}
+
+/// An override as edited, after the stored one changed from `filled` to
+/// `now` (elsewhere): permissions the user changed keep their edit, the
+/// rest follow.
+pub fn follow_override(filled: &Override, edited: &Override, now: &Override) -> Override {
+    let touched = (filled.allow ^ edited.allow) | (filled.deny ^ edited.deny);
+    Override {
+        allow: (now.allow & !touched) | (edited.allow & touched),
+        deny: (now.deny & !touched) | (edited.deny & touched),
+    }
+}

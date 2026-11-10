@@ -1294,6 +1294,27 @@ impl StoatClient {
         .await
     }
 
+    /// `PUT /servers/{server}/permissions/{role}`: a role's allow and deny
+    /// bits (Manage Permissions, and the role ranking below the user's best
+    /// one, else `NotElevated`). The user must hold every permission newly
+    /// allowed or no longer denied (`CannotGiveMissingPermissions`). Stoat
+    /// answers with the server; `ServerRoleUpdate` follows.
+    pub async fn set_role_permissions(
+        &self,
+        server: &str,
+        role: &str,
+        permissions: &revolt_permissions::Override,
+    ) -> Result<Server, ApiError> {
+        self.send(
+            Method::PUT,
+            &format!("/servers/{server}/permissions/{role}"),
+            Some(&revolt_models::v0::DataSetServerRolePermission {
+                permissions: permissions.clone(),
+            }),
+        )
+        .await
+    }
+
     /// `PUT /servers/{server}/permissions/default`: the server's default
     /// permissions, which every member has (Manage Permissions). The user
     /// must hold every permission `permissions` allows, not just the ones

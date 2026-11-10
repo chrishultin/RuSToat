@@ -14,11 +14,12 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use gpui_kit::{Hsla, Rgba};
-use revolt_permissions::ChannelPermission;
+use revolt_permissions::{ChannelPermission, Override};
 use revolt_result::ErrorType;
 
 use crate::api::ApiError;
 use crate::api::models::{DataEditRole, FieldsRole, PartialRole, Role};
+use crate::permission_matrix::{override_change, override_of};
 use crate::permissions::{RoleLock, acting_rank, has, server_permissions};
 use crate::profile_edit::{ProfileImage, error_text};
 use crate::rail::parse_colour;
@@ -157,6 +158,9 @@ pub struct RoleForm {
     pub colour: ColourChoice,
     /// Uploaded with the tag `icons`, within the server icon's limit.
     pub icon: ProfileImage,
+    /// Allow and deny bits, sent separately from the rest (see
+    /// [`RoleForm::permissions_change`]).
+    pub permissions: Override,
 }
 
 /// A role's colour as the editor holds it.
@@ -222,6 +226,7 @@ impl RoleForm {
             icon: role.icon.as_ref().map_or(ProfileImage::None, |icon| {
                 ProfileImage::Current(icon.id.clone())
             }),
+            permissions: override_of(role.permissions),
         }
     }
 
@@ -230,10 +235,19 @@ impl RoleForm {
         self.icon.new_file()
     }
 
-    /// Whether Save has anything to do: a change to send, or an icon to
-    /// upload first.
+    /// Whether Save has anything to do: a change to send (the role's
+    /// fields or its permissions), or an icon to upload first.
     pub fn has_changes(&self, role: &Role) -> bool {
-        self.new_file().is_some() || self.changes(role).is_some()
+        self.new_file().is_some()
+            || self.changes(role).is_some()
+            || self.permissions_change(role).is_some()
+    }
+
+    /// The `PUT /servers/{id}/permissions/{role}` that gives `role` this
+    /// form's permissions, if they changed. Stoat takes them separately
+    /// from the `PATCH` ([`Self::changes`]), with Manage Permissions.
+    pub fn permissions_change(&self, role: &Role) -> Option<Override> {
+        override_change(&override_of(role.permissions), &self.permissions)
     }
 
     /// Whether the name is 1 to [`ROLE_NAME_MAX`] characters (trimmed), so
@@ -248,8 +262,9 @@ impl RoleForm {
     /// never sent: it's only ever the role's own, unchanged. A picked icon
     /// is left out until it's uploaded (and then it's
     /// [`ProfileImage::Current`] with its new ID, which replaces the old
-    /// one without a remove). `None` when nothing changed, or the form
-    /// isn't valid.
+    /// one without a remove). Permissions are never in it: they're
+    /// [`Self::permissions_change`]. `None` when nothing changed, or the
+    /// form isn't valid.
     pub fn changes(&self, role: &Role) -> Option<DataEditRole> {
         let name = check_role_name(&self.name)?;
         let mut edit = empty_role_edit();
