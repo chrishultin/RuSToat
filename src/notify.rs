@@ -172,13 +172,20 @@ impl NotificationSettings {
                 .filter_map(|(id, level)| Some((id.clone(), Level::parse(level.as_str()?)?)))
                 .collect()
         };
+        // As the web client's `clean()`: a mute without `until` lasts until
+        // unmuted, and one whose `until` isn't a number isn't a mute.
         let mutes = |key: &str| -> HashMap<String, Option<i64>> {
             raw.get(key)
                 .and_then(Value::as_object)
                 .into_iter()
                 .flatten()
-                .filter(|(_, mute)| mute.is_object())
-                .map(|(id, mute)| (id.clone(), mute.get("until").and_then(Value::as_i64)))
+                .filter_map(|(id, mute)| {
+                    let until = match mute.as_object()?.get("until") {
+                        None => None,
+                        Some(until) => Some(until.as_f64()? as i64),
+                    };
+                    Some((id.clone(), until))
+                })
                 .collect()
         };
         NotificationSettings {
@@ -572,6 +579,28 @@ mod tests {
             !settings.is_muted("c-junk", None, 0),
             "non-object mute ignored"
         );
+    }
+
+    #[test]
+    fn mute_ends_read_as_the_web_client_reads_them() {
+        let settings = NotificationSettings::parse(
+            r#"{
+                "channel_mutes": {
+                    "c-null": { "until": null },
+                    "c-text": { "until": "soon" },
+                    "c-float": { "until": 2000.5 },
+                    "c-extra": { "until": 2000, "by": "web" }
+                }
+            }"#,
+        );
+        // An end that isn't a number isn't a mute, rather than one forever.
+        assert!(!settings.is_muted("c-null", None, 0));
+        assert!(!settings.is_muted("c-text", None, 0));
+        // A fractional end is still a time.
+        assert!(settings.is_muted("c-float", None, 1000));
+        assert!(!settings.is_muted("c-float", None, 3000));
+        assert!(settings.is_muted("c-extra", None, 1000));
+        assert_eq!(settings.next_mute_expiry(0), Some(2000));
     }
 
     #[test]

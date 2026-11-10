@@ -1753,20 +1753,23 @@ impl ChatStore {
         }
     }
 
-    /// Unread state for the Home button: open DMs and groups. Each friend
-    /// request waiting for the user counts as a mention (with no unread dot).
+    /// Unread state for the Home button: open DMs and groups, but not muted
+    /// ones (which show their mentions only in the list, as server channels
+    /// do). Each friend request waiting for the user counts as a mention
+    /// (with no unread dot).
     pub fn home_summary(&self) -> (bool, usize) {
         let requests = crate::friends::incoming_count(self);
         self.home_channels()
             .iter()
+            .filter(|c| !c.muted)
             .fold((false, requests), |(unread, mentions), c| {
                 (unread || c.unread, mentions + c.mentions)
             })
     }
 
     /// The whole account, for its switcher button: whether anything shows an
-    /// unread dot (Home or any server), and all unread mentions. Muted
-    /// channels add mentions but no dot, as on the rail.
+    /// unread dot (Home or any server), and all unread mentions, as Home and
+    /// the rail count them (so a muted channel adds neither).
     pub fn account_summary(&self) -> (bool, usize) {
         self.servers()
             .iter()
@@ -3611,9 +3614,16 @@ impl ChatStore {
             matches!(self.channels.get(*id), Some(Channel::TextChannel { .. }))
                 && self.shows_channel(id)
         });
+        // As the web client: a mute (the server's or the channel's) hides
+        // the dot, and a channel's own mute keeps its mentions off the
+        // badge. The server's mute doesn't: mentions are aimed at the user.
         let (unread, mentions) = visible.fold((false, 0), |(unread, mentions), id| {
             let shows_dot = self.is_unread(id) && !self.is_muted(id);
-            (unread || shows_dot, mentions + self.mention_count(id))
+            let counted = match self.channel_mute_until(id) {
+                Some(_) => 0,
+                None => self.mention_count(id),
+            };
+            (unread || shows_dot, mentions + counted)
         });
         Some(ServerEntry {
             id: s.id.clone(),
