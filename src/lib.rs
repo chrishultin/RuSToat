@@ -27,6 +27,7 @@ pub mod moderation;
 pub mod nav;
 pub mod media;
 pub mod notify;
+pub mod permission_matrix;
 pub mod permissions;
 pub mod places;
 pub mod prefs;

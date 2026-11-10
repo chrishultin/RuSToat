@@ -140,9 +140,10 @@ Some milestones lay foundations that later ones reuse. When the earlier one's pl
 - This needs `ServerRoleRanksUpdate` events, as live role edits (milestone 7) already handle
 - A Roles page in milestone 23's Server Settings window: the list, and a role's editor in the same page; drag to reorder
 
-### Milestone 25: Roles editor, part 2: permissions (M)
+### Milestone 25: Roles editor, part 2: permissions (M). Plan: [`role-permissions.md`](role-permissions.md)
 - A permission matrix for a role, and for the server's default permissions, built from `revolt-permissions`' list of permissions
 - Greys out what you can't grant
+- Exactly Stoat's grant rule: an unheld permission can only be made stricter on a role, and must be off for Everyone. The Roles page also shows for Manage Permissions. One Save for a role's fields and permissions. The matrix is reusable for milestone 27
 
 ### Milestone 26: Channel settings and order (M)
 - Channel overview: name, description, icon, slowmode, mature flag

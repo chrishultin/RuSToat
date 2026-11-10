@@ -16,6 +16,7 @@ use stoat_gpui::store::ChatStore;
 const MANAGE_SERVER: u64 = ChannelPermission::ManageServer as u64;
 const BAN: u64 = ChannelPermission::BanMembers as u64;
 const MANAGE_ROLE: u64 = ChannelPermission::ManageRole as u64;
+const MANAGE_PERMISSIONS: u64 = ChannelPermission::ManagePermissions as u64;
 
 fn user(id: &str) -> Value {
     json!({
@@ -33,11 +34,12 @@ fn member(user: &str, roles: &[&str]) -> Value {
 }
 
 /// `srv`, owned by `u-owner`: `u-admin` may manage it, `u-banner` may only
-/// ban, `u-roler` may only manage roles, and `u-plain` has no roles.
+/// ban, `u-roler` may only manage roles, `u-permer` may only manage
+/// permissions, and `u-plain` has no roles.
 /// `u-gone`'s membership isn't known.
 fn store(me: &str) -> ChatStore {
     let users: Vec<Value> = [
-        "u-owner", "u-admin", "u-banner", "u-roler", "u-plain", "u-gone",
+        "u-owner", "u-admin", "u-banner", "u-roler", "u-permer", "u-plain", "u-gone",
     ]
     .map(user)
     .into();
@@ -54,7 +56,8 @@ fn store(me: &str) -> ChatStore {
             "roles": {
                 "admin": { "_id": "admin", "name": "Admin", "rank": 0, "permissions": { "a": MANAGE_SERVER, "d": 0 } },
                 "banner": { "_id": "banner", "name": "Banner", "rank": 1, "permissions": { "a": BAN, "d": 0 } },
-                "roler": { "_id": "roler", "name": "Roler", "rank": 2, "permissions": { "a": MANAGE_ROLE, "d": 0 } }
+                "roler": { "_id": "roler", "name": "Roler", "rank": 2, "permissions": { "a": MANAGE_ROLE, "d": 0 } },
+                "permer": { "_id": "permer", "name": "Permer", "rank": 3, "permissions": { "a": MANAGE_PERMISSIONS, "d": 0 } }
             }
         }],
         "channels": [
@@ -67,6 +70,7 @@ fn store(me: &str) -> ChatStore {
             member("u-admin", &["admin"]),
             member("u-banner", &["banner"]),
             member("u-roler", &["roler"]),
+            member("u-permer", &["permer"]),
             member("u-plain", &[]),
         ],
     });
@@ -121,6 +125,18 @@ fn manage_role_shows_only_roles() {
         }
     );
     assert!(access.any());
+}
+
+#[test]
+fn manage_permissions_also_shows_roles() {
+    let access = access(&store("u-permer"), "srv");
+    assert_eq!(
+        access,
+        Access {
+            roles: true,
+            ..Access::default()
+        }
+    );
 }
 
 #[test]

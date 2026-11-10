@@ -7,20 +7,22 @@
 //! Stoat's rules (0.16.2): every role route needs Manage Role, and a role
 //! may be edited or deleted only if it ranks below the user's best role
 //! (the owner outranks everyone). A bot's role can be edited but not
-//! deleted.
+//! deleted. A role's permissions need Manage Permissions instead, with the
+//! same rank rule.
 
 use std::collections::HashSet;
 use std::path::Path;
 
 use gpui_kit::{Hsla, Rgba};
+use revolt_permissions::ChannelPermission;
 use revolt_result::ErrorType;
 
 use crate::api::ApiError;
 use crate::api::models::{DataEditRole, FieldsRole, PartialRole, Role};
-use crate::permissions::{RoleLock, acting_rank};
+use crate::permissions::{RoleLock, acting_rank, has, server_permissions};
 use crate::profile_edit::{ProfileImage, error_text};
 use crate::rail::parse_colour;
-use crate::server_settings::{access, image_change};
+use crate::server_settings::image_change;
 use crate::store::{ChatStore, solid_colour};
 
 /// The longest role name Stoat takes, in characters.
@@ -285,17 +287,81 @@ pub fn empty_role_edit() -> DataEditRole {
     }
 }
 
+/// Whether the user holds `permission` across `server`: its owner, or a
+/// member (once their membership is known) whose roles give it.
+fn holds(store: &ChatStore, server: &str, permission: ChannelPermission) -> bool {
+    let me = store.me();
+    let Some(known) = store.server(server) else {
+        return false;
+    };
+    (known.owner == me || store.member(server, me).is_some())
+        && has(server_permissions(store, me, server), permission)
+}
+
+/// Whether the user may create, edit, delete and reorder `server`'s roles
+/// at all (Manage Role). Which roles is [`may_edit`]'s to say.
+pub fn can_manage_roles(store: &ChatStore, server: &str) -> bool {
+    holds(store, server, ChannelPermission::ManageRole)
+}
+
+/// Whether the user may change permissions on `server` at all (Manage
+/// Permissions): its default permissions, and roles' permissions where
+/// [`may_edit_permissions`] allows.
+pub fn can_manage_permissions(store: &ChatStore, server: &str) -> bool {
+    holds(store, server, ChannelPermission::ManagePermissions)
+}
+
+/// `role` on `server`, if both are known, and whether it ranks below the
+/// user's best role (always, for the owner).
+fn below_us<'a>(store: &'a ChatStore, server: &str, role: &str) -> Option<(&'a Role, bool)> {
+    let role = store.server(server)?.roles.get(role)?;
+    Some((role, role.rank > acting_rank(store, server)))
+}
+
 /// Whether the user may edit `role` on `server`, as Stoat checks: Manage
 /// Role, and the role ranking below their best one (the owner may edit
 /// any). A bot's role may be edited.
 pub fn may_edit(store: &ChatStore, server: &str, role: &str) -> bool {
-    let Some(role) = store
-        .server(server)
-        .and_then(|server| server.roles.get(role))
-    else {
-        return false;
+    below_us(store, server, role).is_some_and(|(_, below)| below) && can_manage_roles(store, server)
+}
+
+/// Whether the user may change `role`'s permissions on `server`, as Stoat
+/// checks: Manage Permissions, and the role ranking below their best one
+/// (the owner may change any). A bot's role may be changed. Which settings
+/// they may choose is the grant rule's to say.
+pub fn may_edit_permissions(store: &ChatStore, server: &str, role: &str) -> bool {
+    below_us(store, server, role).is_some_and(|(_, below)| below)
+        && can_manage_permissions(store, server)
+}
+
+/// Why the role editor can't change some or all of `role`, a line each:
+/// its rank (which locks everything), a missing Manage Role or Manage
+/// Permissions (which lock its fields or its permissions), or a bot's
+/// role (which can't be deleted). Empty when nothing's locked.
+pub fn role_lock_notes(store: &ChatStore, server: &str, role: &str) -> Vec<&'static str> {
+    let Some((role, below)) = below_us(store, server, role) else {
+        return Vec::new();
     };
-    access(store, server).roles && role.rank > acting_rank(store, server)
+    if !below {
+        return vec!["This role ranks at or above your highest role, so you can't change it."];
+    }
+    let mut notes = Vec::new();
+    let roles = can_manage_roles(store, server);
+    if !roles {
+        notes.push(
+            "You don't have Manage Roles, so you can't change this role's name, colour, icon \
+             or hoisting.",
+        );
+    }
+    if !can_manage_permissions(store, server) {
+        notes.push(
+            "You don't have Manage Permissions, so you can't change this role's permissions.",
+        );
+    }
+    if roles && role.owner.is_some() {
+        notes.push("A bot manages this role. You can edit it, but not delete it.");
+    }
+    notes
 }
 
 /// Whether the user may delete `role` on `server`: as [`may_edit`], and not
@@ -378,7 +444,7 @@ pub fn may_reorder(store: &ChatStore, server: &str, old: &[String], new: &[Strin
         return false;
     };
     let unique: HashSet<&String> = new.iter().collect();
-    if !access(store, server).roles
+    if !can_manage_roles(store, server)
         || new.len() != known.roles.len()
         || unique.len() != new.len()
         || !known.roles.keys().all(|id| unique.contains(id))

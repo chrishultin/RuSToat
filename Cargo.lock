@@ -7042,6 +7042,7 @@ checksum = "bf16f929a973f897889611b3223e02d7960d330251c1ceccb30a436eac556b54"
 dependencies = [
  "async-trait",
  "auto_ops",
+ "num_enum",
  "once_cell",
  "revolt-result",
  "schemars 0.8.22",

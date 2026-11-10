@@ -236,6 +236,11 @@ mod tests {
             IconName::Crown,
             IconName::Lock,
             IconName::Plus,
+            IconName::Users,
+            // The permission matrix's Deny / Neutral / Allow.
+            IconName::Close,
+            IconName::Minus,
+            IconName::Check,
         ] {
             let path = icon.path();
             assert!(AppAssets.load(&path).unwrap().is_some(), "{path} missing");

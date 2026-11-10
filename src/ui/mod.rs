@@ -16,6 +16,7 @@ pub mod login;
 pub mod markup;
 pub mod math;
 pub mod moderation_dialogs;
+pub mod permission_matrix;
 pub mod profile_card;
 pub mod profile_editor;
 pub mod report_dialog;

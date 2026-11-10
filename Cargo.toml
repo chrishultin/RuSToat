@@ -96,6 +96,10 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
 
 [dev-dependencies]
 wiremock = "0.6"
+# Trying every bit as a `ChannelPermission` (tests/permission_matrix.rs), so
+# the permission list can't miss one. With resolver 2, the feature (and its
+# `num_enum`, already in the lock file) only reaches test builds.
+revolt-permissions = { version = "=0.16.2", default-features = false, features = ["try-from-primitive"] }
 # A scratch directory for the account list file tests. Already in the tree.
 tempfile = "3"
 # Rendering the app icon's SVG to PNGs (examples/render_icon.rs). The version

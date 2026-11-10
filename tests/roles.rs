@@ -10,13 +10,15 @@ use stoat_gpui::api::models::{FieldsRole, PartialRole, Role};
 use stoat_gpui::permissions::RoleLock;
 use stoat_gpui::profile_edit::ProfileImage;
 use stoat_gpui::roles::{
-    ColourChoice, ROLE_NAME_MAX, RoleDrop, RoleForm, RoleRow, check_role_name, create_error_text,
-    delete_error_text, draggable, edit_error_text, empty_role_edit, hex_of, may_delete, may_edit,
-    may_reorder, reorder, reorder_error_text, role_order, role_rows, role_update,
+    ColourChoice, ROLE_NAME_MAX, RoleDrop, RoleForm, RoleRow, can_manage_permissions,
+    can_manage_roles, check_role_name, create_error_text, delete_error_text, draggable,
+    edit_error_text, empty_role_edit, hex_of, may_delete, may_edit, may_edit_permissions,
+    may_reorder, reorder, reorder_error_text, role_lock_notes, role_order, role_rows, role_update,
 };
 use stoat_gpui::store::ChatStore;
 
 const MANAGE_ROLE: u64 = ChannelPermission::ManageRole as u64;
+const MANAGE_PERMISSIONS: u64 = ChannelPermission::ManagePermissions as u64;
 
 fn user(id: &str) -> Value {
     json!({
@@ -41,8 +43,13 @@ fn role(id: &str, name: &str, rank: i64) -> Value {
 /// (Manage Role, held by `u-mod`), `bot` (a bot's), `members` (red,
 /// hoisted, with an icon) and `fans` (a gradient). `u-plain` has none.
 fn store(me: &str) -> ChatStore {
+    store_with(me, MANAGE_ROLE)
+}
+
+/// [`store`], with `mods` allowing `permissions`.
+fn store_with(me: &str, permissions: u64) -> ChatStore {
     let mut mods = role("mods", "Mods", 1);
-    mods["permissions"]["a"] = json!(MANAGE_ROLE);
+    mods["permissions"]["a"] = json!(permissions);
     let mut bot = role("bot", "Bot", 2);
     bot["owner"] = json!("u-bot");
     let mut members = role("members", "Members", 3);
@@ -832,4 +839,88 @@ fn a_refused_order_is_put_back() {
     store.apply_role_ranks("srv", &new);
     store.apply_role_ranks("srv", &old);
     assert_eq!(role_order(&store, "srv"), start());
+}
+
+#[test]
+fn who_may_manage_roles_and_permissions() {
+    let owner = store("u-owner");
+    assert!(can_manage_roles(&owner, "srv"));
+    assert!(can_manage_permissions(&owner, "srv"));
+    let roles_only = store_with("u-mod", MANAGE_ROLE);
+    assert!(can_manage_roles(&roles_only, "srv"));
+    assert!(!can_manage_permissions(&roles_only, "srv"));
+    let permissions_only = store_with("u-mod", MANAGE_PERMISSIONS);
+    assert!(!can_manage_roles(&permissions_only, "srv"));
+    assert!(can_manage_permissions(&permissions_only, "srv"));
+    let plain = store("u-plain");
+    assert!(!can_manage_roles(&plain, "srv"));
+    assert!(!can_manage_permissions(&plain, "srv"));
+    assert!(!can_manage_permissions(&owner, "srv-unknown"));
+}
+
+#[test]
+fn the_owner_may_edit_any_roles_permissions() {
+    let store = store("u-owner");
+    for role in ["admin", "mods", "bot", "members", "fans"] {
+        assert!(may_edit_permissions(&store, "srv", role), "{role}");
+    }
+    assert!(!may_edit_permissions(&store, "srv", "r-unknown"));
+}
+
+#[test]
+fn a_moderator_may_edit_permissions_only_below_their_role() {
+    let store = store_with("u-mod", MANAGE_PERMISSIONS);
+    // Above, and their own.
+    assert!(!may_edit_permissions(&store, "srv", "admin"));
+    assert!(!may_edit_permissions(&store, "srv", "mods"));
+    // Below, a bot's role too.
+    for role in ["bot", "members", "fans"] {
+        assert!(may_edit_permissions(&store, "srv", role), "{role}");
+    }
+    // Manage Role alone isn't enough.
+    let roles_only = store_with("u-mod", MANAGE_ROLE);
+    assert!(!may_edit_permissions(&roles_only, "srv", "members"));
+}
+
+#[test]
+fn manage_permissions_alone_edits_no_roles_fields_and_moves_nothing() {
+    let store = store_with("u-mod", MANAGE_PERMISSIONS);
+    for role in ["members", "fans", "bot"] {
+        assert!(!may_edit(&store, "srv", role), "{role}");
+        assert!(!may_delete(&store, "srv", role), "{role}");
+        assert!(!draggable(&store, "srv", role), "{role}");
+    }
+    let swapped = ids(&["admin", "mods", "bot", "fans", "members"]);
+    assert!(!may_reorder(&store, "srv", &start(), &swapped));
+}
+
+#[test]
+fn lock_notes_say_what_the_user_cant_change() {
+    let owner = store("u-owner");
+    assert!(role_lock_notes(&owner, "srv", "members").is_empty());
+    assert_eq!(
+        role_lock_notes(&owner, "srv", "bot"),
+        ["A bot manages this role. You can edit it, but not delete it."]
+    );
+    let roles_only = store_with("u-mod", MANAGE_ROLE);
+    assert_eq!(
+        role_lock_notes(&roles_only, "srv", "admin"),
+        ["This role ranks at or above your highest role, so you can't change it."]
+    );
+    assert_eq!(
+        role_lock_notes(&roles_only, "srv", "members"),
+        ["You don't have Manage Permissions, so you can't change this role's permissions."]
+    );
+    let permissions_only = store_with("u-mod", MANAGE_PERMISSIONS);
+    // Deleting needs Manage Role anyway, so a bot's role says nothing more.
+    assert_eq!(
+        role_lock_notes(&permissions_only, "srv", "bot"),
+        [
+            "You don't have Manage Roles, so you can't change this role's name, colour, icon \
+             or hoisting."
+        ]
+    );
+    let both = store_with("u-mod", MANAGE_ROLE | MANAGE_PERMISSIONS);
+    assert!(role_lock_notes(&both, "srv", "fans").is_empty());
+    assert!(role_lock_notes(&both, "srv", "r-unknown").is_empty());
 }

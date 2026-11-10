@@ -33,7 +33,9 @@ pub const DESCRIPTION_MAX: usize = 1024;
 pub struct Access {
     /// Name, description, icon, banner and system messages (Manage Server).
     pub overview: bool,
-    /// The server's roles (Manage Role).
+    /// The server's roles (Manage Role), and their permissions and the
+    /// server's default permissions (Manage Permissions): either shows the
+    /// page, and each part is read-only without its own.
     pub roles: bool,
     /// The server's invites (Manage Server).
     pub invites: bool,
@@ -65,7 +67,8 @@ pub fn access(store: &ChatStore, server: &str) -> Access {
     let manage = has(permissions, ChannelPermission::ManageServer);
     Access {
         overview: manage,
-        roles: has(permissions, ChannelPermission::ManageRole),
+        roles: has(permissions, ChannelPermission::ManageRole)
+            || has(permissions, ChannelPermission::ManagePermissions),
         invites: manage,
         bans: has(permissions, ChannelPermission::BanMembers),
         ownership,

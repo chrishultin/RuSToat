@@ -32,12 +32,14 @@ use gpui_kit::*;
 use crate::api::ApiError;
 use crate::api::models::{Role, Server};
 use crate::links::invite_link;
+use crate::permission_matrix::override_of;
 use crate::profile_edit::{ImageLimits, ProfileImage};
 use crate::rail::{PALETTE, parse_colour};
 use crate::roles::{
-    ColourChoice, ROLE_NAME_MAX, RoleDrop, RoleForm, RoleRow, check_role_name, create_error_text,
+    ColourChoice, ROLE_NAME_MAX, RoleDrop, RoleForm, RoleRow, can_manage_permissions,
+    can_manage_roles, check_role_name, create_error_text,
     delete_error_text as delete_role_error_text, draggable, edit_error_text, hex_of, may_delete,
-    may_edit, may_reorder, reorder, reorder_error_text, role_order, role_rows,
+    may_edit, may_reorder, reorder, reorder_error_text, role_lock_notes, role_order, role_rows,
 };
 use crate::runtime::spawn_io;
 use crate::server_settings::{
@@ -53,6 +55,7 @@ use crate::ui::chat::{ChatView, DRAGGED_OPACITY, DragPreview, DropMark, avatar, 
 use crate::ui::confirm_dialog::{ConfirmRequest, confirm_then};
 use crate::ui::invites::{CREATE_DIALOG_WIDTH, CreateInviteDialog, InviteCreated};
 use crate::ui::moderation_dialogs::{MemberActionRequest, confirm_member_action_then};
+use crate::ui::permission_matrix::{Mode, PermissionMatrix};
 use crate::ui::profile_editor::{
     ImageSlot, Preview, avatar_preview, banner_preview, field, prompt_for_image, render_image_row,
     square_preview, upload_image,
@@ -850,10 +853,11 @@ fn roles_page(view: &ServerSettingsView, cx: &mut App) -> Option<SettingPage> {
 }
 
 /// The Roles page: the server's roles, highest first, each with its colour,
-/// icon, whether it's hoisted, and a lock if the user can't change it; and
-/// "Create role…". Clicking a role opens its editor in the same page, with
-/// a way back; dragging one moves it, where Stoat would allow. It follows
-/// the store, which live role events keep.
+/// icon, whether it's hoisted, and a lock if the user can't change it;
+/// "Everyone" (the server's default permissions) below them; and "Create
+/// role…". Clicking a role, or Everyone, opens its editor in the same page,
+/// with a way back; dragging a role moves it, where Stoat would allow. It
+/// follows the store, which live role events keep.
 pub struct RolesPage {
     chat: WeakEntity<ChatView>,
     server: String,
@@ -871,6 +875,7 @@ pub struct RolesPage {
 enum RolesMode {
     List,
     Editing(Entity<RoleEditor>),
+    Everyone(Entity<DefaultPermissionsEditor>),
 }
 
 /// What a role carries while it's dragged in the list.
@@ -908,21 +913,24 @@ impl RolesPage {
 
     /// The store changed: if the role being edited was deleted (elsewhere:
     /// the user's own delete goes back first), or the user may no longer
-    /// manage roles, go back to the list.
+    /// see the Roles page, go back to the list.
     fn follow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let RolesMode::Editing(editor) = &self.mode
-            && let Some(chat) = self.chat.upgrade()
-        {
+        if let Some(chat) = self.chat.upgrade() {
             let store = chat.read(cx).store();
-            let role = editor.read(cx).role.clone();
-            let exists = store
-                .server(&self.server)
-                .is_some_and(|server| server.roles.contains_key(&role));
-            if !exists {
-                window.push_notification(Notification::info("That role was deleted."), cx);
-                self.back(cx);
-            } else if !access(store, &self.server).roles {
-                self.back(cx);
+            match &self.mode {
+                RolesMode::List => {}
+                _ if !access(store, &self.server).roles => self.back(cx),
+                RolesMode::Editing(editor) => {
+                    let role = editor.read(cx).role.clone();
+                    let exists = store
+                        .server(&self.server)
+                        .is_some_and(|server| server.roles.contains_key(&role));
+                    if !exists {
+                        window.push_notification(Notification::info("That role was deleted."), cx);
+                        self.back(cx);
+                    }
+                }
+                RolesMode::Everyone(_) => {}
             }
         }
         cx.notify();
@@ -937,6 +945,18 @@ impl RolesPage {
         let editor = cx.new(|cx| RoleEditor::new(&chat, server, role, window, cx));
         self._editor = Some(cx.subscribe(&editor, |this, _, _: &BackToRoles, cx| this.back(cx)));
         self.mode = RolesMode::Editing(editor);
+        cx.notify();
+    }
+
+    /// Open Everyone's editor: the server's default permissions.
+    fn open_everyone(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat) = self.chat.upgrade() else {
+            return;
+        };
+        let server = self.server.clone();
+        let editor = cx.new(|cx| DefaultPermissionsEditor::new(&chat, server, window, cx));
+        self._editor = Some(cx.subscribe(&editor, |this, _, _: &BackToRoles, cx| this.back(cx)));
+        self.mode = RolesMode::Everyone(editor);
         cx.notify();
     }
 
@@ -1181,11 +1201,55 @@ impl RolesPage {
             .into_any_element()
     }
 
+    /// "Everyone", below the roles: the server's default permissions. It
+    /// isn't a role, so it can't be dragged or dropped on.
+    fn render_everyone(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        h_flex()
+            .id("role-everyone")
+            .w_full()
+            .gap_3()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .cursor_pointer()
+            .hover(|el| el.bg(theme.secondary))
+            .on_click(cx.listener(|this, _, window, cx| this.open_everyone(window, cx)))
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(theme.muted_foreground)
+                    .child(Icon::new(IconName::Users).small()),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child("Everyone"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("Permissions available without any role"),
+            )
+            .into_any_element()
+    }
+
     fn render_list(&self, cx: &mut Context<Self>) -> AnyElement {
-        let rows = self
+        let (rows, create) = self
             .chat
             .upgrade()
-            .map(|chat| role_rows(chat.read(cx).store(), &self.server))
+            .map(|chat| {
+                let store = chat.read(cx).store();
+                (
+                    role_rows(store, &self.server),
+                    can_manage_roles(store, &self.server),
+                )
+            })
             .unwrap_or_default();
         let muted = cx.theme().muted_foreground;
         let header =
@@ -1199,14 +1263,16 @@ impl RolesPage {
                         "Roles higher in the list outrank those below them. Drag one to move it."
                     },
                 ))
-                .child(
-                    Button::new("roles-create")
-                        .label("Create role…")
-                        .icon(IconName::Plus)
-                        .outline()
-                        .small()
-                        .on_click(cx.listener(|this, _, window, cx| this.create(window, cx))),
-                );
+                .when(create, |this| {
+                    this.child(
+                        Button::new("roles-create")
+                            .label("Create role…")
+                            .icon(IconName::Plus)
+                            .outline()
+                            .small()
+                            .on_click(cx.listener(|this, _, window, cx| this.create(window, cx))),
+                    )
+                });
         let body =
             if rows.is_empty() {
                 div()
@@ -1239,6 +1305,14 @@ impl RolesPage {
             .gap_3()
             .child(header)
             .child(body)
+            .child(
+                div()
+                    .w_full()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(self.render_everyone(cx)),
+            )
             .into_any_element()
     }
 }
@@ -1289,6 +1363,7 @@ impl Render for RolesPage {
         match &self.mode {
             RolesMode::List => self.render_list(cx),
             RolesMode::Editing(editor) => editor.clone().into_any_element(),
+            RolesMode::Everyone(editor) => editor.clone().into_any_element(),
         }
     }
 }
@@ -1879,25 +1954,55 @@ impl RoleEditor {
             .into_any_element()
     }
 
-    /// Why the role can't be changed, or deleted, if it can't.
-    fn render_lock(&self, editable: bool, deletable: bool, cx: &App) -> Option<AnyElement> {
-        let text = if !editable {
-            "This role ranks at or above your highest role, so you can't change it."
-        } else if !deletable {
-            "A bot manages this role. You can edit it, but not delete it."
-        } else {
-            return None;
+    /// Why the role, its permissions, or deleting it are locked, if any are
+    /// (see [`role_lock_notes`]).
+    fn render_lock(&self, cx: &App) -> Vec<AnyElement> {
+        let Some(chat) = self.chat.upgrade() else {
+            return Vec::new();
         };
-        Some(
-            h_flex()
-                .gap_2()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child(Icon::new(IconName::Lock).small())
-                .child(text)
-                .into_any_element(),
-        )
+        role_lock_notes(chat.read(cx).store(), &self.server, &self.role)
+            .into_iter()
+            .map(|text| lock_note(text, cx))
+            .collect()
     }
+
+    /// "Permissions": the role's matrix, Deny / Neutral / Allow each.
+    fn render_permissions(&self, role: &Role, cx: &App) -> AnyElement {
+        v_flex()
+            .w_full()
+            .gap_1()
+            .pt_2()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .child(section_heading("Permissions"))
+            .child(
+                PermissionMatrix::new(
+                    "role-permission",
+                    Mode::Overrides(override_of(role.permissions)),
+                )
+                .read_only(true),
+            )
+            .into_any_element()
+    }
+}
+
+/// A line saying why something on the page can't be changed, with a lock.
+fn lock_note(text: &'static str, cx: &App) -> AnyElement {
+    h_flex()
+        .gap_2()
+        .text_sm()
+        .text_color(cx.theme().muted_foreground)
+        .child(Icon::new(IconName::Lock).small())
+        .child(text)
+        .into_any_element()
+}
+
+/// A section's heading in an editor.
+fn section_heading(text: &'static str) -> Div {
+    div()
+        .text_base()
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(text)
 }
 
 impl Render for RoleEditor {
@@ -1973,7 +2078,7 @@ impl Render for RoleEditor {
                             .child(role.name.clone()),
                     ),
             )
-            .children(self.render_lock(editable, deletable, cx))
+            .children(self.render_lock(cx))
             .child(name)
             .child(self.render_colour(
                 match edited.name.trim() {
@@ -2014,6 +2119,7 @@ impl Render for RoleEditor {
                         ),
                 )
             })
+            .child(self.render_permissions(&role, cx))
             .child(
                 h_flex()
                     .gap_2()
@@ -2041,6 +2147,99 @@ impl Render for RoleEditor {
                                 ),
                         )
                     }),
+            )
+            .into_any_element()
+    }
+}
+
+/// Everyone's editor, in the Roles page: the server's default permissions,
+/// which every member has whatever their roles, as checkboxes. They follow
+/// changes made elsewhere.
+pub struct DefaultPermissionsEditor {
+    chat: WeakEntity<ChatView>,
+    server: String,
+    _chat: Subscription,
+}
+
+impl EventEmitter<BackToRoles> for DefaultPermissionsEditor {}
+
+impl DefaultPermissionsEditor {
+    fn new(
+        chat: &Entity<ChatView>,
+        server: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self {
+            chat: chat.downgrade(),
+            server,
+            _chat: cx.observe_in(chat, window, |_, _, _, cx| cx.notify()),
+        }
+    }
+
+    /// The server's default permissions as the store has them now.
+    fn current(&self, cx: &App) -> Option<u64> {
+        let chat = self.chat.upgrade()?;
+        let server = chat.read(cx).store().server(&self.server)?;
+        Some(server.default_permissions as u64)
+    }
+
+    /// Whether the user may change them at all (Manage Permissions).
+    fn editable(&self, cx: &App) -> bool {
+        self.chat
+            .upgrade()
+            .is_some_and(|chat| can_manage_permissions(chat.read(cx).store(), &self.server))
+    }
+}
+
+impl Render for DefaultPermissionsEditor {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(stored) = self.current(cx) else {
+            return div().into_any_element();
+        };
+        let editable = self.editable(cx);
+        v_flex()
+            .w_full()
+            .gap_4()
+            .child(
+                h_flex().child(
+                    Button::new("roles-back")
+                        .label("Roles")
+                        .icon(IconName::ChevronLeft)
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(BackToRoles))),
+                ),
+            )
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(
+                        h_flex().gap_2().child(Icon::new(IconName::Users)).child(
+                            div()
+                                .text_lg()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child("Everyone"),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(
+                                "Every member has these permissions, whatever their roles. \
+                                 Roles can add to them, or take them away.",
+                            ),
+                    ),
+            )
+            .when(!editable, |this| {
+                this.child(lock_note(
+                    "You don't have Manage Permissions, so you can't change these.",
+                    cx,
+                ))
+            })
+            .child(
+                PermissionMatrix::new("default-permission", Mode::Values(stored)).read_only(true),
             )
             .into_any_element()
     }
