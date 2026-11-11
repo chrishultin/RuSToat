@@ -121,6 +121,18 @@ impl Layout {
         }
     }
 
+    /// The section listing `channel`, and where in it.
+    fn find_mut(&mut self, channel: &str) -> Option<(&mut Vec<String>, usize)> {
+        let sections = std::iter::once(&mut self.top)
+            .chain(self.categories.iter_mut().map(|c| &mut c.channels));
+        for list in sections {
+            if let Some(at) = list.iter().position(|id| id == channel) {
+                return Some((list, at));
+            }
+        }
+        None
+    }
+
     fn len(&self) -> usize {
         self.top.len()
             + self
@@ -135,12 +147,81 @@ impl Layout {
 /// the top section), with everything else where it was. `None` if nothing
 /// would change, or there's no such channel or category.
 pub fn move_to_end(server: &Server, channel: &str, section: Option<&str>) -> Option<Vec<Category>> {
+    move_channel(
+        server,
+        channel,
+        &ChannelDrop::EndOf(section.map(str::to_string)),
+    )
+}
+
+/// Where a dragged channel would land.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelDrop {
+    /// Just before this channel, in its section.
+    Before(String),
+    /// Just after this channel, in its section.
+    After(String),
+    /// Last in this section (`None` is the top section).
+    EndOf(Option<String>),
+    /// First in this category.
+    StartOf(String),
+}
+
+/// What a dragged channel is over in the channel list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelHover<'a> {
+    /// A channel's row.
+    Channel(&'a str),
+    /// A category's heading. `above` is the section shown before it
+    /// (`None` is the top section, even when it isn't shown).
+    Heading {
+        category: &'a str,
+        above: Option<&'a str>,
+    },
+}
+
+/// Where a channel lands over `hovered`, `fraction` of the way down it:
+/// over a row, the top half is before that channel and the bottom half
+/// after it; over a heading, the top half is the end of the section above
+/// and the bottom half the start of that category. Whether that changes
+/// anything is [`move_channel`]'s to say.
+pub fn channel_target(hovered: ChannelHover, fraction: f32) -> ChannelDrop {
+    let top = fraction < 0.5;
+    match hovered {
+        ChannelHover::Channel(id) if top => ChannelDrop::Before(id.to_string()),
+        ChannelHover::Channel(id) => ChannelDrop::After(id.to_string()),
+        ChannelHover::Heading { above, .. } if top => ChannelDrop::EndOf(above.map(str::to_string)),
+        ChannelHover::Heading { category, .. } => ChannelDrop::StartOf(category.to_string()),
+    }
+}
+
+/// The categories that put `channel` at `target`, with everything else
+/// where it was: a drop beside a channel is placed by that channel's ID,
+/// so channels the user can't see around it don't move. `None` if nothing
+/// would change, or the channel, its neighbour or the category is unknown.
+pub fn move_channel(server: &Server, channel: &str, target: &ChannelDrop) -> Option<Vec<Category>> {
     let before = layout(server);
     let mut after = before.clone();
     if !after.take(channel) {
         return None;
     }
-    after.section_mut(section)?.push(channel.to_string());
+    match target {
+        ChannelDrop::Before(id) | ChannelDrop::After(id) => {
+            let (list, at) = after.find_mut(id)?;
+            let at = if matches!(target, ChannelDrop::After(_)) {
+                at + 1
+            } else {
+                at
+            };
+            list.insert(at, channel.to_string());
+        }
+        ChannelDrop::EndOf(section) => after
+            .section_mut(section.as_deref())?
+            .push(channel.to_string()),
+        ChannelDrop::StartOf(category) => after
+            .section_mut(Some(category))?
+            .insert(0, channel.to_string()),
+    }
     (after != before).then(|| after.into_categories(server))
 }
 

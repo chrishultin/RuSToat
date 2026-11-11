@@ -6,7 +6,8 @@ use std::collections::HashSet;
 use serde_json::{Value, json};
 use stoat_gpui::api::models::{Category, Server};
 use stoat_gpui::channel_order::{
-    CategoryDrop, DEFAULT_CATEGORY, Layout, category_target, layout, move_category, move_to_end,
+    CategoryDrop, ChannelDrop, ChannelHover, DEFAULT_CATEGORY, Layout, category_target,
+    channel_target, layout, move_category, move_channel, move_to_end,
 };
 
 /// A server with `channels` in its own order, and `categories` as
@@ -338,4 +339,191 @@ fn moving_a_category_keeps_hidden_channels_and_categories() {
             category("k2", "Hidden", &["secret"])
         ]
     );
+}
+
+#[test]
+fn a_channel_lands_by_the_half_of_what_its_over() {
+    let row = ChannelHover::Channel("x");
+    assert_eq!(channel_target(row, 0.3), ChannelDrop::Before("x".into()));
+    assert_eq!(channel_target(row, 0.7), ChannelDrop::After("x".into()));
+    let heading = ChannelHover::Heading {
+        category: "voice",
+        above: Some("chat"),
+    };
+    assert_eq!(
+        channel_target(heading, 0.3),
+        ChannelDrop::EndOf(Some("chat".into()))
+    );
+    assert_eq!(
+        channel_target(heading, 0.7),
+        ChannelDrop::StartOf("voice".into())
+    );
+    // Above the first heading is the top section, even when it's empty.
+    let first = ChannelHover::Heading {
+        category: "chat",
+        above: None,
+    };
+    assert_eq!(channel_target(first, 0.1), ChannelDrop::EndOf(None));
+}
+
+#[test]
+fn a_channel_moves_within_its_section() {
+    let server = plain();
+    assert_eq!(
+        move_channel(&server, "y", &ChannelDrop::Before("x".into())).unwrap(),
+        [
+            category("chat", "Chat", &["y", "x"]),
+            category("voice", "Voice", &["z"])
+        ]
+    );
+    // In the top section, any new order writes `"default"`.
+    assert_eq!(
+        move_channel(&server, "a", &ChannelDrop::After("c".into())).unwrap(),
+        [
+            category(DEFAULT_CATEGORY, "Default", &["b", "c", "a"]),
+            category("chat", "Chat", &["x", "y"]),
+            category("voice", "Voice", &["z"])
+        ]
+    );
+}
+
+#[test]
+fn a_channel_moves_between_sections() {
+    let server = plain();
+    assert_eq!(
+        move_channel(&server, "z", &ChannelDrop::After("x".into())).unwrap(),
+        [
+            category("chat", "Chat", &["x", "z", "y"]),
+            category("voice", "Voice", &[])
+        ]
+    );
+    assert_eq!(
+        move_channel(&server, "b", &ChannelDrop::StartOf("voice".into())).unwrap(),
+        [
+            category("chat", "Chat", &["x", "y"]),
+            category("voice", "Voice", &["b", "z"])
+        ]
+    );
+    // Into the top section, beside one of its channels.
+    assert_eq!(
+        move_channel(&server, "x", &ChannelDrop::Before("a".into())).unwrap(),
+        [
+            category(DEFAULT_CATEGORY, "Default", &["x", "a", "b", "c"]),
+            category("chat", "Chat", &["y"]),
+            category("voice", "Voice", &["z"])
+        ]
+    );
+}
+
+#[test]
+fn a_channel_into_an_empty_category() {
+    let server = server(
+        &["a", "x"],
+        &[("chat", "Chat", &["x"]), ("empty", "Empty", &[])],
+    );
+    assert_eq!(
+        move_channel(&server, "x", &ChannelDrop::StartOf("empty".into())).unwrap(),
+        [
+            category("chat", "Chat", &[]),
+            category("empty", "Empty", &["x"])
+        ]
+    );
+}
+
+#[test]
+fn a_channel_dropped_where_it_is_changes_nothing() {
+    let server = plain();
+    assert_eq!(
+        move_channel(&server, "x", &ChannelDrop::Before("y".into())),
+        None
+    );
+    assert_eq!(
+        move_channel(&server, "x", &ChannelDrop::StartOf("chat".into())),
+        None
+    );
+    assert_eq!(
+        move_channel(&server, "y", &ChannelDrop::After("x".into())),
+        None
+    );
+    assert_eq!(
+        move_channel(&server, "y", &ChannelDrop::EndOf(Some("chat".into()))),
+        None
+    );
+    // Onto itself.
+    assert_eq!(
+        move_channel(&server, "x", &ChannelDrop::After("x".into())),
+        None
+    );
+}
+
+#[test]
+fn a_channel_beside_an_unknown_one_changes_nothing() {
+    let server = plain();
+    assert_eq!(
+        move_channel(&server, "x", &ChannelDrop::Before("nope".into())),
+        None
+    );
+    assert_eq!(
+        move_channel(&server, "nope", &ChannelDrop::Before("x".into())),
+        None
+    );
+    assert_eq!(
+        move_channel(&server, "x", &ChannelDrop::StartOf("nope".into())),
+        None
+    );
+}
+
+#[test]
+fn a_dropped_channel_leaves_hidden_ones_in_place() {
+    // `secret` sits between `x` and `y`, unseen; `z` dropped after `x`
+    // lands between `x` and `secret`.
+    let server = server(
+        &["x", "secret", "y", "z"],
+        &[
+            ("chat", "Chat", &["x", "secret", "y"]),
+            ("voice", "Voice", &["z"]),
+        ],
+    );
+    assert_eq!(
+        move_channel(&server, "z", &ChannelDrop::After("x".into())).unwrap(),
+        [
+            category("chat", "Chat", &["x", "z", "secret", "y"]),
+            category("voice", "Voice", &[])
+        ]
+    );
+}
+
+#[test]
+fn every_channel_drop_lists_each_channel_once() {
+    let server = server(
+        &["a", "x", "b", "y", "z"],
+        &[
+            (DEFAULT_CATEGORY, "Default", &["b"]),
+            ("chat", "Chat", &["x", "y", "gone"]),
+            ("voice", "Voice", &["z"]),
+        ],
+    );
+    let channels = ["a", "b", "x", "y", "z"];
+    let mut targets = vec![
+        ChannelDrop::EndOf(None),
+        ChannelDrop::EndOf(Some("chat".into())),
+        ChannelDrop::StartOf("voice".into()),
+    ];
+    for id in channels {
+        targets.push(ChannelDrop::Before(id.into()));
+        targets.push(ChannelDrop::After(id.into()));
+    }
+    for channel in channels {
+        for target in &targets {
+            if let Some(edited) = move_channel(&server, channel, target) {
+                assert!(listed_once(&edited), "{channel} to {target:?}");
+                // Every channel is still somewhere: listed, or uncategorized.
+                let listed: HashSet<&String> = edited.iter().flat_map(|c| &c.channels).collect();
+                assert!(
+                    listed.contains(&"gone".to_string()),
+                    "{channel} to {target:?}"
+                );
+            }
+        }
+    }
 }

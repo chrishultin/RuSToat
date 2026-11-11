@@ -153,3 +153,66 @@ Look-ahead: chunk 5 adds `ChannelDrag::Channel`, a channel target type alongside
 
 ### Manual Validation
 Deferred to the end (batched): drag categories above and below others; Esc cancels mid-drag; a click still folds; a member without Manage Channels can't drag.
+
+## Chunk 5: Drag channels within and between categories
+
+### Changes Made
+- `src/channel_order.rs`:
+  - `ChannelDrop { Before(id), After(id), EndOf(Option<section>), StartOf(category) }`;
+  - `ChannelHover { Channel(id), Heading { category, above } }` and `channel_target(hovered, fraction)` (the geometry only): over a row, the top half is before it and the bottom half after it; over a heading, the top half is the end of the section above (the top section when there's none) and the bottom half the start of that category;
+  - `move_channel(server, channel, &target)`. A drop beside a channel is placed by that channel's ID in the full layout, so hidden channels don't move. `None` when nothing changes, or the channel, its neighbour or the category is unknown. `"default"` is written only when needed (chunk 3's rule);
+  - `move_to_end` is now `move_channel(…, EndOf(…))`, and `Layout::find_mut` finds a channel's section and position.
+- `src/ui/chat.rs`:
+  - `ChannelDrag::Channel(id)` (with `channel()`), and `ListDrop { Category, Channel }` as the drag state's target;
+  - `channel_drag_over(hovered, event, cx)` shows a target only if `move_channel` would change something; `section_drag_over` now only handles category drags;
+  - `drop_on_channel_list` matches the drag with its target (`move_category` or `move_channel`);
+  - `row_mark` (Before → above, After → below) and `heading_mark` (EndOf the section above → above the heading, StartOf → below it);
+  - `render_channel_row` makes a server channel's own row draggable when `may_drag_channels`, with a pill preview of its icon and name. In the list, each row sits in a `relative` wrapper that takes `on_drag_move`, shows the line, and dims while dragged; the wrapper covers a voice channel's participants. Each heading is wrapped likewise, and knows the section shown above it.
+- `tests/channel_order.rs`: 8 new tests (25 in all). The geometry; moves within the top section (writing `"default"`) and within a category; between categories and into the top section; into an empty category; no-ops (each neighbour's near side, the start of its own category, the end of its own section, itself); unknown neighbours or categories; hidden channels kept in place; every drop over every channel lists each once and keeps a stale ID.
+
+### Divergences
+- **Folded categories aren't special-cased:** a folded category's heading takes drops (its start, or the end of the section above), and any rows it still shows (the open channel, or one with mentions) take them too. Disallowing those rows would only hide valid targets.
+- **`channel_target` is geometry only.** Whether a drop changes anything is `move_channel`'s answer, which the view checks before showing a line, so no-ops show nothing.
+- **Hidden-channel no-ops:** dropping a channel just past a hidden one moves it in the full list, so it's sent even though the visible order looks the same. It's harmless, and rare.
+- **Scrolling while dragging** isn't verified yet (manual check). If the list doesn't scroll mid-drag, "Move to ›" is the fallback.
+
+### Verification Performed
+- `cargo test --test channel_order`: 25 passed.
+- Full suite: `cargo test` gave 1,338 passed, 0 failed. `cargo clippy --all-targets -- -D warnings` is clean.
+- Rustfmt: `src/ui/chat.rs` is still 17 (one new hunk was hand-formatted). `src/channel_order.rs` and `tests/channel_order.rs` are clean.
+
+### Manual Validation
+Deferred to the end (batched): reorder within sections, between categories, into an empty category and back to the top; scrolling mid-drag; a refused drop rolls back.
+
+## Summary
+
+_Completed: 2026-11-11_
+
+### Chunks Completed
+1. Channel Settings window: name, description and icon (`76fe078`)
+2. Slowmode and the mature flag (`a871c71`)
+3. The top section, `"default"`, and "Move to ›" (`df1fd25`)
+4. Drag to reorder categories (`30cce4e`)
+5. Drag channels within and between categories (this commit)
+
+### Divergences
+- Chunk 1: the icon preview is round, like the sidebar's. The window is 680×520. No sign-out hook was needed. `channel_edited` skips what can't change.
+- Chunk 2: the slowmode countdown risk didn't apply. Store slowmode coverage came from chunk 1. The mature buttons end with "…".
+- Chunk 3: one task field for saving orders. The rollback compares the whole list. "Move to"'s current section is ticked and does nothing.
+- Chunk 4: no `First` variant. `with_drop_line` is new beside `with_drop_mark`. The preview is a pill.
+- Chunk 5: folded categories aren't special-cased. `channel_target` is geometry only. Hidden-channel no-ops may send. Scrolling mid-drag is unverified.
+- Process: commits are signed through Secretive (Touch ID), and the chunk 2 commit waited for the user to approve it.
+
+### Definition of Done
+- [x] "Channel settings…" (or "Group settings…") opens one Channel Settings window, from the channel's menu or its info dialog, for anyone with Manage Channel on that channel or group, and it closes when that's lost or the channel goes.
+- [x] Name, description and icon save in one `PATCH /channels/{id}` (after the icon's upload), with only what changed, and show at once.
+- [x] Slowmode offers the web client's choices plus any other stored value, and is sent only for server channels.
+- [x] The mature button asks first, sends `{ nsfw }` alone, and the age gate follows at once.
+- [x] A `"default"` category is drawn as the top, headerless section, and is written only when an order needs it.
+- [x] Categories and channels can be dragged into any order and section, and "Move to ›" moves a channel to the end of a section. Each saves at once and rolls back with a toast if refused; hidden channels keep their places.
+- [x] Refusals read plainly: `MissingPermission`, `FailedValidation`, `NotFound`, and the categories' own texts.
+- [x] `cargo test` (1,338) and `cargo clippy --all-targets -- -D warnings` pass. No touched file's rustfmt drift grew, and new files are clean.
+- [x] The roadmap links this plan (committed with chunk 1).
+
+### Remaining Manual Steps
+The plan's Manual Tests 1–11, batched at the end as the user asked (two accounts and the web client): overview; access; live changes; slowmode; mature; `"default"`; Move to; drag categories; drag channels (with a hidden channel); refusal rollback; themes. Also check that the channel list scrolls while dragging.
