@@ -3710,37 +3710,34 @@ impl ChatStore {
         }
     }
 
-    /// A server's text channels: uncategorized ones first (in the server's
-    /// order), then each category in order. Channels we can't see (missing
-    /// from `Ready`, or hidden since: see [`Self::shows_channel`]) are left
-    /// out, and so is a category of only such channels. A category with no
-    /// channels on the server (new, or its channels deleted) shows empty.
+    /// A server's text channels: the top section first (the web client's
+    /// `"default"` category, then uncategorized channels in the server's
+    /// order: see [`crate::channel_order`]), then each other category in
+    /// order. Channels we can't see (missing from `Ready`, or hidden since:
+    /// see [`Self::shows_channel`]) are left out, and so is a category of
+    /// only such channels. A category with no channels on the server (new,
+    /// or its channels deleted) shows empty.
     pub fn server_channels(&self, server_id: &str) -> Vec<ChannelSection> {
         let Some(server) = self.servers.get(server_id) else {
             return Vec::new();
         };
-        let categories = server.categories.as_deref().unwrap_or_default();
-        let categorized: HashSet<&str> = categories
-            .iter()
-            .flat_map(|c| c.channels.iter().map(String::as_str))
-            .collect();
+        let layout = crate::channel_order::layout(server);
 
         let mut sections = Vec::new();
-        let uncategorized: Vec<ChannelEntry> = server
-            .channels
+        let top: Vec<ChannelEntry> = layout
+            .top
             .iter()
-            .filter(|id| !categorized.contains(id.as_str()))
             .filter(|id| self.shows_channel(id))
             .filter_map(|id| self.channel_entry(id))
             .collect();
-        if !uncategorized.is_empty() {
+        if !top.is_empty() {
             sections.push(ChannelSection {
                 title: None,
                 id: None,
-                channels: uncategorized,
+                channels: top,
             });
         }
-        for category in categories {
+        for category in &layout.categories {
             let channels: Vec<ChannelEntry> = category
                 .channels
                 .iter()
@@ -3765,7 +3762,9 @@ impl ChatStore {
         sections
     }
 
-    /// The category of `server` that lists `channel`, if any.
+    /// The category of `server` that lists `channel`, if any. The web
+    /// client's `"default"` category is the top section, so a channel in
+    /// it has none.
     pub fn category_of(&self, server: &str, channel: &str) -> Option<String> {
         self.servers
             .get(server)?
@@ -3774,6 +3773,7 @@ impl ChatStore {
             .flatten()
             .find(|category| category.channels.iter().any(|id| id == channel))
             .map(|category| category.id.clone())
+            .filter(|id| id != crate::channel_order::DEFAULT_CATEGORY)
     }
 
     /// Whether any server has a category with this ID.

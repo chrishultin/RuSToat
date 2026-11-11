@@ -382,3 +382,83 @@ fn a_saved_edit_of_an_unknown_or_unsettable_channel_does_nothing() {
     let dm = store.channel("dm-ada").cloned().unwrap();
     assert!(!store.apply_channel_edit(&dm));
 }
+
+#[test]
+fn the_default_category_is_the_headless_top_section() {
+    let mut store = store();
+    store.set_categories(
+        "srv-alpha",
+        vec![
+            Category {
+                id: "cat-chat".into(),
+                title: "Chat".into(),
+                channels: vec!["ch-general".into(), "ch-random".into()],
+            },
+            Category {
+                id: "default".into(),
+                title: "Default".into(),
+                channels: vec!["ch-voice".into()],
+            },
+        ],
+    );
+    assert_eq!(
+        sidebar(&store),
+        [
+            // Its own channel first, then the uncategorized one.
+            (None, vec!["ch-voice".to_string(), "ch-welcome".into()]),
+            (
+                Some("cat-chat".into()),
+                vec!["ch-general".into(), "ch-random".into()]
+            ),
+        ]
+    );
+    let titles: Vec<Option<String>> = store
+        .server_channels("srv-alpha")
+        .into_iter()
+        .map(|s| s.title)
+        .collect();
+    assert_eq!(titles, [None, Some("Chat".into())]);
+    // A channel in it has no category of its own.
+    assert_eq!(store.category_of("srv-alpha", "ch-voice"), None);
+    assert_eq!(
+        store.category_of("srv-alpha", "ch-general").as_deref(),
+        Some("cat-chat")
+    );
+}
+
+#[test]
+fn a_default_category_of_hidden_channels_shows_nothing() {
+    let mut store = store();
+    store.set_categories(
+        "srv-alpha",
+        vec![
+            Category {
+                id: "default".into(),
+                title: "Default".into(),
+                channels: vec!["ch-gone".into()],
+            },
+            Category {
+                id: "cat-all".into(),
+                title: "All".into(),
+                channels: vec![
+                    "ch-welcome".into(),
+                    "ch-general".into(),
+                    "ch-random".into(),
+                    "ch-voice".into(),
+                ],
+            },
+        ],
+    );
+    assert_eq!(
+        sidebar(&store),
+        [(
+            Some("cat-all".into()),
+            vec![
+                "ch-welcome".to_string(),
+                "ch-general".into(),
+                "ch-random".into(),
+                "ch-voice".into()
+            ]
+        )]
+    );
+}

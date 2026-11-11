@@ -410,3 +410,40 @@ async fn deleting_a_server_sends_one_delete() {
 
     client(&server).delete_server("srv").await.unwrap();
 }
+
+#[tokio::test]
+async fn a_move_out_of_a_category_sends_default_first() {
+    let server = MockServer::start().await;
+    let body = json!({
+        "categories": [
+            { "id": "default", "title": "Default", "channels": ["c1", "c3", "c2"] },
+            { "id": "k1", "title": "Chat", "channels": [] }
+        ]
+    });
+    Mock::given(method("PATCH"))
+        .and(path("/servers/s1"))
+        .and(body_json(body.clone()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "_id": "s1", "owner": "u-me", "name": "Lounge", "channels": ["c1", "c2", "c3"],
+            "categories": body["categories"],
+            "default_permissions": 0, "approximate_member_count": 1
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // `c2` is in Chat; moved to the end of the top section, after `c3`,
+    // which isn't the server's own order.
+    let lounge: stoat_gpui::api::models::Server = serde_json::from_value(json!({
+        "_id": "s1", "owner": "u-me", "name": "Lounge", "channels": ["c1", "c2", "c3"],
+        "categories": [{ "id": "k1", "title": "Chat", "channels": ["c2"] }],
+        "default_permissions": 0, "approximate_member_count": 1
+    }))
+    .unwrap();
+    let edited = stoat_gpui::channel_order::move_to_end(&lounge, "c2", None).unwrap();
+    let kept = client(&server)
+        .edit_categories("s1", &edited)
+        .await
+        .unwrap();
+    assert_eq!(kept, edited);
+}

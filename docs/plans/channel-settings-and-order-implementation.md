@@ -83,3 +83,41 @@ Look-ahead: chunks 3–5 don't touch Channel Settings. No amendments.
 
 ### Manual Validation
 Deferred to the end (batched): set slowmode to 10 seconds and back; mark and unmark a channel mature, and check the age gate.
+
+## Chunk 3: The top section, `"default"`, and "Move to ›"
+
+### Changes Made
+- `src/channel_order.rs` (new, no GPUI):
+  - `DEFAULT_CATEGORY` (`"default"`) and `DEFAULT_TITLE` (`"Default"`);
+  - `Layout { top, categories }` and `layout(&Server)`. The top section is `"default"`'s channels, then every channel no category lists, in server order. The other categories keep every ID they list, hidden and stale ones included;
+  - `Layout::into_categories(server)`: the list to send. `"default"` is written first (keeping its stored title) when it already exists or when the top section's order differs from the server's own order of the uncategorized channels. Each channel is listed once;
+  - `move_to_end(server, channel, section)`: `None` when nothing changes or the channel or category is unknown. It compares layouts, so a no-op never sends;
+  - `listed_once` (moved here from `src/server_edit.rs`, which now imports it).
+- `src/store.rs`:
+  - `server_channels` builds the top section and the categories from `layout` (`"default"` never gets a heading);
+  - `category_of` returns `None` for `"default"`, so "Create channel…" from a top-section channel doesn't try to move the new one into it.
+- `src/ui/chat.rs`:
+  - `categories_saving: Option<Task<()>>`;
+  - `save_categories(server, edited, window, cx)` applies the order at once (`categories_changed`), sends `edit_categories`, applies the answer, or on failure restores the old categories (only if the store still shows what was sent) and toasts `categories_error_text`. While one is saving, another is ignored;
+  - `move_channel_to(server, channel, section, window, cx)` (through `move_to_end`);
+  - "Move to ›" in `channel_menu`, after the Create items, with Manage Channels across the server and at least one category: "No category", then each category, the current one ticked (and doing nothing).
+- `src/lib.rs`: `pub mod channel_order;` (by hand).
+- Tests:
+  - `tests/channel_order.rs` (new, 11 tests): layouts without categories, with categories, with `"default"` anywhere in the list, and with hidden or stale IDs; moving into a category and between categories; moving out with and without writing `"default"`; an existing `"default"` kept first with its title; no-ops; unknown channel or category; hidden channels kept in place; each channel listed once;
+  - `tests/store_channels.rs`: 2 tests. `"default"` is the headless top section with its own channels first, and `category_of` ignores it; a `"default"` of only gone channels shows nothing;
+  - `tests/api_servers.rs`: a move out of a category sends `"default"` first, exactly.
+
+### Divergences
+- **`save_categories` takes no `(server, Task)` pair:** one task field is enough, since only one save runs at a time across servers.
+- **The rollback compares the whole stored list** with what was sent, rather than a separate counter, as the plan's Assumption 12 says.
+- **A channel already where "Move to" points** is ticked and does nothing, rather than being disabled, so the tick stays readable.
+
+Look-ahead: chunks 4–5 reuse `layout`, `into_categories`, `save_categories` and `categories_saving`. Chunk 5's `move_channel` can be built on `Layout::take` plus an insert at a position. No amendments.
+
+### Verification Performed
+- `cargo test --test channel_order --test store_channels --test api_servers`: 11, 16 and 19 passed.
+- Full suite: `cargo test` gave 1,324 passed, 0 failed. `cargo clippy --all-targets -- -D warnings` is clean.
+- Rustfmt: `src/ui/chat.rs` is still 17 (two new hunks were hand-formatted) and `src/store.rs` 14. `src/server_edit.rs`, `src/channel_order.rs`, `tests/channel_order.rs`, `tests/store_channels.rs` and `tests/api_servers.rs` are clean.
+
+### Manual Validation
+Deferred to the end (batched): a server reordered in the web client shows no "DEFAULT" header and the same top section; "Move to ›" into a category and back.

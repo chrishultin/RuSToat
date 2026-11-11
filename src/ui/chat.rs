@@ -311,6 +311,9 @@ pub struct ChatView {
     /// The channel whose "Delete {name}?" confirmation is waiting for Stoat
     /// to answer: its buttons are disabled until then.
     deleting_channel: Option<String>,
+    /// A new order of a server's channels and categories, shown already,
+    /// while Stoat hasn't answered: another waits until then.
+    categories_saving: Option<Task<()>>,
     /// The group and member whose "Remove {name}?" confirmation is waiting
     /// for Stoat to answer, likewise.
     removing_member: Option<(String, String)>,
@@ -857,6 +860,7 @@ impl ChatView {
             safety,
             link_prompt: None,
             deleting_channel: None,
+            categories_saving: None,
             removing_member: None,
             transferring_group: None,
             closing_dm: None,
@@ -4200,6 +4204,23 @@ impl ChatView {
                 }
                 _ => None,
             };
+            // "Move to ›" also takes Manage Channels across the server, and
+            // only shows with somewhere to move to.
+            let move_to = create_in.as_ref().and_then(|(server, _)| {
+                let categories: Vec<(String, String)> =
+                    crate::channel_order::layout(store.server(server)?)
+                        .categories
+                        .into_iter()
+                        .map(|category| (category.id, category.title))
+                        .collect();
+                (!categories.is_empty()).then(|| {
+                    (
+                        server.clone(),
+                        store.category_of(server, &channel_id),
+                        categories,
+                    )
+                })
+            });
             let mute = store.channel_mute_until(&channel_id);
             let current = store.notification_settings().channel_override(&channel_id);
             let inherited = store.level_source(&channel_id).label();
@@ -4257,6 +4278,41 @@ impl ChatView {
                 Some((server, category)) => menu
                     .item(create_channel_item(&view, server.clone(), category))
                     .item(create_category_item(&view, server)),
+                None => menu,
+            };
+            let menu = match move_to {
+                Some((server, now, categories)) => {
+                    let (view, channel) = (view.clone(), channel_id.clone());
+                    menu.submenu("Move to", window, cx, move |menu, _, _| {
+                        let sections = std::iter::once((None, "No category".to_string())).chain(
+                            categories
+                                .iter()
+                                .map(|(id, title)| (Some(id.clone()), title.clone())),
+                        );
+                        sections.fold(menu, |menu, (section, title)| {
+                            let here = section == now;
+                            let (view, server, channel) =
+                                (view.clone(), server.clone(), channel.clone());
+                            menu.item(PopupMenuItem::new(title).checked(here).on_click(
+                                move |_, window, cx| {
+                                    if here {
+                                        return;
+                                    }
+                                    view.update(cx, |this, cx| {
+                                        this.move_channel_to(
+                                            server.clone(),
+                                            channel.clone(),
+                                            section.clone(),
+                                            window,
+                                            cx,
+                                        )
+                                    })
+                                    .ok();
+                                },
+                            ))
+                        })
+                    })
+                }
                 None => menu,
             };
             let menu = if editable {
@@ -7283,6 +7339,73 @@ impl ChatView {
             .ok();
         })
         .detach();
+    }
+
+    /// "Move to ›": put `channel` at the end of `section` (`None` is the top
+    /// section), saved at once.
+    fn move_channel_to(
+        &mut self,
+        server: String,
+        channel: String,
+        section: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(edited) = self
+            .store
+            .server(&server)
+            .and_then(|s| crate::channel_order::move_to_end(s, &channel, section.as_deref()))
+        else {
+            return;
+        };
+        self.save_categories(server, edited, window, cx);
+    }
+
+    /// A new order of `server`'s channels and categories: show it now, then
+    /// send it. If Stoat refuses, the old order comes back (unless the
+    /// order changed again meanwhile, from elsewhere) and a toast says why.
+    /// While one is saving, another is ignored.
+    fn save_categories(
+        &mut self,
+        server: String,
+        edited: Vec<Category>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.categories_saving.is_some() {
+            return;
+        }
+        let Some(old) = self.store.server(&server).map(|s| s.categories.clone()) else {
+            return;
+        };
+        self.categories_changed(&server, edited.clone(), cx);
+        let request = spawn_io({
+            let (client, server, edited) = (self.client.clone(), server.clone(), edited.clone());
+            async move { client.edit_categories(&server, &edited).await }
+        });
+        self.categories_saving = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.categories_saving = None;
+                match result {
+                    Ok(Ok(categories)) => this.categories_changed(&server, categories, cx),
+                    failed => {
+                        log::warn!("couldn't reorder the channels of {server}: {failed:?}");
+                        let shown = this.store.server(&server).map(|s| s.categories.clone());
+                        if shown == Some(Some(edited)) {
+                            this.categories_changed(&server, old.unwrap_or_default(), cx);
+                        }
+                        let text = match failed {
+                            Ok(Err(err)) => crate::server_edit::categories_error_text(&err),
+                            _ => "Couldn't change the order of the channels.".into(),
+                        };
+                        window.push_notification(Notification::error(text), cx);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     /// "Create a new category" in `server`, appended after the others.

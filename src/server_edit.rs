@@ -7,6 +7,7 @@ use revolt_result::ErrorType;
 
 use crate::api::ApiError;
 use crate::api::models::Category;
+use crate::channel_order::listed_once;
 use crate::profile_edit::error_text;
 
 /// Server, channel and category names: 1 to 32 characters, as Stoat
@@ -105,15 +106,6 @@ pub fn first_line(description: Option<&str>) -> Option<&str> {
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
-}
-
-/// Keep each channel where it's first listed, and drop any later copy:
-/// Stoat refuses a list with a channel twice.
-fn listed_once(categories: &mut [Category]) {
-    let mut seen = std::collections::HashSet::new();
-    for c in categories {
-        c.channels.retain(|id| seen.insert(id.clone()));
-    }
 }
 
 /// Why `POST /servers/create` was refused.
