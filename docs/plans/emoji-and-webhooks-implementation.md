@@ -132,3 +132,58 @@ Look-ahead: chunk 4 turns `WebhookView`'s heading into an editor (avatar row, na
 
 ### Manual Validation
 Deferred to the end (batched): create a webhook in a channel and in a group, copy the URL, post with `curl`, then delete both (no error in the group).
+
+## Chunk 4: Edit a webhook's name and avatar
+
+### Changes Made
+- `src/webhooks.rs`: `WebhookForm { name, avatar: ProfileImage }` with `of`, `is_valid`, `new_file`, `has_changes` and `changes` (a trimmed new name; a new avatar's file ID, or `remove: [Avatar]`; a picked file waits for its upload; `None` when unchanged or invalid), and `empty_webhook_edit()`.
+- `src/api/client.rs`: `edit_webhook(id, &DataEditWebhook) -> Webhook`, a `PATCH /webhooks/{id}` through `edit_body`.
+- `src/ui/webhooks_page.rs`, `WebhookView`:
+  - the bar has Reset and Save beside "‹ Webhooks";
+  - under the muted ID come an Avatar row (`render_image_row` with `avatar_preview`, the avatar size limit, uploaded to `avatars`) and a Name field (count, "A webhook needs a name."). Enter saves;
+  - `filled` with per-field live-follow, `reset`, `pick_avatar`, and `save` (upload, then a `PATCH` built against the webhook as stored then; the answer goes through `webhook_saved`, which keeps the known token; "Saved."), with `save_failed`;
+  - the URL and Delete sections are as in chunk 3.
+- Tests:
+  - `tests/webhooks.rs`: 2 new tests (9 in all). The editor sends only what changed (name, avatar removed, replaced, picked, blank name); a saved webhook keeps its token;
+  - `tests/api_webhooks.rs`: 2 new wiremock tests (7 in all). A rename with a removed avatar sends exactly `{"name","remove":["Avatar"]}`; a new avatar is sent by file ID and the answer's avatar parses.
+
+### Divergences
+- **The heading with the avatar and name is replaced by the editor** (the avatar row and the name field), with the webhook's ID kept above them as muted text.
+
+### Verification Performed
+- `cargo test --test webhooks --test api_webhooks`: 9 and 7 passed.
+- Full suite: `cargo test` gave 1,402 passed, 0 failed. `cargo clippy --all-targets -- -D warnings` is clean.
+- Rustfmt: `src/api/client.rs` is still 3. The touched new files are clean.
+
+### Manual Validation
+Deferred to the end (batched): rename a webhook and give it an avatar, post with `curl`, and see the new name and avatar. Remove the avatar.
+
+## Summary
+
+_Completed: 2026-11-11_
+
+### Chunks Completed
+1. The Emojis page: list and delete (`8516372`)
+2. Upload and rename emoji (`d51357f`)
+3. The Webhooks page: list, create, copy the URL, delete (`739e608`)
+4. Edit a webhook's name and avatar (this commit)
+
+### Divergences
+- Chunk 1: the event decode test is in `tests/store_emoji.rs`. The page icon is `FaceSlightlySmiling`. Emoji events now redraw the chat view.
+- Chunk 2: the emoji size limit is on `ChatView`, not `ImageLimits`. The page has its own file prompt (to open the dialog with a window). Upload and create are one task.
+- Chunk 3: the page fetches from its own render. The group-delete check is in the request task. Tokens are kept off screen and out of logs.
+- Chunk 4: the webhook's heading became the editor.
+- Before starting, the live API had moved to Stoat 0.16.4 (`1f568f4`); no emoji or webhook route changed.
+
+### Definition of Done
+- [x] Server Settings has an Emojis page for Manage Customisation, listing the server's emoji with their creators, and a count against the limit.
+- [x] Emoji upload to `emojis` then `PUT /custom/emoji/{id}`, rename with `PATCH`, and delete with `DELETE`, each showing at once. `EmojiUpdate` from elsewhere renames.
+- [x] Emoji names are checked as Stoat does (1–32 of `a–z0–9_`), prefilled from the file name.
+- [x] Channel Settings has a Webhooks page for Manage Webhooks in a server channel or group: list, create (name), copy URL (token never shown or logged), and delete (with the group-panic workaround).
+- [x] A webhook's name and avatar can be edited; the answer and webhook events keep the list current, and a known token isn't lost.
+- [x] Refusals read plainly, including an HTML 404 for instances without webhooks.
+- [x] `cargo test` (1,402) and `cargo clippy --all-targets -- -D warnings` pass. No touched file's rustfmt drift grew, and new files are clean.
+- [x] The roadmap links this plan (committed with chunk 1).
+
+### Remaining Manual Steps
+The plan's Manual Tests 1–8, batched at the end as the user asked: the emoji list; upload (PNG and GIF); rename and delete; access; webhooks in a channel (create, copy, post with `curl`, rename, avatar, delete); group webhooks (delete without an error); live changes (including Copy URL for a webhook made elsewhere); themes.

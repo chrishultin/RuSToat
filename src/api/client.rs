@@ -1322,6 +1322,20 @@ impl StoatClient {
         .await
     }
 
+    /// `PATCH /webhooks/{id}`: change a webhook's name or avatar (Manage
+    /// Webhooks in its channel). Only what's set is sent, as with
+    /// [`Self::edit_server`]. Stoat answers with the webhook;
+    /// `WebhookUpdate` (without the token) follows.
+    pub async fn edit_webhook(
+        &self,
+        id: &str,
+        edit: &revolt_models::v0::DataEditWebhook,
+    ) -> Result<revolt_models::v0::Webhook, ApiError> {
+        let body = edit_body(serde_json::to_value(edit).expect("webhook edit serialises"));
+        self.send(Method::PATCH, &format!("/webhooks/{id}"), Some(&body))
+            .await
+    }
+
     /// `DELETE /webhooks/{id}` (Manage Webhooks in its channel). In a group,
     /// Stoat 0.16 deletes it and then fails (a 500).
     pub async fn delete_webhook(&self, id: &str) -> Result<(), ApiError> {

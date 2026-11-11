@@ -6,7 +6,7 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
-use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme, Disableable, Icon, Sizable, WindowExt, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
@@ -14,18 +14,22 @@ use gpui_kit::*;
 
 use crate::api::ApiError;
 use crate::api::models::{Channel, Webhook};
+use crate::profile_edit::ProfileImage;
 use crate::runtime::spawn_io;
 use crate::ui::chat::{ChatView, avatar};
+use crate::ui::profile_editor::{
+    ImageSlot, Preview, avatar_preview, field, prompt_for_image, render_image_row, upload_image,
+};
 use crate::ui::server_dialogs::name_field;
 use crate::ui::server_settings::{open_focused_dialog, section_heading};
 use crate::webhooks::{
-    WebhookRow, avatar_url, check_webhook_name, delete_prompt, list_error_text, shown_url,
-    webhook_error_text, webhook_rows, webhook_url, webhooks_unavailable,
+    WEBHOOK_AVATAR_TAG, WEBHOOK_NAME_MAX, WebhookForm, WebhookRow, check_webhook_name,
+    delete_prompt, list_error_text, shown_url, webhook_error_text, webhook_rows, webhook_url,
+    webhooks_unavailable,
 };
 
-/// How big an avatar shows in the list, and on a webhook's page.
+/// How big an avatar shows in the list.
 const LIST_AVATAR: f32 = 24.;
-const PAGE_AVATAR: f32 = 40.;
 
 /// Fetching the list.
 enum Fetch {
@@ -427,15 +431,23 @@ impl Render for CreateWebhookDialog {
 /// "‹ Webhooks" was clicked, or the webhook was deleted.
 pub struct BackToWebhooks;
 
-/// One webhook's page: its avatar and name, its URL to copy, and Delete.
+/// One webhook's page: its avatar and name (saved together, after
+/// uploading a new avatar), its URL to copy, and Delete. Untouched fields
+/// follow changes made elsewhere.
 pub struct WebhookView {
     chat: WeakEntity<ChatView>,
     channel: String,
     id: String,
+    name: Entity<InputState>,
+    avatar: ImageSlot,
+    /// The webhook's values the fields were last filled with.
+    filled: WebhookForm,
+    /// Waiting for the upload, then the `PATCH`.
+    saving: bool,
     /// Copying is waiting for the list (and so the token).
     copying: bool,
     deleting: bool,
-    _chat: Subscription,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl EventEmitter<BackToWebhooks> for WebhookView {}
@@ -445,17 +457,208 @@ impl WebhookView {
         chat: &Entity<ChatView>,
         channel: String,
         id: String,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self {
+        let name = cx.new(|cx| InputState::new(window, cx));
+        let subscriptions = vec![
+            cx.subscribe_in(&name, window, |this, _, event, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.save(window, cx),
+                _ => cx.notify(),
+            }),
+            cx.observe_in(chat, window, |this, _, window, cx| this.follow(window, cx)),
+        ];
+        let mut this = Self {
             chat: chat.downgrade(),
             channel,
             id,
+            name,
+            avatar: ImageSlot::default(),
+            filled: WebhookForm::default(),
+            saving: false,
             copying: false,
             deleting: false,
-            _chat: cx.observe(chat, |_, _, cx| cx.notify()),
+            _subscriptions: subscriptions,
+        };
+        this.reset(window, cx);
+        this
+    }
+
+    /// The form as edited.
+    fn edited(&self, cx: &App) -> WebhookForm {
+        WebhookForm {
+            name: self.name.read(cx).value().to_string(),
+            avatar: self.avatar.image.clone(),
         }
+    }
+
+    fn can_save(&self, edited: &WebhookForm, cx: &App) -> bool {
+        !self.saving
+            && self.avatar.problem.is_none()
+            && edited.is_valid()
+            && self
+                .current(cx)
+                .is_some_and(|webhook| edited.has_changes(&webhook))
+    }
+
+    /// Fill the fields with the webhook's values.
+    fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(form) = self.current(cx).as_ref().map(WebhookForm::of) else {
+            return;
+        };
+        let name = form.name.clone();
+        self.name
+            .update(cx, |input, cx| input.set_value(name, window, cx));
+        self.avatar = ImageSlot {
+            image: form.avatar.clone(),
+            problem: None,
+        };
+        self.filled = form;
+        cx.notify();
+    }
+
+    /// The webhook changed (here or elsewhere): untouched fields take its
+    /// new values, edited ones keep theirs.
+    fn follow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(now) = self.current(cx).as_ref().map(WebhookForm::of) else {
+            cx.notify();
+            return;
+        };
+        if now != self.filled {
+            let edited = self.edited(cx);
+            if edited.name == self.filled.name && now.name != self.filled.name {
+                let name = now.name.clone();
+                self.name
+                    .update(cx, |input, cx| input.set_value(name, window, cx));
+            }
+            if edited.avatar == self.filled.avatar && self.avatar.problem.is_none() {
+                self.avatar = ImageSlot {
+                    image: now.avatar.clone(),
+                    problem: None,
+                };
+            }
+            self.filled = now;
+        }
+        cx.notify();
+    }
+
+    /// Change… on the avatar's row.
+    fn pick_avatar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let limit = self
+            .chat
+            .upgrade()
+            .map(|chat| chat.read(cx).image_limits())
+            .unwrap_or_default()
+            .avatar;
+        prompt_for_image(window, cx, move |this: &mut Self, path, _| {
+            this.avatar.pick(path, limit);
+        });
+    }
+
+    /// Send what changed: upload a new avatar first, then one `PATCH` built
+    /// against the webhook as stored then. Stoat's answer shows at once; a
+    /// failure says why, and the form keeps the edit.
+    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let edited = self.edited(cx);
+        if !self.can_save(&edited, cx) {
+            return;
+        }
+        let Some(chat) = self.chat.upgrade() else {
+            return;
+        };
+        let (client, file_server) = {
+            let chat = chat.read(cx);
+            let file_server = chat.store().media().file_server().map(str::to_string);
+            (chat.client().clone(), file_server)
+        };
+        let upload = edited.new_file().map(|path| path.to_path_buf());
+        let file_server = match (file_server, upload.is_none()) {
+            (Some(server), _) => server,
+            (None, true) => String::new(),
+            (None, false) => {
+                window.push_notification(
+                    Notification::error("Couldn't upload: Stoat's file server isn't known yet."),
+                    cx,
+                );
+                return;
+            }
+        };
+        self.saving = true;
+        cx.notify();
+        let id = self.id.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let mut edited = edited;
+            if let Some(path) = upload {
+                let upload = spawn_io(upload_image(
+                    client.clone(),
+                    file_server,
+                    WEBHOOK_AVATAR_TAG,
+                    path,
+                ));
+                match upload.await {
+                    Ok(Ok(uploaded)) => edited.avatar = ProfileImage::Current(uploaded),
+                    failed => {
+                        let failed = failed.map(|result| result.map(|_| ()));
+                        this.update_in(cx, |this, window, cx| this.save_failed(failed, window, cx))
+                            .ok();
+                        return;
+                    }
+                }
+            }
+            let Ok(edit) = this.update(cx, |this, cx| {
+                this.current(cx)
+                    .and_then(|webhook| edited.changes(&webhook))
+            }) else {
+                return;
+            };
+            let Some(edit) = edit else {
+                this.update(cx, |this, cx| {
+                    this.saving = false;
+                    cx.notify();
+                })
+                .ok();
+                return;
+            };
+            let request = spawn_io(async move { client.edit_webhook(&id, &edit).await });
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| match result {
+                Ok(Ok(saved)) => {
+                    this.saving = false;
+                    log::info!("saved webhook {}", this.id);
+                    this.chat
+                        .update(cx, |chat, cx| chat.webhook_saved(saved, cx))
+                        .ok();
+                    this.reset(window, cx);
+                    window.push_notification(Notification::success("Saved."), cx);
+                }
+                failed => this.save_failed(failed.map(|result| result.map(|_| ())), window, cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The upload or the `PATCH` failed: say why, and keep the edit.
+    fn save_failed(
+        &mut self,
+        result: Result<Result<(), ApiError>, impl std::fmt::Debug>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.saving = false;
+        let text = match result {
+            Ok(Err(err)) => {
+                log::warn!("couldn't save webhook {}: {err:?}", self.id);
+                webhook_error_text(&err)
+            }
+            Ok(Ok(())) => return,
+            Err(err) => {
+                log::warn!("webhook save task failed: {err:?}");
+                "Couldn't save the webhook.".into()
+            }
+        };
+        window.push_notification(Notification::error(text), cx);
+        cx.notify();
     }
 
     /// The webhook as the store has it now.
@@ -661,50 +864,87 @@ impl Render for WebhookView {
         let Some(webhook) = self.current(cx) else {
             return div().into_any_element();
         };
+        let edited = self.edited(cx);
+        let changed = edited != self.filled || self.avatar.problem.is_some();
+        let can_save = self.can_save(&edited, cx);
+        let (limit, preview) = match self.chat.upgrade() {
+            Some(chat) => {
+                let chat = chat.read(cx);
+                let preview = Preview::of(
+                    &self.avatar.image,
+                    WEBHOOK_AVATAR_TAG,
+                    chat.store().media(),
+                    Preview::Empty,
+                );
+                (chat.image_limits().avatar, preview)
+            }
+            None => (0, Preview::Empty),
+        };
+        let avatar_row = render_image_row(
+            "webhook-avatar",
+            "Avatar",
+            avatar_preview("webhook-avatar-preview", preview, &edited.name, cx),
+            &self.avatar,
+            limit,
+            self.saving,
+            cx.listener(|this, _, window, cx| this.pick_avatar(window, cx)),
+            cx.listener(|this, _, _, cx| {
+                this.avatar.remove();
+                cx.notify();
+            }),
+            cx,
+        );
+        let name_count = edited.name.trim().chars().count();
+        let name = field(
+            "Name",
+            Input::new(&self.name)
+                .disabled(self.saving)
+                .into_any_element(),
+            name_count,
+            WEBHOOK_NAME_MAX,
+            (name_count == 0).then(|| "A webhook needs a name.".to_string()),
+            cx,
+        );
         let theme = cx.theme();
         let muted = theme.muted_foreground;
-        let url = self
-            .chat
-            .upgrade()
-            .and_then(|chat| avatar_url(&webhook, chat.read(cx).store().media()));
         let api = self.api(cx);
         v_flex()
             .w_full()
             .gap_4()
             .child(
-                h_flex().w_full().child(
-                    Button::new("webhooks-back")
-                        .label("Webhooks")
-                        .icon(IconName::ChevronLeft)
-                        .ghost()
-                        .small()
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(BackToWebhooks))),
-                ),
-            )
-            .child(
                 h_flex()
-                    .gap_3()
-                    .items_center()
-                    .child(avatar(
-                        format!("webhook-page-avatar-{}", webhook.id),
-                        url,
-                        &webhook.name,
-                        PAGE_AVATAR,
-                        theme.secondary,
-                        theme.secondary_foreground,
-                    ))
+                    .w_full()
+                    .gap_2()
                     .child(
-                        v_flex()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_lg()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(webhook.name.clone()),
-                            )
-                            .child(div().text_xs().text_color(muted).child(webhook.id.clone())),
+                        Button::new("webhooks-back")
+                            .label("Webhooks")
+                            .icon(IconName::ChevronLeft)
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(BackToWebhooks))),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("webhook-reset")
+                            .label("Reset")
+                            .outline()
+                            .small()
+                            .disabled(!changed || self.saving)
+                            .on_click(cx.listener(|this, _, window, cx| this.reset(window, cx))),
+                    )
+                    .child(
+                        Button::new("webhook-save")
+                            .label("Save")
+                            .primary()
+                            .small()
+                            .loading(self.saving)
+                            .disabled(!can_save)
+                            .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
                     ),
             )
+            .child(div().text_xs().text_color(muted).child(webhook.id.clone()))
+            .child(avatar_row)
+            .child(name)
             .child(
                 v_flex()
                     .gap_2()

@@ -11,11 +11,14 @@
 use revolt_permissions::ChannelPermission;
 use revolt_result::ErrorType;
 
+use std::path::Path;
+
 use crate::api::ApiError;
-use crate::api::models::{Channel, Webhook};
+use crate::api::models::{Channel, DataEditWebhook, FieldsWebhook, Webhook};
 use crate::media::MediaUrls;
 use crate::permissions::{channel_permissions, has};
-use crate::profile_edit::error_text;
+use crate::profile_edit::{ProfileImage, error_text};
+use crate::server_settings::image_change;
 use crate::store::ChatStore;
 
 /// The longest webhook name Stoat takes, in characters.
@@ -120,5 +123,68 @@ pub fn webhook_error_text(err: &ApiError) -> String {
         Some(ErrorType::NotFound) => "That webhook was deleted.".into(),
         Some(ErrorType::InvalidOperation) => "Webhooks can't be made here.".into(),
         _ => error_text(err, "Couldn't change the webhook."),
+    }
+}
+
+/// A webhook's editor, as typed and picked.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WebhookForm {
+    pub name: String,
+    pub avatar: ProfileImage,
+}
+
+impl WebhookForm {
+    /// The form filled with `webhook`'s values.
+    pub fn of(webhook: &Webhook) -> Self {
+        Self {
+            name: webhook.name.clone(),
+            avatar: webhook.avatar.as_ref().map_or(ProfileImage::None, |file| {
+                ProfileImage::Current(file.id.clone())
+            }),
+        }
+    }
+
+    /// Whether the name is one Stoat takes, so Save can send it.
+    pub fn is_valid(&self) -> bool {
+        check_webhook_name(&self.name).is_some()
+    }
+
+    /// The avatar picked to upload before saving.
+    pub fn new_file(&self) -> Option<&Path> {
+        self.avatar.new_file()
+    }
+
+    /// Whether Save has anything to do: a change, or an avatar to upload.
+    pub fn has_changes(&self, webhook: &Webhook) -> bool {
+        self.new_file().is_some() || self.changes(webhook).is_some()
+    }
+
+    /// The `PATCH /webhooks/{id}` that turns `webhook` into this form: a
+    /// trimmed new name, a new avatar's file ID, or `remove: [Avatar]`. A
+    /// picked avatar is left out until it's uploaded. `None` when nothing
+    /// changed or the form isn't valid.
+    pub fn changes(&self, webhook: &Webhook) -> Option<DataEditWebhook> {
+        let name = check_webhook_name(&self.name)?;
+        let stored = Self::of(webhook);
+        let mut edit = empty_webhook_edit();
+        if name != webhook.name {
+            edit.name = Some(name);
+        }
+        match image_change(&stored.avatar, &self.avatar) {
+            Some(Some(id)) => edit.avatar = Some(id),
+            Some(None) => edit.remove.push(FieldsWebhook::Avatar),
+            None => {}
+        }
+        (edit != empty_webhook_edit()).then_some(edit)
+    }
+}
+
+/// A `DataEditWebhook` that changes nothing (it has no `Default`).
+pub fn empty_webhook_edit() -> DataEditWebhook {
+    DataEditWebhook {
+        name: None,
+        avatar: None,
+        permissions: None,
+        remove: Vec::new(),
     }
 }

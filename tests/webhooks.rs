@@ -5,9 +5,12 @@ use revolt_permissions::{ChannelPermission, DEFAULT_PERMISSION_SERVER};
 use serde_json::{Value, json};
 use stoat_gpui::api::ApiError;
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
+use stoat_gpui::api::models::FieldsWebhook;
 use stoat_gpui::api::models::Webhook;
 use stoat_gpui::media::MediaUrls;
+use stoat_gpui::profile_edit::ProfileImage;
 use stoat_gpui::store::ChatStore;
+use stoat_gpui::webhooks::{WebhookForm, empty_webhook_edit};
 use stoat_gpui::webhooks::{
     WebhookRow, can_manage_webhooks, check_webhook_name, delete_prompt, list_error_text, shown_url,
     webhook_error_text, webhook_rows, webhook_url, webhooks_unavailable,
@@ -290,5 +293,78 @@ fn webhook_names_and_texts() {
     assert_eq!(
         text(r#"{"type":"InternalError"}"#),
         "Couldn't change the webhook."
+    );
+}
+
+fn with_avatar(mut webhook: Webhook, id: &str) -> Webhook {
+    webhook.avatar = Some(
+        serde_json::from_value(json!({
+            "_id": id, "tag": "avatars", "filename": "a.png",
+            "metadata": { "type": "Image", "width": 64, "height": 64 },
+            "content_type": "image/png", "size": 100
+        }))
+        .unwrap(),
+    );
+    webhook
+}
+
+#[test]
+fn the_editor_sends_only_what_changed() {
+    let hook = with_avatar(webhook("w1", "CI", Some("tok")), "av");
+    let form = WebhookForm::of(&hook);
+    assert_eq!(
+        form,
+        WebhookForm {
+            name: "CI".into(),
+            avatar: ProfileImage::Current("av".into()),
+        }
+    );
+    assert_eq!(form.changes(&hook), None);
+    assert!(!form.has_changes(&hook));
+
+    let mut renamed = form.clone();
+    renamed.name = "  Builds ".into();
+    let edit = renamed.changes(&hook).unwrap();
+    assert_eq!(edit.name.as_deref(), Some("Builds"));
+    assert_eq!((edit.avatar, edit.permissions), (None, None));
+    assert!(edit.remove.is_empty());
+
+    let mut removed = form.clone();
+    removed.avatar = ProfileImage::None;
+    assert_eq!(
+        removed.changes(&hook).unwrap().remove,
+        vec![FieldsWebhook::Avatar]
+    );
+
+    let mut replaced = form.clone();
+    replaced.avatar = ProfileImage::Current("av2".into());
+    assert_eq!(
+        replaced.changes(&hook).unwrap().avatar.as_deref(),
+        Some("av2")
+    );
+
+    // A picked file waits for its upload, but Save has work.
+    let mut picked = form.clone();
+    picked.avatar = ProfileImage::New("/tmp/a.png".into());
+    assert_eq!(picked.changes(&hook), None);
+    assert!(picked.has_changes(&hook));
+
+    let mut blank = form;
+    blank.name = "  ".into();
+    assert!(!blank.is_valid());
+    assert_eq!(blank.changes(&hook), None);
+    assert!(empty_webhook_edit().remove.is_empty());
+}
+
+#[test]
+fn a_saved_webhook_keeps_its_token() {
+    let mut store = store("u-owner");
+    store.set_webhooks("ch-a", vec![webhook("w1", "CI", Some("tok1"))]);
+    // The PATCH answer, as if without the token.
+    store.add_webhook(webhook("w1", "Builds", None));
+    let saved = &store.webhooks("ch-a").unwrap()[0];
+    assert_eq!(
+        (saved.name.as_str(), saved.token.as_deref()),
+        ("Builds", Some("tok1"))
     );
 }
