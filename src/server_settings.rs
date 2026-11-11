@@ -41,6 +41,8 @@ pub struct Access {
     pub invites: bool,
     /// The server's bans (Ban Members).
     pub bans: bool,
+    /// The server's custom emoji (Manage Customisation).
+    pub emojis: bool,
     /// Transfer ownership, and delete the server (the owner).
     pub ownership: bool,
 }
@@ -48,7 +50,7 @@ pub struct Access {
 impl Access {
     /// Whether there's any page to show, so "Server settings…" is offered.
     pub fn any(&self) -> bool {
-        self.overview || self.roles || self.invites || self.bans || self.ownership
+        self.overview || self.roles || self.invites || self.bans || self.emojis || self.ownership
     }
 }
 
@@ -71,6 +73,7 @@ pub fn access(store: &ChatStore, server: &str) -> Access {
             || has(permissions, ChannelPermission::ManagePermissions),
         invites: manage,
         bans: has(permissions, ChannelPermission::BanMembers),
+        emojis: has(permissions, ChannelPermission::ManageCustomisation),
         ownership,
     }
 }

@@ -2278,6 +2278,29 @@ impl ChatStore {
         self.other_emojis.remove(id);
     }
 
+    /// A server emoji was renamed (`EmojiUpdate`, or the answer to the
+    /// user's own rename). Returns false for an unknown emoji.
+    pub fn rename_emoji(&mut self, id: &str, name: &str) -> bool {
+        match self.emojis.get_mut(id) {
+            Some(emoji) => {
+                name.clone_into(&mut emoji.name);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `server`'s custom emoji, by name.
+    pub fn server_emojis(&self, server: &str) -> Vec<&Emoji> {
+        let mut emojis: Vec<&Emoji> = self
+            .emojis
+            .values()
+            .filter(|emoji| matches!(&emoji.parent, EmojiParent::Server { id } if id == server))
+            .collect();
+        emojis.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+        emojis
+    }
+
     /// Another server's emoji, fetched by ID (see [`ChatStore::missing_emojis`]).
     pub fn add_other_emoji(&mut self, emoji: Emoji) {
         self.other_emojis.insert(emoji.id.clone(), emoji);

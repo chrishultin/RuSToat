@@ -14,6 +14,7 @@ pub mod channel_order;
 pub mod channel_permissions;
 pub mod channel_settings;
 pub mod complete;
+pub mod custom_emoji;
 pub mod dock;
 pub mod draft;
 pub mod embed;

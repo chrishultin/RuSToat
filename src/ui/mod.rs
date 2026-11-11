@@ -7,6 +7,7 @@ pub mod channel_permissions;
 pub mod channel_settings;
 pub mod chat;
 pub mod confirm_dialog;
+pub mod emoji_page;
 pub mod composer;
 pub mod emoji_picker;
 pub mod friends;

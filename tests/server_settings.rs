@@ -89,6 +89,7 @@ fn the_owner_sees_every_page() {
         roles: true,
         invites: true,
         bans: true,
+        emojis: true,
         ownership: true,
     };
     assert_eq!(access(&store("u-owner"), "srv"), all);

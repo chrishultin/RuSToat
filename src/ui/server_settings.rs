@@ -60,6 +60,7 @@ use crate::store::solid_colour;
 use crate::themes;
 use crate::ui::chat::{ChatView, DRAGGED_OPACITY, DragPreview, DropMark, avatar, with_drop_mark};
 use crate::ui::confirm_dialog::{ConfirmRequest, confirm_then};
+use crate::ui::emoji_page::EmojiPage;
 use crate::ui::invites::{CREATE_DIALOG_WIDTH, CreateInviteDialog, InviteCreated};
 use crate::ui::moderation_dialogs::{MemberActionRequest, confirm_member_action_then};
 use crate::ui::permission_matrix::{Mode, PermissionMatrix};
@@ -183,15 +184,17 @@ pub struct ServerSettingsView {
     roles: Entity<RolesPage>,
     invites: Entity<InvitesPage>,
     bans: Entity<BansPage>,
+    emojis: Entity<EmojiPage>,
     ownership: Entity<OwnershipPage>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl ServerSettingsView {
     /// The pages, in sidebar order.
-    pub const PAGES: [ServerPageFn; 5] = [
+    pub const PAGES: [ServerPageFn; 6] = [
         overview_page,
         roles_page,
+        emojis_page,
         invites_page,
         bans_page,
         ownership_page,
@@ -226,6 +229,7 @@ impl ServerSettingsView {
         let roles = cx.new(|cx| RolesPage::new(&chat, server.clone(), window, cx));
         let invites = cx.new(|_| InvitesPage::new(&chat, server.clone()));
         let bans = cx.new(|cx| BansPage::new(&chat, server.clone(), window, cx));
+        let emojis = cx.new(|cx| EmojiPage::new(&chat, server.clone(), cx));
         let ownership = cx.new(|_| OwnershipPage::new(&chat, server.clone()));
         Self {
             chat: chat.downgrade(),
@@ -238,6 +242,7 @@ impl ServerSettingsView {
             roles,
             invites,
             bans,
+            emojis,
             ownership,
             _subscriptions: subscriptions,
         }
@@ -2872,6 +2877,27 @@ impl Render for InvitesPage {
 }
 
 /// Bans: everyone banned from the server, and why.
+/// Emojis: the server's custom emoji.
+fn emojis_page(view: &ServerSettingsView, cx: &mut App) -> Option<SettingPage> {
+    if !view.access(cx).emojis {
+        return None;
+    }
+    let emojis = view.emojis.clone();
+    Some(
+        SettingPage::new("Emojis")
+            .icon(IconName::FaceSlightlySmiling)
+            .resettable(false)
+            .group(SettingGroup::new().item(
+                SettingItem::render(move |_, _, _| emojis.clone()).keywords([
+                    "emoji",
+                    "emojis",
+                    "customisation",
+                    "custom",
+                ]),
+            )),
+    )
+}
+
 fn bans_page(view: &ServerSettingsView, cx: &mut App) -> Option<SettingPage> {
     if !view.access(cx).bans {
         return None;

@@ -104,6 +104,9 @@ pub struct GlobalLimits {
     /// default is 100).
     #[serde(default)]
     pub group_size: Option<u32>,
+    /// The most custom emoji a server may have (Stoat's default is 100).
+    #[serde(default)]
+    pub server_emoji: Option<u32>,
 }
 
 /// The limits this client uses, out of many.
@@ -133,6 +136,9 @@ pub struct FileSizeLimits {
     /// Largest server banner (Stoat 0.16.2 doesn't send it).
     #[serde(default)]
     pub banners: Option<u64>,
+    /// Largest custom emoji.
+    #[serde(default)]
+    pub emojis: Option<u64>,
 }
 
 /// Used when `GET /` doesn't say: Stoat's own defaults (20 MB, 5 files).
@@ -144,6 +150,8 @@ pub const DEFAULT_BACKGROUND_SIZE_LIMIT: u64 = 6_000_000;
 /// Stoat's defaults for server icons (2.5 MB) and server banners (6 MB).
 pub const DEFAULT_ICON_SIZE_LIMIT: u64 = 2_500_000;
 pub const DEFAULT_BANNER_SIZE_LIMIT: u64 = 6_000_000;
+/// Stoat's default for custom emoji (500 KB).
+pub const DEFAULT_EMOJI_SIZE_LIMIT: u64 = 500_000;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServiceFeature {
@@ -196,6 +204,13 @@ impl RootConfig {
     pub fn banner_size_limit(&self) -> u64 {
         self.stricter_size_limit(|l| l.banners)
             .unwrap_or(DEFAULT_BANNER_SIZE_LIMIT)
+    }
+
+    /// Largest custom emoji, in bytes, chosen the same way, else
+    /// [`DEFAULT_EMOJI_SIZE_LIMIT`].
+    pub fn emoji_size_limit(&self) -> u64 {
+        self.stricter_size_limit(|l| l.emojis)
+            .unwrap_or(DEFAULT_EMOJI_SIZE_LIMIT)
     }
 
     /// The stricter of the two account limits on one kind of file, if
@@ -1270,6 +1285,14 @@ impl StoatClient {
             Some(&revolt_models::v0::DataDefaultChannelPermissions::Value { permissions }),
         )
         .await
+    }
+
+    /// `DELETE /custom/emoji/{id}`: delete a server's custom emoji (Manage
+    /// Customisation, unless the user created it). `EmojiDelete` follows.
+    pub async fn delete_emoji(&self, id: &str) -> Result<(), ApiError> {
+        self.send_raw(Method::DELETE, &format!("/custom/emoji/{id}"), None::<&()>)
+            .await
+            .map(|_| ())
     }
 
     /// `DELETE /channels/{channel}`: delete a server channel (Manage

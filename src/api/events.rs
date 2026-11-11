@@ -120,6 +120,12 @@ pub enum ServerEvent {
     EmojiDelete {
         id: String,
     },
+    /// A server emoji was renamed (`name`; `None` if this update didn't
+    /// change it).
+    EmojiUpdate {
+        id: String,
+        name: Option<String>,
+    },
     /// `user` started typing in `channel` (again: it's resent while they type).
     ChannelStartTyping {
         channel: String,
@@ -498,6 +504,19 @@ fn decode(mut value: Value, out: &mut Vec<ServerEvent>) {
             }
             out.push(decode_as(value, &kind, |d: Delete| {
                 ServerEvent::EmojiDelete { id: d.id }
+            }))
+        }
+        "EmojiUpdate" => {
+            #[derive(Deserialize)]
+            struct Update {
+                id: String,
+                data: crate::api::models::PartialEmoji,
+            }
+            out.push(decode_as(value, &kind, |u: Update| {
+                ServerEvent::EmojiUpdate {
+                    id: u.id,
+                    name: u.data.name,
+                }
             }))
         }
         // `id` is the channel.
@@ -1233,6 +1252,7 @@ async fn session(
                         | ServerEvent::ChannelStartTyping { .. }
                         | ServerEvent::ChannelStopTyping { .. }
                         | ServerEvent::EmojiDelete { .. }
+                        | ServerEvent::EmojiUpdate { .. }
                         | ServerEvent::ServerUpdate { .. }
                         | ServerEvent::ServerRoleUpdate { .. }
                         | ServerEvent::ServerRoleDelete { .. }

@@ -157,9 +157,9 @@ Some milestones lay foundations that later ones reuse. When the earlier one's pl
 - Only the permissions that apply in a channel (23) or group (12)
 - A group's member permissions, on or off, for its owner
 
-### Milestone 28: Emoji and webhooks (M)
-- Server emoji: upload, rename, delete
-- Webhooks: create, view (copy the URL), delete
+### Milestone 28: Emoji and webhooks (M). Plan: [`emoji-and-webhooks.md`](emoji-and-webhooks.md)
+- Server emoji: upload, rename, delete, on an Emojis page in Server Settings
+- Webhooks: create, view (copy the URL), rename and change the avatar, delete, on a Webhooks page in Channel Settings, for server channels and groups
 
 ## E. Bots
 

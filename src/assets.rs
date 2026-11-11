@@ -237,6 +237,8 @@ mod tests {
             IconName::Lock,
             IconName::Plus,
             IconName::Users,
+            // Server Settings' Emojis page.
+            IconName::FaceSlightlySmiling,
             // Channel Settings' Permissions page, and its rows.
             IconName::ShieldCheck,
             IconName::ChevronRight,

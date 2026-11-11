@@ -416,6 +416,8 @@ pub struct ChatView {
     invite_max_days: Option<u32>,
     /// The most members a group may have on this instance, when it says.
     group_size: Option<u32>,
+    /// The most custom emoji a server may have, when the instance says.
+    server_emoji_limit: Option<u32>,
     /// The instance's voice servers (see
     /// [`crate::api::RootConfig::voice_nodes`]); none without voice. Calls
     /// are joined on the first; a moderator's move names its own.
@@ -666,6 +668,7 @@ impl ChatView {
                         this.store.set_invite_hosts(this.invite_hosts());
                         this.invite_max_days = root.features.limits.global.max_invite_duration_days;
                         this.group_size = root.features.limits.global.group_size;
+                        this.server_emoji_limit = root.features.limits.global.server_emoji;
                         this.set_media(media, cx);
                         this.composer
                             .update(cx, |composer, _| composer.set_limits(limits));
@@ -909,6 +912,7 @@ impl ChatView {
             own_member_fetches: HashSet::new(),
             invite_max_days: None,
             group_size: None,
+            server_emoji_limit: None,
             voice_nodes: Vec::new(),
             voice: None,
             voice_user_fetches: HashSet::new(),
@@ -1182,13 +1186,18 @@ impl ChatView {
                     return;
                 }
             }
+            // Redrawn, for an open Emojis page.
             ConnectionEvent::Event(ServerEvent::EmojiCreate(emoji)) => {
                 self.store.add_emoji(*emoji);
-                return;
             }
             ConnectionEvent::Event(ServerEvent::EmojiDelete { id }) => {
                 self.store.remove_emoji(&id);
-                return;
+            }
+            ConnectionEvent::Event(ServerEvent::EmojiUpdate { id, name }) => {
+                log::debug!("live: emoji {id} updated");
+                if let Some(name) = name {
+                    self.store.rename_emoji(&id, &name);
+                }
             }
             ConnectionEvent::Event(ServerEvent::ServerMemberJoin { server, member }) => {
                 let user = member.id.user.clone();
@@ -7685,6 +7694,19 @@ impl ChatView {
             self.ensure_current_loaded(cx);
         }
         cx.notify();
+    }
+
+    /// The user deleted emoji `id` (from Server Settings): drop it now,
+    /// without waiting for its `EmojiDelete`.
+    pub fn emoji_deleted(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.store.remove_emoji(id);
+        cx.notify();
+    }
+
+    /// The most custom emoji a server may have on this instance.
+    pub fn emoji_limit(&self) -> u32 {
+        self.server_emoji_limit
+            .unwrap_or(crate::custom_emoji::DEFAULT_SERVER_EMOJI)
     }
 
     /// Stoat answered the user's own change to a channel's permissions with
