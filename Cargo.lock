@@ -7001,9 +7001,9 @@ dependencies = [
 
 [[package]]
 name = "revolt-config"
-version = "0.16.2"
+version = "0.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb8993585358da2391d7917639ed9d41e73d80180ff2798d01218734b6f2ebc5"
+checksum = "f49e81b86b92f04a2ccbcae86e28f0d72fd893ac98c79ebb106326b9cc161039"
 dependencies = [
  "cached",
  "config",
@@ -7016,9 +7016,9 @@ dependencies = [
 
 [[package]]
 name = "revolt-models"
-version = "0.16.2"
+version = "0.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a86bcd7e033434dac0ffb7b37ae766b06e46a5f3c8fc8094b4e434235d860f51"
+checksum = "29c93a7e1df45c6311b1519bfe3e827bedbd920627a5c9d23b31dbccdc63eb07"
 dependencies = [
  "indexmap",
  "iso8601-timestamp",
@@ -7036,9 +7036,9 @@ dependencies = [
 
 [[package]]
 name = "revolt-permissions"
-version = "0.16.2"
+version = "0.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf16f929a973f897889611b3223e02d7960d330251c1ceccb30a436eac556b54"
+checksum = "304d40bfbad95f605b2123b726c34c3543c57b4b6b1972e9136deab63f23c396"
 dependencies = [
  "async-trait",
  "auto_ops",
@@ -7051,9 +7051,9 @@ dependencies = [
 
 [[package]]
 name = "revolt-result"
-version = "0.16.2"
+version = "0.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27c26dbf1a41a6fd2139f2be0b58d87605f12c339702c63ca7d1191b7b5ce68b"
+checksum = "e0f9ac194afac2c22d9c9110774d167f38d035ad5b91c80f49033035ebe1d640"
 dependencies = [
  "log",
  "sentry",

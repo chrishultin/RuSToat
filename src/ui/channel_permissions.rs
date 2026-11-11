@@ -498,15 +498,16 @@ impl Render for OverrideEditor {
         let blocked = ungrantable_note(&self.target, &ungrantable(held, &basis, &self.edited))
             .filter(|_| editable);
         let explanation = match self.target {
-            // Stoat applies the server's default permissions, then this,
-            // then roles' server-wide permissions, then role overrides here.
+            // Stoat (0.16.4) works out a member's permissions across the
+            // server (the defaults, then their roles'), then applies this,
+            // then their roles' overrides here.
             OverrideTarget::Everyone => {
-                "Changes the server's default permissions in this channel. Roles' own \
-                 permissions still apply over it, and role overrides here come last."
+                "What every member may do in this channel, over their permissions across the \
+                 server. Role overrides here come after it."
             }
             OverrideTarget::Role(_) => {
                 "What members with this role may do in this channel. It comes last, over \
-                 Everyone's override here and the role's server-wide permissions."
+                 their permissions across the server and Everyone's override here."
             }
         };
         let view = cx.entity().downgrade();

@@ -469,3 +469,64 @@ fn embeds_already_on_a_message_show_in_order() {
         .collect();
     assert_eq!(titles, vec![Some("first".into()), Some("second".into())]);
 }
+
+/// A Gifbox GIF as Stoat 0.16.4's embed service describes it.
+fn gifbox_embed(poster: Option<&str>) -> Value {
+    json!({
+        "type": "Website",
+        "url": "https://gifbox.me/view/smGy30kWfDtNbJyWRnq8a",
+        "original_url": "https://gifbox.me/view/smGy30kWfDtNbJyWRnq8a",
+        "special": { "type": "Gifbox", "poster_url": poster },
+        "title": "Stoat",
+        "video": {
+            "url": "https://media.gifbox.me/media/post/smGy30kWfDtNbJyWRnq8a/video.mp4",
+            "width": 640, "height": 360
+        },
+        "site_name": "Gifbox"
+    })
+}
+
+#[test]
+fn a_page_of_messages_with_a_gifbox_embed_parses() {
+    // Before 0.16.4's models, this failed the whole page ("data did not
+    // match any variant of untagged enum BulkMessageResponse").
+    let page: BulkMessageResponse = serde_json::from_value(json!([{
+        "_id": MSG, "channel": "ch", "author": "u-ada",
+        "content": "https://gifbox.me/view/smGy30kWfDtNbJyWRnq8a",
+        "embeds": [gifbox_embed(Some("https://media.gifbox.me/poster.jpg"))]
+    }]))
+    .unwrap();
+    let BulkMessageResponse::JustMessages(messages) = page else {
+        panic!("just messages");
+    };
+    assert_eq!(messages[0].embeds.as_ref().map(Vec::len), Some(1));
+}
+
+#[test]
+fn a_gifbox_gif_shows_its_poster_linking_to_the_gif() {
+    assert_eq!(
+        view(gifbox_embed(Some("https://media.gifbox.me/poster.jpg"))),
+        Some(EmbedView::GifPoster {
+            image: EmbedImage {
+                url: proxied("https://media.gifbox.me/poster.jpg"),
+                width: 400,
+                height: 225,
+                original: (640, 360),
+            },
+            link: "https://gifbox.me/view/smGy30kWfDtNbJyWRnq8a".into(),
+        })
+    );
+    // Without a poster, the still Gifbox keeps for the video.
+    assert_eq!(
+        view(gifbox_embed(None)),
+        Some(EmbedView::GifPoster {
+            image: EmbedImage {
+                url: proxied("https://media.gifbox.me/media/post/smGy30kWfDtNbJyWRnq8a/poster"),
+                width: 400,
+                height: 225,
+                original: (640, 360),
+            },
+            link: "https://gifbox.me/view/smGy30kWfDtNbJyWRnq8a".into(),
+        })
+    );
+}

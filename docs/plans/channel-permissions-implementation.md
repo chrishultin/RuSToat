@@ -175,3 +175,10 @@ _Completed: 2026-11-11_
 
 ### Remaining Manual Steps
 The plan's Manual Tests 1–8, batched at the end as the user asked (two accounts and the web client): read; Everyone; role; the quirk as a moderator (including the blocking note); group; access with only Manage Permissions; live changes; themes.
+
+## Afterwards: Stoat 0.16.4 (2026-11-11)
+
+The live API moved to 0.16.4. Its embed service sends a new `Special::Gifbox { poster_url }` embed for GIFs, which revolt-models 0.16.2 couldn't parse, so a channel with one failed to load ("data did not match any variant of untagged enum BulkMessageResponse"). Fixed separately from this milestone:
+- `Cargo.toml`: `revolt-models`, `revolt-result` and `revolt-permissions` are pinned to `=0.16.4`.
+- `src/embed.rs`: a Gifbox embed shows as its poster (the embed's `poster_url`, else Gifbox's own still), linking to its Gifbox page. `tests/store_embeds.rs` adds a page with one parsing, and both poster cases.
+- **0.16.4 also changed the order of channel permissions.** A server channel now works out a member's permissions across the server (defaults, then roles), then applies Everyone's override, then role overrides. Before, Everyone's override came before roles' server-wide permissions. RuSToat uses `revolt-permissions` itself, so its answers follow. The editors' explanations in `src/ui/channel_permissions.rs` now say so. The grant rule and routes are unchanged (no diffs in `delta/src/routes/channels/permissions_set*.rs`).

@@ -12,12 +12,12 @@ gpui-kit = "=0.9.0"
 # Wire types straight from the Stoat backend (MIT). Pinned to the live API
 # version; bump all revolt-* crates together. Default features pull in the
 # Rocket server integration, which a client doesn't need.
-revolt-models = { version = "=0.16.2", default-features = false, features = ["serde", "partials"] }
-revolt-result = { version = "=0.16.2", default-features = false, features = ["serde"] }
+revolt-models = { version = "=0.16.4", default-features = false, features = ["serde", "partials"] }
+revolt-result = { version = "=0.16.4", default-features = false, features = ["serde"] }
 # Stoat's own permission maths (owners, role and channel overrides, timeouts),
 # for what a user may see or do in a channel. Its `PermissionQuery` trait is
 # declared with `#[async_trait]`, so implementing it needs that crate too.
-revolt-permissions = { version = "=0.16.2", default-features = false }
+revolt-permissions = { version = "=0.16.4", default-features = false }
 async-trait = "0.1"
 # The `Timestamp` Stoat's wire types use (a member's timeout), as revolt-models
 # depends on it.
@@ -99,7 +99,7 @@ wiremock = "0.6"
 # Trying every bit as a `ChannelPermission` (tests/permission_matrix.rs), so
 # the permission list can't miss one. With resolver 2, the feature (and its
 # `num_enum`, already in the lock file) only reaches test builds.
-revolt-permissions = { version = "=0.16.2", default-features = false, features = ["try-from-primitive"] }
+revolt-permissions = { version = "=0.16.4", default-features = false, features = ["try-from-primitive"] }
 # A scratch directory for the account list file tests. Already in the tree.
 tempfile = "3"
 # Rendering the app icon's SVG to PNGs (examples/render_icon.rs). The version
