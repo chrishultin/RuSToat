@@ -119,3 +119,59 @@ Look-ahead: chunk 4 (groups) has no grant check, so it isn't affected. No other 
 
 ### Manual Validation
 Deferred to the end (batched): deny View Channel to a role in one channel; the quirk as a moderator (an option enabled because the role has it server-wide, Deny only where it's denied server-wide, the blocking note); roles at or above them are read-only.
+
+## Chunk 4: Edit a group's member permissions
+
+### Changes Made
+- `src/api/client.rs`: `set_group_permissions(group, u64) -> Channel`, the same `PUT …/permissions/default` with `DataDefaultChannelPermissions::Value` (`{"permissions": n}`).
+- `src/permission_matrix.rs`: `with_value(value, bit, setting)`, a checkbox's change that touches only its bit.
+- `src/ui/channel_permissions.rs`, `GroupPermissionsEditor`:
+  - `filled`, `edited` and `saving`, starting from `group_permissions` (Stoat's default when unset);
+  - `editable` (`may_edit_group_permissions`), `can_save`, `reset`, per-permission `follow` (`follow_value`), `set` (`with_value`) and `save` through `set_group_permissions` and `channel_permissions_saved` (chunk 2's store path already had the group branch);
+  - its bar is the "Members" heading with Reset and Save on the right (no back button, since a group's page is this editor alone). Every option is enabled with Manage Permissions, as Stoat has no grant check here. The unused `BackToList` emitter is gone.
+- Tests:
+  - `tests/permission_matrix.rs`: `with_value`;
+  - `tests/channel_permissions.rs`: 2 new tests (21 in all). Turning a group's permission off keeps every bit the page doesn't show (and the default has some); a saved group value, then its `ChannelUpdate`, are one state, and a member loses `can_add_to_group` and `can_edit_channel` at once;
+  - `tests/api_channels.rs`: the body is exactly `{"permissions":1234}`, and the `Group` parses.
+
+### Divergences
+- **The store test is in `tests/channel_permissions.rs`**, whose fixture has groups with members, not `tests/store_groups.rs`.
+- **The group editor has no back bar**, only its heading with Reset and Save, since there's no list to go back to.
+
+### Verification Performed
+- `cargo test --test channel_permissions --test api_channels --test permission_matrix`: 21, 10 and 26 passed.
+- Full suite: `cargo test` gave 1,371 passed, 0 failed. `cargo clippy --all-targets -- -D warnings` is clean.
+- Rustfmt: `src/ui/chat.rs` 17, `src/store.rs` 14 and `src/api/client.rs` 3 are unchanged. The other touched files are clean.
+
+### Manual Validation
+Deferred to the end (batched): as a group's owner, turn off Invite Others and Manage Channels; a member loses "Add members" and "Group settings…" at once.
+
+## Summary
+
+_Completed: 2026-11-11_
+
+### Chunks Completed
+1. The channel list of permissions, and a read-only Permissions page (`89369eb`)
+2. Edit Everyone's override in a channel (`28cd1bb`)
+3. Edit a role's override in a channel (`ce1afbf`)
+4. Edit a group's member permissions (this commit)
+
+### Divergences
+- Chunk 1: a few descriptions reworded for one channel or group. The editors explain Stoat's order of application. A small `held` helper was added. The group page's heading is "Members".
+- Chunk 2: `channel_edited` keeps its lighter follow-up. The editor was built for both targets, with role saves held back until chunk 3.
+- Chunk 3: **the blocking note** (plan amended, Assumption 12). Stoat checks the whole override against the role's server-wide permissions, so even a stored override can be refused, and the editor now says which permissions block it. Also, the store test is in `tests/channel_permissions.rs`.
+- Chunk 4: the store test is in `tests/channel_permissions.rs`; the group editor has no back bar.
+
+### Definition of Done
+- [x] Channel Settings has a Permissions page for anyone with Manage Permissions in the channel or group, and "Channel settings…" opens the window for them.
+- [x] A server channel's page lists Everyone, then roles with overrides ("Allows N, denies M"), then roles without, in rank order.
+- [x] The matrix shows the channel's 23 or the group's 12 permissions with fitting descriptions. The Roles page still shows all 35, unchanged (`the_server_context_is_every_permission_as_before`). Hidden bits are kept.
+- [x] Everyone's override saves as `{"permissions":{"allow","deny"}}`; a role's override saves within the rank rule; both enable exactly what Stoat's `throw_permission_override` allows (against the stored default, or the role's server-wide value), checked against Stoat's own function.
+- [x] A group's member permissions save as `{"permissions": n}`, starting from Stoat's default when unset.
+- [x] Every save applies at once (visibility, pinning, group actions), and the event that follows changes nothing.
+- [x] Refusals read plainly: `CannotGiveMissingPermissions`, `NotElevated`, `MissingPermission`, `NotFound`, `InvalidOperation`.
+- [x] `cargo test` (1,371) and `cargo clippy --all-targets -- -D warnings` pass. No touched file's rustfmt drift grew, and new files are clean.
+- [x] The roadmap links this plan (committed with chunk 1).
+
+### Remaining Manual Steps
+The plan's Manual Tests 1–8, batched at the end as the user asked (two accounts and the web client): read; Everyone; role; the quirk as a moderator (including the blocking note); group; access with only Manage Permissions; live changes; themes.

@@ -265,3 +265,32 @@ async fn role_override_refusals_read_plainly() {
         assert_eq!(channel_permissions_error_text(&err), text);
     }
 }
+
+#[tokio::test]
+async fn a_groups_permissions_are_sent_as_a_value() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/channels/grp/permissions/default"))
+        .and(header("x-session-token", "tok"))
+        .and(body_json(json!({ "permissions": 1234 })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "channel_type": "Group", "_id": "grp", "name": "Friends",
+            "owner": "u-owner", "recipients": ["u-owner", "u-plain"],
+            "permissions": 1234
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let saved = client(&server)
+        .set_group_permissions("grp", 1234)
+        .await
+        .unwrap();
+    assert!(matches!(
+        saved,
+        Channel::Group {
+            permissions: Some(1234),
+            ..
+        }
+    ));
+}

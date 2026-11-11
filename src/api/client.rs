@@ -1255,6 +1255,23 @@ impl StoatClient {
         .await
     }
 
+    /// `PUT /channels/{group}/permissions/default` with a value: what a
+    /// group's members other than its owner may do (Manage Permissions in
+    /// it, the owner's unless members are given it). Stoat checks nothing
+    /// else. It answers with the group; `ChannelUpdate` follows.
+    pub async fn set_group_permissions(
+        &self,
+        group: &str,
+        permissions: u64,
+    ) -> Result<Channel, ApiError> {
+        self.send(
+            Method::PUT,
+            &format!("/channels/{group}/permissions/default"),
+            Some(&revolt_models::v0::DataDefaultChannelPermissions::Value { permissions }),
+        )
+        .await
+    }
+
     /// `DELETE /channels/{channel}`: delete a server channel (Manage
     /// Channels on it). Stoat takes it out of the server's channel list but
     /// not its categories, and sends `ChannelDelete` to whoever could see

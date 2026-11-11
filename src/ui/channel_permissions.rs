@@ -16,12 +16,12 @@ use revolt_permissions::Override;
 use crate::api::models::Channel;
 use crate::channel_permissions::{
     OverrideRow, OverrideTarget, channel_permissions_error_text, grant_basis, group_lock_note,
-    group_permissions, held, may_edit_override, override_lock_notes, override_rows,
-    stored_override, ungrantable, ungrantable_note,
+    group_permissions, held, may_edit_group_permissions, may_edit_override, override_lock_notes,
+    override_rows, stored_override, ungrantable, ungrantable_note,
 };
 use crate::permission_matrix::{
-    MatrixContext, Setting, follow_override, may_grant, override_change, setting_enabled,
-    with_setting,
+    MatrixContext, Setting, default_change, follow_override, follow_value, may_grant,
+    override_change, setting_enabled, with_setting, with_value,
 };
 use crate::runtime::spawn_io;
 use crate::ui::chat::ChatView;
@@ -550,34 +550,133 @@ fn section_heading_owned(text: String) -> Div {
 }
 
 /// A group's member permissions: what members other than the owner may do
-/// in it, each on or off.
+/// in it, each on or off, saved with one `PUT`. Stoat has no grant check
+/// here, so with Manage Permissions everything is enabled. Bits for
+/// permissions a group doesn't show are kept as they are. Untouched
+/// permissions follow changes made elsewhere.
 pub struct GroupPermissionsEditor {
     chat: WeakEntity<ChatView>,
     channel: String,
+    /// The stored value the matrix was last filled with.
+    filled: u64,
+    /// The matrix as edited.
+    edited: u64,
+    saving: bool,
     _chat: Subscription,
 }
 
-impl EventEmitter<BackToList> for GroupPermissionsEditor {}
-
 impl GroupPermissionsEditor {
     fn new(chat: &Entity<ChatView>, channel: String, cx: &mut Context<Self>) -> Self {
-        Self {
+        let mut this = Self {
             chat: chat.downgrade(),
             channel,
-            _chat: cx.observe(chat, |_, _, cx| cx.notify()),
-        }
+            filled: 0,
+            edited: 0,
+            saving: false,
+            _chat: cx.observe(chat, |this, _, cx| this.follow(cx)),
+        };
+        this.reset(cx);
+        this
     }
 
-    /// The group's member permissions as Stoat stores them now.
-    fn stored(&self, cx: &App) -> u64 {
+    /// The group's member permissions as Stoat stores them now (its
+    /// default, when it has none).
+    fn stored(&self, cx: &App) -> Option<u64> {
+        let chat = self.chat.upgrade()?;
+        Some(group_permissions(
+            chat.read(cx).store().channel(&self.channel)?,
+        ))
+    }
+
+    /// Whether the user may change them.
+    fn editable(&self, cx: &App) -> bool {
         self.chat
             .upgrade()
-            .and_then(|chat| {
-                Some(group_permissions(
-                    chat.read(cx).store().channel(&self.channel)?,
-                ))
+            .is_some_and(|chat| may_edit_group_permissions(chat.read(cx).store(), &self.channel))
+    }
+
+    fn can_save(&self, cx: &App) -> bool {
+        !self.saving
+            && self.editable(cx)
+            && self
+                .stored(cx)
+                .is_some_and(|stored| default_change(stored, self.edited).is_some())
+    }
+
+    /// Fill the matrix with the stored value.
+    fn reset(&mut self, cx: &mut Context<Self>) {
+        if let Some(stored) = self.stored(cx) {
+            self.filled = stored;
+            self.edited = stored;
+        }
+        cx.notify();
+    }
+
+    /// The store changed: untouched permissions take the new value, edited
+    /// ones keep theirs.
+    fn follow(&mut self, cx: &mut Context<Self>) {
+        if let Some(now) = self.stored(cx)
+            && now != self.filled
+        {
+            self.edited = follow_value(self.filled, self.edited, now);
+            self.filled = now;
+        }
+        cx.notify();
+    }
+
+    fn set(&mut self, bit: u64, setting: Setting, cx: &mut Context<Self>) {
+        self.edited = with_value(self.edited, bit, setting);
+        cx.notify();
+    }
+
+    /// Send the new value. Stoat's answer shows at once, in the main window
+    /// too; a refusal says why in a toast, and the matrix keeps the edit.
+    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_save(cx) {
+            return;
+        }
+        let Some(chat) = self.chat.upgrade() else {
+            return;
+        };
+        let permissions = self.edited;
+        self.saving = true;
+        cx.notify();
+        let client = chat.read(cx).client().clone();
+        let group = self.channel.clone();
+        let request =
+            spawn_io(async move { client.set_group_permissions(&group, permissions).await });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.saving = false;
+                let text = match result {
+                    Ok(Ok(saved)) => {
+                        log::info!("saved the member permissions of group {}", this.channel);
+                        this.chat
+                            .update(cx, |chat, cx| chat.channel_permissions_saved(&saved, cx))
+                            .ok();
+                        this.reset(cx);
+                        window.push_notification(Notification::success("Saved."), cx);
+                        return;
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!(
+                            "couldn't save the member permissions of group {}: {err:?}",
+                            this.channel
+                        );
+                        channel_permissions_error_text(&err)
+                    }
+                    Err(err) => {
+                        log::warn!("group permissions save task failed: {err:?}");
+                        "Couldn't save the permissions.".into()
+                    }
+                };
+                window.push_notification(Notification::error(text), cx);
+                cx.notify();
             })
-            .unwrap_or_default()
+            .ok();
+        })
+        .detach();
     }
 }
 
@@ -587,13 +686,45 @@ impl Render for GroupPermissionsEditor {
             .chat
             .upgrade()
             .and_then(|chat| group_lock_note(chat.read(cx).store(), &self.channel));
-        let matrix = PermissionMatrix::new("group", Mode::Values(self.stored(cx)))
+        let editable = self.editable(cx);
+        let changed = self.edited != self.filled;
+        let can_save = self.can_save(cx);
+        let view = cx.entity().downgrade();
+        let matrix = PermissionMatrix::new("group", Mode::Values(self.edited))
             .context(MatrixContext::Group)
-            .read_only(true);
+            .read_only(!editable || self.saving)
+            .on_change(move |bit, setting, _, cx| {
+                view.update(cx, |this, cx| this.set(bit, setting, cx)).ok();
+            });
+        // No "‹ Permissions": a group's page is this editor alone.
+        let bar = h_flex()
+            .w_full()
+            .gap_2()
+            .child(section_heading("Members"))
+            .child(div().flex_1())
+            .when(editable, |bar| {
+                bar.child(
+                    Button::new("group-permissions-reset")
+                        .label("Reset")
+                        .outline()
+                        .small()
+                        .disabled(!changed || self.saving)
+                        .on_click(cx.listener(|this, _, _, cx| this.reset(cx))),
+                )
+                .child(
+                    Button::new("group-permissions-save")
+                        .label("Save")
+                        .primary()
+                        .small()
+                        .loading(self.saving)
+                        .disabled(!can_save)
+                        .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
+                )
+            });
         v_flex()
             .w_full()
             .gap_3()
-            .child(section_heading("Members"))
+            .child(bar)
             .child(
                 div()
                     .text_sm()

@@ -10,7 +10,7 @@ use stoat_gpui::api::ApiError;
 use stoat_gpui::permission_matrix::{
     MatrixContext, PERMISSIONS, PermissionEntry, Setting, default_change, entries, follow_override,
     follow_value, may_grant, missing_from_default, missing_note, override_change, override_of,
-    permissions_error_text, setting_enabled, setting_of, value_enabled, with_setting,
+    permissions_error_text, setting_enabled, setting_of, value_enabled, with_setting, with_value,
 };
 
 /// Every single-bit permission `revolt-permissions` names.
@@ -547,4 +547,13 @@ fn contexts_describe_permissions_their_own_way() {
     );
     assert_eq!(describe(MatrixContext::Channel, KickMembers), None);
     assert_eq!(describe(MatrixContext::Group, UseExternalEmojis), None);
+}
+
+#[test]
+fn a_checkbox_change_touches_only_its_bit() {
+    let value = SEND | REACT;
+    assert_eq!(with_value(value, SEND, Setting::Neutral), REACT);
+    assert_eq!(with_value(value, SEND, Setting::Deny), REACT);
+    assert_eq!(with_value(REACT, SEND, Setting::Allow), SEND | REACT);
+    assert_eq!(with_value(value, SEND, Setting::Allow), value);
 }

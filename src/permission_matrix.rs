@@ -480,6 +480,15 @@ pub fn default_change(stored: u64, edited: u64) -> Option<u64> {
     (stored != edited).then_some(edited)
 }
 
+/// `value` with `bit` on (for [`Setting::Allow`]) or off (otherwise), and
+/// every other bit as it was: a checkbox's change.
+pub fn with_value(value: u64, bit: u64, setting: Setting) -> u64 {
+    match setting {
+        Setting::Allow => value | bit,
+        Setting::Neutral | Setting::Deny => value & !bit,
+    }
+}
+
 /// Permission bits as edited, after the stored value changed from `filled`
 /// to `now` (elsewhere): bits the user changed keep their edit, the rest
 /// follow.

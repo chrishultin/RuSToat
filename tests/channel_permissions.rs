@@ -17,7 +17,9 @@ use stoat_gpui::channel_permissions::{
     channel_permissions_error_text, grant_basis, ungrantable, ungrantable_note,
 };
 use stoat_gpui::channel_settings::{ChannelAccess, access};
-use stoat_gpui::permission_matrix::{Setting, may_grant, setting_enabled, with_setting};
+use stoat_gpui::permission_matrix::{
+    MatrixContext, Setting, entries, may_grant, setting_enabled, with_setting, with_value,
+};
 use stoat_gpui::store::ChatStore;
 
 const MANAGE_PERMISSIONS: u64 = ChannelPermission::ManagePermissions as u64;
@@ -565,4 +567,61 @@ fn nothing_blocks_exactly_when_stoat_grants() {
             }
         }
     }
+}
+
+const INVITE: u64 = ChannelPermission::InviteOthers as u64;
+const MANAGE_CHANNEL: u64 = ChannelPermission::ManageChannel as u64;
+
+#[test]
+fn turning_a_groups_permission_off_keeps_the_ones_it_doesnt_show() {
+    let store = store("u-owner");
+    let stored = group_permissions(store.channel("grp").unwrap());
+    let edited = with_value(stored, INVITE, Setting::Neutral);
+    assert_eq!(edited, stored & !INVITE);
+    // Every bit the group page doesn't show is as it was.
+    let shown = entries(MatrixContext::Group)
+        .iter()
+        .fold(0, |bits, shown| bits | shown.entry.bit());
+    assert_eq!(edited & !shown, stored & !shown);
+    assert_ne!(stored & !shown, 0, "the default has hidden bits");
+}
+
+#[test]
+fn a_saved_group_value_then_its_event_are_one_state() {
+    let mut store = store("u-plain");
+    assert!(stoat_gpui::permissions::can_add_to_group(
+        &store, "u-plain", "grp"
+    ));
+    assert!(stoat_gpui::permissions::can_edit_channel(
+        &store, "u-plain", "grp"
+    ));
+    let value = *DEFAULT_PERMISSION_DIRECT_MESSAGE & !INVITE & !MANAGE_CHANNEL;
+    let saved: stoat_gpui::api::models::Channel = serde_json::from_value(json!({
+        "channel_type": "Group", "_id": "grp", "name": "Friends", "owner": "u-owner",
+        "recipients": ["u-owner", "u-mod", "u-local", "u-plain"],
+        "permissions": value as i64
+    }))
+    .unwrap();
+    assert!(store.apply_channel_permissions(&saved));
+    // A member loses Add members and Group settings at once.
+    assert!(!stoat_gpui::permissions::can_add_to_group(
+        &store, "u-plain", "grp"
+    ));
+    assert!(!stoat_gpui::permissions::can_edit_channel(
+        &store, "u-plain", "grp"
+    ));
+    assert_eq!(group_permissions(store.channel("grp").unwrap()), value);
+    let after_save = store.channel("grp").cloned();
+
+    let frame = json!({
+        "type": "ChannelUpdate", "id": "grp",
+        "data": { "permissions": value as i64 }, "clear": []
+    });
+    let Some(ServerEvent::ChannelUpdate { id, data, clear }) =
+        parse_frame(&frame.to_string()).pop()
+    else {
+        panic!("ChannelUpdate");
+    };
+    store.apply_channel_update(&id, *data, &clear);
+    assert_eq!(store.channel("grp").cloned(), after_save);
 }
