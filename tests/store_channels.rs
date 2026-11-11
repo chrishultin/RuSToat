@@ -462,3 +462,74 @@ fn a_default_category_of_hidden_channels_shows_nothing() {
         )]
     );
 }
+
+const VIEW: u64 = revolt_permissions::ChannelPermission::ViewChannel as u64;
+
+#[test]
+fn a_saved_default_override_then_its_event_are_one_state() {
+    let mut store = store();
+    assert!(stoat_gpui::permissions::can_view(
+        &store,
+        "u-me",
+        "ch-general"
+    ));
+    let saved: Channel = serde_json::from_value(json!({
+        "channel_type": "TextChannel", "_id": "ch-general", "server": "srv-alpha",
+        "name": "general", "default_permissions": { "a": 0, "d": VIEW }
+    }))
+    .unwrap();
+    assert!(store.apply_channel_permissions(&saved));
+    let after_save = store.channel("ch-general").cloned();
+    // `u-me` has no role there, so they lose it at once.
+    assert!(!stoat_gpui::permissions::can_view(
+        &store,
+        "u-me",
+        "ch-general"
+    ));
+
+    apply(
+        &mut store,
+        channel_update(
+            "ch-general",
+            json!({ "default_permissions": { "a": 0, "d": VIEW } }),
+            &[],
+        ),
+    );
+    assert_eq!(store.channel("ch-general").cloned(), after_save);
+}
+
+#[test]
+fn a_saved_answer_without_a_default_override_clears_it() {
+    let mut store = store();
+    apply(
+        &mut store,
+        channel_update(
+            "ch-general",
+            json!({ "default_permissions": { "a": 0, "d": VIEW } }),
+            &[],
+        ),
+    );
+    let saved: Channel = serde_json::from_value(json!({
+        "channel_type": "TextChannel", "_id": "ch-general", "server": "srv-alpha",
+        "name": "general"
+    }))
+    .unwrap();
+    assert!(store.apply_channel_permissions(&saved));
+    assert!(matches!(
+        store.channel("ch-general"),
+        Some(Channel::TextChannel {
+            default_permissions: None,
+            ..
+        })
+    ));
+    assert!(stoat_gpui::permissions::can_view(
+        &store,
+        "u-me",
+        "ch-general"
+    ));
+    // Nothing else is taken from the answer.
+    assert!(matches!(
+        store.channel("ch-general"),
+        Some(Channel::TextChannel { name, .. }) if name == "general"
+    ));
+}

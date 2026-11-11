@@ -7,17 +7,23 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex};
+use gpui_kit::component::notification::Notification;
+use gpui_kit::component::{ActiveTheme, Disableable, Icon, Sizable, WindowExt, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use revolt_permissions::Override;
 
 use crate::api::models::Channel;
 use crate::channel_permissions::{
-    OverrideRow, OverrideTarget, group_lock_note, group_permissions, override_lock_notes,
-    override_rows, stored_override,
+    OverrideRow, OverrideTarget, channel_permissions_error_text, grant_basis, group_lock_note,
+    group_permissions, held, may_edit_override, override_lock_notes, override_rows,
+    stored_override,
 };
-use crate::permission_matrix::MatrixContext;
+use crate::permission_matrix::{
+    MatrixContext, Setting, follow_override, may_grant, override_change, setting_enabled,
+    with_setting,
+};
+use crate::runtime::spawn_io;
 use crate::ui::chat::ChatView;
 use crate::ui::permission_matrix::{Mode, PermissionMatrix};
 use crate::ui::server_settings::{colour_dot, lock_note, section_heading};
@@ -268,15 +274,33 @@ fn editor_bar<V: EventEmitter<BackToList>>(
 }
 
 /// One override in a server channel: Everyone's, or a role's, as Deny /
-/// Neutral / Allow for each permission that means something in a channel.
+/// Neutral / Allow for each permission that means something in a channel,
+/// saved with one `PUT`. Which options are enabled is Stoat's grant rule,
+/// against [`grant_basis`] and the user's permissions in the channel.
+/// Untouched permissions follow changes made elsewhere.
 pub struct OverrideEditor {
     chat: WeakEntity<ChatView>,
     channel: String,
     target: OverrideTarget,
+    /// The stored override the matrix was last filled with.
+    filled: Override,
+    /// The matrix as edited.
+    edited: Override,
+    saving: bool,
     _chat: Subscription,
 }
 
 impl EventEmitter<BackToList> for OverrideEditor {}
+
+/// What the user may do with an override, now.
+struct OverrideRights {
+    /// They may change it at all.
+    editable: bool,
+    /// The permissions they hold in the channel.
+    held: u64,
+    /// What Stoat compares an edit with.
+    basis: Override,
+}
 
 impl OverrideEditor {
     fn new(
@@ -285,12 +309,17 @@ impl OverrideEditor {
         target: OverrideTarget,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self {
+        let mut this = Self {
             chat: chat.downgrade(),
             channel,
             target,
-            _chat: cx.observe(chat, |_, _, cx| cx.notify()),
-        }
+            filled: Override::default(),
+            edited: Override::default(),
+            saving: false,
+            _chat: cx.observe(chat, |this, _, cx| this.follow(cx)),
+        };
+        this.reset(cx);
+        this
     }
 
     /// The override as Stoat stores it now.
@@ -302,6 +331,111 @@ impl OverrideEditor {
                 Some(stored_override(store.channel(&self.channel)?, &self.target))
             })
             .unwrap_or_default()
+    }
+
+    fn rights(&self, cx: &App) -> OverrideRights {
+        let Some(chat) = self.chat.upgrade() else {
+            return OverrideRights {
+                editable: false,
+                held: 0,
+                basis: Override::default(),
+            };
+        };
+        let store = chat.read(cx).store();
+        let basis = grant_basis(store, &self.channel, &self.target);
+        OverrideRights {
+            editable: basis.is_some() && may_edit_override(store, &self.channel, &self.target),
+            held: held(store, &self.channel),
+            basis: basis.unwrap_or_default(),
+        }
+    }
+
+    /// Whether Save can send the matrix: the user may change it, Stoat
+    /// would take it, something changed, and not already saving.
+    fn can_save(&self, cx: &App) -> bool {
+        let rights = self.rights(cx);
+        !self.saving
+            && rights.editable
+            && may_grant(rights.held, &rights.basis, &self.edited)
+            && override_change(&self.stored(cx), &self.edited).is_some()
+    }
+
+    /// Fill the matrix with the stored override.
+    fn reset(&mut self, cx: &mut Context<Self>) {
+        self.filled = self.stored(cx);
+        self.edited = self.filled.clone();
+        cx.notify();
+    }
+
+    /// The store changed: untouched permissions take the new value, edited
+    /// ones keep theirs.
+    fn follow(&mut self, cx: &mut Context<Self>) {
+        let now = self.stored(cx);
+        if now != self.filled {
+            self.edited = follow_override(&self.filled, &self.edited, &now);
+            self.filled = now;
+        }
+        cx.notify();
+    }
+
+    fn set(&mut self, bit: u64, setting: Setting, cx: &mut Context<Self>) {
+        self.edited = with_setting(self.edited.clone(), bit, setting);
+        cx.notify();
+    }
+
+    /// Send the new override. Stoat's answer shows at once, in the main
+    /// window too; a refusal says why in a toast, and the matrix keeps the
+    /// edit.
+    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A role's override can't be edited yet (no grant basis).
+        if !self.can_save(cx) || self.target != OverrideTarget::Everyone {
+            return;
+        }
+        let Some(chat) = self.chat.upgrade() else {
+            return;
+        };
+        let permissions = self.edited.clone();
+        self.saving = true;
+        cx.notify();
+        let client = chat.read(cx).client().clone();
+        let channel = self.channel.clone();
+        let request = spawn_io(async move {
+            client
+                .set_channel_default_permissions(&channel, &permissions)
+                .await
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.saving = false;
+                let text = match result {
+                    Ok(Ok(saved)) => {
+                        log::info!("saved an override in channel {}", this.channel);
+                        this.chat
+                            .update(cx, |chat, cx| chat.channel_permissions_saved(&saved, cx))
+                            .ok();
+                        this.reset(cx);
+                        window.push_notification(Notification::success("Saved."), cx);
+                        return;
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!(
+                            "couldn't save an override in channel {}: {err:?}",
+                            this.channel
+                        );
+                        channel_permissions_error_text(&err)
+                    }
+                    Err(err) => {
+                        log::warn!("override save task failed: {err:?}");
+                        "Couldn't save the permissions.".into()
+                    }
+                };
+                window.push_notification(Notification::error(text), cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The role's name, or "Everyone".
@@ -329,6 +463,30 @@ impl Render for OverrideEditor {
             .upgrade()
             .map(|chat| override_lock_notes(chat.read(cx).store(), &self.channel, &self.target))
             .unwrap_or_default();
+        let OverrideRights {
+            editable,
+            held,
+            basis,
+        } = self.rights(cx);
+        let changed = self.edited != self.filled;
+        let can_save = self.can_save(cx);
+        let actions = editable.then(|| {
+            [
+                Button::new("override-reset")
+                    .label("Reset")
+                    .outline()
+                    .small()
+                    .disabled(!changed || self.saving)
+                    .on_click(cx.listener(|this, _, _, cx| this.reset(cx))),
+                Button::new("override-save")
+                    .label("Save")
+                    .primary()
+                    .small()
+                    .loading(self.saving)
+                    .disabled(!can_save)
+                    .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
+            ]
+        });
         let explanation = match self.target {
             // Stoat applies the server's default permissions, then this,
             // then roles' server-wide permissions, then role overrides here.
@@ -341,13 +499,18 @@ impl Render for OverrideEditor {
                  Everyone's override here and the role's server-wide permissions."
             }
         };
-        let matrix = PermissionMatrix::new("override", Mode::Overrides(self.stored(cx)))
+        let view = cx.entity().downgrade();
+        let matrix = PermissionMatrix::new("override", Mode::Overrides(self.edited.clone()))
             .context(MatrixContext::Channel)
-            .read_only(true);
+            .read_only(!editable || self.saving)
+            .enabled(move |bit, setting| setting_enabled(held, &basis, bit, setting))
+            .on_change(move |bit, setting, _, cx| {
+                view.update(cx, |this, cx| this.set(bit, setting, cx)).ok();
+            });
         v_flex()
             .w_full()
             .gap_3()
-            .child(editor_bar(None, cx))
+            .child(editor_bar(actions, cx))
             .child(section_heading_owned(self.title(cx)))
             .child(
                 div()

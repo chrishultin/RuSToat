@@ -1,9 +1,11 @@
 //! A channel's or group's settings against a mock Stoat API, from the
 //! Channel Settings window: `PATCH /channels/{id}`.
 
+use revolt_permissions::Override;
 use serde_json::json;
 use stoat_gpui::api::StoatClient;
 use stoat_gpui::api::models::{Channel, FieldsChannel};
+use stoat_gpui::channel_permissions::channel_permissions_error_text;
 use stoat_gpui::channel_settings::{empty_channel_edit, mature_edit, save_error_text};
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -146,4 +148,57 @@ async fn slowmode_off_is_sent_as_zero() {
     let mut edit = empty_channel_edit();
     edit.slowmode = Some(0);
     client(&server).edit_channel("ch-a", &edit).await.unwrap();
+}
+
+#[tokio::test]
+async fn everyones_override_is_sent_as_allow_and_deny() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/channels/ch-a/permissions/default"))
+        .and(header("x-session-token", "tok"))
+        .and(body_json(
+            json!({ "permissions": { "allow": 2, "deny": 4 } }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "channel_type": "TextChannel", "_id": "ch-a", "server": "srv", "name": "a",
+            "default_permissions": { "a": 2, "d": 4 }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let saved = client(&server)
+        .set_channel_default_permissions("ch-a", &Override { allow: 2, deny: 4 })
+        .await
+        .unwrap();
+    let Channel::TextChannel {
+        default_permissions: Some(field),
+        ..
+    } = saved
+    else {
+        panic!("a text channel with a default override");
+    };
+    assert_eq!((field.a, field.d), (2, 4));
+}
+
+#[tokio::test]
+async fn an_override_stoat_wont_grant_reads_plainly() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/channels/ch-a/permissions/default"))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .set_body_json(json!({ "type": "CannotGiveMissingPermissions" })),
+        )
+        .mount(&server)
+        .await;
+
+    let err = client(&server)
+        .set_channel_default_permissions("ch-a", &Override { allow: 2, deny: 0 })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        channel_permissions_error_text(&err),
+        "You can't grant permissions you don't have."
+    );
 }

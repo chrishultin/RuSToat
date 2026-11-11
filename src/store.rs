@@ -2222,6 +2222,51 @@ impl ChatStore {
         true
     }
 
+    /// Stoat answered the user's own change to a channel's permissions
+    /// (`PUT /channels/{id}/permissions/…`) with `saved`: show a server
+    /// channel's overrides, or a group's member permissions, now, without
+    /// waiting for its `ChannelUpdate` (which carries the same). Nothing else
+    /// is taken from it. Returns false for an unknown channel, or one with
+    /// no permissions.
+    pub fn apply_channel_permissions(&mut self, saved: &Channel) -> bool {
+        let (id, data, clear) = match saved {
+            Channel::TextChannel {
+                id,
+                role_permissions,
+                default_permissions,
+                ..
+            } => {
+                let clear = match default_permissions {
+                    Some(_) => Vec::new(),
+                    None => vec![FieldsChannel::DefaultPermissions],
+                };
+                let data = PartialChannel {
+                    role_permissions: Some(role_permissions.clone()),
+                    default_permissions: *default_permissions,
+                    ..Default::default()
+                };
+                (id, data, clear)
+            }
+            Channel::Group {
+                id,
+                permissions: Some(permissions),
+                ..
+            } => {
+                let data = PartialChannel {
+                    permissions: Some(*permissions),
+                    ..Default::default()
+                };
+                (id, data, Vec::new())
+            }
+            _ => return false,
+        };
+        if !self.channels.contains_key(id) {
+            return false;
+        }
+        self.apply_channel_update(id, data, &clear);
+        true
+    }
+
     /// A server emoji was added (`EmojiCreate`).
     pub fn add_emoji(&mut self, emoji: Emoji) {
         self.emojis.insert(emoji.id.clone(), emoji);

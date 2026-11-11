@@ -13,9 +13,13 @@
 
 use revolt_permissions::{ChannelPermission, DEFAULT_PERMISSION_DIRECT_MESSAGE, Override};
 
+use revolt_result::ErrorType;
+
+use crate::api::ApiError;
 use crate::api::models::Channel;
 use crate::permission_matrix::override_of;
 use crate::permissions::{acting_rank, channel_permissions, has};
+use crate::profile_edit::error_text;
 use crate::roles::role_rows;
 use crate::store::ChatStore;
 
@@ -180,4 +184,34 @@ pub fn group_lock_note(store: &ChatStore, channel: &str) -> Option<&'static str>
     (!may_edit_group_permissions(store, channel)).then_some(
         "Only the group's owner, or members allowed Manage Permissions, can change this.",
     )
+}
+
+/// What Stoat compares an edit of `target`'s override in `channel` with,
+/// for the grant rule: for Everyone, the stored default override (none is
+/// the same as all neutral). `None` if the channel isn't a server's.
+pub fn grant_basis(store: &ChatStore, channel: &str, target: &OverrideTarget) -> Option<Override> {
+    let channel = store.channel(channel)?;
+    if !matches!(channel, Channel::TextChannel { .. }) {
+        return None;
+    }
+    match target {
+        OverrideTarget::Everyone => Some(stored_override(channel, target)),
+        OverrideTarget::Role(_) => None,
+    }
+}
+
+/// Why Stoat refused a change to a channel's permissions.
+pub fn channel_permissions_error_text(err: &ApiError) -> String {
+    match err.error_type() {
+        Some(ErrorType::CannotGiveMissingPermissions) => {
+            "You can't grant permissions you don't have.".into()
+        }
+        Some(ErrorType::NotElevated) => "That role ranks at or above your highest role.".into(),
+        Some(ErrorType::MissingPermission { .. }) => {
+            "You don't have permission to change this channel's permissions.".into()
+        }
+        Some(ErrorType::NotFound) => "That role or channel was deleted.".into(),
+        Some(ErrorType::InvalidOperation) => "Stoat can't set that here.".into(),
+        _ => error_text(err, "Couldn't save the permissions."),
+    }
 }

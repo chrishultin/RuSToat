@@ -54,3 +54,37 @@ Look-ahead: chunk 2 makes `OverrideEditor` editable (state, follow, save). Chunk
 
 ### Manual Validation
 Deferred to the end (batched): a channel's list and editors match the web client, read-only; a group's page shows its member permissions.
+
+## Chunk 2: Edit Everyone's override in a channel
+
+### Changes Made
+- `src/api/client.rs`: `set_channel_default_permissions(channel, &Override) -> Channel`, a `PUT /channels/{id}/permissions/default` with `DataDefaultChannelPermissions::Field` (type paths written out in full, so the drifted import block isn't touched).
+- `src/store.rs`: `apply_channel_permissions(&Channel) -> bool`. For a text channel it takes the answer's `role_permissions` and `default_permissions` (clearing the latter when absent); for a group, its `permissions` when present. Nothing else is taken from the answer.
+- `src/ui/chat.rs`:
+  - `channel_changed(id, cx)`, factored out of the `ChannelUpdate` handler (forget member lists, `sync_pane`, `drop_stale_selection`, reload), which now calls it;
+  - `channel_permissions_saved(&Channel, cx)` applies the answer and calls it.
+- `src/channel_permissions.rs`: `grant_basis(store, channel, target)` (Everyone: the stored default, all neutral when unset; a role: `None` until chunk 3) and `channel_permissions_error_text` (Assumption 7).
+- `src/ui/channel_permissions.rs`, `OverrideEditor`:
+  - `filled`, `edited` and `saving`, and `rights()` (`OverrideRights { editable, held, basis }`);
+  - `can_save` (editable, `may_grant` against the basis, changed, not saving), `reset`, per-permission `follow` (`follow_override`), `set` (`with_setting`) and `save`;
+  - the bar's Reset and Save show when editable. The matrix is `setting_enabled(held, basis, …)`, read-only while saving or when not editable;
+  - a save applies through `channel_permissions_saved`, resets and toasts "Saved."; a refusal toasts the plain text and keeps the edit;
+  - `save` returns early for a role's override (no basis yet), which chunk 3 replaces.
+- Tests:
+  - `tests/channel_permissions.rs`: 4 new tests (13 in all). The basis for Everyone, stored or neutral, and none outside server channels; `may_grant` with the basis matches Stoat's `throw_permission_override` for every case over three permissions, with the stored default unset (`None`) and set; each enabled option is one Stoat takes; the refusal texts;
+  - `tests/api_channels.rs`: 2 new wiremock tests. The `PUT` body is exactly `{"permissions":{"allow":2,"deny":4}}` and the answer parses; `CannotGiveMissingPermissions` reads as its text;
+  - `tests/store_channels.rs`: 2 new tests. A saved default override, then its `ChannelUpdate`, are one state, and `can_view` follows at once; an answer without a default override clears it and takes nothing else.
+
+### Divergences
+- **`channel_edited` (milestone 26) still has its own lighter follow-up**, rather than calling `channel_changed`: an edit of name, icon or slowmode can't change visibility.
+- **The editor is built for both targets now**, with saving held back for roles by an early return rather than a separate type. Chunk 3 only adds the role's basis, the client call and the save branch.
+
+Look-ahead: chunk 3 as planned. Chunk 4 reuses `apply_channel_permissions` (its group branch is already in) and `channel_permissions_saved`. No amendments.
+
+### Verification Performed
+- `cargo test --test channel_permissions --test api_channels --test store_channels`: 13, 7 and 18 passed.
+- Full suite: `cargo test` gave 1,359 passed, 0 failed. `cargo clippy --all-targets -- -D warnings` is clean.
+- Rustfmt: `src/ui/chat.rs` 17, `src/store.rs` 14 and `src/api/client.rs` 3 are unchanged. The other touched files are clean.
+
+### Manual Validation
+Deferred to the end (batched): deny Send Messages to Everyone in one channel; a plain member can't send there at once; then clear it.

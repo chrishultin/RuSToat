@@ -1212,6 +1212,26 @@ impl StoatClient {
             .await
     }
 
+    /// `PUT /channels/{channel}/permissions/default`: Everyone's override
+    /// in a server channel (Manage Permissions there). The user must hold
+    /// every permission it newly allows or no longer denies, compared with
+    /// the stored override (`CannotGiveMissingPermissions`). Stoat answers
+    /// with the channel; `ChannelUpdate` follows.
+    pub async fn set_channel_default_permissions(
+        &self,
+        channel: &str,
+        permissions: &revolt_permissions::Override,
+    ) -> Result<Channel, ApiError> {
+        self.send(
+            Method::PUT,
+            &format!("/channels/{channel}/permissions/default"),
+            Some(&revolt_models::v0::DataDefaultChannelPermissions::Field {
+                permissions: permissions.clone(),
+            }),
+        )
+        .await
+    }
+
     /// `DELETE /channels/{channel}`: delete a server channel (Manage
     /// Channels on it). Stoat takes it out of the server's channel list but
     /// not its categories, and sends `ChannelDelete` to whoever could see

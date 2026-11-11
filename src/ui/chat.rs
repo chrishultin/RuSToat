@@ -1151,21 +1151,7 @@ impl ChatView {
             ConnectionEvent::Event(ServerEvent::ChannelUpdate { id, data, clear }) => {
                 log::debug!("live: channel {id} updated");
                 self.store.apply_channel_update(&id, *data, &clear);
-                // Permission overrides decide who sees the channel, and who
-                // may pin in it.
-                self.forget_member_lists();
-                self.sync_pane(&id, cx);
-                // A hidden channel, or a DM closed elsewhere, can't stay open.
-                let selected = self.selected.len();
-                self.drop_stale_selection();
-                let open = self.current_channel().is_some_and(|c| c.id == id);
-                if self.selected.len() != selected {
-                    self.remember_places();
-                    self.ensure_current_loaded(cx);
-                } else if open {
-                    // It may no longer be marked mature, so not gated.
-                    self.ensure_current_loaded(cx);
-                }
+                self.channel_changed(&id, cx);
             }
             ConnectionEvent::Event(ServerEvent::ChannelDelete { id }) => {
                 log::debug!("live: channel {id} deleted");
@@ -7699,6 +7685,37 @@ impl ChatView {
             self.ensure_current_loaded(cx);
         }
         cx.notify();
+    }
+
+    /// Stoat answered the user's own change to a channel's permissions with
+    /// `saved`: show it now (who sees it, who may pin or send), without
+    /// waiting for its `ChannelUpdate`.
+    pub fn channel_permissions_saved(&mut self, saved: &Channel, cx: &mut Context<Self>) {
+        if self.store.apply_channel_permissions(saved) {
+            let id = crate::store::channel_id(saved).to_string();
+            self.channel_changed(&id, cx);
+            cx.notify();
+        }
+    }
+
+    /// Channel `id` changed in the store (a `ChannelUpdate`, or the answer
+    /// to the user's own change): follow it everywhere it shows.
+    fn channel_changed(&mut self, id: &str, cx: &mut Context<Self>) {
+        // Permission overrides decide who sees the channel, and who may pin
+        // in it.
+        self.forget_member_lists();
+        self.sync_pane(id, cx);
+        // A hidden channel, or a DM closed elsewhere, can't stay open.
+        let selected = self.selected.len();
+        self.drop_stale_selection();
+        let open = self.current_channel().is_some_and(|c| c.id == id);
+        if self.selected.len() != selected {
+            self.remember_places();
+            self.ensure_current_loaded(cx);
+        } else if open {
+            // It may no longer be marked mature, so not gated.
+            self.ensure_current_loaded(cx);
+        }
     }
 
     /// The user deleted `server` (from Server Settings): drop it now,

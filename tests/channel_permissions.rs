@@ -1,17 +1,21 @@
 //! A channel's permissions: who may change them, the list of overrides,
 //! the stored values, and the rank rule.
 
+use revolt_permissions::PermissionValue;
 use revolt_permissions::{
     ChannelPermission, DEFAULT_PERMISSION_DIRECT_MESSAGE, DEFAULT_PERMISSION_SERVER, Override,
 };
 use serde_json::{Value, json};
+use stoat_gpui::api::ApiError;
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::channel_permissions::{
     OverrideRow, OverrideTarget, can_manage_channel_permissions, group_lock_note,
     group_permissions, may_edit_group_permissions, may_edit_override, override_lock_notes,
     override_rows, stored_override,
 };
+use stoat_gpui::channel_permissions::{channel_permissions_error_text, grant_basis};
 use stoat_gpui::channel_settings::{ChannelAccess, access};
+use stoat_gpui::permission_matrix::{Setting, may_grant, setting_enabled, with_setting};
 use stoat_gpui::store::ChatStore;
 
 const MANAGE_PERMISSIONS: u64 = ChannelPermission::ManagePermissions as u64;
@@ -259,4 +263,135 @@ fn manage_permissions_alone_opens_only_the_permissions_page() {
         }
     );
     assert!(!access(&local, "ch-a").any());
+}
+
+#[test]
+fn everyones_basis_is_the_stored_default_or_neutral() {
+    let store = store("u-owner");
+    assert_eq!(
+        grant_basis(&store, "ch-a", &OverrideTarget::Everyone),
+        Some(Override {
+            allow: 0,
+            deny: SEND
+        })
+    );
+    assert_eq!(
+        grant_basis(&store, "ch-b", &OverrideTarget::Everyone),
+        Some(Override::default())
+    );
+    // Only a server channel has one.
+    assert_eq!(grant_basis(&store, "grp", &OverrideTarget::Everyone), None);
+    assert_eq!(grant_basis(&store, "nope", &OverrideTarget::Everyone), None);
+}
+
+/// Stoat's own check, from `revolt-permissions`, with `current` as Stoat
+/// stores it (`None` when the channel has no default override).
+fn stoat_grants(held: u64, current: Option<Override>, edited: &Override) -> bool {
+    futures::executor::block_on(
+        PermissionValue::from(held).throw_permission_override(current, edited),
+    )
+    .is_ok()
+}
+
+/// Every override of `bits`, each Deny, Neutral or Allow.
+fn every_override(bits: &[u64]) -> Vec<Override> {
+    bits.iter().fold(vec![Override::default()], |values, bit| {
+        values
+            .into_iter()
+            .flat_map(|value| {
+                Setting::ALL.map(|setting| with_setting(value.clone(), *bit, setting))
+            })
+            .collect()
+    })
+}
+
+/// Each subset of `bits`, as held permissions.
+fn every_held(bits: &[u64]) -> Vec<u64> {
+    (0..1u64 << bits.len())
+        .map(|subset| {
+            bits.iter()
+                .enumerate()
+                .filter(|(n, _)| subset & (1 << n) != 0)
+                .fold(0, |held, (_, bit)| held | bit)
+        })
+        .collect()
+}
+
+#[test]
+fn everyones_rule_is_stoats_with_and_without_a_stored_default() {
+    let bits = [SEND, REACT, PIN];
+    let overrides = every_override(&bits);
+    for held in every_held(&bits) {
+        for edited in &overrides {
+            // No stored default: the basis is all neutral.
+            assert_eq!(
+                may_grant(held, &Override::default(), edited),
+                stoat_grants(held, None, edited),
+                "held {held:#x}, none -> {edited:?}"
+            );
+            for stored in &overrides {
+                assert_eq!(
+                    may_grant(held, stored, edited),
+                    stoat_grants(held, Some(stored.clone()), edited),
+                    "held {held:#x}, {stored:?} -> {edited:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn each_option_enabled_for_everyone_is_one_stoat_takes() {
+    let bits = [SEND, REACT];
+    for held in every_held(&bits) {
+        for stored in every_override(&bits) {
+            for bit in bits {
+                for setting in Setting::ALL {
+                    let edited = with_setting(stored.clone(), bit, setting);
+                    if setting_enabled(held, &stored, bit, setting) {
+                        assert!(
+                            stoat_grants(held, Some(stored.clone()), &edited),
+                            "held {held:#x}, {stored:?}: {bit:#x} to {setting:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn api_error(body: Value) -> ApiError {
+    ApiError::from_response(
+        reqwest::StatusCode::BAD_REQUEST,
+        body.to_string().as_bytes(),
+    )
+}
+
+#[test]
+fn refusals_read_plainly() {
+    let text = |body| channel_permissions_error_text(&api_error(body));
+    assert_eq!(
+        text(json!({ "type": "CannotGiveMissingPermissions" })),
+        "You can't grant permissions you don't have."
+    );
+    assert_eq!(
+        text(json!({ "type": "NotElevated" })),
+        "That role ranks at or above your highest role."
+    );
+    assert_eq!(
+        text(json!({ "type": "MissingPermission", "permission": "ManagePermissions" })),
+        "You don't have permission to change this channel's permissions."
+    );
+    assert_eq!(
+        text(json!({ "type": "NotFound" })),
+        "That role or channel was deleted."
+    );
+    assert_eq!(
+        text(json!({ "type": "InvalidOperation" })),
+        "Stoat can't set that here."
+    );
+    assert_eq!(
+        text(json!({ "type": "InternalError" })),
+        "Couldn't save the permissions."
+    );
 }
