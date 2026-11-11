@@ -16,18 +16,21 @@
 use std::path::PathBuf;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::setting::{SelectIndex, SettingGroup, SettingItem, SettingPage, Settings};
 use gpui_kit::component::{ActiveTheme, Disableable, Sizable, WindowExt, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::api::ApiError;
 use crate::api::models::Channel;
 use crate::channel_settings::{
     ChannelAccess, ChannelForm, ChannelKind, DESCRIPTION_MAX, ICON_TAG, NAME_MAX, access,
-    save_error_text, window_title,
+    mature_edit, mature_error_text, mature_prompt, mature_state, save_error_text, slowmode_choices,
+    slowmode_label, window_title,
 };
 use crate::profile_edit::ProfileImage;
 use crate::runtime::spawn_io;
@@ -39,6 +42,8 @@ use crate::ui::profile_editor::{
 
 /// Rows the description field grows between before it scrolls.
 const DESCRIPTION_ROWS: (usize, usize) = (3, 10);
+/// The tallest the slowmode menu grows before it scrolls.
+const SLOWMODE_MENU_HEIGHT: f32 = 320.;
 
 /// Builds one page of the window, each time it renders: `None` hides it.
 pub type ChannelPageFn = fn(&ChannelSettingsView, &mut App) -> Option<SettingPage>;
@@ -250,6 +255,9 @@ fn overview_page(view: &ChannelSettingsView, cx: &mut App) -> Option<SettingPage
                     "name",
                     "description",
                     "icon",
+                    "slowmode",
+                    "mature",
+                    "nsfw",
                 ]),
             )),
     )
@@ -262,20 +270,25 @@ enum Saving {
     Sending,
 }
 
-/// The Overview form: the channel's icon, name and description, saved
-/// together with one `PATCH /channels/{id}` (see [`ChannelForm::changes`]).
-/// A new icon is uploaded first.
+/// The Overview form: the channel's icon, name, description and slowmode,
+/// saved together with one `PATCH /channels/{id}` (see
+/// [`ChannelForm::changes`]). A new icon is uploaded first. Marking it
+/// mature is a button of its own, which asks first and saves at once.
 pub struct ChannelOverviewPage {
     chat: WeakEntity<ChatView>,
     channel: String,
     name: Entity<InputState>,
     description: Entity<TextareaState>,
     icon: ImageSlot,
+    /// Seconds, as chosen (0 is off).
+    slowmode: u64,
     /// The channel's values the fields were last filled with. A field still
     /// showing its value is untouched, and follows changes made elsewhere;
     /// once it's edited, it keeps the edit.
     filled: ChannelForm,
     saving: Option<Saving>,
+    /// Waiting for Stoat to (un)mark it mature.
+    marking: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -310,8 +323,10 @@ impl ChannelOverviewPage {
             name,
             description,
             icon: ImageSlot::default(),
+            slowmode: 0,
             filled: ChannelForm::default(),
             saving: None,
+            marking: false,
             _subscriptions: subscriptions,
         };
         this.reset(window, cx);
@@ -338,6 +353,7 @@ impl ChannelOverviewPage {
             name: self.name.read(cx).value().to_string(),
             description: self.description.read(cx).value().to_string(),
             icon: self.icon.image.clone(),
+            slowmode: self.slowmode,
         }
     }
 
@@ -364,6 +380,7 @@ impl ChannelOverviewPage {
             input.set_value(form.description.clone(), window, cx)
         });
         self.icon = slot(form.icon.clone());
+        self.slowmode = form.slowmode;
         self.filled = form;
         cx.notify();
     }
@@ -392,6 +409,9 @@ impl ChannelOverviewPage {
         }
         if edited.icon == self.filled.icon && self.icon.problem.is_none() {
             self.icon = slot(now.icon.clone());
+        }
+        if edited.slowmode == self.filled.slowmode {
+            self.slowmode = now.slowmode;
         }
         self.filled = now;
         cx.notify();
@@ -524,6 +544,206 @@ impl ChannelOverviewPage {
         cx.notify();
     }
 
+    /// Whether the channel is marked mature, as the store has it.
+    fn mature(&self, cx: &App) -> bool {
+        self.chat
+            .upgrade()
+            .is_some_and(|chat| chat.read(cx).store().is_mature(&self.channel))
+    }
+
+    /// Ask before marking the channel mature (or not), in the web client's
+    /// words. The button waits, disabled, for Stoat's answer, which shows
+    /// at once; a refusal leaves the dialog open with a toast.
+    fn confirm_mature(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mature = self.mature(cx);
+        let prompt = mature_prompt(self.kind(cx), mature);
+        let page = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let busy = page.upgrade().is_some_and(|page| page.read(cx).marking);
+            let mark = {
+                let page = page.clone();
+                move |window: &mut Window, cx: &mut App| {
+                    page.update(cx, |this, cx| this.set_mature(!mature, window, cx))
+                        .ok();
+                }
+            };
+            alert
+                .title(prompt.title.clone())
+                .description(prompt.text.clone())
+                .keyboard(!busy)
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("mature-cancel")
+                                .label("Keep as is")
+                                .disabled(busy)
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("mature-ok")
+                                .with_variant(ButtonVariant::Primary)
+                                .label(prompt.confirm)
+                                .loading(busy)
+                                .disabled(busy)
+                                .on_click({
+                                    let mark = mark.clone();
+                                    move |_, window, cx| mark(window, cx)
+                                }),
+                        ),
+                )
+                .on_ok(move |_, window, cx| {
+                    if !busy {
+                        mark(window, cx);
+                    }
+                    false
+                })
+        });
+    }
+
+    /// Send `{ nsfw: mature }` alone. On Stoat's answer it shows at once
+    /// (the main window gates or ungates the channel) and the confirmation
+    /// closes; otherwise a toast says why.
+    fn set_mature(&mut self, mature: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.marking {
+            return;
+        }
+        let Some(chat) = self.chat.upgrade() else {
+            return;
+        };
+        let client = chat.read(cx).client().clone();
+        self.marking = true;
+        window.refresh();
+        let id = self.channel.clone();
+        let request = spawn_io(async move { client.edit_channel(&id, &mature_edit(mature)).await });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.marking = false;
+                match result {
+                    Ok(Ok(saved)) => {
+                        if let Some(chat) = this.chat.upgrade() {
+                            chat.update(cx, |chat, cx| chat.channel_edited(&saved, cx));
+                        }
+                        window.close_dialog(cx);
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't mark channel {} mature: {err:?}", this.channel);
+                        window.push_notification(Notification::error(mature_error_text(&err)), cx);
+                    }
+                    Err(err) => {
+                        log::warn!("mature task failed: {err:?}");
+                        window.push_notification(
+                            Notification::error("Couldn't change whether the channel is mature."),
+                            cx,
+                        );
+                    }
+                }
+                window.refresh();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// "Slowmode": how long members wait between messages, picked from the
+    /// web client's choices (and the stored value, if it's another).
+    fn render_slowmode(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let chosen = self.slowmode;
+        let entity = cx.entity().downgrade();
+        // The stored value, and the one chosen (which may be an earlier
+        // stored value, since followed), are always offered.
+        let mut choices = slowmode_choices(self.filled.slowmode);
+        if !choices.iter().any(|(secs, _)| *secs == chosen) {
+            let at = choices.partition_point(|(secs, _)| *secs < chosen);
+            choices.insert(at, (chosen, slowmode_label(chosen)));
+        }
+        h_flex()
+            .justify_between()
+            .gap_3()
+            .child(
+                v_flex()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Slowmode"),
+                    )
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(
+                        "How long members wait between messages. Members with Bypass Slowmode \
+                         don't wait.",
+                    )),
+            )
+            .child(
+                Button::new("channel-slowmode")
+                    .outline()
+                    .small()
+                    .label(slowmode_label(chosen))
+                    .icon(IconName::ChevronDown)
+                    .disabled(self.saving.is_some())
+                    .dropdown_menu(move |menu: PopupMenu, _, _| {
+                        let menu = menu.scrollable(true).max_h(px(SLOWMODE_MENU_HEIGHT));
+                        choices.iter().fold(menu, |menu, (secs, label)| {
+                            let (entity, secs) = (entity.clone(), *secs);
+                            menu.item(
+                                PopupMenuItem::new(label.clone())
+                                    .checked(secs == chosen)
+                                    .on_click(move |_, _, cx| {
+                                        entity
+                                            .update(cx, |this, cx| {
+                                                this.slowmode = secs;
+                                                cx.notify();
+                                            })
+                                            .ok();
+                                    }),
+                            )
+                        })
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// "Mature": whether members confirm their age first, and the button
+    /// that changes it.
+    fn render_mature(&self, kind: ChannelKind, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let mature = self.mature(cx);
+        h_flex()
+            .justify_between()
+            .gap_3()
+            .child(
+                v_flex()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Mature"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(mature_state(kind, mature)),
+                    ),
+            )
+            .child(
+                Button::new("channel-mature")
+                    .outline()
+                    .small()
+                    .label(if mature {
+                        "Unmark as mature…"
+                    } else {
+                        "Mark as mature…"
+                    })
+                    .disabled(self.marking)
+                    .on_click(cx.listener(|this, _, window, cx| this.confirm_mature(window, cx))),
+            )
+            .into_any_element()
+    }
+
     /// The icon's row.
     fn render_icon(&self, kind: ChannelKind, cx: &mut Context<Self>) -> Option<AnyElement> {
         let chat = self.chat.upgrade()?;
@@ -611,6 +831,9 @@ impl Render for ChannelOverviewPage {
             .children(icon)
             .child(name)
             .child(description)
+            .when(kind == ChannelKind::Channel, |el| {
+                el.child(self.render_slowmode(cx))
+            })
             .child(
                 h_flex()
                     .gap_2()
@@ -635,6 +858,14 @@ impl Render for ChannelOverviewPage {
                             .disabled(!can_save)
                             .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
                     ),
+            )
+            // Saved on its own, after asking, as in the web client.
+            .child(
+                div()
+                    .pt_4()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(self.render_mature(kind, cx)),
             )
     }
 }

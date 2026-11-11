@@ -4,7 +4,7 @@
 use serde_json::json;
 use stoat_gpui::api::StoatClient;
 use stoat_gpui::api::models::{Channel, FieldsChannel};
-use stoat_gpui::channel_settings::{empty_channel_edit, save_error_text};
+use stoat_gpui::channel_settings::{empty_channel_edit, mature_edit, save_error_text};
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -106,4 +106,44 @@ async fn a_refusal_reads_plainly() {
         save_error_text(&err),
         "You don't have permission to change this channel."
     );
+}
+
+#[tokio::test]
+async fn marking_mature_sends_nsfw_alone() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/channels/ch-a"))
+        .and(body_json(json!({ "nsfw": true })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "channel_type": "TextChannel", "_id": "ch-a", "server": "srv",
+            "name": "a", "nsfw": true
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let saved = client(&server)
+        .edit_channel("ch-a", &mature_edit(true))
+        .await
+        .unwrap();
+    assert!(matches!(saved, Channel::TextChannel { nsfw: true, .. }));
+}
+
+#[tokio::test]
+async fn slowmode_off_is_sent_as_zero() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/channels/ch-a"))
+        .and(body_json(json!({ "slowmode": 0 })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "channel_type": "TextChannel", "_id": "ch-a", "server": "srv",
+            "name": "a", "slowmode": 0
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut edit = empty_channel_edit();
+    edit.slowmode = Some(0);
+    client(&server).edit_channel("ch-a", &edit).await.unwrap();
 }

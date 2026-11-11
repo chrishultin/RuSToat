@@ -50,3 +50,36 @@ Look-ahead: chunk 2 adds slowmode to `ChannelForm` (and `changes`), and the matu
 
 ### Manual Validation
 Deferred to the end (batched, as the user asked): rename a channel and a group, set and clear a description and icon, and check that a plain member has no "Channel settings…".
+
+## Chunk 2: Slowmode and the mature flag
+
+### Changes Made
+- `src/channel_settings.rs`:
+  - `ChannelForm.slowmode: u64` (0 for unset and for groups), read by `of` and sent by `changes` only for a server channel whose slowmode changed (0 included);
+  - `SLOWMODE_CHOICES` (the web client's 11), `slowmode_label` (a choice's words, else `format_duration_short`) and `slowmode_choices(current)`, which adds a stored value that isn't a choice in its place;
+  - `mature_edit(bool)` (`nsfw` alone), `MaturePrompt` and `mature_prompt(kind, mature)` (the web client's words, "group" for a group), `mature_state` (the row's line) and `mature_error_text`.
+- `src/ui/channel_settings.rs`, `ChannelOverviewPage`:
+  - `slowmode` joins the form's state, `reset` and per-field `follow`;
+  - a "Slowmode" row (server channels only) with a dropdown button. It offers the choices plus the stored value, and the chosen one if it's an older stored value;
+  - a "Mature" row below Save, under a border, with the current state and "Mark as mature…" / "Unmark as mature…";
+  - `confirm_mature` opens an alert dialog ("Keep as is", and the confirm button that waits while sending), and `set_mature` sends `mature_edit`, applies the answer through `channel_edited` (which gates or ungates the open channel), and closes the dialog. A refusal toasts `mature_error_text` and leaves the dialog open;
+  - the page's search keywords gain slowmode, mature and nsfw.
+- Tests:
+  - `tests/channel_settings.rs`: 8 new tests (22 in all). Slowmode's starting values; a changed slowmode sent including off; a group never sends one; the choices and labels; a stored value off the list offered in its place; `mature_edit`; the prompts and state lines; the mature refusal texts. The fixture's `ch-b` gained `slowmode: 45`;
+  - `tests/api_channels.rs`: 2 new wiremock tests (the mature body is exactly `{"nsfw":true}`, and slowmode off is `{"slowmode":0}`);
+  - `tests/store_mature.rs`: a saved mature flag shows at once, both ways.
+
+### Divergences
+- **The slowmode risk didn't apply:** `send_block_left` already treats a channel without slowmode as unblocked, so the composer's countdown stops once the store says it's off.
+- **No `tests/store_slowmode.rs` change:** chunk 1's `a_saved_channel_edit_then_its_event_are_one_state` and `a_saved_edit_clears_what_the_answer_lacks` already cover slowmode in the store.
+- The mature button's labels end with "…", since they open a confirmation.
+
+Look-ahead: chunks 3–5 don't touch Channel Settings. No amendments.
+
+### Verification Performed
+- `cargo test --test channel_settings --test api_channels --test store_mature`: 22, 5 and 3 passed.
+- Full suite: `cargo test` gave 1,310 passed, 0 failed. `cargo clippy --all-targets -- -D warnings` is clean.
+- Rustfmt: the new files (`src/channel_settings.rs`, `src/ui/channel_settings.rs`, `tests/channel_settings.rs`, `tests/api_channels.rs`) are clean, and `tests/store_mature.rs` is still clean.
+
+### Manual Validation
+Deferred to the end (batched): set slowmode to 10 seconds and back; mark and unmark a channel mature, and check the age gate.

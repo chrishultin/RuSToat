@@ -9,8 +9,9 @@ use stoat_gpui::api::ApiError;
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::api::models::{Channel, FieldsChannel};
 use stoat_gpui::channel_settings::{
-    ChannelAccess, ChannelForm, ChannelKind, access, empty_channel_edit, save_error_text,
-    window_title,
+    ChannelAccess, ChannelForm, ChannelKind, MaturePrompt, SLOWMODE_CHOICES, access,
+    empty_channel_edit, mature_edit, mature_error_text, mature_prompt, mature_state,
+    save_error_text, slowmode_choices, slowmode_label, window_title,
 };
 use stoat_gpui::profile_edit::ProfileImage;
 use stoat_gpui::store::ChatStore;
@@ -59,6 +60,7 @@ fn store(me: &str) -> ChatStore {
             },
             {
                 "channel_type": "TextChannel", "_id": "ch-b", "server": "srv", "name": "b",
+                "slowmode": 45,
                 "role_permissions": { "local": { "a": MANAGE_CHANNEL, "d": 0 } }
             },
             {
@@ -177,6 +179,7 @@ fn the_form_starts_with_the_stored_values() {
             name: "a".into(),
             description: "About a".into(),
             icon: ProfileImage::Current("ic-a".into()),
+            slowmode: 0,
         })
     );
     assert_eq!(
@@ -185,6 +188,7 @@ fn the_form_starts_with_the_stored_values() {
             name: "Friends".into(),
             description: String::new(),
             icon: ProfileImage::None,
+            slowmode: 0,
         })
     );
 }
@@ -312,5 +316,139 @@ fn refusals_read_plainly() {
     assert_eq!(
         save_error_text(&api_error(json!({ "type": "InternalError" }))),
         "Couldn't save the channel's settings."
+    );
+}
+
+#[test]
+fn slowmode_starts_as_stored_and_off_when_unset() {
+    let store = store("u-owner");
+    assert_eq!(
+        ChannelForm::of(channel(&store, "ch-b")).unwrap().slowmode,
+        45
+    );
+    assert_eq!(
+        ChannelForm::of(channel(&store, "ch-a")).unwrap().slowmode,
+        0
+    );
+    assert_eq!(ChannelForm::of(channel(&store, "grp")).unwrap().slowmode, 0);
+}
+
+#[test]
+fn a_changed_slowmode_is_sent_including_off() {
+    let store = store("u-owner");
+    let a = channel(&store, "ch-a");
+    let mut form = ChannelForm::of(a).unwrap();
+    form.slowmode = 10;
+    let edit = form.changes(a).unwrap();
+    assert_eq!(edit.slowmode, Some(10));
+    assert_eq!((edit.name, edit.description, edit.icon), (None, None, None));
+    assert!(edit.remove.is_empty());
+
+    let b = channel(&store, "ch-b");
+    let mut form = ChannelForm::of(b).unwrap();
+    form.slowmode = 0;
+    assert_eq!(form.changes(b).unwrap().slowmode, Some(0));
+    form.slowmode = 45;
+    assert_eq!(form.changes(b), None);
+}
+
+#[test]
+fn a_group_never_sends_a_slowmode() {
+    let store = store("u-owner");
+    let group = channel(&store, "grp");
+    let mut form = ChannelForm::of(group).unwrap();
+    form.slowmode = 30;
+    assert_eq!(form.changes(group), None);
+    form.name = "Pals".into();
+    assert_eq!(form.changes(group).unwrap().slowmode, None);
+}
+
+#[test]
+fn the_slowmode_choices_are_the_web_clients() {
+    let secs: Vec<u64> = SLOWMODE_CHOICES.iter().map(|(secs, _)| *secs).collect();
+    assert_eq!(secs, [0, 5, 10, 30, 60, 300, 600, 1800, 3600, 7200, 21600]);
+    assert_eq!(slowmode_label(0), "Off");
+    assert_eq!(slowmode_label(60), "1 minute");
+    assert_eq!(slowmode_label(21600), "6 hours");
+    // Anything else in short words.
+    assert_eq!(slowmode_label(45), "45s");
+    assert_eq!(slowmode_label(90), "1m 30s");
+    // A listed value adds nothing.
+    assert_eq!(slowmode_choices(30).len(), 11);
+}
+
+#[test]
+fn a_stored_slowmode_off_the_list_is_offered_in_its_place() {
+    let choices = slowmode_choices(45);
+    assert_eq!(choices.len(), 12);
+    assert_eq!(choices[3], (30, "30 seconds".to_string()));
+    assert_eq!(choices[4], (45, "45s".to_string()));
+    assert_eq!(choices[5], (60, "1 minute".to_string()));
+    // Beyond the last one, it goes last.
+    assert_eq!(
+        slowmode_choices(21601).last(),
+        Some(&(21601, "6h".to_string()))
+    );
+}
+
+#[test]
+fn marking_mature_sends_only_nsfw() {
+    let edit = mature_edit(true);
+    assert_eq!(edit.nsfw, Some(true));
+    assert_eq!(
+        edit,
+        stoat_gpui::api::models::DataEditChannel {
+            nsfw: Some(true),
+            ..empty_channel_edit()
+        }
+    );
+    assert_eq!(mature_edit(false).nsfw, Some(false));
+}
+
+#[test]
+fn the_mature_prompt_is_the_web_clients() {
+    assert_eq!(
+        mature_prompt(ChannelKind::Channel, false),
+        MaturePrompt {
+            title: "Mark this channel as mature?".into(),
+            text: "Users will be asked to confirm their age before joining this channel.".into(),
+            confirm: "Mark as mature",
+        }
+    );
+    assert_eq!(
+        mature_prompt(ChannelKind::Group, true),
+        MaturePrompt {
+            title: "Unmark this group as mature?".into(),
+            text: "Users will no longer be asked to confirm their age before joining this \
+                   group. Please ensure the content is appropriate for all ages."
+                .into(),
+            confirm: "Unmark as mature",
+        }
+    );
+    assert_eq!(
+        mature_state(ChannelKind::Channel, true),
+        "Members are asked to confirm their age before opening this channel."
+    );
+    assert_eq!(
+        mature_state(ChannelKind::Group, false),
+        "Members aren't asked to confirm their age."
+    );
+}
+
+#[test]
+fn mature_refusals_read_plainly() {
+    assert_eq!(
+        mature_error_text(&api_error(
+            json!({ "type": "MissingPermission", "permission": "ManageChannel" })
+        )),
+        "You don't have permission to change this channel."
+    );
+    assert_eq!(
+        mature_error_text(&api_error(json!({ "type": "NotFound" }))),
+        "That channel was deleted."
+    );
+    assert_eq!(
+        mature_error_text(&api_error(json!({ "type": "InternalError" }))),
+        "Couldn't change whether the channel is mature."
     );
 }
