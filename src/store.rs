@@ -575,6 +575,9 @@ pub struct ChatStore {
     /// Custom emoji of other servers, fetched by ID when a reaction or
     /// message uses one, so they can be named. Not offered for use.
     other_emojis: HashMap<String, Emoji>,
+    /// Webhooks of the channels whose list was fetched (Channel Settings'
+    /// Webhooks page), by channel. Others' webhook events are ignored.
+    webhooks: HashMap<String, Vec<crate::api::models::Webhook>>,
     /// Large images the user chose to load ("Show image"), by file ID.
     revealed_images: HashSet<String>,
     /// Spoilers the user clicked to see, as (message ID, spoiler index).
@@ -619,6 +622,8 @@ impl ChatStore {
 
     /// Replace everything with a fresh `Ready` (on first connect and every reconnect).
     pub fn apply_ready(&mut self, ready: Ready) {
+        // Events may have been missed: a Webhooks page fetches its list again.
+        self.webhooks.clear();
         let ready_order: Vec<String> = ready.servers.iter().map(|s| s.id.clone()).collect();
         self.users = ready.users.into_iter().map(|u| (u.id.clone(), u)).collect();
         self.servers = ready
@@ -2299,6 +2304,74 @@ impl ChatStore {
             .collect();
         emojis.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
         emojis
+    }
+
+    /// `channel`'s webhooks, if its list has been fetched.
+    pub fn webhooks(&self, channel: &str) -> Option<&[crate::api::models::Webhook]> {
+        self.webhooks.get(channel).map(Vec::as_slice)
+    }
+
+    /// `channel`'s webhooks as Stoat listed them (with their tokens).
+    pub fn set_webhooks(&mut self, channel: &str, webhooks: Vec<crate::api::models::Webhook>) {
+        self.webhooks.insert(channel.to_string(), webhooks);
+    }
+
+    /// A webhook was made (`WebhookCreate`, or the answer to the user's own
+    /// create), or saved: added to, or replaced in, its channel's list, if
+    /// that's been fetched. A token already known is kept when `webhook`
+    /// has none (events never carry it).
+    pub fn add_webhook(&mut self, mut webhook: crate::api::models::Webhook) {
+        let Some(list) = self.webhooks.get_mut(&webhook.channel_id) else {
+            return;
+        };
+        match list.iter_mut().find(|known| known.id == webhook.id) {
+            Some(known) => {
+                if webhook.token.is_none() {
+                    webhook.token = known.token.take();
+                }
+                *known = webhook;
+            }
+            None => list.push(webhook),
+        }
+    }
+
+    /// A webhook changed (`WebhookUpdate`): merge `data`, then clear
+    /// `remove`. Its token is never changed here.
+    pub fn apply_webhook_update(
+        &mut self,
+        channel: &str,
+        id: &str,
+        data: crate::api::models::PartialWebhook,
+        remove: &[crate::api::models::FieldsWebhook],
+    ) {
+        let Some(webhook) = self
+            .webhooks
+            .get_mut(channel)
+            .and_then(|list| list.iter_mut().find(|known| known.id == id))
+        else {
+            return;
+        };
+        if let Some(name) = data.name {
+            webhook.name = name;
+        }
+        if let Some(avatar) = data.avatar {
+            webhook.avatar = Some(avatar);
+        }
+        if let Some(permissions) = data.permissions {
+            webhook.permissions = permissions;
+        }
+        for field in remove {
+            match field {
+                crate::api::models::FieldsWebhook::Avatar => webhook.avatar = None,
+            }
+        }
+    }
+
+    /// A webhook was deleted (`WebhookDelete`, or by the user).
+    pub fn remove_webhook(&mut self, channel: &str, id: &str) {
+        if let Some(list) = self.webhooks.get_mut(channel) {
+            list.retain(|known| known.id != id);
+        }
     }
 
     /// Another server's emoji, fetched by ID (see [`ChatStore::missing_emojis`]).

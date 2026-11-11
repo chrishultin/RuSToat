@@ -115,12 +115,14 @@ fn api_error(body: Value) -> ApiError {
 const SHOWN: ChannelAccess = ChannelAccess {
     overview: true,
     permissions: false,
+    webhooks: false,
 };
 
 /// Both pages.
 const EVERY_PAGE: ChannelAccess = ChannelAccess {
     overview: true,
     permissions: true,
+    webhooks: true,
 };
 
 #[test]

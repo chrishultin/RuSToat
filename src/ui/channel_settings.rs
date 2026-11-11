@@ -40,6 +40,7 @@ use crate::ui::chat::ChatView;
 use crate::ui::profile_editor::{
     ImageSlot, Preview, avatar_preview, field, prompt_for_image, render_image_row, upload_image,
 };
+use crate::ui::webhooks_page::WebhooksPage;
 
 /// Rows the description field grows between before it scrolls.
 const DESCRIPTION_ROWS: (usize, usize) = (3, 10);
@@ -145,12 +146,13 @@ pub struct ChannelSettingsView {
     title: String,
     overview: Entity<ChannelOverviewPage>,
     permissions: Entity<ChannelPermissionsPage>,
+    webhooks: Entity<WebhooksPage>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl ChannelSettingsView {
     /// The pages, in sidebar order.
-    pub const PAGES: [ChannelPageFn; 2] = [overview_page, permissions_page];
+    pub const PAGES: [ChannelPageFn; 3] = [overview_page, permissions_page, webhooks_page];
 
     pub fn new(
         chat: Entity<ChatView>,
@@ -179,6 +181,7 @@ impl ChannelSettingsView {
         let title = window_title(chat.read(cx).store().channel(&channel));
         let overview = cx.new(|cx| ChannelOverviewPage::new(&chat, channel.clone(), window, cx));
         let permissions = cx.new(|cx| ChannelPermissionsPage::new(&chat, channel.clone(), cx));
+        let webhooks = cx.new(|cx| WebhooksPage::new(&chat, channel.clone(), cx));
         Self {
             chat: chat.downgrade(),
             channel,
@@ -188,6 +191,7 @@ impl ChannelSettingsView {
             title,
             overview,
             permissions,
+            webhooks,
             _subscriptions: subscriptions,
         }
     }
@@ -284,6 +288,27 @@ fn permissions_page(view: &ChannelSettingsView, cx: &mut App) -> Option<SettingP
                     "overrides",
                     "roles",
                     "everyone",
+                ]),
+            )),
+    )
+}
+
+/// Webhooks: a channel's or group's webhooks.
+fn webhooks_page(view: &ChannelSettingsView, cx: &mut App) -> Option<SettingPage> {
+    if !view.access(cx).webhooks {
+        return None;
+    }
+    let webhooks = view.webhooks.clone();
+    Some(
+        SettingPage::new("Webhooks")
+            .icon(IconName::Webhook)
+            .resettable(false)
+            .group(SettingGroup::new().item(
+                SettingItem::render(move |_, _, _| webhooks.clone()).keywords([
+                    "webhooks",
+                    "webhook",
+                    "url",
+                    "integration",
                 ]),
             )),
     )

@@ -30,5 +30,6 @@ pub mod settings;
 pub mod switcher;
 pub mod thumbhash;
 pub mod voice_global;
+pub mod webhooks_page;
 
 pub use app_root::AppRoot;

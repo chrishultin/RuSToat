@@ -60,6 +60,7 @@ gpui_kit::assets::icon_assets!(
         UserX,
         Users,
         Volume2,
+        Webhook,
         WifiOff
     ]
 );
@@ -239,6 +240,9 @@ mod tests {
             IconName::Users,
             // Server Settings' Emojis page.
             IconName::FaceSlightlySmiling,
+            // Channel Settings' Webhooks page, and its Copy URL.
+            IconName::Webhook,
+            IconName::Copy,
             // Channel Settings' Permissions page, and its rows.
             IconName::ShieldCheck,
             IconName::ChevronRight,

@@ -86,3 +86,49 @@ Look-ahead: chunks 3–4 (webhooks) are independent. No amendments.
 
 ### Manual Validation
 Deferred to the end (batched): upload a PNG and a GIF (named from their files); both show in the list and the picker, and the GIF animates. Rename one; the web client follows. At the limit, the button is disabled.
+
+## Chunk 3: The Webhooks page: list, create, copy the URL, delete
+
+### Changes Made
+- `src/webhooks.rs` (new, no GPUI):
+  - `WEBHOOK_NAME_MAX` (32) and `WEBHOOK_AVATAR_TAG` (`"avatars"`);
+  - `WebhookRow { id, name, avatar_url, token_known }` and `webhook_rows(store, channel)` (`None` until fetched; by name), plus `avatar_url`;
+  - `can_manage_webhooks` (Manage Webhooks in `channel_permissions`, for a server channel or group);
+  - `webhook_url(api, id, token)` and `shown_url(api, id)` (the token as `••••••`);
+  - `check_webhook_name` and `delete_prompt`;
+  - `webhooks_unavailable(err)`: an HTML 404, which arrives as `ApiError::Unexpected { status: 404 }`, as opposed to Stoat's own JSON `NotFound`;
+  - `list_error_text` and `webhook_error_text`.
+- `src/store.rs`: `webhooks: HashMap<channel, Vec<Webhook>>`, with `webhooks`, `set_webhooks`, `add_webhook` (only into a fetched list; keeps a known token when the new copy has none), `apply_webhook_update` (name, avatar, permissions, `remove: [Avatar]`; never the token) and `remove_webhook`. `apply_ready` clears them, so a page fetches again after a reconnect.
+- `src/api/events.rs`: `WebhookCreate(Box<Webhook>)`, `WebhookUpdate { id, channel, data, remove }` and `WebhookDelete { id, channel }`. The old test that `WebhookCreate` stays unknown now uses a made-up event type.
+- `src/ui/chat.rs`: handles the three events (and redraws), and adds `webhooks_fetched`, `webhook_saved` and `webhook_deleted`.
+- `src/api/client.rs`: `fetch_webhooks(channel)`, `create_webhook(channel, name)` (a body of only `{"name"}`) and `delete_webhook(id)`.
+- `src/channel_settings.rs`: `ChannelAccess.webhooks`, included in `any()`.
+- `src/ui/webhooks_page.rs` (new):
+  - `WebhooksPage`: fetches when the store has no list for the channel (first shown, or after a reconnect). It shows "Loading…", the reason with Try again, or "This Stoat instance doesn't have webhooks." (and no Create);
+  - a line explaining webhooks, "Create webhook…" (`Plus`), and the rows: avatar, name, muted ID and chevron;
+  - `CreateWebhookDialog` (a name, then Create, which adds it with its token and opens it);
+  - `WebhookView`: "‹ Webhooks", the avatar, name and ID, then "Webhook URL" (shown with the token hidden, monospace) with Copy URL, then "Delete webhook…" under a border.
+    - Copy writes the full URL to the clipboard and toasts "Copied.". Without a known token it fetches the list first, and toasts "Couldn't get the webhook's URL." if that fails.
+    - Delete confirms; in a group a failed `DELETE` is followed by a fetch, and the webhook being gone counts as success (Stoat's panic). It goes back to the list when the webhook is deleted, here or elsewhere.
+- `src/ui/channel_settings.rs`: `webhooks_page` (icon `Webhook`) in `PAGES: [_; 3]`. The file was formatted whole (it was clean).
+- `src/assets.rs`: `Webhook` added to the extra Lucide icons; the icons test checks it and `Copy`.
+- `src/lib.rs`, `src/ui/mod.rs`: the modules, by hand.
+- Tests:
+  - `tests/webhooks.rs` (new, 7 tests): who may manage them (owner, holder, override-only, plain, group owner and a default group member), and `ChannelAccess.webhooks`; rows `None` until fetched, then by name with avatar URLs and whether the token is known; create and update events keep the list and its tokens, and a delete removes; events for an unfetched channel are ignored; a reconnect forgets the lists; the URLs (the token never in the shown one); names, the prompt, and every text, with an HTML 404 telling "no webhooks" apart from Stoat's `NotFound`;
+  - `tests/api_webhooks.rs` (new, 5 wiremock tests): the list parses tokens; an HTML 404 reads as "no webhooks"; `POST` sends exactly `{"name":"CI"}` and the answer carries the token; `DELETE /webhooks/{id}`; `InvalidOperation` reads plainly;
+  - `tests/channel_settings.rs`, `tests/channel_permissions.rs`: the `ChannelAccess` literals gain `webhooks`.
+
+### Divergences
+- **Fetching is done by the page's render** (`load_once` from the list view), rather than the window's, since the page knows whether the store has the list.
+- **The group-delete check happens inside the request task** (delete, then fetch on failure), so the view sees one result.
+- **Token safety:** tokens are only in the store and the clipboard. Logs name webhooks by ID, and the shown URL hides the token.
+
+Look-ahead: chunk 4 turns `WebhookView`'s heading into an editor (avatar row, name field, Reset and Save in the bar). No amendments.
+
+### Verification Performed
+- `cargo test --test webhooks --test api_webhooks --test channel_settings --test channel_permissions`: 7, 5, 22 and 21 passed.
+- Full suite: `cargo test` gave 1,398 passed, 0 failed. `cargo clippy --all-targets -- -D warnings` is clean.
+- Rustfmt: `src/ui/chat.rs` 17 and `src/api/events.rs` 3 (one new hunk each, hand-formatted), `src/store.rs` 14 and `src/api/client.rs` 3 are unchanged. The new files and the other touched files are clean.
+
+### Manual Validation
+Deferred to the end (batched): create a webhook in a channel and in a group, copy the URL, post with `curl`, then delete both (no error in the group).

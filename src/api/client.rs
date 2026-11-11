@@ -1287,6 +1287,49 @@ impl StoatClient {
         .await
     }
 
+    /// `GET /channels/{channel}/webhooks`: a server channel's or group's
+    /// webhooks, with their tokens (Manage Webhooks there). A 404 means the
+    /// instance doesn't have webhooks.
+    pub async fn fetch_webhooks(
+        &self,
+        channel: &str,
+    ) -> Result<Vec<revolt_models::v0::Webhook>, ApiError> {
+        self.send(
+            Method::GET,
+            &format!("/channels/{channel}/webhooks"),
+            None::<&()>,
+        )
+        .await
+    }
+
+    /// `POST /channels/{channel}/webhooks`: a new webhook called `name`
+    /// (Manage Webhooks). Stoat answers with it, token and all;
+    /// `WebhookCreate` (without the token) follows.
+    pub async fn create_webhook(
+        &self,
+        channel: &str,
+        name: &str,
+    ) -> Result<revolt_models::v0::Webhook, ApiError> {
+        #[derive(Serialize)]
+        struct Create<'a> {
+            name: &'a str,
+        }
+        self.send(
+            Method::POST,
+            &format!("/channels/{channel}/webhooks"),
+            Some(&Create { name }),
+        )
+        .await
+    }
+
+    /// `DELETE /webhooks/{id}` (Manage Webhooks in its channel). In a group,
+    /// Stoat 0.16 deletes it and then fails (a 500).
+    pub async fn delete_webhook(&self, id: &str) -> Result<(), ApiError> {
+        self.send_raw(Method::DELETE, &format!("/webhooks/{id}"), None::<&()>)
+            .await
+            .map(|_| ())
+    }
+
     /// `PUT /custom/emoji/{id}`: make the file `id`, already uploaded under
     /// `emojis`, one of `server`'s emoji called `name` (Manage
     /// Customisation; at most the instance's `server_emoji`, else

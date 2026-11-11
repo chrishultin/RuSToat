@@ -265,7 +265,8 @@ fn manage_permissions_alone_opens_only_the_permissions_page() {
         access(&local, "ch-b"),
         ChannelAccess {
             overview: false,
-            permissions: true
+            permissions: true,
+            webhooks: false,
         }
     );
     assert!(!access(&local, "ch-a").any());

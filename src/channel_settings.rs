@@ -32,13 +32,15 @@ pub struct ChannelAccess {
     /// Its overrides, or a group's member permissions (Manage Permissions
     /// in it).
     pub permissions: bool,
+    /// Its webhooks (Manage Webhooks in it).
+    pub webhooks: bool,
 }
 
 impl ChannelAccess {
     /// Whether any page shows: the window opens only then, and closes once
     /// none does.
     pub fn any(&self) -> bool {
-        self.overview || self.permissions
+        self.overview || self.permissions || self.webhooks
     }
 }
 
@@ -47,6 +49,7 @@ pub fn access(store: &ChatStore, channel: &str) -> ChannelAccess {
     ChannelAccess {
         overview: store.can_edit_channel(channel),
         permissions: crate::channel_permissions::can_manage_channel_permissions(store, channel),
+        webhooks: crate::webhooks::can_manage_webhooks(store, channel),
     }
 }
 

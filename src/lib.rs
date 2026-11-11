@@ -57,4 +57,5 @@ pub mod time;
 pub mod typing;
 pub mod ui;
 pub mod voice;
+pub mod webhooks;
 pub mod window_hide;

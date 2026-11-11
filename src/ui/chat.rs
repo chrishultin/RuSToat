@@ -1197,6 +1197,22 @@ impl ChatView {
             ConnectionEvent::Event(ServerEvent::EmojiDelete { id }) => {
                 self.store.remove_emoji(&id);
             }
+            // Redrawn, for an open Webhooks page.
+            ConnectionEvent::Event(ServerEvent::WebhookCreate(webhook)) => {
+                self.store.add_webhook(*webhook);
+            }
+            ConnectionEvent::Event(ServerEvent::WebhookUpdate {
+                id,
+                channel,
+                data,
+                remove,
+            }) => {
+                self.store
+                    .apply_webhook_update(&channel, &id, *data, &remove);
+            }
+            ConnectionEvent::Event(ServerEvent::WebhookDelete { id, channel }) => {
+                self.store.remove_webhook(&channel, &id);
+            }
             ConnectionEvent::Event(ServerEvent::EmojiUpdate { id, name }) => {
                 log::debug!("live: emoji {id} updated");
                 if let Some(name) = name {
@@ -7711,6 +7727,30 @@ impl ChatView {
     /// show it now, without waiting for its event.
     pub fn emoji_saved(&mut self, saved: crate::api::models::Emoji, cx: &mut Context<Self>) {
         self.store.add_emoji(saved);
+        cx.notify();
+    }
+
+    /// `channel`'s webhooks as Stoat listed them, fetched for Channel
+    /// Settings.
+    pub fn webhooks_fetched(
+        &mut self,
+        channel: &str,
+        webhooks: Vec<crate::api::models::Webhook>,
+        cx: &mut Context<Self>,
+    ) {
+        self.store.set_webhooks(channel, webhooks);
+        cx.notify();
+    }
+
+    /// The user's own new or saved webhook: show it now.
+    pub fn webhook_saved(&mut self, webhook: crate::api::models::Webhook, cx: &mut Context<Self>) {
+        self.store.add_webhook(webhook);
+        cx.notify();
+    }
+
+    /// The user deleted webhook `id` of `channel`.
+    pub fn webhook_deleted(&mut self, channel: &str, id: &str, cx: &mut Context<Self>) {
+        self.store.remove_webhook(channel, id);
         cx.notify();
     }
 
