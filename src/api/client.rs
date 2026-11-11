@@ -1232,6 +1232,29 @@ impl StoatClient {
         .await
     }
 
+    /// `PUT /channels/{channel}/permissions/{role}`: a role's override in
+    /// a server channel (Manage Permissions there, and the role ranking
+    /// below the user's best one, else `NotElevated`). The user must hold
+    /// every permission it allows that the role's server-wide permissions
+    /// don't, and every one those deny that it doesn't
+    /// (`CannotGiveMissingPermissions`). Stoat answers with the channel;
+    /// `ChannelUpdate` follows, with every role's override.
+    pub async fn set_channel_role_permissions(
+        &self,
+        channel: &str,
+        role: &str,
+        permissions: &revolt_permissions::Override,
+    ) -> Result<Channel, ApiError> {
+        self.send(
+            Method::PUT,
+            &format!("/channels/{channel}/permissions/{role}"),
+            Some(&revolt_models::v0::DataSetRolePermissions {
+                permissions: permissions.clone(),
+            }),
+        )
+        .await
+    }
+
     /// `DELETE /channels/{channel}`: delete a server channel (Manage
     /// Channels on it). Stoat takes it out of the server's channel list but
     /// not its categories, and sends `ChannelDelete` to whoever could see

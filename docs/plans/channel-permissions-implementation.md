@@ -88,3 +88,34 @@ Look-ahead: chunk 3 as planned. Chunk 4 reuses `apply_channel_permissions` (its 
 
 ### Manual Validation
 Deferred to the end (batched): deny Send Messages to Everyone in one channel; a plain member can't send there at once; then clear it.
+
+## Chunk 3: Edit a role's override in a channel
+
+### Changes Made
+- `src/api/client.rs`: `set_channel_role_permissions(channel, role, &Override) -> Channel`, a `PUT /channels/{id}/permissions/{role}` with `DataSetRolePermissions`.
+- `src/channel_permissions.rs`:
+  - `grant_basis` for a role is **the role's server-wide permissions** (`override_of(role.permissions)`); an unknown role is `None`;
+  - `ungrantable(held, basis, edited)` lists the unheld permissions the edit sets looser than the basis. It's empty exactly when Stoat would take the edit;
+  - `ungrantable_note(target, blocking)` puts that in words.
+- `src/ui/channel_permissions.rs`, `OverrideEditor`:
+  - a role's override saves through `set_channel_role_permissions` (the early return for roles is gone);
+  - when the override as edited can't be granted, the blocking note shows under the lock notes, in the danger colour with `TriangleAlert`, and Save stays disabled;
+  - the rank rule, going back to the list when the role is deleted, and the list's rows moving between sections were already in place from chunk 1 (they follow the store).
+- `docs/plans/channel-permissions.md`: Assumption 12 (the blocking note).
+- Tests:
+  - `tests/channel_permissions.rs`: 6 new tests (19 in all). The fixture's `low` role is now allowed Manage Messages and denied Manage Webhooks server-wide, neither of which the moderator has. Tests: a role's basis is its server-wide permissions; an unheld permission the role has server-wide may be allowed (all three options enabled, and Stoat takes it); one the role is denied server-wide offers only Deny (Stoat refuses neutral); the stored override itself can be ungrantable, with the note naming Send Messages and Manage Webhooks, and fixed by making them stricter; `ungrantable` is empty exactly when Stoat's `throw_permission_override` passes, for every case over three permissions; a saved role override then its `ChannelUpdate` are one state, and `can_pin` follows at once;
+  - `tests/api_channels.rs`: 2 new wiremock tests (the exact `PUT` body and parsed answer; `NotElevated`, `CannotGiveMissingPermissions` and `NotFound` read as their texts).
+
+### Divergences
+- **The blocking note (plan amended, Assumption 12).** This is a consequence of the quirk the plan didn't foresee. Stoat checks the whole override against the role's server-wide permissions, so a moderator may find the stored override itself refused (it allows something they lack in the channel that the role lacks server-wide). Each row's options were right, but Save would have stayed disabled without saying why. The editor now names the blocking permissions, as milestone 25's Everyone editor does. Blocking bits on permissions the channel doesn't show can't be fixed in the page; that's rare and accepted.
+- **The store test is in `tests/channel_permissions.rs`**, not `tests/store_channels.rs`: `can_pin` needs a member with a role, which only that fixture has.
+
+Look-ahead: chunk 4 (groups) has no grant check, so it isn't affected. No other amendments.
+
+### Verification Performed
+- `cargo test --test channel_permissions --test api_channels`: 19 and 9 passed.
+- Full suite: `cargo test` gave 1,367 passed, 0 failed. `cargo clippy --all-targets -- -D warnings` is clean.
+- Rustfmt: `src/api/client.rs` is still 3. The other touched files are clean.
+
+### Manual Validation
+Deferred to the end (batched): deny View Channel to a role in one channel; the quirk as a moderator (an option enabled because the role has it server-wide, Deny only where it's denied server-wide, the blocking note); roles at or above them are read-only.

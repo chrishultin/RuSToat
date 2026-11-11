@@ -17,7 +17,7 @@ use revolt_result::ErrorType;
 
 use crate::api::ApiError;
 use crate::api::models::Channel;
-use crate::permission_matrix::override_of;
+use crate::permission_matrix::{PERMISSIONS, PermissionEntry, override_of, setting_of};
 use crate::permissions::{acting_rank, channel_permissions, has};
 use crate::profile_edit::error_text;
 use crate::roles::role_rows;
@@ -188,15 +188,20 @@ pub fn group_lock_note(store: &ChatStore, channel: &str) -> Option<&'static str>
 
 /// What Stoat compares an edit of `target`'s override in `channel` with,
 /// for the grant rule: for Everyone, the stored default override (none is
-/// the same as all neutral). `None` if the channel isn't a server's.
+/// the same as all neutral); for a role, **the role's server-wide
+/// permissions**, whatever its override in the channel is. `None` if the
+/// channel isn't a server's, or the role is unknown.
 pub fn grant_basis(store: &ChatStore, channel: &str, target: &OverrideTarget) -> Option<Override> {
-    let channel = store.channel(channel)?;
-    if !matches!(channel, Channel::TextChannel { .. }) {
+    let found = store.channel(channel)?;
+    let Channel::TextChannel { server, .. } = found else {
         return None;
-    }
+    };
     match target {
-        OverrideTarget::Everyone => Some(stored_override(channel, target)),
-        OverrideTarget::Role(_) => None,
+        OverrideTarget::Everyone => Some(stored_override(found, target)),
+        OverrideTarget::Role(role) => {
+            let role = store.server(server)?.roles.get(role)?;
+            Some(override_of(role.permissions))
+        }
     }
 }
 
@@ -214,4 +219,48 @@ pub fn channel_permissions_error_text(err: &ApiError) -> String {
         Some(ErrorType::InvalidOperation) => "Stoat can't set that here.".into(),
         _ => error_text(err, "Couldn't save the permissions."),
     }
+}
+
+/// The permissions that keep Stoat from taking `edited` from a user
+/// holding `held`, against `basis` (see [`grant_basis`]), in list order:
+/// ones they don't hold that `edited` sets looser than `basis` does. A
+/// role's override in a channel is compared with the role's server-wide
+/// permissions, so even its stored override may have some.
+pub fn ungrantable(
+    held: u64,
+    basis: &Override,
+    edited: &Override,
+) -> Vec<&'static PermissionEntry> {
+    PERMISSIONS
+        .iter()
+        .filter(|entry| {
+            let bit = entry.bit();
+            // Settings are ordered from strictest, so looser is greater.
+            held & bit == 0 && setting_of(edited, bit) > setting_of(basis, bit)
+        })
+        .collect()
+}
+
+/// Why an override can't be saved as it is: "You don't have Send
+/// Messages, so this role's override can't set it looser than the role's
+/// server-wide permissions do. Make it stricter to save." `None` when
+/// nothing blocks it.
+pub fn ungrantable_note(target: &OverrideTarget, blocking: &[&PermissionEntry]) -> Option<String> {
+    let titles: Vec<&str> = blocking.iter().map(|entry| entry.title).collect();
+    let them = if titles.len() == 1 { "it" } else { "them" };
+    let titles = match titles.as_slice() {
+        [] => return None,
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    Some(match target {
+        OverrideTarget::Role(_) => format!(
+            "You don't have {titles}, so this role's override can't set {them} looser than \
+             the role's server-wide permissions do. Make {them} stricter to save."
+        ),
+        OverrideTarget::Everyone => format!(
+            "You don't have {titles}, so Everyone's override can't set {them} looser than \
+             it was. Make {them} stricter to save."
+        ),
+    })
 }

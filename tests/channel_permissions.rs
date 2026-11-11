@@ -13,7 +13,9 @@ use stoat_gpui::channel_permissions::{
     group_permissions, may_edit_group_permissions, may_edit_override, override_lock_notes,
     override_rows, stored_override,
 };
-use stoat_gpui::channel_permissions::{channel_permissions_error_text, grant_basis};
+use stoat_gpui::channel_permissions::{
+    channel_permissions_error_text, grant_basis, ungrantable, ungrantable_note,
+};
 use stoat_gpui::channel_settings::{ChannelAccess, access};
 use stoat_gpui::permission_matrix::{Setting, may_grant, setting_enabled, with_setting};
 use stoat_gpui::store::ChatStore;
@@ -22,6 +24,7 @@ const MANAGE_PERMISSIONS: u64 = ChannelPermission::ManagePermissions as u64;
 const SEND: u64 = ChannelPermission::SendMessage as u64;
 const REACT: u64 = ChannelPermission::React as u64;
 const PIN: u64 = ChannelPermission::ManageMessages as u64;
+const WEBHOOKS: u64 = ChannelPermission::ManageWebhooks as u64;
 
 fn user(id: &str) -> Value {
     json!({
@@ -39,7 +42,8 @@ fn member(user: &str, roles: &[&str]) -> Value {
 }
 
 /// `srv`, owned by `u-owner`. Roles by rank: `top` (0), `mod` (1, Manage
-/// Permissions), `low` (2) and `plain` (3). `u-mod` has `mod`; `u-local`
+/// Permissions), `low` (2; allowed Manage Messages and denied Manage
+/// Webhooks server-wide, neither of which `mod` has) and `plain` (3). `u-mod` has `mod`; `u-local`
 /// has `plain`, which `ch-b`'s override gives Manage Permissions;
 /// `u-plain` has nothing. `ch-a` has overrides for Everyone, `low` and
 /// (all neutral) `top`. Groups: `grp` (no stored permissions) and `strict`
@@ -58,7 +62,7 @@ fn store(me: &str) -> ChatStore {
             "roles": {
                 "top": { "_id": "top", "name": "Top", "rank": 0, "colour": "#ff0000", "permissions": { "a": 0, "d": 0 } },
                 "mod": { "_id": "mod", "name": "Mod", "rank": 1, "permissions": { "a": MANAGE_PERMISSIONS, "d": 0 } },
-                "low": { "_id": "low", "name": "Low", "rank": 2, "permissions": { "a": 0, "d": 0 } },
+                "low": { "_id": "low", "name": "Low", "rank": 2, "permissions": { "a": PIN, "d": WEBHOOKS } },
                 "plain": { "_id": "plain", "name": "Plain", "rank": 3, "permissions": { "a": 0, "d": 0 } }
             }
         }],
@@ -394,4 +398,171 @@ fn refusals_read_plainly() {
         text(json!({ "type": "InternalError" })),
         "Couldn't save the permissions."
     );
+}
+
+#[test]
+fn a_roles_basis_is_its_server_wide_permissions() {
+    let store = store("u-owner");
+    // Not its override in the channel (which allows Send and React, and
+    // denies Manage Messages).
+    assert_eq!(
+        grant_basis(&store, "ch-a", &role("low")),
+        Some(Override {
+            allow: PIN,
+            deny: WEBHOOKS
+        })
+    );
+    assert_eq!(
+        grant_basis(&store, "ch-a", &role("mod")),
+        Some(Override {
+            allow: MANAGE_PERMISSIONS,
+            deny: 0
+        })
+    );
+    assert_eq!(grant_basis(&store, "ch-a", &role("gone")), None);
+}
+
+/// The options enabled for `bit` in `low`'s override in `ch-a`, as the
+/// moderator.
+fn moderators_options(bit: u64) -> Vec<Setting> {
+    let store = store("u-mod");
+    let held = stoat_gpui::channel_permissions::held(&store, "ch-a");
+    let basis = grant_basis(&store, "ch-a", &role("low")).unwrap();
+    Setting::ALL
+        .into_iter()
+        .filter(|setting| setting_enabled(held, &basis, bit, *setting))
+        .collect()
+}
+
+#[test]
+fn an_unheld_permission_the_role_has_server_wide_may_be_allowed() {
+    let held = stoat_gpui::channel_permissions::held(&store("u-mod"), "ch-a");
+    assert_eq!(held & PIN, 0, "the moderator doesn't have Manage Messages");
+    // Stored here as denied, but allowed for the role server-wide: Stoat
+    // takes any setting.
+    assert_eq!(
+        moderators_options(PIN),
+        [Setting::Deny, Setting::Neutral, Setting::Allow]
+    );
+    // From an override that's otherwise grantable (Manage Webhooks denied,
+    // as server-wide).
+    let basis = Override {
+        allow: PIN,
+        deny: WEBHOOKS,
+    };
+    let start = Override {
+        allow: 0,
+        deny: WEBHOOKS,
+    };
+    let allowed = with_setting(start, PIN, Setting::Allow);
+    assert!(may_grant(held, &basis, &allowed));
+    assert!(stoat_grants(held, Some(basis), &allowed));
+}
+
+#[test]
+fn an_unheld_permission_the_role_is_denied_server_wide_stays_denied() {
+    let held = stoat_gpui::channel_permissions::held(&store("u-mod"), "ch-a");
+    assert_eq!(
+        held & WEBHOOKS,
+        0,
+        "the moderator doesn't have Manage Webhooks"
+    );
+    // Neutral in the channel, but the role is denied it server-wide: only
+    // Deny is enabled, and Stoat refuses neutral.
+    assert_eq!(moderators_options(WEBHOOKS), [Setting::Deny]);
+    let basis = Override {
+        allow: PIN,
+        deny: WEBHOOKS,
+    };
+    let neutral = Override::default();
+    assert!(!may_grant(held, &basis, &neutral));
+    assert!(!stoat_grants(held, Some(basis.clone()), &neutral));
+    let denied = with_setting(neutral, WEBHOOKS, Setting::Deny);
+    assert!(may_grant(held, &basis, &denied));
+    assert!(stoat_grants(held, Some(basis), &denied));
+}
+
+#[test]
+fn a_saved_role_override_then_its_event_are_one_state() {
+    // `u-local` has `plain`; an override allowing Manage Messages lets them
+    // pin in `ch-a` at once.
+    let mut store = store("u-local");
+    assert!(!stoat_gpui::permissions::can_pin(&store, "u-local", "ch-a"));
+    let overrides = json!({
+        "low": { "a": SEND | REACT, "d": PIN },
+        "top": { "a": 0, "d": 0 },
+        "plain": { "a": PIN, "d": 0 }
+    });
+    let saved: stoat_gpui::api::models::Channel = serde_json::from_value(json!({
+        "channel_type": "TextChannel", "_id": "ch-a", "server": "srv", "name": "a",
+        "default_permissions": { "a": 0, "d": SEND },
+        "role_permissions": overrides
+    }))
+    .unwrap();
+    assert!(store.apply_channel_permissions(&saved));
+    assert!(stoat_gpui::permissions::can_pin(&store, "u-local", "ch-a"));
+    let after_save = store.channel("ch-a").cloned();
+
+    let frame = json!({
+        "type": "ChannelUpdate", "id": "ch-a",
+        "data": { "role_permissions": overrides }, "clear": []
+    });
+    let Some(ServerEvent::ChannelUpdate { id, data, clear }) =
+        parse_frame(&frame.to_string()).pop()
+    else {
+        panic!("ChannelUpdate");
+    };
+    store.apply_channel_update(&id, *data, &clear);
+    assert_eq!(store.channel("ch-a").cloned(), after_save);
+}
+
+#[test]
+fn a_stored_override_may_itself_be_ungrantable_and_says_why() {
+    // The moderator lacks Send Messages in `ch-a` (Everyone is denied it
+    // there) and Manage Webhooks. `low`'s override allows the first, which
+    // the role doesn't have server-wide, and leaves the second neutral,
+    // where the role is denied it server-wide: Stoat would refuse it as it
+    // is, whichever row the moderator changes.
+    let store = store("u-mod");
+    let held = stoat_gpui::channel_permissions::held(&store, "ch-a");
+    let basis = grant_basis(&store, "ch-a", &role("low")).unwrap();
+    let stored = stored_override(store.channel("ch-a").unwrap(), &role("low"));
+    let blocking = ungrantable(held, &basis, &stored);
+    let titles: Vec<&str> = blocking.iter().map(|entry| entry.title).collect();
+    assert_eq!(titles, ["Send Messages", "Manage Webhooks"]);
+    assert!(!stoat_grants(held, Some(basis.clone()), &stored));
+    assert_eq!(
+        ungrantable_note(&role("low"), &blocking).as_deref(),
+        Some(
+            "You don't have Send Messages and Manage Webhooks, so this role's override can't \
+             set them looser than the role's server-wide permissions do. Make them stricter \
+             to save."
+        )
+    );
+    assert_eq!(ungrantable_note(&role("low"), &[]), None);
+    // Once both are stricter, it's fine.
+    let fixed = with_setting(
+        with_setting(stored, SEND, Setting::Neutral),
+        WEBHOOKS,
+        Setting::Deny,
+    );
+    assert!(ungrantable(held, &basis, &fixed).is_empty());
+    assert!(stoat_grants(held, Some(basis), &fixed));
+}
+
+#[test]
+fn nothing_blocks_exactly_when_stoat_grants() {
+    let bits = [SEND, REACT, PIN];
+    let overrides = every_override(&bits);
+    for held in every_held(&bits) {
+        for basis in &overrides {
+            for edited in &overrides {
+                assert_eq!(
+                    ungrantable(held, basis, edited).is_empty(),
+                    stoat_grants(held, Some(basis.clone()), edited),
+                    "held {held:#x}, {basis:?} -> {edited:?}"
+                );
+            }
+        }
+    }
 }

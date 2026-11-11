@@ -202,3 +202,66 @@ async fn an_override_stoat_wont_grant_reads_plainly() {
         "You can't grant permissions you don't have."
     );
 }
+
+#[tokio::test]
+async fn a_roles_override_is_sent_as_allow_and_deny() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/channels/ch-a/permissions/low"))
+        .and(header("x-session-token", "tok"))
+        .and(body_json(
+            json!({ "permissions": { "allow": 8, "deny": 0 } }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "channel_type": "TextChannel", "_id": "ch-a", "server": "srv", "name": "a",
+            "role_permissions": { "low": { "a": 8, "d": 0 } }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let saved = client(&server)
+        .set_channel_role_permissions("ch-a", "low", &Override { allow: 8, deny: 0 })
+        .await
+        .unwrap();
+    let Channel::TextChannel {
+        role_permissions, ..
+    } = saved
+    else {
+        panic!("a text channel");
+    };
+    assert_eq!(
+        role_permissions.get("low").map(|f| (f.a, f.d)),
+        Some((8, 0))
+    );
+}
+
+#[tokio::test]
+async fn role_override_refusals_read_plainly() {
+    for (body, text) in [
+        (
+            json!({ "type": "NotElevated" }),
+            "That role ranks at or above your highest role.",
+        ),
+        (
+            json!({ "type": "CannotGiveMissingPermissions" }),
+            "You can't grant permissions you don't have.",
+        ),
+        (
+            json!({ "type": "NotFound" }),
+            "That role or channel was deleted.",
+        ),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/channels/ch-a/permissions/low"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(body))
+            .mount(&server)
+            .await;
+        let err = client(&server)
+            .set_channel_role_permissions("ch-a", "low", &Override::default())
+            .await
+            .unwrap_err();
+        assert_eq!(channel_permissions_error_text(&err), text);
+    }
+}

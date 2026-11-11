@@ -17,7 +17,7 @@ use crate::api::models::Channel;
 use crate::channel_permissions::{
     OverrideRow, OverrideTarget, channel_permissions_error_text, grant_basis, group_lock_note,
     group_permissions, held, may_edit_override, override_lock_notes, override_rows,
-    stored_override,
+    stored_override, ungrantable, ungrantable_note,
 };
 use crate::permission_matrix::{
     MatrixContext, Setting, follow_override, may_grant, override_change, setting_enabled,
@@ -387,8 +387,7 @@ impl OverrideEditor {
     /// window too; a refusal says why in a toast, and the matrix keeps the
     /// edit.
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // A role's override can't be edited yet (no grant basis).
-        if !self.can_save(cx) || self.target != OverrideTarget::Everyone {
+        if !self.can_save(cx) {
             return;
         }
         let Some(chat) = self.chat.upgrade() else {
@@ -398,11 +397,20 @@ impl OverrideEditor {
         self.saving = true;
         cx.notify();
         let client = chat.read(cx).client().clone();
-        let channel = self.channel.clone();
+        let (channel, target) = (self.channel.clone(), self.target.clone());
         let request = spawn_io(async move {
-            client
-                .set_channel_default_permissions(&channel, &permissions)
-                .await
+            match target {
+                OverrideTarget::Everyone => {
+                    client
+                        .set_channel_default_permissions(&channel, &permissions)
+                        .await
+                }
+                OverrideTarget::Role(role) => {
+                    client
+                        .set_channel_role_permissions(&channel, &role, &permissions)
+                        .await
+                }
+            }
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = request.await;
@@ -487,6 +495,8 @@ impl Render for OverrideEditor {
                     .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
             ]
         });
+        let blocked = ungrantable_note(&self.target, &ungrantable(held, &basis, &self.edited))
+            .filter(|_| editable);
         let explanation = match self.target {
             // Stoat applies the server's default permissions, then this,
             // then roles' server-wide permissions, then role overrides here.
@@ -519,6 +529,14 @@ impl Render for OverrideEditor {
                     .child(explanation),
             )
             .children(notes.into_iter().map(|note| lock_note(note, cx)))
+            .children(blocked.map(|text| {
+                h_flex()
+                    .gap_2()
+                    .text_sm()
+                    .text_color(cx.theme().danger)
+                    .child(Icon::new(IconName::TriangleAlert).small())
+                    .child(text)
+            }))
             .child(matrix)
     }
 }

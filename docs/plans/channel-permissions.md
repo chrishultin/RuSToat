@@ -110,6 +110,10 @@ As on the Roles page, the options greyed out are exactly the ones Stoat would re
    - The Overview page still needs Manage Channel.
 10. **No warning when an edit would take a permission away from the user themselves** (denying View Channel to Everyone, say). If they lose access, the window closes, as milestone 23's and 26's do.
 11. **"Clear" isn't a button:** setting every row to Neutral clears an override, and Reset puts back the stored one.
+12. **An override Stoat would refuse as it stands says why** (added in chunk 3). Stoat checks the whole override, and a role's is compared with the role's server-wide permissions, so even the stored override may be refused for this user: say it allows Send Messages, which they lack in the channel and the role lacks server-wide.
+    - Under the bar, in the danger colour, the editor names the blocking permissions: "You don't have {titles}, so this role's override can't set {them} looser than the role's server-wide permissions do. Make {them} stricter to save."
+    - Save stays disabled until they're fixed, as milestone 25's Everyone editor does.
+    - Blocking bits on permissions the channel doesn't show can't be fixed here. That's rare (only possible through the API) and accepted.
 
 ## Plan
 
