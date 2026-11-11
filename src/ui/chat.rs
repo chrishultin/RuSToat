@@ -40,6 +40,7 @@ use crate::api::models::{
     ReplyIntent, Server, SystemMessage, UserProfile,
 };
 use crate::attachment::{AttachmentView, fit_into};
+use crate::channel_order::{CategoryDrop, category_target, move_category};
 use crate::complete::{Query, QueryKind, Suggestion, TokenRef, rank, rank_mentions};
 use crate::draft::{AttachmentLimits, DraftAttachment, ReplyTarget};
 use crate::embed::{Description, EmbedCard, EmbedImage, EmbedView};
@@ -446,7 +447,11 @@ pub struct ChatView {
     /// A server or folder being dragged in the rail. Only while gpui has a
     /// drag going (see [`Self::rail_dragging`]).
     rail_drag: Option<RailDragState>,
-    /// Esc cancels a drag in the rail, which gpui doesn't do itself.
+    /// A category or channel being dragged in the channel list. Only while
+    /// gpui has a drag going (see [`Self::channel_dragging`]).
+    channel_drag: Option<ChannelDragState>,
+    /// Esc cancels a drag in the rail or the channel list, which gpui
+    /// doesn't do itself.
     _drag_escape: Subscription,
     /// The message whose reaction picker is open.
     picker_for: Option<String>,
@@ -618,7 +623,9 @@ impl ChatView {
                 return;
             }
             if view
-                .update(cx, |this, cx| this.end_rail_drag(cx))
+                .update(cx, |this, cx| {
+                    this.end_rail_drag(cx) | this.end_channel_drag(cx)
+                })
                 .unwrap_or(false)
             {
                 cx.stop_active_drag(window);
@@ -916,6 +923,7 @@ impl ChatView {
             notifications_write: 0,
             rail_write: 0,
             rail_drag: None,
+            channel_drag: None,
             _drag_escape: drag_escape,
             picker_for: None,
             reacting: HashSet::new(),
@@ -4079,6 +4087,121 @@ impl ChatView {
                 this.rail_drag_over(&hovered, event, cx)
             },
         ))
+    }
+
+    /// The drag in the channel list, while gpui has one going.
+    fn channel_dragging(&self, cx: &App) -> Option<&ChannelDragState> {
+        self.channel_drag.as_ref().filter(|_| cx.has_active_drag())
+    }
+
+    /// A category or channel has started being dragged in the list.
+    fn start_channel_drag(&mut self, dragged: ChannelDrag, cx: &mut Context<Self>) {
+        self.channel_drag = Some(ChannelDragState {
+            dragged,
+            target: None,
+        });
+        cx.notify();
+    }
+
+    /// Forget the drag in the channel list: dropped, cancelled, or ended
+    /// off the list. Whether there was one.
+    fn end_channel_drag(&mut self, cx: &mut Context<Self>) -> bool {
+        let ended = self.channel_drag.take().is_some();
+        if ended {
+            cx.notify();
+        }
+        ended
+    }
+
+    /// Show where the drag in the channel list would land, if that's
+    /// changed.
+    fn set_channel_target(&mut self, target: Option<CategoryDrop>, cx: &mut Context<Self>) {
+        if let Some(drag) = &mut self.channel_drag
+            && drag.target != target
+        {
+            drag.target = target;
+            cx.notify();
+        }
+    }
+
+    /// The drag moved, as the whole list sees it: off the list, a drop
+    /// does nothing. (The list's own listener runs before its sections'.)
+    fn channel_list_drag_moved(
+        &mut self,
+        event: &DragMoveEvent<ChannelDrag>,
+        cx: &mut Context<Self>,
+    ) {
+        if !event.bounds.contains(&event.event.position) {
+            self.set_channel_target(None, cx);
+        }
+    }
+
+    /// The drag moved, as the section of category `hovered` (`None` is the
+    /// top section) sees it: a category lands before or after it, as
+    /// [`category_target`] says. Between sections, it stays where it was.
+    fn section_drag_over(
+        &mut self,
+        hovered: Option<&str>,
+        event: &DragMoveEvent<ChannelDrag>,
+        cx: &mut Context<Self>,
+    ) {
+        let position = event.event.position;
+        if self.channel_drag.is_none() || !event.bounds.contains(&position) {
+            return;
+        }
+        let fraction = (position.y - event.bounds.origin.y) / event.bounds.size.height;
+        let target = match event.drag(cx) {
+            ChannelDrag::Category(dragged) => {
+                let shown: Vec<String> = self
+                    .sections()
+                    .into_iter()
+                    .filter_map(|section| section.id)
+                    .collect();
+                category_target(&shown, dragged, hovered, fraction)
+            }
+        };
+        self.set_channel_target(target, cx);
+    }
+
+    /// A drag dropped on the channel list lands where it was shown to, if
+    /// anywhere, and is saved at once.
+    fn drop_on_channel_list(
+        &mut self,
+        drag: &ChannelDrag,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = self.channel_drag.take().and_then(|d| d.target);
+        cx.notify();
+        let (Some(target), Place::Server(server)) = (target, self.place.clone()) else {
+            return;
+        };
+        let edited = match drag {
+            ChannelDrag::Category(dragged) => self
+                .store
+                .server(&server)
+                .and_then(|s| move_category(s, dragged, &target)),
+        };
+        if let Some(edited) = edited {
+            self.save_categories(server, edited, window, cx);
+        }
+    }
+
+    /// Where the drag in the channel list would land beside category
+    /// `id`'s section.
+    fn section_mark(&self, id: Option<&str>, cx: &App) -> Option<DropMark> {
+        match self.channel_dragging(cx)?.target.as_ref()? {
+            CategoryDrop::Before(target) if Some(target.as_str()) == id => Some(DropMark::Above),
+            CategoryDrop::After(target) if Some(target.as_str()) == id => Some(DropMark::Below),
+            _ => None,
+        }
+    }
+
+    /// Whether categories and channels may be dragged in the list now: in a
+    /// server, with Manage Channels across it, and no order still saving.
+    fn may_drag_channels(&self) -> bool {
+        self.categories_saving.is_none()
+            && matches!(&self.place, Place::Server(id) if self.store.can_manage_channels(id))
     }
 
     /// Save the Edit folder dialog: the folder's name and colour.
@@ -9156,11 +9279,17 @@ impl ChatView {
             .map(|id| self.channel_list_menu(id, cx));
         let theme = cx.theme();
         let (muted, hover_fg) = (theme.muted_foreground, theme.sidebar_foreground);
+        let may_drag = self.may_drag_channels();
+        let dragged_category = self
+            .channel_dragging(cx)
+            .and_then(|d| d.dragged.category())
+            .map(str::to_string);
 
         let rows: Vec<_> = self
             .visible_sections()
             .into_iter()
             .map(|section| {
+                let section_id = section.id.clone();
                 let header = section.title.map(|title| {
                     let id = section.id.clone().unwrap_or_default();
                     let folded = self.collapsed.contains(&id);
@@ -9188,15 +9317,39 @@ impl ChatView {
                         .on_click(toggle)
                         .child(Icon::new(chevron).xsmall())
                         .child(div().truncate().child(title.to_uppercase()))
+                        // Dragging starts after a few pixels, and then
+                        // doesn't fold it.
+                        .when(may_drag, |header| {
+                            let view = cx.entity().downgrade();
+                            let face = list_drag_face(IconName::Folder, title.clone());
+                            header.on_drag(
+                                ChannelDrag::Category(id.clone()),
+                                move |drag, _, _, cx| {
+                                    let drag = drag.clone();
+                                    view.update(cx, |this, cx| this.start_channel_drag(drag, cx))
+                                        .ok();
+                                    DragPreview::new(face.clone(), cx)
+                                },
+                            )
+                        })
                         .context_menu(move |popup, window, cx| menu(popup, window, cx))
                 });
-                v_flex()
+                let mark = self.section_mark(section_id.as_deref(), cx);
+                let dragged = section_id.is_some() && section_id == dragged_category;
+                let body = v_flex()
+                    .relative()
                     .gap_0p5()
+                    .when(dragged, |body| body.opacity(DRAGGED_OPACITY))
                     .children(header)
                     .children(section.channels.into_iter().map(|channel| {
                         let selected = current.as_deref() == Some(channel.id.as_str());
                         self.render_channel_row(channel, selected, cx)
-                    }))
+                    }));
+                with_drop_line(body, mark, 2., 4., cx).on_drag_move(cx.listener(
+                    move |this, event: &DragMoveEvent<ChannelDrag>, _, cx| {
+                        this.section_drag_over(section_id.as_deref(), event, cx)
+                    },
+                ))
             })
             .collect();
 
@@ -9222,7 +9375,21 @@ impl ChatView {
                         .child("Nothing here yet."),
                 )
             })
-            .children(rows);
+            .children(rows)
+            .on_drag_move(
+                cx.listener(|this, event: &DragMoveEvent<ChannelDrag>, _, cx| {
+                    this.channel_list_drag_moved(event, cx)
+                }),
+            )
+            .on_drop(cx.listener(|this, drag: &ChannelDrag, window, cx| {
+                this.drop_on_channel_list(drag, window, cx)
+            }))
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.end_channel_drag(cx);
+                }),
+            );
         // Right-click on the empty space below (and between) the rows: rows
         // and headers open their own menus first.
         let list = match list_menu {
@@ -10698,6 +10865,28 @@ struct RailDragState {
     /// The pointer is over the rail. Items scrolled out of sight still
     /// see it, so they only take it while it is.
     over_rail: bool,
+}
+
+/// What a category carries while it's dragged in the channel list.
+#[derive(Clone)]
+enum ChannelDrag {
+    Category(String),
+}
+
+impl ChannelDrag {
+    /// The category dragged, if it's one.
+    fn category(&self) -> Option<&str> {
+        match self {
+            ChannelDrag::Category(id) => Some(id),
+        }
+    }
+}
+
+/// A drag in the channel list: what's dragged and where it would land.
+struct ChannelDragState {
+    dragged: ChannelDrag,
+    /// `None` off the list, or where dropping would change nothing.
+    target: Option<CategoryDrop>,
 }
 
 /// A change to the user's own status.
@@ -13818,21 +14007,9 @@ const DROP_LINE: f32 = 3.;
 /// [`rail_slot`]'s rows are).
 pub(crate) fn with_drop_mark(item: Div, mark: Option<DropMark>, cx: &App) -> Div {
     let accent = cx.theme().primary;
-    // Centred in the gap.
-    let line = || {
-        div()
-            .absolute()
-            .left(px(12.))
-            .right(px(12.))
-            .h(px(DROP_LINE))
-            .rounded_full()
-            .bg(accent)
-    };
-    let gap = px(-(4. + DROP_LINE / 2.));
     let mark = match mark {
         None => return item,
-        Some(DropMark::Above) => line().top(gap),
-        Some(DropMark::Below) => line().bottom(gap),
+        Some(DropMark::Above | DropMark::Below) => return with_drop_line(item, mark, 8., 12., cx),
         Some(DropMark::Onto) => div()
             .absolute()
             .top(px(-4.))
@@ -13850,6 +14027,53 @@ pub(crate) fn with_drop_mark(item: Div, mark: Option<DropMark>, cx: &App) -> Div
             ),
     };
     item.child(mark)
+}
+
+/// `item` showing `mark` as a line centred in the `gap` (in pixels) above
+/// or below it, `inset` pixels in from each side. `item` is `relative`.
+/// [`DropMark::Onto`] draws nothing here.
+pub(crate) fn with_drop_line(
+    item: Div,
+    mark: Option<DropMark>,
+    gap: f32,
+    inset: f32,
+    cx: &App,
+) -> Div {
+    let line = div()
+        .absolute()
+        .left(px(inset))
+        .right(px(inset))
+        .h(px(DROP_LINE))
+        .rounded_full()
+        .bg(cx.theme().primary);
+    let offset = px(-(gap / 2. + DROP_LINE / 2.));
+    match mark {
+        Some(DropMark::Above) => item.child(line.top(offset)),
+        Some(DropMark::Below) => item.child(line.bottom(offset)),
+        Some(DropMark::Onto) | None => item,
+    }
+}
+
+/// What follows the pointer while a category or channel is dragged in the
+/// channel list: a pill with `icon` and `label`.
+fn list_drag_face(icon: IconName, label: String) -> Rc<dyn Fn(&App) -> AnyElement> {
+    Rc::new(move |cx: &App| {
+        let theme = cx.theme();
+        h_flex()
+            .gap_1p5()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(theme.secondary)
+            .border_1()
+            .border_color(theme.border)
+            .text_sm()
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(theme.secondary_foreground)
+            .child(Icon::new(icon).small())
+            .child(label.clone())
+            .into_any_element()
+    })
 }
 
 /// A rail button's face as it follows the pointer while dragged: `content`

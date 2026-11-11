@@ -144,6 +144,77 @@ pub fn move_to_end(server: &Server, channel: &str, section: Option<&str>) -> Opt
     (after != before).then(|| after.into_categories(server))
 }
 
+/// Where a dragged category would land: just before or after another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CategoryDrop {
+    Before(String),
+    After(String),
+}
+
+/// Where the category `dragged` lands when it's over `hovered`'s section
+/// (`None` is the top section), `fraction` of the way down it: the top
+/// half drops before that category and the bottom half after it. Over the
+/// top section, which always comes first, it goes before the first
+/// category. `shown` is the categories shown, in order. `None` when that's
+/// where it is already.
+pub fn category_target(
+    shown: &[String],
+    dragged: &str,
+    hovered: Option<&str>,
+    fraction: f32,
+) -> Option<CategoryDrop> {
+    let target = match hovered {
+        None => CategoryDrop::Before(shown.first()?.clone()),
+        Some(id) if id == dragged => return None,
+        Some(id) if fraction < 0.5 => CategoryDrop::Before(id.to_string()),
+        Some(id) => CategoryDrop::After(id.to_string()),
+    };
+    let moved = reordered(shown, dragged, &target)?;
+    (moved != shown).then_some(target)
+}
+
+/// `order` with `dragged` moved to `target`. `None` if either is missing,
+/// or the target is `dragged` itself.
+fn reordered(order: &[String], dragged: &str, target: &CategoryDrop) -> Option<Vec<String>> {
+    let anchor = match target {
+        CategoryDrop::Before(id) | CategoryDrop::After(id) => id,
+    };
+    if anchor == dragged || !order.iter().any(|id| id == dragged) {
+        return None;
+    }
+    let mut moved: Vec<String> = order.iter().filter(|id| *id != dragged).cloned().collect();
+    let at = moved.iter().position(|id| id == anchor)?;
+    let at = match target {
+        CategoryDrop::Before(_) => at,
+        CategoryDrop::After(_) => at + 1,
+    };
+    moved.insert(at, dragged.to_string());
+    Some(moved)
+}
+
+/// The categories that put category `dragged` at `target`, with every
+/// channel where it was. The top section stays first (and isn't written
+/// just for this). `None` if nothing would change, or either category is
+/// unknown.
+pub fn move_category(
+    server: &Server,
+    dragged: &str,
+    target: &CategoryDrop,
+) -> Option<Vec<Category>> {
+    let before = layout(server);
+    let order: Vec<String> = before.categories.iter().map(|c| c.id.clone()).collect();
+    let moved = reordered(&order, dragged, target)?;
+    if moved == order {
+        return None;
+    }
+    let mut after = before;
+    after.categories = moved
+        .iter()
+        .filter_map(|id| after.categories.iter().find(|c| &c.id == id).cloned())
+        .collect();
+    Some(after.into_categories(server))
+}
+
 /// Keep each channel where it's first listed, and drop any later copy:
 /// Stoat refuses a list with a channel twice.
 pub(crate) fn listed_once(categories: &mut [Category]) {

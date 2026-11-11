@@ -121,3 +121,35 @@ Look-ahead: chunks 4–5 reuse `layout`, `into_categories`, `save_categories` an
 
 ### Manual Validation
 Deferred to the end (batched): a server reordered in the web client shows no "DEFAULT" header and the same top section; "Move to ›" into a category and back.
+
+## Chunk 4: Drag to reorder categories
+
+### Changes Made
+- `src/channel_order.rs`:
+  - `CategoryDrop { Before(id), After(id) }`;
+  - `category_target(shown, dragged, hovered, fraction)`: the top half of a section is before it and the bottom half after it. Over the top section it's before the first category. `None` over itself or where it already is;
+  - `move_category(server, dragged, &target)`: reorders the full list (hidden categories keep their places relative to the anchors), keeps `"default"` first, and doesn't add it. `None` when nothing changes or either category is unknown.
+- `src/ui/chat.rs`:
+  - `ChannelDrag::Category(id)` (the drag value, with `category()`) and `ChannelDragState { dragged, target }`, held in `ChatView.channel_drag`;
+  - `channel_dragging`, `start_channel_drag`, `end_channel_drag`, `set_channel_target`, `channel_list_drag_moved` (off the list, no target), `section_drag_over` (hit-tests the whole section, header and channels), `drop_on_channel_list` (through `move_category` and chunk 3's `save_categories`), `section_mark` and `may_drag_channels` (a server, Manage Channels across it, nothing saving);
+  - a category header is draggable (`on_drag`, before its `context_menu`) when `may_drag_channels`, with a pill preview (`list_drag_face`: the `Folder` icon and the title);
+  - each section is `relative`, takes `on_drag_move`, dims to `DRAGGED_OPACITY` while it's the one dragged, and shows the line;
+  - the list takes `on_drag_move`, `on_drop` and `on_mouse_up_out` for `ChannelDrag`;
+  - Esc ends a channel-list drag too (`end_rail_drag(cx) | end_channel_drag(cx)` in the keystroke hook);
+  - `with_drop_line(item, mark, gap, inset, cx)`, the line part of `with_drop_mark`, which now calls it with 8 px and 12 px. The sidebar uses 2 px (its `gap_0p5`) and 4 px.
+- `tests/channel_order.rs`: 6 new tests (17 in all). Targets before and after, over the top section, and no-op targets (itself, its neighbours' near halves, already first, nothing shown, unknown); moves after and before; no-op and unknown moves; `"default"` kept first and not added; a hidden category keeps its place.
+
+### Divergences
+- **No `First` variant:** over the top section the target is `Before(first shown category)`, which is the same thing and draws the line on that section.
+- **`with_drop_line` is a new function** that `with_drop_mark` delegates to for lines, rather than an offset parameter on `with_drop_mark`, so the rail's and roles' calls stay as they were.
+- **The drag preview is a pill** (`list_drag_face`), not a copy of the header, which would be too faint at the preview's opacity.
+
+Look-ahead: chunk 5 adds `ChannelDrag::Channel`, a channel target type alongside `CategoryDrop` in `ChannelDragState`, and row-level hit-testing. No amendments.
+
+### Verification Performed
+- `cargo test --test channel_order`: 17 passed.
+- Full suite: `cargo test` gave 1,330 passed, 0 failed. `cargo clippy --all-targets -- -D warnings` is clean.
+- Rustfmt: `src/ui/chat.rs` is still 17 (one new hunk was hand-formatted). `src/channel_order.rs` and `tests/channel_order.rs` are clean.
+
+### Manual Validation
+Deferred to the end (batched): drag categories above and below others; Esc cancels mid-drag; a click still folds; a member without Manage Channels can't drag.

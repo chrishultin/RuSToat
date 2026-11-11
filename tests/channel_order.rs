@@ -5,7 +5,9 @@ use std::collections::HashSet;
 
 use serde_json::{Value, json};
 use stoat_gpui::api::models::{Category, Server};
-use stoat_gpui::channel_order::{DEFAULT_CATEGORY, Layout, layout, move_to_end};
+use stoat_gpui::channel_order::{
+    CategoryDrop, DEFAULT_CATEGORY, Layout, category_target, layout, move_category, move_to_end,
+};
 
 /// A server with `channels` in its own order, and `categories` as
 /// `(id, title, channels)`.
@@ -206,4 +208,134 @@ fn every_move_lists_each_channel_once() {
             }
         }
     }
+}
+
+fn before(id: &str) -> CategoryDrop {
+    CategoryDrop::Before(id.into())
+}
+
+fn after(id: &str) -> CategoryDrop {
+    CategoryDrop::After(id.into())
+}
+
+#[test]
+fn a_category_lands_before_or_after_the_one_its_over() {
+    let shown = ids(&["k1", "k2", "k3"]);
+    assert_eq!(
+        category_target(&shown, "k1", Some("k3"), 0.2),
+        Some(before("k3"))
+    );
+    assert_eq!(
+        category_target(&shown, "k1", Some("k3"), 0.8),
+        Some(after("k3"))
+    );
+    assert_eq!(
+        category_target(&shown, "k3", Some("k1"), 0.4),
+        Some(before("k1"))
+    );
+    // Over the top section, it goes first.
+    assert_eq!(category_target(&shown, "k3", None, 0.9), Some(before("k1")));
+}
+
+#[test]
+fn a_category_dropped_where_it_is_shows_no_target() {
+    let shown = ids(&["k1", "k2", "k3"]);
+    // Over itself.
+    assert_eq!(category_target(&shown, "k2", Some("k2"), 0.2), None);
+    // Just after the one before it, or just before the one after it.
+    assert_eq!(category_target(&shown, "k2", Some("k1"), 0.8), None);
+    assert_eq!(category_target(&shown, "k2", Some("k3"), 0.2), None);
+    // Already first.
+    assert_eq!(category_target(&shown, "k1", None, 0.5), None);
+    // Nothing shown, or not one of them.
+    assert_eq!(category_target(&[], "k1", None, 0.5), None);
+    assert_eq!(category_target(&shown, "k9", Some("k1"), 0.2), None);
+}
+
+/// `srv` with categories `k1` (`x`), `k2` (`y`) and `k3` (`z`), and `a`
+/// uncategorized.
+fn three() -> Server {
+    server(
+        &["a", "x", "y", "z"],
+        &[
+            ("k1", "One", &["x"]),
+            ("k2", "Two", &["y"]),
+            ("k3", "Three", &["z"]),
+        ],
+    )
+}
+
+#[test]
+fn moving_a_category_keeps_every_channel_in_it() {
+    let server = three();
+    assert_eq!(
+        move_category(&server, "k1", &after("k3")).unwrap(),
+        [
+            category("k2", "Two", &["y"]),
+            category("k3", "Three", &["z"]),
+            category("k1", "One", &["x"])
+        ]
+    );
+    assert_eq!(
+        move_category(&server, "k3", &before("k2")).unwrap(),
+        [
+            category("k1", "One", &["x"]),
+            category("k3", "Three", &["z"]),
+            category("k2", "Two", &["y"])
+        ]
+    );
+}
+
+#[test]
+fn moving_a_category_where_it_is_or_unknown_changes_nothing() {
+    let server = three();
+    assert_eq!(move_category(&server, "k2", &after("k1")), None);
+    assert_eq!(move_category(&server, "k2", &before("k2")), None);
+    assert_eq!(move_category(&server, "k9", &before("k1")), None);
+    assert_eq!(move_category(&server, "k1", &before("k9")), None);
+}
+
+#[test]
+fn moving_a_category_keeps_default_first_and_doesnt_add_it() {
+    let with_default = server(
+        &["a", "x", "y"],
+        &[
+            ("k1", "One", &["x"]),
+            (DEFAULT_CATEGORY, "Default", &["a"]),
+            ("k2", "Two", &["y"]),
+        ],
+    );
+    assert_eq!(
+        move_category(&with_default, "k2", &before("k1")).unwrap(),
+        [
+            category(DEFAULT_CATEGORY, "Default", &["a"]),
+            category("k2", "Two", &["y"]),
+            category("k1", "One", &["x"])
+        ]
+    );
+    // Without one, none is written.
+    let edited = move_category(&three(), "k3", &before("k1")).unwrap();
+    assert!(edited.iter().all(|c| c.id != DEFAULT_CATEGORY));
+}
+
+#[test]
+fn moving_a_category_keeps_hidden_channels_and_categories() {
+    // `k2` lists only a channel the user can't see, so it isn't shown, but
+    // it keeps its place relative to the others.
+    let server = server(
+        &["x", "secret", "z"],
+        &[
+            ("k1", "One", &["x"]),
+            ("k2", "Hidden", &["secret"]),
+            ("k3", "Three", &["z"]),
+        ],
+    );
+    assert_eq!(
+        move_category(&server, "k3", &before("k1")).unwrap(),
+        [
+            category("k3", "Three", &["z"]),
+            category("k1", "One", &["x"]),
+            category("k2", "Hidden", &["secret"])
+        ]
+    );
 }
