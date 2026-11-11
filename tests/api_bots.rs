@@ -257,3 +257,109 @@ async fn a_bots_profile_is_its_users() {
     assert_eq!(user.display_name.as_deref(), Some("Helper Bot"));
     assert_eq!(user.avatar.map(|file| file.id).as_deref(), Some("av-new"));
 }
+
+#[tokio::test]
+async fn a_public_bot_parses() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/bots/b1/invite"))
+        .and(header("x-session-token", "tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "_id": "b1", "username": "helper", "avatar": "av1",
+            "description": "I help.", "default_permissions": 24
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let public = client(&server).fetch_public_bot("b1").await.unwrap();
+    assert_eq!(public.username, "helper");
+    assert_eq!(public.avatar, "av1");
+    assert_eq!(public.description, "I help.");
+    assert_eq!(public.default_permissions, Some(24));
+}
+
+#[tokio::test]
+async fn adding_sends_the_place_and_only_given_permissions() {
+    use stoat_gpui::api::models::InviteBotDestination;
+    use wiremock::matchers::{query_param, query_param_is_missing};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/bots/b1/invite"))
+        .and(header("x-session-token", "tok"))
+        .and(query_param("permissions", "24"))
+        .and(body_json(json!({ "server": "srv" })))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/bots/b1/invite"))
+        .and(query_param_is_missing("permissions"))
+        .and(body_json(json!({ "group": "grp" })))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/bots/b1/invite"))
+        .and(query_param_is_missing("permissions"))
+        .and(body_json(json!({ "server": "plain" })))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = client(&server);
+    let to_server = InviteBotDestination::Server {
+        server: "srv".into(),
+    };
+    client.invite_bot("b1", &to_server, Some(24)).await.unwrap();
+    let to_group = InviteBotDestination::Group {
+        group: "grp".into(),
+    };
+    client.invite_bot("b1", &to_group, None).await.unwrap();
+    let plain = InviteBotDestination::Server {
+        server: "plain".into(),
+    };
+    client.invite_bot("b1", &plain, None).await.unwrap();
+}
+
+#[tokio::test]
+async fn adding_refusals_read_plainly() {
+    use stoat_gpui::api::models::InviteBotDestination;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/bots/private/invite"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({ "type": "BotIsPrivate" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/bots/b1/invite"))
+        .respond_with(
+            ResponseTemplate::new(409).set_body_json(json!({ "type": "AlreadyInServer" })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/bots/gone/invite"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({ "type": "NotFound" })))
+        .mount(&server)
+        .await;
+
+    let client = client(&server);
+    let to = InviteBotDestination::Server {
+        server: "srv".into(),
+    };
+    let err = client.invite_bot("private", &to, None).await.unwrap_err();
+    assert_eq!(bot_error_text(&err, None), "That bot is private.");
+    let err = client.invite_bot("b1", &to, None).await.unwrap_err();
+    assert_eq!(bot_error_text(&err, None), "The bot is already there.");
+    let err = client.fetch_public_bot("gone").await.unwrap_err();
+    assert_eq!(
+        bot_error_text(&err, None),
+        "That bot doesn't exist, or it's private."
+    );
+}

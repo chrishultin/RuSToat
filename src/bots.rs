@@ -7,13 +7,17 @@
 //! else gets `NotFound`). Every answer about a bot carries its token, so
 //! [`Bot`] values are never logged: their `Debug` prints it.
 
+use revolt_permissions::ChannelPermission;
 use revolt_result::ErrorType;
 
 use crate::api::ApiError;
 use crate::api::RootConfig;
-use crate::api::models::{Bot, DataEditBot, FieldsBot, User};
+use crate::api::models::{Bot, Channel, DataEditBot, FieldsBot, InviteBotDestination, User};
 use crate::media::MediaUrls;
+use crate::permission_matrix::{MatrixContext, PermissionEntry, entries};
+use crate::permissions::{channel_permissions, has, server_permissions};
 use crate::profile_edit::error_text;
+use crate::store::ChatStore;
 
 /// The shortest and longest username Stoat takes, in characters.
 pub const BOT_USERNAME_MIN: usize = 2;
@@ -271,4 +275,159 @@ pub fn reset_prompt(name: &str) -> (String, &'static str) {
 /// `{app}/bot/{id}`.
 pub fn invite_url(app: &str, id: &str) -> String {
     format!("{}/bot/{id}", app.trim_end_matches('/'))
+}
+
+/// Where a bot can be added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestinationKind {
+    Server,
+    Group,
+}
+
+/// A server or group the user may add a bot to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Destination {
+    pub kind: DestinationKind,
+    pub id: String,
+    pub name: String,
+    /// Its icon, on the file server.
+    pub icon: Option<String>,
+}
+
+impl Destination {
+    /// What `POST /bots/{id}/invite` sends for it.
+    pub fn invite(&self) -> InviteBotDestination {
+        match self.kind {
+            DestinationKind::Server => InviteBotDestination::Server {
+                server: self.id.clone(),
+            },
+            DestinationKind::Group => InviteBotDestination::Group {
+                group: self.id.clone(),
+            },
+        }
+    }
+}
+
+/// Where the user may add `bot`, as Stoat checks: servers they have Manage
+/// Server in, then groups they have Invite Others in, each by name. Places
+/// the bot is known to be in already are left out (a server whose members
+/// aren't loaded can't be told, and still shows).
+pub fn destinations(store: &ChatStore, bot: &str) -> Vec<Destination> {
+    let me = store.me();
+    let by_name = |a: &Destination, b: &Destination| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.id.cmp(&b.id))
+    };
+    let mut servers: Vec<Destination> = store
+        .servers()
+        .into_iter()
+        .filter(|server| {
+            has(
+                server_permissions(store, me, &server.id),
+                ChannelPermission::ManageServer,
+            ) && store.member(&server.id, bot).is_none()
+        })
+        .map(|server| Destination {
+            kind: DestinationKind::Server,
+            icon: server
+                .icon
+                .as_ref()
+                .and_then(|file| store.media().file(file)),
+            id: server.id,
+            name: server.name,
+        })
+        .collect();
+    servers.sort_by(by_name);
+    let mut groups: Vec<Destination> = store
+        .channels()
+        .filter_map(|channel| match channel {
+            Channel::Group {
+                id,
+                name,
+                recipients,
+                icon,
+                ..
+            } if !recipients.iter().any(|user| user == bot)
+                && has(
+                    channel_permissions(store, me, id),
+                    ChannelPermission::InviteOthers,
+                ) =>
+            {
+                Some(Destination {
+                    kind: DestinationKind::Group,
+                    id: id.clone(),
+                    name: name.clone(),
+                    icon: icon.as_ref().and_then(|file| store.media().file(file)),
+                })
+            }
+            _ => None,
+        })
+        .collect();
+    groups.sort_by(by_name);
+    servers.extend(groups);
+    servers
+}
+
+/// The destinations whose name contains `filter` (any case, trimmed).
+pub fn filter_destinations<'a>(
+    destinations: &'a [Destination],
+    filter: &str,
+) -> Vec<&'a Destination> {
+    let filter = filter.trim().to_lowercase();
+    destinations
+        .iter()
+        .filter(|place| filter.is_empty() || place.name.to_lowercase().contains(&filter))
+        .collect()
+}
+
+/// More destinations than this, and the dialog offers a filter.
+pub const DESTINATION_FILTER_FROM: usize = 8;
+
+/// The permissions a bot asks for (its `default_permissions`), as the
+/// matrix lists them, in its order. Bits the matrix doesn't know are left
+/// out (and so never granted).
+pub fn requested(bits: u64) -> Vec<&'static PermissionEntry> {
+    entries(MatrixContext::Server)
+        .into_iter()
+        .map(|shown| shown.entry)
+        .filter(|entry| bits & entry.bit() != 0)
+        .collect()
+}
+
+/// Which of `bits` the user may give a bot in `server`, as Stoat checks
+/// them after it joins: none without Manage Roles, else those they hold.
+pub fn grantable(store: &ChatStore, server: &str, bits: u64) -> u64 {
+    let held = server_permissions(store, store.me(), server);
+    if !has(held, ChannelPermission::ManageRole) {
+        return 0;
+    }
+    bits & held
+}
+
+/// Why a requested permission can't be given, if it can't: Manage Roles
+/// first, then holding it.
+pub fn ungrantable_reason(store: &ChatStore, server: &str, bit: u64) -> Option<&'static str> {
+    let held = server_permissions(store, store.me(), server);
+    if !has(held, ChannelPermission::ManageRole) {
+        Some("You need Manage Roles to give it permissions.")
+    } else if held & bit != bit {
+        Some("You don't have this permission.")
+    } else {
+        None
+    }
+}
+
+/// The `?permissions=` to send: what's ticked and grantable, or `None`
+/// (so nothing is sent) when that's nothing. Never a bit outside
+/// `grantable`: Stoat checks them after the bot has joined.
+pub fn invite_permissions(ticked: u64, grantable: u64) -> Option<u64> {
+    let bits = ticked & grantable;
+    (bits != 0).then_some(bits)
+}
+
+/// The toast once a bot is added.
+pub fn added_text(bot: &str, place: &str) -> String {
+    format!("Added {bot} to {place}.")
 }

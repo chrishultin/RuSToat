@@ -369,3 +369,203 @@ fn renames_tokens_and_links() {
         "https://chat.example/bot/01ABC"
     );
 }
+
+mod adding {
+    use revolt_permissions::ChannelPermission;
+    use serde_json::{Value, json};
+    use stoat_gpui::api::events::{ServerEvent, parse_frame};
+    use stoat_gpui::api::models::InviteBotDestination;
+    use stoat_gpui::bots::{
+        DestinationKind, added_text, destinations, filter_destinations, grantable,
+        invite_permissions, requested, ungrantable_reason,
+    };
+    use stoat_gpui::media::MediaUrls;
+    use stoat_gpui::permission_matrix::{MatrixContext, entries};
+    use stoat_gpui::store::ChatStore;
+
+    const MANAGE_SERVER: u64 = ChannelPermission::ManageServer as u64;
+    const MANAGE_ROLE: u64 = ChannelPermission::ManageRole as u64;
+    const SEND: u64 = ChannelPermission::SendMessage as u64;
+    const KICK: u64 = ChannelPermission::KickMembers as u64;
+    const MESSAGES: u64 = ChannelPermission::ManageMessages as u64;
+    const VIEW: u64 = ChannelPermission::ViewChannel as u64;
+    const INVITE: u64 = ChannelPermission::InviteOthers as u64;
+
+    fn user(id: &str) -> Value {
+        json!({
+            "_id": id, "username": id, "discriminator": "0001",
+            "relationship": "None", "online": true
+        })
+    }
+
+    fn server(id: &str, name: &str, owner: &str, roles: Value) -> Value {
+        json!({
+            "_id": id, "owner": owner, "name": name, "channels": [],
+            "approximate_member_count": 2, "default_permissions": 0, "roles": roles
+        })
+    }
+
+    fn role(id: &str, permissions: u64) -> Value {
+        json!({ "_id": id, "name": id, "rank": 0, "permissions": { "a": permissions, "d": 0 } })
+    }
+
+    fn member(server: &str, user: &str, roles: &[&str]) -> Value {
+        json!({
+            "_id": { "server": server, "user": user },
+            "joined_at": "2026-01-01T00:00:00.000Z",
+            "roles": roles,
+        })
+    }
+
+    fn group(id: &str, name: &str, owner: &str, recipients: &[&str], permissions: u64) -> Value {
+        json!({
+            "channel_type": "Group", "_id": id, "name": name, "owner": owner,
+            "recipients": recipients, "permissions": permissions
+        })
+    }
+
+    /// The user (`u-me`):
+    /// - owns `srv-own` ("Zeta") and `srv-has-bot` (the bot's in it);
+    /// - may manage `srv-mod` ("alpha") but not its roles;
+    /// - may manage `srv-roles` ("Middle") and its roles, holding Send
+    ///   Messages but not Kick Members;
+    /// - has nothing in `srv-plain`;
+    /// - owns `grp-own` ("Friends") and `grp-has-bot`; is a member of
+    ///   `grp-open` ("book club", members may invite) and `grp-closed`.
+    fn store() -> ChatStore {
+        let ready = json!({
+            "type": "Ready",
+            "users": [user("u-me"), user("u-owner"), user("b-bot")],
+            "servers": [
+                server("srv-own", "Zeta", "u-me", json!({})),
+                server("srv-has-bot", "Has bot", "u-me", json!({})),
+                server("srv-mod", "alpha", "u-owner", json!({ "mod": role("mod", MANAGE_SERVER) })),
+                server(
+                    "srv-roles", "Middle", "u-owner",
+                    json!({ "admin": role("admin", MANAGE_SERVER | MANAGE_ROLE | SEND) }),
+                ),
+                server("srv-plain", "Plain", "u-owner", json!({})),
+            ],
+            "channels": [
+                group("grp-own", "Friends", "u-me", &["u-me"], 0),
+                group("grp-has-bot", "Bots", "u-me", &["u-me", "b-bot"], 0),
+                group("grp-open", "book club", "u-owner", &["u-me", "u-owner"], VIEW | INVITE),
+                group("grp-closed", "Closed", "u-owner", &["u-me", "u-owner"], VIEW),
+            ],
+            "members": [
+                member("srv-own", "u-me", &[]),
+                member("srv-has-bot", "u-me", &[]),
+                member("srv-has-bot", "b-bot", &[]),
+                member("srv-mod", "u-me", &["mod"]),
+                member("srv-roles", "u-me", &["admin"]),
+                member("srv-plain", "u-me", &[]),
+            ],
+        });
+        let Some(ServerEvent::Ready(ready)) = parse_frame(&ready.to_string()).pop() else {
+            panic!("ready");
+        };
+        let mut store = ChatStore::new("u-me");
+        store.apply_ready(*ready);
+        store.set_media(MediaUrls::new(
+            "https://api.example",
+            Some("https://cdn.example".into()),
+            None,
+        ));
+        store
+    }
+
+    #[test]
+    fn places_are_servers_then_groups_the_user_may_add_to() {
+        let places = destinations(&store(), "b-bot");
+        let shown: Vec<(DestinationKind, &str)> = places
+            .iter()
+            .map(|place| (place.kind, place.id.as_str()))
+            .collect();
+        assert_eq!(
+            shown,
+            vec![
+                (DestinationKind::Server, "srv-mod"),
+                (DestinationKind::Server, "srv-roles"),
+                (DestinationKind::Server, "srv-own"),
+                (DestinationKind::Group, "grp-open"),
+                (DestinationKind::Group, "grp-own"),
+            ]
+        );
+        assert_eq!(
+            places[0].invite(),
+            InviteBotDestination::Server {
+                server: "srv-mod".into()
+            }
+        );
+        assert_eq!(
+            places[3].invite(),
+            InviteBotDestination::Group {
+                group: "grp-open".into()
+            }
+        );
+
+        let filtered: Vec<&str> = filter_destinations(&places, " CLUB ")
+            .iter()
+            .map(|place| place.id.as_str())
+            .collect();
+        assert_eq!(filtered, vec!["grp-open"]);
+        assert_eq!(filter_destinations(&places, "").len(), places.len());
+    }
+
+    #[test]
+    fn requested_permissions_follow_the_matrix() {
+        let bits = KICK | SEND | MESSAGES | (1 << 62);
+        let order: Vec<u64> = entries(MatrixContext::Server)
+            .iter()
+            .map(|shown| shown.entry.bit())
+            .filter(|bit| bits & bit != 0)
+            .collect();
+        let listed: Vec<u64> = requested(bits).iter().map(|entry| entry.bit()).collect();
+        assert_eq!(listed, order);
+        assert_eq!(listed.len(), 3, "an unknown bit is left out");
+        assert!(requested(0).is_empty());
+    }
+
+    #[test]
+    fn only_held_permissions_are_grantable_and_only_with_manage_roles() {
+        let store = store();
+        let asks = SEND | KICK | MESSAGES;
+        // The owner holds everything.
+        assert_eq!(grantable(&store, "srv-own", asks), asks);
+        assert_eq!(ungrantable_reason(&store, "srv-own", KICK), None);
+        // Without Manage Roles, nothing.
+        assert_eq!(grantable(&store, "srv-mod", asks), 0);
+        assert_eq!(
+            ungrantable_reason(&store, "srv-mod", SEND),
+            Some("You need Manage Roles to give it permissions.")
+        );
+        // With it, only what's held.
+        assert_eq!(grantable(&store, "srv-roles", asks), SEND);
+        assert_eq!(ungrantable_reason(&store, "srv-roles", SEND), None);
+        assert_eq!(
+            ungrantable_reason(&store, "srv-roles", KICK),
+            Some("You don't have this permission.")
+        );
+        assert_eq!(grantable(&store, "srv-plain", asks), 0);
+    }
+
+    #[test]
+    fn what_is_sent_never_exceeds_what_is_grantable() {
+        for ticked in 0..32_u64 {
+            for grantable in 0..32_u64 {
+                let sent = invite_permissions(ticked, grantable);
+                assert_eq!(sent.is_none(), ticked & grantable == 0);
+                let sent = sent.unwrap_or(0);
+                assert_eq!(sent & !grantable, 0, "{ticked} {grantable}");
+                assert_eq!(sent & !ticked, 0, "{ticked} {grantable}");
+            }
+        }
+        assert_eq!(invite_permissions(SEND | KICK, SEND), Some(SEND));
+        assert_eq!(invite_permissions(KICK, SEND), None);
+    }
+
+    #[test]
+    fn the_toast_names_both() {
+        assert_eq!(added_text("helper", "Zeta"), "Added helper to Zeta.");
+    }
+}

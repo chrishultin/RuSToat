@@ -1037,6 +1037,17 @@ impl BotView {
                                 window.push_notification(Notification::success("Copied."), cx);
                             }),
                     )
+                    .child(
+                        Button::new("bot-add")
+                            .label("Add to a server or group…")
+                            .icon(IconName::Plus)
+                            .outline()
+                            .small()
+                            .on_click({
+                                let (chat, id) = (self.chat.clone(), self.bot.id.clone());
+                                move |_, _, cx| add_in_main_window(chat.clone(), id.clone(), cx)
+                            }),
+                    )
                     .children(link.map(|link| {
                         Button::new("bot-copy-invite")
                             .label("Copy invite URL")
@@ -1183,5 +1194,24 @@ fn open_confirm(
                 }
                 false
             })
+    });
+}
+
+/// Open the Add bot dialog for `bot` in the account's own window (the main
+/// window), and bring it forward. Deferred: the click arrives while GPUI is
+/// updating the settings window.
+fn add_in_main_window(chat: WeakEntity<ChatView>, bot: String, cx: &mut App) {
+    cx.defer(move |cx| {
+        let Some(chat) = chat.upgrade() else {
+            return;
+        };
+        let handle = chat.read(cx).window_handle();
+        handle
+            .update(cx, |_, window, cx| {
+                window.activate_window();
+                chat.update(cx, |chat, cx| chat.open_add_bot(bot, window, cx));
+            })
+            .ok();
+        cx.activate(true);
     });
 }

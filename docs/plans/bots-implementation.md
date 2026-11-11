@@ -105,3 +105,44 @@ Look-ahead: chunks 4–5 are unaffected.
 
 ### Manual Validation
 Deferred to the end (batched): give a bot an avatar, banner, display name and bio; its messages and profile card show them. Your own Profile page behaves as before.
+
+## Chunk 4: Add a bot to a server or group
+
+### Changes Made
+- `src/bots.rs`:
+  - `DestinationKind { Server, Group }`, `Destination { kind, id, name, icon }` with `invite()` (the `InviteBotDestination`);
+  - `destinations(store, bot)`: servers with Manage Server where the bot isn't a known member, then groups with Invite Others it isn't in, each by name (case-insensitive);
+  - `filter_destinations(places, filter)` and `DESTINATION_FILTER_FROM` (8);
+  - `requested(bits)`: the matrix's entries (server context) the bot asks for, in its order; unknown bits are left out;
+  - `grantable(store, server, bits)`: 0 without Manage Roles, else `bits & held`. That's Stoat's rule (`throw_permission_override(Override::default(), allow)` means every bit must be held);
+  - `ungrantable_reason(store, server, bit)`: "You need Manage Roles to give it permissions." or "You don't have this permission.";
+  - `invite_permissions(ticked, grantable)` (`ticked & grantable`, `None` when 0) and `added_text`.
+- `src/links.rs`: `bot_from_link(url, hosts)`. `/bot/{ULID}` on the instance's web client (its own host and port, or the Stoat/Revolt hosts on the official instance, not the short ones), with a trailing `/`, query or fragment ignored.
+- `src/api/client.rs`: `fetch_public_bot(id)` (`GET /bots/{id}/invite`) and `invite_bot(id, &InviteBotDestination, Option<u64>)` (`POST /bots/{id}/invite`, `?permissions=n` only when `Some`).
+- `src/ui/add_bot.rs` (new): `AddBotDialog`.
+  - It loads the public bot ("Loading…", or the reason and Close), then shows its avatar (its file, else the default), name, and "Description provided by the bot's owner" with the description.
+  - **Places:** "Add it to" lists servers then groups, each with its icon, name and "Server"/"Group", in a scrolling list. A filter field shows when there are more than 8. With nowhere to add it, the dialog says why and offers only Close.
+  - **Permissions:** for a server, the requested permissions are checkboxes with the matrix's titles. Each is ticked and enabled only if grantable, otherwise disabled with its reason as a tooltip. When the bot asks for none: "The bot will not be granted any permissions."
+  - **Add:** sends `invite_permissions(ticked, grantable)` (none for a group), toasts "Added {bot} to {place}." and closes. A refusal shows in the dialog.
+- `src/ui/chat.rs`: `open_add_bot(bot)` opens the dialog ("Add a bot", 440 px). `open_external` opens it for a bot link, after invite links and before channel links.
+- `src/ui/bots_page.rs`: Share has "Add to a server or group…". It opens the dialog in the main window and brings that window forward (deferred, as the Server identities rows do).
+- `src/ui/mod.rs`: the module.
+- Tests:
+  - `tests/bots.rs`: a new `adding` module (5 tests) with a store where the user owns, moderates without Manage Roles, administers with Manage Roles (holding Send Messages but not Kick Members), or has nothing, plus groups they own, may invite to, may not, or the bot's in. It covers destinations (order, exclusions, `invite()` bodies, the filter); `requested` order and unknown bits; `grantable` and its reasons; `invite_permissions` never exceeding what's grantable or ticked (exhaustive over 5 bits); the toast;
+  - `tests/links.rs`: `bot_links_lead_to_their_bot`. Official hosts, trailing `/`, query, no scheme; non-ULIDs, other paths, the short host and other hosts refused; another instance's own host only (port included);
+  - `tests/api_bots.rs`: 3 new tests. `PublicBot` parses; the invite sends `{"server"}` with `?permissions=24`, `{"group"}` without, and a server without; `BotIsPrivate`, `AlreadyInServer` and a fetch's `NotFound` read plainly.
+
+### Divergences
+- **`ungrantable_reason`, `filter_destinations` and `added_text`** were added to `src/bots.rs` so the dialog's rules and texts are tested.
+- **The bot's ID in the test links is a ULID constant** shared with the channel tests.
+- **The dialog has no explicit "already a member" note:** servers where the bot is a known member, and groups it's in, are simply not listed (as Assumption 5 says). Stoat's `AlreadyInServer` reads plainly for a server whose members weren't loaded.
+
+Look-ahead: chunk 5 (marks) is independent. No amendments.
+
+### Verification Performed
+- `cargo test --test bots --test api_bots --test links`: 12, 10 and the links suite passed.
+- Full suite: `cargo test` gave 1,425 passed, 0 failed. `cargo clippy --all-targets -- -D warnings` is clean.
+- Rustfmt: `src/ui/chat.rs` 17 and `src/api/client.rs` 3 are unchanged. `src/links.rs` and `tests/links.rs` stay clean; the new files are clean.
+
+### Manual Validation
+Deferred to the end (batched): from a bot's page, add it to a server with some requested permissions ticked (its managed role has exactly those); as a moderator without Manage Roles, nothing is ticked and the bot joins with no role; add it to a group; paste `{app}/bot/{id}` in a message and click it.

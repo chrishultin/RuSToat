@@ -1390,6 +1390,37 @@ impl StoatClient {
             .await
     }
 
+    /// `GET /bots/{id}/invite`: a bot's public face (name, avatar file ID,
+    /// description, the permissions it asks for), if it's public or the
+    /// user's own; otherwise `NotFound`.
+    pub async fn fetch_public_bot(
+        &self,
+        id: &str,
+    ) -> Result<revolt_models::v0::PublicBot, ApiError> {
+        self.send(Method::GET, &format!("/bots/{id}/invite"), None::<&()>)
+            .await
+    }
+
+    /// `POST /bots/{id}/invite`: add a bot to a server (Manage Server) or a
+    /// group (Invite Others). For a server, `permissions` gives it a
+    /// managed role with those, checked (Manage Roles, and holding each)
+    /// only after it has joined; groups ignore them. A private bot that
+    /// isn't the user's is `BotIsPrivate`.
+    pub async fn invite_bot(
+        &self,
+        id: &str,
+        destination: &revolt_models::v0::InviteBotDestination,
+        permissions: Option<u64>,
+    ) -> Result<(), ApiError> {
+        let path = match permissions {
+            Some(bits) => format!("/bots/{id}/invite?permissions={bits}"),
+            None => format!("/bots/{id}/invite"),
+        };
+        self.send_raw(Method::POST, &path, Some(destination))
+            .await
+            .map(|_| ())
+    }
+
     /// `DELETE /bots/{id}` (its owner only). The bot leaves everything it's
     /// in.
     pub async fn delete_bot(&self, id: &str) -> Result<(), ApiError> {

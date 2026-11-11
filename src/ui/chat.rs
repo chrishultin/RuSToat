@@ -2844,6 +2844,10 @@ impl ChatView {
             self.open_join_dialog(Some(code), window, cx);
             return;
         }
+        if let Some(bot) = crate::links::bot_from_link(&url, &self.invite_hosts()) {
+            self.open_add_bot(bot, window, cx);
+            return;
+        }
         if let Some(link) = crate::links::channel_from_link(&url, &self.invite_hosts())
             && self.store.channel(&link.channel).is_some()
         {
@@ -7018,6 +7022,20 @@ impl ChatView {
             modal
                 .title("Join a server")
                 .w(px(JOIN_DIALOG_WIDTH))
+                .child(dialog.clone())
+        });
+    }
+
+    /// The Add bot dialog for `bot`: from its page in My Bots, or a
+    /// `/bot/{id}` link.
+    pub fn open_add_bot(&mut self, bot: String, window: &mut Window, cx: &mut Context<Self>) {
+        let weak = cx.entity().downgrade();
+        let dialog =
+            cx.new(|cx| crate::ui::add_bot::AddBotDialog::new(self, weak, bot, window, cx));
+        window.open_dialog(cx, move |modal, _, _| {
+            modal
+                .title("Add a bot")
+                .w(px(crate::ui::add_bot::ADD_BOT_DIALOG_WIDTH))
                 .child(dialog.clone())
         });
     }
