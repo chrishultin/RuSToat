@@ -99,7 +99,7 @@ use crate::ui::moderation_dialogs::{
 };
 use crate::ui::profile_card::{
     CardBio, CardContent, MUTUALS_DIALOG_WIDTH, MutualList, MutualPick, OnLink, OnMutualPick,
-    OnMutuals, render_mutuals_list, render_profile_card,
+    OnMutuals, OnUser, render_mutuals_list, render_profile_card,
 };
 use crate::ui::report_dialog::open_report_dialog;
 use crate::ui::server_dialogs::{
@@ -6374,7 +6374,14 @@ impl ChatView {
                 .ok();
             })
         };
-        let element = render_profile_card(&content, actions, on_link, on_mutuals, cx)
+        let on_user: OnUser = {
+            let (view, position) = (cx.entity().downgrade(), open.position);
+            Rc::new(move |user, window, cx| {
+                view.update(cx, |this, cx| this.open_card(user, position, window, cx))
+                    .ok();
+            })
+        };
+        let element = render_profile_card(&content, actions, on_link, on_mutuals, on_user, cx)
             .id("profile-card")
             .track_focus(&self.card_focus)
             .occlude()
@@ -12402,6 +12409,7 @@ fn render_message_row(
                     .when(author_id.is_some(), |el| el.hover(|el| el.underline()))
                     .child(name),
             ))
+            .when(message.author_bot, |el| el.child(bot_tag(colors)))
             .child(div().text_color(colors.muted).child(message.time.clone()))
     });
 
@@ -12598,6 +12606,20 @@ const REPLY_LINE_HEIGHT: f32 = 18.;
 const REPLY_GAP: f32 = 2.;
 /// The original author's avatar in a reply preview.
 const REPLY_AVATAR_SIZE: f32 = 14.;
+
+/// "Bot" after a bot's name in its messages' headers.
+fn bot_tag(colors: RowColors) -> Div {
+    div()
+        .flex_none()
+        .px_1()
+        .rounded_sm()
+        .border_1()
+        .border_color(colors.muted)
+        .text_color(colors.muted)
+        .text_xs()
+        .font_weight(FontWeight::SEMIBOLD)
+        .child("Bot")
+}
 
 /// "↱ Name: snippet" above a reply. Clicking an original that's been fetched
 /// scrolls to it, loading the messages around it if it's not in the list.

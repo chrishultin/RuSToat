@@ -23,6 +23,8 @@ pub struct ProfileCard {
     /// The server's pronouns first, else their own.
     pub pronouns: Option<String>,
     pub bot: bool,
+    /// Who owns them, if they're a bot.
+    pub owner: Option<CardOwner>,
     /// Their roles in the channel's server, highest first. Empty outside
     /// server channels.
     pub roles: Vec<CardRole>,
@@ -38,6 +40,30 @@ pub struct ProfileCard {
     pub friend_buttons: Vec<RelationshipAction>,
     /// The card is the user's own.
     pub is_me: bool,
+}
+
+/// A bot's owner, as its card names them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CardOwner {
+    pub id: String,
+    /// Their display name, else the start of their ID.
+    pub name: String,
+    /// The store knows them, so their card can open.
+    pub known: bool,
+}
+
+/// How a bot's owner is named: their display name if the store knows
+/// them, else the start of their ID.
+pub fn card_owner(store: &ChatStore, owner: &str) -> CardOwner {
+    let known = store.user(owner);
+    CardOwner {
+        id: owner.to_string(),
+        name: match known {
+            Some(user) => display_name(user).to_string(),
+            None => format!("{}…", owner.chars().take(8).collect::<String>()),
+        },
+        known: known.is_some(),
+    }
 }
 
 /// One of a member's roles.
@@ -117,6 +143,10 @@ pub fn profile_card(store: &ChatStore, user: &str, channel: Option<&str>) -> Opt
         status,
         pronouns,
         bot: person.bot.is_some(),
+        owner: person
+            .bot
+            .as_ref()
+            .map(|bot| card_owner(store, &bot.owner_id)),
         roles,
         joined_server,
         timed_out_until,

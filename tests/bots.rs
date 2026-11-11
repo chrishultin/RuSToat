@@ -569,3 +569,73 @@ mod adding {
         assert_eq!(added_text("helper", "Zeta"), "Added helper to Zeta.");
     }
 }
+
+mod marks {
+    use serde_json::json;
+    use stoat_gpui::api::models::{BulkMessageResponse, User};
+    use stoat_gpui::store::{ChatStore, MessageRow, TimelineRow};
+
+    const CH: &str = "ch-marks";
+    const BY_BOT: &str = "01M6GDKW80AAAAAAAAAAAAAAAA";
+    const MASKED: &str = "01M6GDSC10BBBBBBBBBBBBBBBB";
+    const HOOK: &str = "01M6GEW5A0CCCCCCCCCCCCCCCC";
+    const BY_ADA: &str = "01M6GEW5A1DDDDDDDDDDDDDDDD";
+    const BY_LATE: &str = "01M6GEW5A2EEEEEEEEEEEEEEEE";
+
+    fn user(id: &str, bot: bool) -> User {
+        let mut user = json!({
+            "_id": id, "username": id, "discriminator": "0001",
+            "relationship": "None", "online": true
+        });
+        if bot {
+            user["bot"] = json!({ "owner": "u-me" });
+        }
+        serde_json::from_value(user).unwrap()
+    }
+
+    fn rows(store: &ChatStore) -> Vec<MessageRow> {
+        store
+            .timeline(CH)
+            .into_iter()
+            .filter_map(|row| match row {
+                TimelineRow::Message(m) => Some(m),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn bot_flag(store: &ChatStore, id: &str) -> bool {
+        rows(store)
+            .into_iter()
+            .find(|row| row.id == id)
+            .unwrap()
+            .author_bot
+    }
+
+    #[test]
+    fn only_a_bots_own_messages_are_marked() {
+        let mut store = ChatStore::new("u-me");
+        store.add_user(user("b-bot", true));
+        store.add_user(user("u-ada", false));
+        let page: BulkMessageResponse = serde_json::from_value(json!([
+            { "_id": BY_BOT, "channel": CH, "author": "b-bot", "content": "beep" },
+            { "_id": MASKED, "channel": CH, "author": "b-bot", "content": "relayed",
+              "masquerade": { "name": "Someone" } },
+            { "_id": HOOK, "channel": CH, "author": "w-hook", "content": "built",
+              "webhook": { "name": "CI" } },
+            { "_id": BY_ADA, "channel": CH, "author": "u-ada", "content": "hi" },
+            { "_id": BY_LATE, "channel": CH, "author": "b-late", "content": "late" },
+        ]))
+        .unwrap();
+        store.set_history(CH, page, 50);
+
+        assert!(bot_flag(&store, BY_BOT));
+        assert!(!bot_flag(&store, MASKED), "a masquerade shows its own name");
+        assert!(!bot_flag(&store, HOOK), "a webhook isn't a bot user");
+        assert!(!bot_flag(&store, BY_ADA));
+        // Its user isn't known yet; once it is, the row says so.
+        assert!(!bot_flag(&store, BY_LATE));
+        store.add_user(user("b-late", true));
+        assert!(bot_flag(&store, BY_LATE));
+    }
+}

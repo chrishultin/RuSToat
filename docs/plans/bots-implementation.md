@@ -146,3 +146,73 @@ Look-ahead: chunk 5 (marks) is independent. No amendments.
 
 ### Manual Validation
 Deferred to the end (batched): from a bot's page, add it to a server with some requested permissions ticked (its managed role has exactly those); as a moderator without Manage Roles, nothing is ticked and the bot joins with no role; add it to a group; paste `{app}/bot/{id}` in a message and click it.
+
+## Chunk 5: Bot marks
+
+### Changes Made
+- `src/store.rs`: `MessageRow.author_bot` and `ChatStore::is_bot_author(message)`. True when the author is a known user with `bot` set, and the message isn't a system message, a webhook's or under a masquerade. It's part of the row's data, so rows re-synced after the user arrives (or changes) pick it up, and `diff_rows` sees the change.
+- `src/ui/chat.rs`:
+  - `bot_tag`: a small outlined "Bot" after the author's name in a message's header, when `author_bot`;
+  - the card's `on_user` opens another card at the same place (a bot's owner).
+- `src/profile.rs`: `CardOwner { id, name, known }`, `card_owner(store, owner)` (their display name if known, else the first 8 characters of the ID and "…"), and `ProfileCard.owner` for bots.
+- `src/ui/profile_card.rs`: "Owned by {name}" under the username. When the owner is known it's clickable (`OnUser`), with a hover underline. `render_profile_card` takes `on_user`.
+- Tests:
+  - `tests/bots.rs`: a new `marks` module. A bot's own message is marked; under a masquerade, a webhook's, and a person's aren't; a bot whose user arrives after its messages is marked once known;
+  - `tests/profile.rs`: `a_bots_card_names_its_owner` (a cached owner by display name, an unknown one by its ID's start, a person with none);
+  - `tests/store_live.rs`: its `MessageRow` literal gains `author_bot: false`.
+
+### Divergences
+- **`ProfileCard.owner` is a `CardOwner` struct** (with `known`), rather than `(id, name)`, so the view knows whether the line can open a card.
+- **The row test lives in `tests/bots.rs`** (`marks`), not a store test file.
+- **`tests/profile.rs` was formatted whole** (it was clean before), and `tests/store_live.rs` needed the new field.
+
+### Verification Performed
+- `cargo test --test bots --test profile`: 13 and 39 passed.
+- Full suite: `cargo test` gave 1,427 passed, 0 failed. `cargo clippy --all-targets -- -D warnings` is clean.
+- Rustfmt: `src/ui/chat.rs` 17 and `src/store.rs` 14 are unchanged. `src/profile.rs`, `src/ui/profile_card.rs`, `tests/profile.rs` and `tests/store_live.rs` are clean.
+
+### Manual Validation
+Deferred to the end (batched): a bot's message shows "Bot"; its card shows "Owned by …", which opens the owner's card.
+
+## Summary
+
+_Completed: 2026-11-11_
+
+**Commit signing:** chunk 4's first two commit attempts failed ("agent refused operation"). It was committed from the index once signing worked again, after chunk 5 was written in the working tree. The committed snapshot is the one that passed the chunk 4 suite (1,425 tests).
+
+### Chunks Completed
+1. My Bots: list, create, delete (`d5f7194`).
+2. A bot's settings and token (`18aafe4`).
+3. A bot's profile with the Profile editor (`84c1450`).
+4. Add a bot to a server or group, from its page or a `/bot/{id}` link (`9bcaf1d`).
+5. Bot marks: "Bot" in message headers, "Owned by …" on cards (this commit).
+
+### Divergences
+- **The bot limit** is the established accounts' (`default`), else `new_user`, else 5, not the stricter. Plan amended.
+- **`bot_error_text(err, owned)`** names the user's actual count for `ReachedMaximumBots`. Plan amended.
+- **`ChatStore::add_bot_user`** keeps the store's relationship (Stoat sends a bot's user as `relationship: User`) and reports name/avatar changes.
+- **The username check also refuses Stoat's blocked names** (`admin`, `revolt`, `stoat`).
+- **The settings' Reset/Save sit under the Settings section,** since the Profile section has its own Save. Plan amended.
+- **`ChatView::bot_profile_saved`** mirrors `own_profile_saved`.
+- **The Add bot dialog's rules and texts** (`ungrantable_reason`, `filter_destinations`, `added_text`) live in `src/bots.rs`. Places the bot is known to be in aren't listed.
+- **`ProfileCard.owner` is a `CardOwner`** with `known`.
+- Smaller ones are in each chunk's entry.
+
+### Definition of Done
+- [x] Settings has a My Bots section per account: list (with "{n} of {max} bots"), create (username checked as Stoat does), and delete (confirmed).
+- [x] A bot's page edits its username (own Save), public flag, interactions URL and requested permissions. It copies its ID, token and invite URL, and resets its token (confirmed). Tokens are only copied: never drawn, and never logged (log lines name bot IDs; the HTTP client logs only method, URL and error bodies).
+- [x] A bot's profile is edited with the Profile editor, saved with `PATCH /users/{bot_id}`. The Profile page's behaviour is unchanged (`tests/profile.rs` passed unchanged after chunk 3).
+- [x] The Add bot dialog adds a bot to a server (Manage Server) or a group (Invite Others), from its page or a `/bot/{id}` link. Requested permissions are offered; only `ticked & grantable` is ever sent (tested exhaustively), and nothing without Manage Roles.
+- [x] Bots' messages show "Bot", and their profile cards show their owner.
+- [x] Refusals read plainly (`bot_error_text`, tested for every Stoat error in Assumption 8).
+- [x] `cargo test` (1,427 passed) and `cargo clippy --all-targets -- -D warnings` pass. No touched file's rustfmt drift grew, and new files are clean.
+- [x] The roadmap links this plan (committed with chunk 1).
+
+### Remaining Manual Steps
+All manual checks were batched to the end, as asked. Run with the web client and a bot client (any library, to check the token), on a test server you own, plus a group:
+1. **My Bots:** matches the web client; create, copy ID, delete.
+2. **Settings and token:** public/private, interactions URL, requested permissions; reset the token (the old one stops working), copy the new one; rename.
+3. **Profile:** avatar, banner, display name, bio; they show on the bot's messages and card. Your own Profile page still works as before.
+4. **Add:** from the page to a server with some requested permissions ticked (the managed role has exactly those); as a moderator without Manage Roles (nothing ticked, no role); to a group; from a pasted `/bot/{id}` link.
+5. **Marks:** "Bot" on its messages, and "Owned by …" on its card, opening the owner's card.
+6. **Themes:** the section, the bot page and the dialog read well in light and dark.

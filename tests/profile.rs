@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::api::models::{MutualResponse, RelationshipStatus};
 use stoat_gpui::profile::{
-    CardRole, MutualKind, RelationshipAction, UserMenuItem, can_message, dm_with, friend_buttons,
-    move_targets, mutuals, overflow_text, profile_card, shows_mutuals, user_menu,
+    CardOwner, CardRole, MutualKind, RelationshipAction, UserMenuItem, can_message, dm_with,
+    friend_buttons, move_targets, mutuals, overflow_text, profile_card, shows_mutuals, user_menu,
 };
 use stoat_gpui::store::{ChatStore, PresenceKind};
 
@@ -751,4 +751,36 @@ fn mutuals_show_for_others_but_not_yourself_bots_or_strangers() {
     assert!(!shows_mutuals(&store, "u-me"));
     assert!(!shows_mutuals(&store, "u-bot"));
     assert!(!shows_mutuals(&store, "u-unknown"));
+}
+
+#[test]
+fn a_bots_card_names_its_owner() {
+    let mut store = store();
+    let card = profile_card(&store, "u-bot", None).unwrap();
+    assert_eq!(
+        card.owner,
+        Some(CardOwner {
+            id: "u-me".into(),
+            name: "me".into(),
+            known: true,
+        })
+    );
+    // An owner the store doesn't know: the start of their ID.
+    let stranger: stoat_gpui::api::models::User = serde_json::from_value(user(
+        "u-bot2",
+        json!({ "bot": { "owner": "01M6GDKW80AAAAAAAAAAAAAAAA" } }),
+    ))
+    .unwrap();
+    store.add_user(stranger);
+    let card = profile_card(&store, "u-bot2", None).unwrap();
+    assert_eq!(
+        card.owner,
+        Some(CardOwner {
+            id: "01M6GDKW80AAAAAAAAAAAAAAAA".into(),
+            name: "01M6GDKW…".into(),
+            known: false,
+        })
+    );
+    // A person has none.
+    assert_eq!(profile_card(&store, "u-plain", None).unwrap().owner, None);
 }

@@ -138,6 +138,9 @@ pub struct MessageRow {
     /// author, even under a masquerade. `None` for system messages and
     /// webhooks, which aren't people.
     pub author_id: Option<String>,
+    /// The author is a bot, as far as the store knows: its header says so.
+    /// Not for webhooks or masquerades, which show their own names.
+    pub author_bot: bool,
     /// Author avatar URL. `None` for system messages, or when there's no
     /// image to show (the UI draws the author's initial instead).
     pub avatar: Option<String>,
@@ -2646,6 +2649,17 @@ impl ChatStore {
         rows
     }
 
+    /// Whether `message` is a bot's own (not under a masquerade, and not a
+    /// webhook's or Stoat's), by what the store knows of its author.
+    pub fn is_bot_author(&self, message: &Message) -> bool {
+        person_id(message).is_some()
+            && message.masquerade.is_none()
+            && self
+                .users
+                .get(&message.author)
+                .is_some_and(|user| user.bot.is_some())
+    }
+
     /// A message's row, by `author` (its [`Self::author_name`]).
     /// `group_end` is fixed up once the next row is known.
     fn message_row(&self, message: &Message, author: String, continuation: bool) -> MessageRow {
@@ -2676,6 +2690,7 @@ impl ChatStore {
             render_key: render_key(&message.id, body.as_deref()),
             avatar: self.avatar_url(message),
             author_id: person_id(message),
+            author_bot: self.is_bot_author(message),
             author,
             time: crate::time::message_time_label(&message.id),
             body,
