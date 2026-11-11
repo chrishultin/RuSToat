@@ -1197,6 +1197,21 @@ impl StoatClient {
             .await
     }
 
+    /// `PATCH /channels/{channel}`: change a server channel's or group's
+    /// name, description, icon, slowmode or mature flag (Manage Channels on
+    /// it). Only what's set is sent, as with [`Self::edit_server`]. Stoat
+    /// answers with the whole channel, as changed; `ChannelUpdate` brings
+    /// the same to everyone.
+    pub async fn edit_channel(
+        &self,
+        channel: &str,
+        edit: &revolt_models::v0::DataEditChannel,
+    ) -> Result<Channel, ApiError> {
+        let body = edit_body(serde_json::to_value(edit).expect("channel edit serialises"));
+        self.send(Method::PATCH, &format!("/channels/{channel}"), Some(&body))
+            .await
+    }
+
     /// `DELETE /channels/{channel}`: delete a server channel (Manage
     /// Channels on it). Stoat takes it out of the server's channel list but
     /// not its categories, and sends `ChannelDelete` to whoever could see

@@ -248,3 +248,137 @@ fn deleting_the_last_category_leaves_every_channel_uncategorized() {
         )]
     );
 }
+
+/// A `ChannelUpdate` frame for `id`, as Stoat sends it.
+fn channel_update(id: &str, data: serde_json::Value, clear: &[&str]) -> ServerEvent {
+    let frame = json!({ "type": "ChannelUpdate", "id": id, "data": data, "clear": clear });
+    parse_frame(&frame.to_string())
+        .pop()
+        .expect("ChannelUpdate")
+}
+
+fn apply(store: &mut ChatStore, event: ServerEvent) {
+    let ServerEvent::ChannelUpdate { id, data, clear } = event else {
+        panic!("ChannelUpdate");
+    };
+    store.apply_channel_update(&id, *data, &clear);
+}
+
+#[test]
+fn a_saved_channel_edit_then_its_event_are_one_state() {
+    let mut store = store();
+    let saved: Channel = serde_json::from_value(json!({
+        "channel_type": "TextChannel", "_id": "ch-general", "server": "srv-alpha",
+        "name": "lobby", "description": "Say hi", "nsfw": true, "slowmode": 30,
+        "icon": {
+            "_id": "ic-1", "tag": "icons", "filename": "i.png",
+            "metadata": { "type": "Image", "width": 64, "height": 64 },
+            "content_type": "image/png", "size": 100
+        }
+    }))
+    .unwrap();
+    assert!(store.apply_channel_edit(&saved));
+    let after_save = store.channel("ch-general").cloned();
+    let Some(Channel::TextChannel {
+        name,
+        description,
+        icon,
+        nsfw,
+        slowmode,
+        voice,
+        ..
+    }) = &after_save
+    else {
+        panic!("a text channel");
+    };
+    assert_eq!(name, "lobby");
+    assert_eq!(description.as_deref(), Some("Say hi"));
+    assert_eq!(icon.as_ref().map(|i| i.id.as_str()), Some("ic-1"));
+    assert!(*nsfw);
+    assert_eq!(*slowmode, Some(30));
+    assert_eq!(*voice, None);
+    assert_eq!(store.slowmode("ch-general"), Some(30));
+    assert!(store.is_mature("ch-general"));
+
+    apply(
+        &mut store,
+        channel_update(
+            "ch-general",
+            json!({ "name": "lobby", "description": "Say hi", "nsfw": true, "slowmode": 30 }),
+            &[],
+        ),
+    );
+    assert_eq!(store.channel("ch-general").cloned(), after_save);
+}
+
+#[test]
+fn a_saved_edit_clears_what_the_answer_lacks() {
+    let mut store = store();
+    apply(
+        &mut store,
+        channel_update(
+            "ch-general",
+            json!({ "description": "Old", "slowmode": 10 }),
+            &[],
+        ),
+    );
+    let saved: Channel = serde_json::from_value(json!({
+        "channel_type": "TextChannel", "_id": "ch-general", "server": "srv-alpha",
+        "name": "general"
+    }))
+    .unwrap();
+    assert!(store.apply_channel_edit(&saved));
+    let Some(Channel::TextChannel {
+        description,
+        slowmode,
+        nsfw,
+        ..
+    }) = store.channel("ch-general")
+    else {
+        panic!("a text channel");
+    };
+    assert_eq!((description, slowmode, nsfw), (&None, &None, &false));
+}
+
+#[test]
+fn a_saved_group_edit_keeps_its_owner_and_members() {
+    let mut store = store();
+    // An answer that (wrongly) names other people changes only the
+    // group's settings.
+    let saved: Channel = serde_json::from_value(json!({
+        "channel_type": "Group", "_id": "grp-weekend", "name": "Weekend",
+        "owner": "u-someone", "recipients": ["u-someone"], "permissions": 0,
+        "description": "Plans"
+    }))
+    .unwrap();
+    assert!(store.apply_channel_edit(&saved));
+    let Some(Channel::Group {
+        name,
+        owner,
+        recipients,
+        description,
+        permissions,
+        ..
+    }) = store.channel("grp-weekend")
+    else {
+        panic!("a group");
+    };
+    assert_eq!(name, "Weekend");
+    assert_eq!(description.as_deref(), Some("Plans"));
+    assert_eq!(owner, "u-ada");
+    assert_eq!(recipients, &["u-me", "u-ada", "u-bob"]);
+    assert_eq!(*permissions, None);
+}
+
+#[test]
+fn a_saved_edit_of_an_unknown_or_unsettable_channel_does_nothing() {
+    let mut store = store();
+    let unknown: Channel = serde_json::from_value(json!({
+        "channel_type": "TextChannel", "_id": "ch-nope", "server": "srv-alpha", "name": "x"
+    }))
+    .unwrap();
+    assert!(!store.apply_channel_edit(&unknown));
+    assert!(store.channel("ch-nope").is_none());
+    let dm = store.channel("dm-ada").cloned().unwrap();
+    assert!(!store.apply_channel_edit(&dm));
+}

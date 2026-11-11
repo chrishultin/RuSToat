@@ -778,18 +778,19 @@ pub enum InfoPlaceholder {
     Glyph(IconName),
 }
 
-/// What "Server settings…" in a server's info dialog does.
+/// What "Server settings…" (or "Channel settings…") in an info dialog
+/// does.
 pub type OnSettings = Rc<dyn Fn(&mut Window, &mut App)>;
 
 /// Server or Channel info: the banner (if any) across the top, the icon
 /// beside the name, the description (selectable, its links through
-/// `on_link`), "Server settings…" with `on_settings`, and Close. It's drawn
+/// `on_link`), a settings button with `on_settings`'s label, and Close. It's drawn
 /// edge to edge, in a dialog with no padding of its own, so the banner
 /// meets the dialog's border.
 pub fn render_info(
     content: &InfoContent,
     on_link: OnLink,
-    on_settings: Option<OnSettings>,
+    on_settings: Option<(&'static str, OnSettings)>,
     cx: &App,
 ) -> Div {
     let theme = cx.theme();
@@ -875,11 +876,11 @@ pub fn render_info(
                 h_flex()
                     .gap_2()
                     .justify_end()
-                    .children(on_settings.map(|on_settings| {
-                        Button::new("info-server-settings")
+                    .children(on_settings.map(|(label, on_settings)| {
+                        Button::new("info-settings")
                             .ghost()
                             .icon(IconName::Settings)
-                            .label("Server settings…")
+                            .label(label)
                             .on_click(move |_, window, cx| on_settings(window, cx))
                     }))
                     .child(

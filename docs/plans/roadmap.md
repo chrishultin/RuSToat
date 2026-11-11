@@ -145,9 +145,11 @@ Some milestones lay foundations that later ones reuse. When the earlier one's pl
 - Greys out what you can't grant
 - Exactly Stoat's grant rule: an unheld permission can only be made stricter on a role, and must be off for Everyone. The Roles page also shows for Manage Permissions. One Save for a role's fields and permissions. The matrix is reusable for milestone 27
 
-### Milestone 26: Channel settings and order (M)
-- Channel overview: name, description, icon, slowmode, mature flag
-- Reorder channels and categories, and move channels between categories. Creating, renaming and deleting categories came in milestone 19.
+### Milestone 26: Channel settings and order (M). Plan: [`channel-settings-and-order.md`](channel-settings-and-order.md)
+- A Channel Settings window (one at a time, like Server Settings); milestones 27 and 28 add its Permissions and Webhooks pages
+- Channel overview: name, description, icon, slowmode, mature flag. Groups get the same page, without slowmode.
+- Reorder channels and categories, and move channels between categories, by dragging in the sidebar or with a "Move to ›" submenu. Creating, renaming and deleting categories came in milestone 19.
+- The web client's `"default"` category is drawn as the top, headerless section, as the web client does
 
 ### Milestone 27: Channel permission overrides (M)
 - Allow or deny, per role and for the default permissions, reusing milestone 25's matrix

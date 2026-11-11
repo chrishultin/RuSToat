@@ -2170,6 +2170,58 @@ impl ChatStore {
         }
     }
 
+    /// Stoat answered the user's own `PATCH /channels/{id}` with `saved`:
+    /// show its name, description, icon, mature flag and slowmode now,
+    /// without waiting for its `ChannelUpdate` (which carries the same).
+    /// Nothing else is taken from it (a group keeps its owner, members and
+    /// permissions as the store has them). Returns false for an unknown
+    /// channel, or one with no settings.
+    pub fn apply_channel_edit(&mut self, saved: &Channel) -> bool {
+        let (id, name, description, icon, nsfw, slowmode) = match saved {
+            Channel::TextChannel {
+                id,
+                name,
+                description,
+                icon,
+                nsfw,
+                slowmode,
+                ..
+            } => (id, name, description, icon, nsfw, *slowmode),
+            Channel::Group {
+                id,
+                name,
+                description,
+                icon,
+                nsfw,
+                ..
+            } => (id, name, description, icon, nsfw, None),
+            _ => return false,
+        };
+        if !self.channels.contains_key(id) {
+            return false;
+        }
+        let mut clear = Vec::new();
+        if description.is_none() {
+            clear.push(FieldsChannel::Description);
+        }
+        if icon.is_none() {
+            clear.push(FieldsChannel::Icon);
+        }
+        if slowmode.is_none() && matches!(saved, Channel::TextChannel { .. }) {
+            clear.push(FieldsChannel::Slowmode);
+        }
+        let data = PartialChannel {
+            name: Some(name.clone()),
+            description: description.clone(),
+            icon: icon.clone(),
+            nsfw: Some(*nsfw),
+            slowmode,
+            ..Default::default()
+        };
+        self.apply_channel_update(id, data, &clear);
+        true
+    }
+
     /// A server emoji was added (`EmojiCreate`).
     pub fn add_emoji(&mut self, emoji: Emoji) {
         self.emojis.insert(emoji.id.clone(), emoji);
@@ -2665,6 +2717,12 @@ impl ChatStore {
     /// [`crate::permissions::can_manage_channel`]).
     pub fn can_manage_channel(&self, channel: &str) -> bool {
         crate::permissions::can_manage_channel(self, &self.me, channel)
+    }
+
+    /// Whether the user may edit `channel`'s settings (see
+    /// [`crate::permissions::can_edit_channel`]).
+    pub fn can_edit_channel(&self, channel: &str) -> bool {
+        crate::permissions::can_edit_channel(self, &self.me, channel)
     }
 
     /// Whether the user may create channels and categories in `server` (see

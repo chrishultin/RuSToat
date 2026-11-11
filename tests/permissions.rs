@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::permissions::{
     RoleLock, assignable_roles, can_add_to_group, can_bypass_slowmode, can_change_avatar,
-    can_change_nickname, can_connect, can_invite, can_listen, can_manage_channel,
+    can_change_nickname, can_connect, can_edit_channel, can_invite, can_listen, can_manage_channel,
     can_manage_channels, can_mention_everyone, can_mention_roles, can_pin, can_send_embeds,
     can_speak, can_view, channel_permissions, has, member_rank, moderation, server_permissions,
 };
@@ -651,6 +651,20 @@ fn deleting_a_channel_takes_manage_channels_on_it() {
     // A role can grant it, and a channel's override take it back.
     assert!(can_manage_channel(&store, "u-builder", "ch-open"));
     assert!(!can_manage_channel(&store, "u-builder", "ch-locked"));
+    // Editing a server channel's settings is the same rule.
+    for (user, channel) in [
+        ("u-me", "ch-open"),
+        ("u-owner", "ch-open"),
+        ("u-owner", "ch-locked"),
+        ("u-builder", "ch-open"),
+        ("u-builder", "ch-locked"),
+    ] {
+        assert_eq!(
+            can_edit_channel(&store, user, channel),
+            can_manage_channel(&store, user, channel),
+            "{user} in {channel}"
+        );
+    }
 }
 
 #[test]
@@ -659,6 +673,21 @@ fn dms_and_groups_are_not_deleted_as_channels() {
     assert!(!can_manage_channel(&store, "u-me", "dm-friend"));
     assert!(!can_manage_channel(&store, "u-me", "grp-mine"));
     assert!(!can_manage_channel(&store, "u-me", "ch-saved"));
+}
+
+#[test]
+fn editing_a_group_takes_manage_channels_in_it() {
+    let store = conversations();
+    // By default every member may, and the owner always may.
+    assert!(can_edit_channel(&store, "u-me", "grp"));
+    assert!(store.can_edit_channel("grp"));
+    assert!(can_edit_channel(&store, "u-me", "grp-mine"));
+    // A group whose permissions leave it out.
+    assert!(!can_edit_channel(&store, "u-me", "grp-quiet"));
+    assert!(can_edit_channel(&store, "u-friend", "grp-quiet"));
+    // DMs and Saved Notes have no settings.
+    assert!(!can_edit_channel(&store, "u-me", "dm-friend"));
+    assert!(!can_edit_channel(&store, "u-me", "ch-saved"));
 }
 
 #[test]

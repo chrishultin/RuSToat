@@ -74,6 +74,7 @@ use crate::time::{format_countdown, format_duration_short, ulid_millis};
 use crate::typing::{OutgoingTyping, TypingSignal, TypingState, typing_label};
 use crate::ui::actions::OpenProfileSettings;
 use crate::ui::app_prefs::AppPrefs;
+use crate::ui::channel_settings::ChannelSettingsWindow;
 use crate::ui::composer::{Composer, ComposerEvent, file_icon};
 use crate::ui::emoji_picker::emoji_grid;
 use crate::ui::friends::{RowButtons, render_add_friend, render_friends_page};
@@ -4184,6 +4185,7 @@ impl ChatView {
             };
             let store = &this.read(cx).store;
             let invitable = store.can_invite(&channel_id);
+            let editable = store.can_edit_channel(&channel_id);
             let deletable = in_server && store.can_manage_channel(&channel_id);
             let group = matches!(store.channel(&channel_id), Some(Channel::Group { .. }));
             let dm = matches!(
@@ -4256,6 +4258,24 @@ impl ChatView {
                     .item(create_channel_item(&view, server.clone(), category))
                     .item(create_category_item(&view, server)),
                 None => menu,
+            };
+            let menu = if editable {
+                let (view, channel) = (view.clone(), channel_id.clone());
+                let label = if group {
+                    "Group settings…"
+                } else {
+                    "Channel settings…"
+                };
+                menu.item(PopupMenuItem::new(label).icon(IconName::Settings).on_click(
+                    move |_, _, cx| {
+                        view.update(cx, |this, cx| {
+                            this.open_channel_settings(channel.clone(), cx)
+                        })
+                        .ok();
+                    },
+                ))
+            } else {
+                menu
             };
             let menu = if deletable {
                 let (view, channel) = (view.clone(), channel_id.clone());
@@ -7341,6 +7361,31 @@ impl ChatView {
         }
         log::debug!("opening settings for server {server}");
         ServerSettingsWindow::open(cx.entity(), server, cx);
+    }
+
+    /// Open `channel`'s settings in their own window (or bring them
+    /// forward), if the user may see any of them.
+    pub fn open_channel_settings(&mut self, channel: String, cx: &mut Context<Self>) {
+        if !crate::channel_settings::access(&self.store, &channel).any() {
+            return;
+        }
+        log::debug!("opening settings for channel {channel}");
+        ChannelSettingsWindow::open(cx.entity(), channel, cx);
+    }
+
+    /// Stoat answered the user's own change to a channel or group with
+    /// `saved`: show it now, without waiting for its `ChannelUpdate`. An
+    /// open channel just marked mature is gated at once.
+    pub fn channel_edited(&mut self, saved: &Channel, cx: &mut Context<Self>) {
+        if !self.store.apply_channel_edit(saved) {
+            return;
+        }
+        let id = crate::store::channel_id(saved).to_string();
+        self.sync_pane(&id, cx);
+        if self.current_channel().is_some_and(|c| c.id == id) {
+            self.ensure_current_loaded(cx);
+        }
+        cx.notify();
     }
 
     /// The user deleted `server` (from Server Settings): drop it now,
@@ -13289,7 +13334,22 @@ fn open_info_dialog(view: WeakEntity<ChatView>, info: Info, window: &mut Window,
                     view.update(cx, |this, cx| this.open_server_settings(server.clone(), cx))
                         .ok();
                 });
-                Some(open)
+                Some(("Server settings…", open))
+            }
+            Info::Channel(channel)
+                if view
+                    .upgrade()
+                    .is_some_and(|chat| chat.read(cx).store().can_edit_channel(channel)) =>
+            {
+                let (view, channel) = (view.clone(), channel.clone());
+                let open: OnSettings = Rc::new(move |window, cx| {
+                    window.close_dialog(cx);
+                    view.update(cx, |this, cx| {
+                        this.open_channel_settings(channel.clone(), cx)
+                    })
+                    .ok();
+                });
+                Some(("Channel settings…", open))
             }
             _ => None,
         };
