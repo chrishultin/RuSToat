@@ -1287,6 +1287,48 @@ impl StoatClient {
         .await
     }
 
+    /// `PUT /custom/emoji/{id}`: make the file `id`, already uploaded under
+    /// `emojis`, one of `server`'s emoji called `name` (Manage
+    /// Customisation; at most the instance's `server_emoji`, else
+    /// `TooManyEmoji`). Stoat answers with the emoji; `EmojiCreate`
+    /// follows.
+    pub async fn create_emoji(
+        &self,
+        id: &str,
+        server: &str,
+        name: &str,
+    ) -> Result<revolt_models::v0::Emoji, ApiError> {
+        self.send(
+            Method::PUT,
+            &format!("/custom/emoji/{id}"),
+            Some(&revolt_models::v0::DataCreateEmoji {
+                name: name.to_string(),
+                parent: revolt_models::v0::EmojiParent::Server {
+                    id: server.to_string(),
+                },
+                nsfw: false,
+            }),
+        )
+        .await
+    }
+
+    /// `PATCH /custom/emoji/{id}`: rename a server's emoji (Manage
+    /// Customisation). Stoat answers with the emoji; `EmojiUpdate` follows.
+    pub async fn rename_emoji(
+        &self,
+        id: &str,
+        name: &str,
+    ) -> Result<revolt_models::v0::Emoji, ApiError> {
+        self.send(
+            Method::PATCH,
+            &format!("/custom/emoji/{id}"),
+            Some(&revolt_models::v0::DataEditEmoji {
+                name: Some(name.to_string()),
+            }),
+        )
+        .await
+    }
+
     /// `DELETE /custom/emoji/{id}`: delete a server's custom emoji (Manage
     /// Customisation, unless the user created it). `EmojiDelete` follows.
     pub async fn delete_emoji(&self, id: &str) -> Result<(), ApiError> {

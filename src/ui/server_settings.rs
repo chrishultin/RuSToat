@@ -3219,7 +3219,7 @@ impl OwnershipPage {
 
 /// Open `content` as a dialog titled `title`, with `focus` focused once
 /// it's drawn (a dialog takes focus as it opens).
-fn open_focused_dialog<V: Render>(
+pub(crate) fn open_focused_dialog<V: Render>(
     title: SharedString,
     content: Entity<V>,
     focus: FocusHandle,

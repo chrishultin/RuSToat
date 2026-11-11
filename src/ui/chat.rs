@@ -418,6 +418,8 @@ pub struct ChatView {
     group_size: Option<u32>,
     /// The most custom emoji a server may have, when the instance says.
     server_emoji_limit: Option<u32>,
+    /// How big a custom emoji's file may be.
+    emoji_size_limit: u64,
     /// The instance's voice servers (see
     /// [`crate::api::RootConfig::voice_nodes`]); none without voice. Calls
     /// are joined on the first; a moderator's move names its own.
@@ -662,6 +664,7 @@ impl ChatView {
                     );
                     this.update(cx, |this, cx| {
                         this.voice_nodes = root.voice_nodes().to_vec();
+                        this.emoji_size_limit = root.emoji_size_limit();
                         this.web_app = root.app;
                         this.image_limits = image_limits;
                         // Before `set_media`, whose re-sync adds the cards.
@@ -913,6 +916,7 @@ impl ChatView {
             invite_max_days: None,
             group_size: None,
             server_emoji_limit: None,
+            emoji_size_limit: crate::api::DEFAULT_EMOJI_SIZE_LIMIT,
             voice_nodes: Vec::new(),
             voice: None,
             voice_user_fetches: HashSet::new(),
@@ -7701,6 +7705,18 @@ impl ChatView {
     pub fn emoji_deleted(&mut self, id: &str, cx: &mut Context<Self>) {
         self.store.remove_emoji(id);
         cx.notify();
+    }
+
+    /// Stoat answered the user's own new or renamed emoji with `saved`:
+    /// show it now, without waiting for its event.
+    pub fn emoji_saved(&mut self, saved: crate::api::models::Emoji, cx: &mut Context<Self>) {
+        self.store.add_emoji(saved);
+        cx.notify();
+    }
+
+    /// How big a custom emoji's file may be.
+    pub fn emoji_size_limit(&self) -> u64 {
+        self.emoji_size_limit
     }
 
     /// The most custom emoji a server may have on this instance.

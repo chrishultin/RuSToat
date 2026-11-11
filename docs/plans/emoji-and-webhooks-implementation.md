@@ -51,3 +51,38 @@ Look-ahead: chunk 2 adds the upload dialog and rename dialog to `EmojiPage`, `Im
 
 ### Manual Validation
 Deferred to the end (batched): the page lists a server's emoji as the web client does; deleting removes it here and from the picker; a rename in the web client shows at once.
+
+## Chunk 2: Upload and rename emoji
+
+### Changes Made
+- `src/custom_emoji.rs`:
+  - `EMOJI_NAME_MAX` (32) and `EMOJI_TAG` (`"emojis"`);
+  - `check_emoji_name` (trimmed, 1–32 of `a–z0–9_`; "An emoji needs a name.", "Use lowercase letters, numbers and underscores only.", "Emoji names are at most 32 characters.");
+  - `name_from_file` (the stem lowercased, anything else `_`, runs squeezed, none at the ends, cut to 32);
+  - `at_limit(count, max)`.
+- `src/api/client.rs`: `create_emoji(id, server, name) -> Emoji` (`PUT /custom/emoji/{id}` with `DataCreateEmoji`, `nsfw: false`) and `rename_emoji(id, name) -> Emoji` (`PATCH` with `DataEditEmoji`).
+- `src/ui/chat.rs`: `emoji_saved(Emoji)` (applies the answer at once) and `emoji_size_limit()` (root config's `emojis` limit, else 500 KB).
+- `src/ui/emoji_page.rs`:
+  - "Upload emoji…" in the count line (disabled at the limit, with the reason as its tooltip). It runs its own file prompt (`pick`), so the dialog can open with the window;
+  - `UploadEmojiDialog`: the picked image (64 px, contained) or why it can't be used (type or size, through `check_image`), a name field prefilled from the file name, with the count and the name problem, then Cancel and Create ("Uploading…"). Create uploads to `emojis`, sends the `PUT`, applies the answer, closes, and toasts "Added :name:.". A refusal shows in the dialog;
+  - `RenameEmojiDialog`: the name prefilled, Cancel and Rename. An unchanged name just closes;
+  - each row gains a Pencil "Rename emoji" button.
+- `src/ui/server_settings.rs`: `open_focused_dialog` is `pub(crate)`.
+- Tests:
+  - `tests/custom_emoji.rs`: 3 new tests (6 in all). The name check (valid, the 32 edge, blank, uppercase, spaces, dashes, accents, too long); names from files (punctuation, runs, ends, accents, nothing left, cut at 32 with no trailing `_`, and suggestions pass the check); the limit;
+  - `tests/api_emoji.rs`: 3 new wiremock tests (5 in all). The `PUT` body is exactly `{"name","parent":{"type":"Server","id"},"nsfw":false}` and the `Emoji` parses; the `PATCH` sends only `{"name"}`; `TooManyEmoji` and `FailedValidation` read as their texts.
+
+### Divergences
+- **No `ImageLimits.emoji`:** the emoji size limit is `ChatView::emoji_size_limit()`, read from root config next to the server emoji limit, since only this dialog uses it.
+- **The page has its own file prompt** rather than `prompt_for_image`, whose callback has no window to open the dialog with.
+- **Upload and create are one task:** a failed `PUT` after a good upload leaves the file orphaned on the file server, as the plan accepted. The dialog shows the refusal.
+
+Look-ahead: chunks 3–4 (webhooks) are independent. No amendments.
+
+### Verification Performed
+- `cargo test --test custom_emoji --test api_emoji`: 6 and 5 passed.
+- Full suite: `cargo test` gave 1,386 passed, 0 failed. `cargo clippy --all-targets -- -D warnings` is clean.
+- Rustfmt: `src/ui/chat.rs` 17 and `src/api/client.rs` 3 are unchanged. `src/ui/server_settings.rs` and the new files are clean.
+
+### Manual Validation
+Deferred to the end (batched): upload a PNG and a GIF (named from their files); both show in the list and the picker, and the GIF animates. Rename one; the web client follows. At the limit, the button is disabled.

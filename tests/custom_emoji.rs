@@ -3,10 +3,13 @@
 
 use revolt_permissions::{ChannelPermission, DEFAULT_PERMISSION_SERVER};
 use serde_json::{Value, json};
+use std::path::Path;
 use stoat_gpui::api::ApiError;
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
+
 use stoat_gpui::custom_emoji::{
-    EmojiRow, can_manage_emoji, count_line, delete_prompt, emoji_error_text, emoji_rows,
+    EmojiRow, at_limit, can_manage_emoji, check_emoji_name, count_line, delete_prompt,
+    emoji_error_text, emoji_rows, name_from_file,
 };
 use stoat_gpui::media::MediaUrls;
 use stoat_gpui::store::ChatStore;
@@ -155,4 +158,50 @@ fn the_texts_read_plainly() {
         text(json!({ "type": "InternalError" })),
         "Couldn't change the emoji."
     );
+}
+
+#[test]
+fn emoji_names_are_checked_as_stoat_does() {
+    assert_eq!(check_emoji_name("  stoat_2 "), Ok("stoat_2".into()));
+    assert_eq!(
+        check_emoji_name("x".repeat(32).as_str()),
+        Ok("x".repeat(32))
+    );
+    assert_eq!(check_emoji_name("   "), Err("An emoji needs a name."));
+    let lowercase = Err("Use lowercase letters, numbers and underscores only.");
+    assert_eq!(check_emoji_name("Stoat"), lowercase);
+    assert_eq!(check_emoji_name("two words"), lowercase);
+    assert_eq!(check_emoji_name("dash-ed"), lowercase);
+    assert_eq!(check_emoji_name("café"), lowercase);
+    assert_eq!(
+        check_emoji_name("x".repeat(33).as_str()),
+        Err("Emoji names are at most 32 characters.")
+    );
+}
+
+#[test]
+fn a_name_is_suggested_from_the_file_name() {
+    let name = |path: &str| name_from_file(Path::new(path));
+    assert_eq!(name("/tmp/My Cat!.png"), "my_cat");
+    assert_eq!(name("party--parrot.gif"), "party_parrot");
+    assert_eq!(name("__odd__.webp"), "odd");
+    assert_eq!(name("ÉTÉ.png"), "t");
+    assert_eq!(name("!!!.png"), "");
+    assert_eq!(name(&format!("{}.png", "a".repeat(40))), "a".repeat(32));
+    // Cut where a `_` would be left at the end.
+    assert_eq!(name(&format!("{} b.png", "a".repeat(31))), "a".repeat(31));
+    // What's suggested always passes the check, when anything's left.
+    for path in ["/tmp/My Cat!.png", "party--parrot.gif", "__odd__.webp"] {
+        assert!(check_emoji_name(&name(path)).is_ok(), "{path}");
+    }
+}
+
+#[test]
+fn uploading_stops_at_the_limit() {
+    assert_eq!(at_limit(99, 100), None);
+    assert_eq!(
+        at_limit(100, 100).as_deref(),
+        Some("This server has 100 emoji, the most Stoat allows.")
+    );
+    assert!(at_limit(3, 3).is_some());
 }

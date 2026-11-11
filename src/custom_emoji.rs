@@ -7,6 +7,8 @@
 //! as renaming does; deleting does too, unless the user created that
 //! emoji. A server has at most `limits.global.server_emoji` (100).
 
+use std::path::Path;
+
 use revolt_permissions::ChannelPermission;
 use revolt_result::ErrorType;
 
@@ -17,6 +19,12 @@ use crate::store::{ChatStore, display_name};
 
 /// Stoat's default for the most custom emoji a server may have.
 pub const DEFAULT_SERVER_EMOJI: u32 = 100;
+
+/// The longest emoji name Stoat takes, in characters.
+pub const EMOJI_NAME_MAX: usize = 32;
+
+/// The file server's tag for emoji.
+pub const EMOJI_TAG: &str = "emojis";
 
 /// One emoji in the list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +73,49 @@ pub fn can_manage_emoji(store: &ChatStore, server: &str) -> bool {
         )
 }
 
+/// `text` as a name Stoat takes for an emoji (trimmed, 1 to
+/// [`EMOJI_NAME_MAX`] characters of `a`–`z`, `0`–`9` and `_`), or why not.
+pub fn check_emoji_name(text: &str) -> Result<String, &'static str> {
+    let name = text.trim();
+    if name.is_empty() {
+        return Err("An emoji needs a name.");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    {
+        return Err("Use lowercase letters, numbers and underscores only.");
+    }
+    if name.chars().count() > EMOJI_NAME_MAX {
+        return Err("Emoji names are at most 32 characters.");
+    }
+    Ok(name.to_string())
+}
+
+/// A name for an emoji uploaded from `path`: its file name without the
+/// extension, lowercased, with anything else made `_` (runs squeezed, and
+/// none at either end), cut to [`EMOJI_NAME_MAX`]. Empty if nothing's left.
+pub fn name_from_file(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let mut name = String::new();
+    for c in stem.chars() {
+        if c.is_ascii_lowercase() || c.is_ascii_digit() {
+            name.push(c);
+        } else if !name.is_empty() && !name.ends_with('_') {
+            name.push('_');
+        }
+    }
+    let name: String = name
+        .trim_end_matches('_')
+        .chars()
+        .take(EMOJI_NAME_MAX)
+        .collect();
+    name.trim_end_matches('_').to_string()
+}
+
 /// "3 of 100 emoji".
 pub fn count_line(count: usize, max: u32) -> String {
     format!("{count} of {max} emoji")
@@ -93,4 +144,9 @@ pub fn emoji_error_text(err: &ApiError) -> String {
         Some(ErrorType::NotFound) => "That emoji was deleted.".into(),
         _ => error_text(err, "Couldn't change the emoji."),
     }
+}
+
+/// Why "Upload emoji…" is disabled, if it is: the server has `max` already.
+pub fn at_limit(count: usize, max: u32) -> Option<String> {
+    (count >= max as usize).then(|| format!("This server has {max} emoji, the most Stoat allows."))
 }
