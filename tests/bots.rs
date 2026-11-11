@@ -2,8 +2,12 @@
 //! the store keeping their users, and the texts.
 
 use serde_json::{Value, json};
-use stoat_gpui::api::models::{Bot, RelationshipStatus, User};
+use stoat_gpui::api::models::{Bot, DataEditBot, FieldsBot, RelationshipStatus, User};
 use stoat_gpui::api::{ApiError, RootConfig};
+use stoat_gpui::bots::{
+    BotForm, INTERACTIONS_URL_MAX, invite_url, rename_edit, reset_prompt, token_reset_edit,
+    username_change,
+};
 use stoat_gpui::bots::{
     BotRow, DEFAULT_BOT_LIMIT, UsernameProblem, at_limit, bot_error_text, bot_limit, bot_rows,
     check_bot_username, count_line, delete_prompt,
@@ -242,5 +246,126 @@ fn texts_read_plainly() {
     assert_eq!(
         bot_error_text(&full, None),
         "You have as many bots as Stoat allows."
+    );
+}
+
+#[test]
+fn a_bots_settings_send_only_what_changed() {
+    let mut stored = bot("b-1", false);
+    stored.interactions_url = "https://bot.example/hook".into();
+    stored.default_permissions = Some(8);
+    let form = BotForm::of(&stored);
+    assert_eq!(
+        form,
+        BotForm {
+            public: false,
+            interactions_url: "https://bot.example/hook".into(),
+            default_permissions: 8,
+        }
+    );
+    assert_eq!(form.changes(&stored), None);
+
+    let public = BotForm {
+        public: true,
+        ..form.clone()
+    };
+    assert_eq!(
+        public.changes(&stored),
+        Some(DataEditBot {
+            public: Some(true),
+            ..Default::default()
+        })
+    );
+
+    // Trimmed; the same URL with spaces is no change.
+    let spaced = BotForm {
+        interactions_url: "  https://bot.example/hook ".into(),
+        ..form.clone()
+    };
+    assert_eq!(spaced.changes(&stored), None);
+    let moved = BotForm {
+        interactions_url: " https://new.example ".into(),
+        ..form.clone()
+    };
+    assert_eq!(
+        moved.changes(&stored),
+        Some(DataEditBot {
+            interactions_url: Some("https://new.example".into()),
+            ..Default::default()
+        })
+    );
+    let blank = BotForm {
+        interactions_url: "  ".into(),
+        ..form.clone()
+    };
+    assert_eq!(
+        blank.changes(&stored),
+        Some(DataEditBot {
+            remove: vec![FieldsBot::InteractionsURL],
+            ..Default::default()
+        })
+    );
+    let too_long = BotForm {
+        interactions_url: "h".repeat(INTERACTIONS_URL_MAX + 1),
+        ..form.clone()
+    };
+    assert!(!too_long.is_valid());
+    assert_eq!(too_long.changes(&stored), None);
+
+    let permissions = BotForm {
+        default_permissions: 8 | 16,
+        ..form.clone()
+    };
+    assert_eq!(
+        permissions.changes(&stored),
+        Some(DataEditBot {
+            default_permissions: Some(24),
+            ..Default::default()
+        })
+    );
+    // None stored reads as nothing requested.
+    let plain = bot("b-2", false);
+    assert_eq!(BotForm::of(&plain).default_permissions, 0);
+    assert_eq!(BotForm::of(&plain).changes(&plain), None);
+}
+
+#[test]
+fn renames_tokens_and_links() {
+    assert_eq!(
+        username_change(" helper2 ", "helper"),
+        Some("helper2".into())
+    );
+    assert_eq!(username_change("helper", "helper"), None);
+    assert_eq!(username_change("Helper", "helper"), Some("Helper".into()));
+    assert_eq!(username_change("no good", "helper"), None);
+    assert_eq!(
+        rename_edit("helper2".into()),
+        DataEditBot {
+            name: Some("helper2".into()),
+            ..Default::default()
+        }
+    );
+
+    assert_eq!(
+        token_reset_edit(),
+        DataEditBot {
+            remove: vec![FieldsBot::Token],
+            ..Default::default()
+        }
+    );
+    let (title, detail) = reset_prompt("Helper");
+    assert_eq!(title, "Reset Helper's token?");
+    assert_eq!(
+        detail,
+        "The old token stops working at once. Anything using it needs the new one."
+    );
+
+    assert_eq!(
+        invite_url("https://stoat.chat", "01ABC"),
+        "https://stoat.chat/bot/01ABC"
+    );
+    assert_eq!(
+        invite_url("https://chat.example/", "01ABC"),
+        "https://chat.example/bot/01ABC"
     );
 }

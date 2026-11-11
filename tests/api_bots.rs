@@ -121,3 +121,93 @@ async fn refusals_read_plainly() {
         "That username can't be used. Try another."
     );
 }
+
+/// Mounts a `PATCH /bots/b1` expecting exactly `body`, answering with the
+/// bot as `answer` (plus its user).
+async fn expect_edit(server: &MockServer, body: Value, mut answer: Value) {
+    answer["user"] = bot_user("b1", "helper");
+    Mock::given(method("PATCH"))
+        .and(path("/bots/b1"))
+        .and(header("x-session-token", "tok"))
+        .and(body_json(body))
+        .respond_with(ResponseTemplate::new(200).set_body_json(answer))
+        .expect(1)
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn edits_send_only_what_changed() {
+    use stoat_gpui::api::models::DataEditBot;
+    use stoat_gpui::bots::{rename_edit, token_reset_edit};
+
+    let server = MockServer::start().await;
+    let mut public = bot("b1");
+    public["public"] = json!(true);
+    expect_edit(&server, json!({ "public": true }), public).await;
+    let mut reset = bot("b1");
+    reset["token"] = json!("fresh");
+    expect_edit(&server, json!({ "remove": ["Token"] }), reset).await;
+    let mut asks = bot("b1");
+    asks["default_permissions"] = json!(24);
+    expect_edit(&server, json!({ "default_permissions": 24 }), asks).await;
+    expect_edit(&server, json!({ "name": "helper2" }), bot("b1")).await;
+    expect_edit(&server, json!({ "remove": ["InteractionsURL"] }), bot("b1")).await;
+
+    let client = client(&server);
+    let saved = client
+        .edit_bot(
+            "b1",
+            &DataEditBot {
+                public: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(saved.bot.public);
+    assert_eq!(saved.user.username, "helper");
+    let saved = client.edit_bot("b1", &token_reset_edit()).await.unwrap();
+    assert_eq!(saved.bot.token, "fresh");
+    let saved = client
+        .edit_bot(
+            "b1",
+            &DataEditBot {
+                default_permissions: Some(24),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(saved.bot.default_permissions, Some(24));
+    client
+        .edit_bot("b1", &rename_edit("helper2".into()))
+        .await
+        .unwrap();
+    client
+        .edit_bot(
+            "b1",
+            &DataEditBot {
+                remove: vec![stoat_gpui::api::models::FieldsBot::InteractionsURL],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_taken_username_reads_plainly() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/bots/b1"))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({ "type": "UsernameTaken" })))
+        .mount(&server)
+        .await;
+
+    let err = client(&server)
+        .edit_bot("b1", &stoat_gpui::bots::rename_edit("taken".into()))
+        .await
+        .unwrap_err();
+    assert_eq!(bot_error_text(&err, None), "That username is taken.");
+}

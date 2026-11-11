@@ -1366,6 +1366,21 @@ impl StoatClient {
         self.send(Method::POST, "/bots/create", Some(&body)).await
     }
 
+    /// `PATCH /bots/{id}` (its owner only): a rename (`name`), the public
+    /// flag, the interactions URL, the permissions it asks for, or a new
+    /// token (`remove: ["Token"]`). Only what's set is sent, as with
+    /// [`Self::edit_user`]. Stoat answers with the bot, token and all, and
+    /// its user.
+    pub async fn edit_bot(
+        &self,
+        id: &str,
+        edit: &revolt_models::v0::DataEditBot,
+    ) -> Result<revolt_models::v0::BotWithUserResponse, ApiError> {
+        let body = edit_body(serde_json::to_value(edit).expect("bot edit serialises"));
+        self.send(Method::PATCH, &format!("/bots/{id}"), Some(&body))
+            .await
+    }
+
     /// `DELETE /bots/{id}` (its owner only). The bot leaves everything it's
     /// in.
     pub async fn delete_bot(&self, id: &str) -> Result<(), ApiError> {

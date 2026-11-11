@@ -11,7 +11,7 @@ use revolt_result::ErrorType;
 
 use crate::api::ApiError;
 use crate::api::RootConfig;
-use crate::api::models::{Bot, User};
+use crate::api::models::{Bot, DataEditBot, FieldsBot, User};
 use crate::media::MediaUrls;
 use crate::profile_edit::error_text;
 
@@ -174,4 +174,101 @@ pub fn bot_error_text(err: &ApiError, owned: Option<usize>) -> String {
         }
         _ => error_text(err, "Couldn't change the bot."),
     }
+}
+
+/// The longest interactions URL Stoat takes, in characters.
+pub const INTERACTIONS_URL_MAX: usize = 2048;
+
+/// A bot's settings, as edited: everything the bar's Save sends. Its
+/// username has its own Save (a rename can fail on its own).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BotForm {
+    pub public: bool,
+    /// As typed; blank means none.
+    pub interactions_url: String,
+    /// The permissions it asks for when added to a server.
+    pub default_permissions: u64,
+}
+
+impl BotForm {
+    /// The form filled with `bot`'s values.
+    pub fn of(bot: &Bot) -> Self {
+        Self {
+            public: bot.public,
+            interactions_url: bot.interactions_url.clone(),
+            default_permissions: bot.default_permissions.unwrap_or(0) as u64,
+        }
+    }
+
+    /// Whether Stoat would take it: the URL is at most
+    /// [`INTERACTIONS_URL_MAX`] characters.
+    pub fn is_valid(&self) -> bool {
+        self.interactions_url.trim().chars().count() <= INTERACTIONS_URL_MAX
+    }
+
+    /// The `PATCH /bots/{id}` that turns `bot` into this form: the public
+    /// flag, a trimmed URL (a blank one becomes `remove: [InteractionsURL]`)
+    /// and the requested permissions, each only if changed. `None` when
+    /// nothing changed or the form isn't valid.
+    pub fn changes(&self, bot: &Bot) -> Option<DataEditBot> {
+        if !self.is_valid() {
+            return None;
+        }
+        let mut edit = DataEditBot::default();
+        if self.public != bot.public {
+            edit.public = Some(self.public);
+        }
+        let url = self.interactions_url.trim();
+        if url != bot.interactions_url {
+            if url.is_empty() {
+                edit.remove.push(FieldsBot::InteractionsURL);
+            } else {
+                edit.interactions_url = Some(url.to_string());
+            }
+        }
+        if self.default_permissions != Self::of(bot).default_permissions {
+            edit.default_permissions = Some(self.default_permissions as i64);
+        }
+        (edit != DataEditBot::default()).then_some(edit)
+    }
+}
+
+/// The rename to send: `typed` as a username Stoat takes, if it isn't the
+/// bot's username already.
+pub fn username_change(typed: &str, current: &str) -> Option<String> {
+    check_bot_username(typed)
+        .ok()
+        .filter(|name| name != current)
+}
+
+/// The rename's `PATCH /bots/{id}`.
+pub fn rename_edit(name: String) -> DataEditBot {
+    DataEditBot {
+        name: Some(name),
+        ..Default::default()
+    }
+}
+
+/// The `PATCH /bots/{id}` that gives the bot a new token: `remove: [Token]`
+/// and nothing else.
+pub fn token_reset_edit() -> DataEditBot {
+    DataEditBot {
+        remove: vec![FieldsBot::Token],
+        ..Default::default()
+    }
+}
+
+/// The confirmation before resetting bot `name`'s token: its title and
+/// what happens.
+pub fn reset_prompt(name: &str) -> (String, &'static str) {
+    (
+        format!("Reset {name}'s token?"),
+        "The old token stops working at once. Anything using it needs the new one.",
+    )
+}
+
+/// The link that adds the bot, on the instance's web client `app`:
+/// `{app}/bot/{id}`.
+pub fn invite_url(app: &str, id: &str) -> String {
+    format!("{}/bot/{id}", app.trim_end_matches('/'))
 }

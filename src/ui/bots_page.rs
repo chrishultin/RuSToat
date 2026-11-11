@@ -8,21 +8,26 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
-use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme, Disableable, Icon, Sizable, WindowExt, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
-use crate::api::models::{Bot, BotWithUserResponse, User};
+use crate::api::models::{Bot, BotWithUserResponse, DataEditBot, User};
 use crate::bots::{
-    BotRow, DEFAULT_BOT_LIMIT, at_limit, bot_error_text, bot_rows, check_bot_username, count_line,
-    delete_prompt,
+    BotForm, BotRow, DEFAULT_BOT_LIMIT, INTERACTIONS_URL_MAX, at_limit, bot_error_text, bot_rows,
+    check_bot_username, count_line, delete_prompt, invite_url, rename_edit, reset_prompt,
+    token_reset_edit, username_change,
 };
+use crate::permission_matrix::with_value;
 use crate::runtime::spawn_io;
 use crate::ui::chat::{ChatView, avatar};
+use crate::ui::permission_matrix::{Mode, PermissionMatrix};
+use crate::ui::profile_editor::field;
 use crate::ui::server_dialogs::name_field;
-use crate::ui::server_settings::open_focused_dialog;
+use crate::ui::server_settings::{open_focused_dialog, section_heading};
 
 /// How big an avatar shows in the list.
 const LIST_AVATAR: f32 = 32.;
@@ -139,10 +144,17 @@ impl BotsPage {
         self._subscriptions
             .push(cx.subscribe(&view, |this, _, event: &BotEvent, cx| {
                 match event {
-                    BotEvent::Back => {}
-                    BotEvent::Deleted(id) => this.bots.retain(|bot| &bot.id != id),
+                    BotEvent::Back => this.mode = PageMode::List,
+                    BotEvent::Deleted(id) => {
+                        this.bots.retain(|bot| &bot.id != id);
+                        this.mode = PageMode::List;
+                    }
+                    BotEvent::Saved(saved) => {
+                        if let Some(bot) = this.bots.iter_mut().find(|bot| bot.id == saved.id) {
+                            *bot = (**saved).clone();
+                        }
+                    }
                 }
-                this.mode = PageMode::List;
                 cx.notify();
             }));
         self.mode = PageMode::View(view);
@@ -472,13 +484,34 @@ pub enum BotEvent {
     Back,
     /// The bot was deleted, by its ID.
     Deleted(String),
+    /// Stoat answered a change with the bot (token and all).
+    Saved(Box<Bot>),
 }
 
-/// One bot's page: its name, Copy ID, and Delete.
+/// Which change is under way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Change {
+    /// The bar's Save: public, URL, requested permissions.
+    Settings,
+    Rename,
+    Token,
+}
+
+/// One bot's page: its username (with its own Save), whether it's public,
+/// its interactions URL and the permissions it asks for (saved together),
+/// its token to copy or reset, its ID and invite link to copy, and Delete.
 pub struct BotView {
     chat: WeakEntity<ChatView>,
     /// The bot as Stoat last sent it, token and all: never logged.
     bot: Bot,
+    username: Entity<InputState>,
+    url: Entity<InputState>,
+    public: bool,
+    permissions: u64,
+    /// The bot's settings the fields were last filled with.
+    filled: BotForm,
+    /// The change waiting for Stoat, if any.
+    busy: Option<Change>,
     deleting: bool,
     _subscriptions: Vec<Subscription>,
 }
@@ -486,19 +519,40 @@ pub struct BotView {
 impl EventEmitter<BotEvent> for BotView {}
 
 impl BotView {
-    fn new(
-        chat: &Entity<ChatView>,
-        bot: Bot,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        Self {
+    fn new(chat: &Entity<ChatView>, bot: Bot, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let username = cx.new(|cx| InputState::new(window, cx));
+        let url = cx.new(|cx| InputState::new(window, cx).placeholder("https://"));
+        let subscriptions = vec![
+            // Its name and avatar come from the store.
+            cx.observe(chat, |_, _, cx| cx.notify()),
+            cx.subscribe_in(
+                &username,
+                window,
+                |this, _, event, window, cx| match event {
+                    InputEvent::PressEnter { .. } => this.rename(window, cx),
+                    _ => cx.notify(),
+                },
+            ),
+            cx.subscribe_in(&url, window, |this, _, event, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.save(window, cx),
+                _ => cx.notify(),
+            }),
+        ];
+        let mut this = Self {
             chat: chat.downgrade(),
             bot,
+            username,
+            url,
+            public: false,
+            permissions: 0,
+            filled: BotForm::default(),
+            busy: None,
             deleting: false,
-            // Its name and avatar come from the store.
-            _subscriptions: vec![cx.observe(chat, |_, _, cx| cx.notify())],
-        }
+            _subscriptions: subscriptions,
+        };
+        this.reset(window, cx);
+        this.reset_username(window, cx);
+        this
     }
 
     /// The bot's user, as the store has it.
@@ -515,52 +569,189 @@ impl BotView {
             .unwrap_or_else(|| self.bot.id.clone())
     }
 
+    /// The settings as edited.
+    fn edited(&self, cx: &App) -> BotForm {
+        BotForm {
+            public: self.public,
+            interactions_url: self.url.read(cx).value().to_string(),
+            default_permissions: self.permissions,
+        }
+    }
+
+    /// Fill the settings with the bot's values.
+    fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let form = BotForm::of(&self.bot);
+        let url = form.interactions_url.clone();
+        self.url
+            .update(cx, |input, cx| input.set_value(url, window, cx));
+        self.public = form.public;
+        self.permissions = form.default_permissions;
+        self.filled = form;
+        cx.notify();
+    }
+
+    /// Fill the username field with the bot's username.
+    fn reset_username(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.user(cx).map(|user| user.username).unwrap_or_default();
+        self.username
+            .update(cx, |input, cx| input.set_value(name, window, cx));
+    }
+
+    /// The rename the username field asks for, if any.
+    fn rename_to(&self, cx: &App) -> Option<String> {
+        let current = self.user(cx).map(|user| user.username).unwrap_or_default();
+        username_change(&self.username.read(cx).value(), &current)
+    }
+
+    /// The bar's Save: send what changed in the settings.
+    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy.is_some() {
+            return;
+        }
+        if let Some(edit) = self.edited(cx).changes(&self.bot) {
+            self.send(Change::Settings, edit, window, cx);
+        }
+    }
+
+    /// The username's own Save.
+    fn rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy.is_some() {
+            return;
+        }
+        if let Some(name) = self.rename_to(cx) {
+            self.send(Change::Rename, rename_edit(name), window, cx);
+        }
+    }
+
+    /// Send `edit`. Stoat's answer (the bot and its user) shows at once; a
+    /// failure says why, and the fields keep their edits.
+    fn send(
+        &mut self,
+        change: Change,
+        edit: DataEditBot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(chat) = self.chat.upgrade() else {
+            return;
+        };
+        self.busy = Some(change);
+        window.refresh();
+        cx.notify();
+        let request = spawn_io({
+            let (client, id) = (chat.read(cx).client().clone(), self.bot.id.clone());
+            async move { client.edit_bot(&id, &edit).await }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.busy = None;
+                match result {
+                    Ok(Ok(saved)) => {
+                        log::info!("saved bot {} ({change:?})", this.bot.id);
+                        let BotWithUserResponse { bot, user } = saved;
+                        this.bot = bot;
+                        this.chat
+                            .update(cx, |chat, cx| chat.bot_users_loaded(vec![user], cx))
+                            .ok();
+                        cx.emit(BotEvent::Saved(Box::new(this.bot.clone())));
+                        let text = match change {
+                            Change::Settings => {
+                                this.reset(window, cx);
+                                "Saved."
+                            }
+                            Change::Rename => {
+                                this.reset_username(window, cx);
+                                "Renamed."
+                            }
+                            Change::Token => {
+                                window.close_dialog(cx);
+                                "Token reset."
+                            }
+                        };
+                        window.push_notification(Notification::success(text), cx);
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("couldn't save bot {} ({change:?}): {err}", this.bot.id);
+                        window
+                            .push_notification(Notification::error(bot_error_text(&err, None)), cx);
+                    }
+                    Err(err) => {
+                        log::warn!("bot save task failed: {err:?}");
+                        window
+                            .push_notification(Notification::error("Couldn't change the bot."), cx);
+                    }
+                }
+                window.refresh();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Copy the token. It's never shown.
+    fn copy_token(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(self.bot.token.clone()));
+        window.push_notification(Notification::success("Token copied."), cx);
+    }
+
+    /// Ask before giving the bot a new token.
+    fn confirm_reset_token(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (title, detail) = reset_prompt(&self.name(cx));
+        let view = cx.entity().downgrade();
+        let reset = move |window: &mut Window, cx: &mut App| {
+            view.update(cx, |this, cx| {
+                if this.busy.is_none() {
+                    this.send(Change::Token, token_reset_edit(), window, cx);
+                }
+            })
+            .ok();
+        };
+        let busy = {
+            let view = cx.entity().downgrade();
+            move |cx: &App| {
+                view.upgrade()
+                    .is_some_and(|view| view.read(cx).busy == Some(Change::Token))
+            }
+        };
+        open_confirm(
+            ConfirmText {
+                title: title.into(),
+                detail,
+                confirm: "Reset token",
+                id: "reset-token",
+            },
+            busy,
+            reset,
+            window,
+            cx,
+        );
+    }
+
     /// Ask before deleting the bot.
     fn confirm_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (title, detail) = delete_prompt(&self.name(cx));
-        let title = SharedString::from(title);
         let view = cx.entity().downgrade();
-        window.open_alert_dialog(cx, move |alert, _, cx| {
-            let busy = view.upgrade().is_some_and(|view| view.read(cx).deleting);
-            let delete = {
-                let view = view.clone();
-                move |window: &mut Window, cx: &mut App| {
-                    view.update(cx, |this, cx| this.delete(window, cx)).ok();
-                }
-            };
-            alert
-                .title(title.clone())
-                .description(detail)
-                .keyboard(!busy)
-                .footer(
-                    h_flex()
-                        .gap_2()
-                        .justify_end()
-                        .child(
-                            Button::new("delete-bot-cancel")
-                                .label("Cancel")
-                                .disabled(busy)
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(
-                            Button::new("delete-bot-ok")
-                                .with_variant(ButtonVariant::Danger)
-                                .label("Delete")
-                                .loading(busy)
-                                .disabled(busy)
-                                .on_click({
-                                    let delete = delete.clone();
-                                    move |_, window, cx| delete(window, cx)
-                                }),
-                        ),
-                )
-                .on_ok(move |_, window, cx| {
-                    if !busy {
-                        delete(window, cx);
-                    }
-                    false
-                })
-        });
+        let delete = move |window: &mut Window, cx: &mut App| {
+            view.update(cx, |this, cx| this.delete(window, cx)).ok();
+        };
+        let busy = {
+            let view = cx.entity().downgrade();
+            move |cx: &App| view.upgrade().is_some_and(|view| view.read(cx).deleting)
+        };
+        open_confirm(
+            ConfirmText {
+                title: title.into(),
+                detail,
+                confirm: "Delete",
+                id: "delete-bot",
+            },
+            busy,
+            delete,
+            window,
+            cx,
+        );
     }
 
     /// Delete the bot (the confirmation's Delete).
@@ -606,10 +797,8 @@ impl BotView {
         })
         .detach();
     }
-}
 
-impl Render for BotView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let user = self.user(cx);
         let name = self.name(cx);
         let avatar_url = self.chat.upgrade().and_then(|chat| {
@@ -619,51 +808,156 @@ impl Render for BotView {
                 .and_then(|file| store.media().file(file))
         });
         let theme = cx.theme();
-        let muted = theme.muted_foreground;
-        let id = self.bot.id.clone();
-        v_flex()
-            .w_full()
-            .gap_4()
+        h_flex()
+            .gap_3()
+            .child(avatar(
+                format!("bot-page-avatar-{}", self.bot.id),
+                avatar_url,
+                &name,
+                PAGE_AVATAR,
+                theme.secondary,
+                theme.secondary_foreground,
+            ))
             .child(
-                h_flex().w_full().gap_2().child(
-                    Button::new("bots-back")
-                        .label("My Bots")
-                        .icon(IconName::ChevronLeft)
-                        .ghost()
-                        .small()
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(BotEvent::Back))),
-                ),
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_base()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(name),
+                    )
+                    .children(user.map(|user| {
+                        div()
+                            .truncate()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(format!("@{}#{}", user.username, user.discriminator))
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// The username, with its own Save.
+    fn render_username(&self, cx: &mut Context<Self>) -> AnyElement {
+        let typed = self.username.read(cx).value();
+        let problem = check_bot_username(&typed)
+            .err()
+            .map(|problem| problem.to_string());
+        let count = typed.trim().chars().count();
+        let renaming = self.busy == Some(Change::Rename);
+        let can_rename = self.busy.is_none() && self.rename_to(cx).is_some();
+        let input = h_flex()
+            .gap_2()
+            .child(
+                div()
+                    .flex_1()
+                    .child(Input::new(&self.username).disabled(renaming)),
             )
             .child(
-                h_flex()
-                    .gap_3()
-                    .child(avatar(
-                        format!("bot-page-avatar-{}", self.bot.id),
-                        avatar_url,
-                        &name,
-                        PAGE_AVATAR,
-                        theme.secondary,
-                        theme.secondary_foreground,
-                    ))
+                Button::new("bot-rename")
+                    .label("Save")
+                    .outline()
+                    .small()
+                    .loading(renaming)
+                    .disabled(!can_rename)
+                    .on_click(cx.listener(|this, _, window, cx| this.rename(window, cx))),
+            )
+            .into_any_element();
+        field(
+            "Username",
+            input,
+            count,
+            crate::bots::BOT_USERNAME_MAX,
+            problem,
+            cx,
+        )
+    }
+
+    fn render_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let saving = self.busy == Some(Change::Settings);
+        let muted = cx.theme().muted_foreground;
+        let url_count = self.url.read(cx).value().trim().chars().count();
+        let url = field(
+            "Interactions URL",
+            Input::new(&self.url).disabled(saving).into_any_element(),
+            url_count,
+            INTERACTIONS_URL_MAX,
+            None,
+            cx,
+        );
+        let public = h_flex()
+            .gap_3()
+            .child(
+                v_flex()
+                    .flex_1()
                     .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_base()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(name),
-                            )
-                            .children(user.map(|user| {
-                                div()
-                                    .truncate()
-                                    .text_sm()
-                                    .text_color(muted)
-                                    .child(format!("@{}#{}", user.username, user.discriminator))
-                            })),
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Public"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child("Anyone can add this bot to their servers and groups."),
                     ),
+            )
+            .child(
+                Switch::new("bot-public")
+                    .checked(self.public)
+                    .disabled(saving)
+                    .on_click(cx.listener(|this, on: &bool, _, cx| {
+                        this.public = *on;
+                        cx.notify();
+                    })),
+            );
+        let view = cx.entity().downgrade();
+        let matrix = PermissionMatrix::new("bot-permissions", Mode::Values(self.permissions))
+            .read_only(saving)
+            .on_change(move |bit, setting, _, cx| {
+                view.update(cx, |this, cx| {
+                    this.permissions = with_value(this.permissions, bit, setting);
+                    cx.notify();
+                })
+                .ok();
+            });
+        v_flex()
+            .gap_4()
+            .child(public)
+            .child(url)
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Requested permissions"),
+                    )
+                    .child(div().text_xs().text_color(muted).child(
+                        "What it asks for when it's added to a server. Whoever adds it \
+                         grants only those they hold themselves.",
+                    ))
+                    .child(matrix),
+            )
+            .into_any_element()
+    }
+
+    fn render_token(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let resetting = self.busy == Some(Change::Token);
+        v_flex()
+            .gap_2()
+            .child(section_heading("Token"))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("Anything with the token can act as the bot. Keep it secret."),
             )
             .child(
                 h_flex()
@@ -672,11 +966,60 @@ impl Render for BotView {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(self.bot.id.clone()),
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(theme.secondary)
+                            .text_sm()
+                            .font_family("Menlo")
+                            .child("••••••"),
                     )
+                    .child(
+                        Button::new("bot-copy-token")
+                            .label("Copy token")
+                            .icon(IconName::Copy)
+                            .outline()
+                            .small()
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.copy_token(window, cx)),
+                            ),
+                    )
+                    .child(
+                        Button::new("bot-reset-token")
+                            .label("Reset token…")
+                            .icon(IconName::RefreshCw)
+                            .outline()
+                            .small()
+                            .loading(resetting)
+                            .disabled(self.busy.is_some())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.confirm_reset_token(window, cx)
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_share(&self, cx: &mut Context<Self>) -> AnyElement {
+        let id = self.bot.id.clone();
+        let app = self
+            .chat
+            .upgrade()
+            .and_then(|chat| chat.read(cx).web_app().map(str::to_string));
+        let link = app.map(|app| invite_url(&app, &self.bot.id));
+        v_flex()
+            .gap_2()
+            .child(section_heading("Share"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(self.bot.id.clone()),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .flex_wrap()
                     .child(
                         Button::new("bot-copy-id")
                             .label("Copy ID")
@@ -687,10 +1030,76 @@ impl Render for BotView {
                                 cx.write_to_clipboard(ClipboardItem::new_string(id.clone()));
                                 window.push_notification(Notification::success("Copied."), cx);
                             }),
+                    )
+                    .children(link.map(|link| {
+                        Button::new("bot-copy-invite")
+                            .label("Copy invite URL")
+                            .icon(IconName::Link)
+                            .outline()
+                            .small()
+                            .on_click(move |_, window, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(link.clone()));
+                                window.push_notification(Notification::success("Copied."), cx);
+                            })
+                    })),
+            )
+            .into_any_element()
+    }
+}
+
+impl Render for BotView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let edited = self.edited(cx);
+        let saving = self.busy == Some(Change::Settings);
+        let changed = edited != self.filled;
+        let can_save = self.busy.is_none() && edited.changes(&self.bot).is_some();
+        let border = cx.theme().border;
+        v_flex()
+            .w_full()
+            .gap_4()
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        Button::new("bots-back")
+                            .label("My Bots")
+                            .icon(IconName::ChevronLeft)
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(BotEvent::Back))),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("bot-reset")
+                            .label("Reset")
+                            .outline()
+                            .small()
+                            .disabled(!changed || saving)
+                            .on_click(cx.listener(|this, _, window, cx| this.reset(window, cx))),
+                    )
+                    .child(
+                        Button::new("bot-save")
+                            .label("Save")
+                            .primary()
+                            .small()
+                            .loading(saving)
+                            .disabled(!can_save)
+                            .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
                     ),
             )
+            .child(self.render_header(cx))
             .child(
-                div().pt_4().border_t_1().border_color(theme.border).child(
+                v_flex()
+                    .gap_4()
+                    .child(section_heading("Settings"))
+                    .child(self.render_username(cx))
+                    .child(self.render_settings(cx)),
+            )
+            .child(self.render_token(cx))
+            .child(self.render_share(cx))
+            .child(
+                div().pt_4().border_t_1().border_color(border).child(
                     Button::new("bot-delete")
                         .label("Delete bot…")
                         .icon(IconName::Trash)
@@ -704,4 +1113,61 @@ impl Render for BotView {
                 ),
             )
     }
+}
+
+/// A confirmation's words.
+struct ConfirmText {
+    title: SharedString,
+    detail: &'static str,
+    /// The danger button's label.
+    confirm: &'static str,
+    /// Its buttons' IDs start with this.
+    id: &'static str,
+}
+
+/// An alert asking before something that can't be undone. Its buttons wait
+/// for the answer (`busy`); `act` closes it when it's done.
+fn open_confirm(
+    text: ConfirmText,
+    busy: impl Fn(&App) -> bool + 'static,
+    act: impl Fn(&mut Window, &mut App) + Clone + 'static,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    window.open_alert_dialog(cx, move |alert, _, cx| {
+        let busy = busy(cx);
+        let act = act.clone();
+        alert
+            .title(text.title.clone())
+            .description(text.detail)
+            .keyboard(!busy)
+            .footer(
+                h_flex()
+                    .gap_2()
+                    .justify_end()
+                    .child(
+                        Button::new(SharedString::from(format!("{}-cancel", text.id)))
+                            .label("Cancel")
+                            .disabled(busy)
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("{}-ok", text.id)))
+                            .with_variant(ButtonVariant::Danger)
+                            .label(text.confirm)
+                            .loading(busy)
+                            .disabled(busy)
+                            .on_click({
+                                let act = act.clone();
+                                move |_, window, cx| act(window, cx)
+                            }),
+                    ),
+            )
+            .on_ok(move |_, window, cx| {
+                if !busy {
+                    act(window, cx);
+                }
+                false
+            })
+    });
 }

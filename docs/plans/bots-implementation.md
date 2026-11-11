@@ -45,3 +45,36 @@ Look-ahead: chunk 2 needs a `BotEvent::Saved` so the page's list follows a save 
 
 ### Manual Validation
 Deferred to the end (batched): My Bots lists your bots like the web client; create one, copy its ID, delete it.
+
+## Chunk 2: A bot's settings and token
+
+### Changes Made
+- `src/bots.rs`:
+  - `INTERACTIONS_URL_MAX` (2048);
+  - `BotForm { public, interactions_url, default_permissions }` with `of`, `is_valid` (URL length) and `changes -> Option<DataEditBot>` (only what changed; the URL trimmed, and a blank one `remove: [InteractionsURL]`; `None` stored permissions read as 0);
+  - `username_change(typed, current)`, `rename_edit(name)`, `token_reset_edit()` (`remove: [Token]` only), `reset_prompt(name)` and `invite_url(app, id)` (`{app}/bot/{id}`).
+- `src/api/client.rs`: `edit_bot(id, &DataEditBot) -> BotWithUserResponse` (`PATCH /bots/{id}`, through `edit_body`).
+- `src/ui/bots_page.rs`:
+  - `BotView` now has the bar (‹ My Bots, Reset, Save), the header, **Settings** (the username with its own Save and its problem shown; Public as a switch; Interactions URL with a count; Requested permissions as the matrix in Values mode, server context, every option enabled), **Token** (`••••••`, Copy token, Reset token… confirmed), **Share** (the ID, Copy ID, and Copy invite URL when the instance's web client is known), and Delete bot…;
+  - every change goes through one `send(change, edit)`: the answer replaces the page's bot, its user goes to the store (`bot_users_loaded`), and `BotEvent::Saved` keeps the section's list current. Settings refill from the answer ("Saved."), a rename refills the username ("Renamed."), a token reset closes its alert ("Token reset."). A refusal toasts `bot_error_text` and keeps the edits;
+  - `open_confirm`, a shared alert for Reset token and Delete whose buttons wait for the answer.
+- Tests:
+  - `tests/bots.rs`: 2 new tests. `BotForm` (filled, nothing changed, public, URL trimmed/changed/blank → remove, too long, permissions, none stored); rename, token reset, the prompt, invite URLs;
+  - `tests/api_bots.rs`: 2 new tests. The exact `PATCH` bodies (`{"public":true}`, `{"remove":["Token"]}`, `{"default_permissions":24}`, `{"name"}`, `{"remove":["InteractionsURL"]}`) and the parsed answers (a new token, the user); `UsernameTaken` reads plainly.
+
+### Divergences
+- **`rename_edit`** was added (the rename's `PATCH`), beside `username_change`.
+- **Copy ID moved to Share**, with the ID shown there, as Assumption 3 lays out.
+- **A failed token reset keeps its alert open** (with a toast), as Delete does, rather than closing.
+
+The token is held only in `BotView.bot` and the section's list; it's copied, never drawn, and no log line formats a `Bot` (only IDs and `ApiError`s).
+
+Look-ahead: chunk 3 adds a Profile section to `BotView`; chunk 4 adds "Add to a server or group…" to Share. No amendments.
+
+### Verification Performed
+- `cargo test --test bots --test api_bots`: 7 and 6 passed.
+- Full suite: `cargo test` gave 1,415 passed, 0 failed. `cargo clippy --all-targets -- -D warnings` is clean.
+- Rustfmt: `src/api/client.rs` stays at 3; the new files are clean.
+
+### Manual Validation
+Deferred to the end (batched): make a bot public, set its interactions URL and requested permissions, reset its token (the old one stops working with a bot client), copy the new one, and rename the bot.
