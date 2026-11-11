@@ -10,6 +10,7 @@ pub mod api;
 pub mod assets;
 pub mod attachment;
 pub mod banners;
+pub mod bots;
 pub mod channel_order;
 pub mod channel_permissions;
 pub mod channel_settings;

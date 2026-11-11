@@ -3374,6 +3374,28 @@ impl ChatStore {
         self.users.insert(user.id.clone(), user);
     }
 
+    /// One of the user's bots, as `GET /bots/@me` or a change to it sends
+    /// it: the bot as it sees itself (`relationship: User`), so the
+    /// relationship the store has is kept (none for a new one). Returns
+    /// whether a known user's name or avatar changed, so rows showing them
+    /// are drawn again.
+    pub fn add_bot_user(&mut self, mut user: User) -> bool {
+        let shown = |u: &User| {
+            (
+                u.username.clone(),
+                u.display_name.clone(),
+                u.avatar.as_ref().map(|f| f.id.clone()),
+            )
+        };
+        let known = self.users.get(&user.id);
+        let changed = known.is_some_and(|known| shown(known) != shown(&user));
+        user.relationship = known.map_or(crate::api::models::RelationshipStatus::None, |known| {
+            known.relationship.clone()
+        });
+        self.users.insert(user.id.clone(), user);
+        changed
+    }
+
     pub fn knows_user(&self, id: &str) -> bool {
         self.users.contains_key(id)
     }

@@ -12,6 +12,7 @@ gpui_kit::assets::icon_assets!(
     [
         AtSign,
         Bookmark,
+        Bot,
         Clock,
         CornerUpRight,
         Crown,
@@ -220,6 +221,8 @@ mod tests {
             IconName::Palette,
             IconName::Play,
             IconName::Settings,
+            // My Bots.
+            IconName::Bot,
         ] {
             let path = icon.path();
             assert!(AppAssets.load(&path).unwrap().is_some(), "{path} missing");

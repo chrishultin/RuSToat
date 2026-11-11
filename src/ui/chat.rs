@@ -418,6 +418,8 @@ pub struct ChatView {
     group_size: Option<u32>,
     /// The most custom emoji a server may have, when the instance says.
     server_emoji_limit: Option<u32>,
+    /// The most bots an account may own, when the instance says.
+    bot_limit: Option<u32>,
     /// How big a custom emoji's file may be.
     emoji_size_limit: u64,
     /// The instance's voice servers (see
@@ -665,6 +667,7 @@ impl ChatView {
                     this.update(cx, |this, cx| {
                         this.voice_nodes = root.voice_nodes().to_vec();
                         this.emoji_size_limit = root.emoji_size_limit();
+                        this.bot_limit = crate::bots::bot_limit(&root);
                         this.web_app = root.app;
                         this.image_limits = image_limits;
                         // Before `set_media`, whose re-sync adds the cards.
@@ -916,6 +919,7 @@ impl ChatView {
             invite_max_days: None,
             group_size: None,
             server_emoji_limit: None,
+            bot_limit: None,
             emoji_size_limit: crate::api::DEFAULT_EMOJI_SIZE_LIMIT,
             voice_nodes: Vec::new(),
             voice: None,
@@ -7757,6 +7761,30 @@ impl ChatView {
     /// How big a custom emoji's file may be.
     pub fn emoji_size_limit(&self) -> u64 {
         self.emoji_size_limit
+    }
+
+    /// The most bots an account may own on this instance, when it says.
+    pub fn bot_limit(&self) -> Option<u32> {
+        self.bot_limit
+    }
+
+    /// The users of the user's bots, fetched or changed in My Bots: keep
+    /// them, and redraw what shows them if their name or avatar changed.
+    pub fn bot_users_loaded(
+        &mut self,
+        users: Vec<crate::api::models::User>,
+        cx: &mut Context<Self>,
+    ) {
+        for user in users {
+            let id = user.id.clone();
+            if self.store.add_bot_user(user) {
+                self.profiles.remove(&id);
+                for channel in self.store.channels_showing(&id) {
+                    self.sync_pane(&channel, cx);
+                }
+            }
+        }
+        cx.notify();
     }
 
     /// The most custom emoji a server may have on this instance.

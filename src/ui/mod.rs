@@ -3,6 +3,7 @@ pub mod account_page;
 pub mod actions;
 pub mod app_prefs;
 pub mod app_root;
+pub mod bots_page;
 pub mod channel_permissions;
 pub mod channel_settings;
 pub mod chat;

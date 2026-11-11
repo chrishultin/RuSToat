@@ -163,10 +163,11 @@ Some milestones lay foundations that later ones reuse. When the earlier one's pl
 
 ## E. Bots
 
-### Milestone 29: Bots (M)
-- Your bots: list, create, edit (name, avatar, public or private, interactions URL), reset and copy the token, delete
-- Add a bot to a server or group, from its invite
-- Profile cards show bot badges and the bot's owner
+### Milestone 29: Bots (M). Plan: [`bots.md`](bots.md)
+- Your bots, in a My Bots section of Settings: list, create, edit (name, public or private, interactions URL, requested permissions), reset and copy the token, delete
+- A bot's profile (avatar, banner, display name, bio) with the Profile editor
+- Add a bot to a server or group, from its page or a `/bot/{id}` link, granting the requested permissions you may give
+- Bots' messages show a "Bot" tag; profile cards show the bot's owner
 
 ## F. Media
 

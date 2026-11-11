@@ -115,6 +115,9 @@ pub struct AccountLimits {
     /// Most files one message can carry.
     #[serde(default)]
     pub message_attachments: Option<usize>,
+    /// The most bots one account may own.
+    #[serde(default)]
+    pub bots: Option<u32>,
     #[serde(default)]
     pub file_upload_size_limits: FileSizeLimits,
 }
@@ -1340,6 +1343,33 @@ impl StoatClient {
     /// Stoat 0.16 deletes it and then fails (a 500).
     pub async fn delete_webhook(&self, id: &str) -> Result<(), ApiError> {
         self.send_raw(Method::DELETE, &format!("/webhooks/{id}"), None::<&()>)
+            .await
+            .map(|_| ())
+    }
+
+    /// `GET /bots/@me`: the user's bots and their users, each list sorted
+    /// by ID. Every bot carries its token.
+    pub async fn fetch_owned_bots(&self) -> Result<revolt_models::v0::OwnedBotsResponse, ApiError> {
+        self.send(Method::GET, "/bots/@me", None::<&()>).await
+    }
+
+    /// `POST /bots/create`: a new bot with username `name`. At most the
+    /// account's limit (`ReachedMaximumBots`), and not by a bot (`IsBot`).
+    /// Stoat answers with the bot, token and all, and its user.
+    pub async fn create_bot(
+        &self,
+        name: &str,
+    ) -> Result<revolt_models::v0::BotWithUserResponse, ApiError> {
+        let body = revolt_models::v0::DataCreateBot {
+            name: name.to_string(),
+        };
+        self.send(Method::POST, "/bots/create", Some(&body)).await
+    }
+
+    /// `DELETE /bots/{id}` (its owner only). The bot leaves everything it's
+    /// in.
+    pub async fn delete_bot(&self, id: &str) -> Result<(), ApiError> {
+        self.send_raw(Method::DELETE, &format!("/bots/{id}"), None::<&()>)
             .await
             .map(|_| ())
     }
