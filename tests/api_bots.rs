@@ -211,3 +211,49 @@ async fn a_taken_username_reads_plainly() {
         .unwrap_err();
     assert_eq!(bot_error_text(&err, None), "That username is taken.");
 }
+
+#[tokio::test]
+async fn a_bots_profile_is_its_users() {
+    use stoat_gpui::profile_edit::{ProfileForm, ProfileImage};
+
+    let loaded = ProfileForm {
+        display_name: "Helper".into(),
+        pronouns: String::new(),
+        bio: "Old".into(),
+        avatar: ProfileImage::Current("av-old".into()),
+        banner: ProfileImage::None,
+    };
+    let edited = ProfileForm {
+        display_name: "Helper Bot".into(),
+        bio: "I help.".into(),
+        avatar: ProfileImage::Current("av-new".into()),
+        ..loaded.clone()
+    };
+    let edit = ProfileForm::changes(&loaded, &edited);
+
+    let server = MockServer::start().await;
+    let mut answer = bot_user("b1", "helper");
+    answer["display_name"] = json!("Helper Bot");
+    answer["avatar"] = json!({
+        "_id": "av-new", "tag": "avatars", "filename": "a.png",
+        "metadata": { "type": "Image", "width": 1, "height": 1 },
+        "content_type": "image/png", "size": 1
+    });
+    Mock::given(method("PATCH"))
+        .and(path("/users/b1"))
+        .and(header("x-session-token", "tok"))
+        .and(body_json(json!({
+            "display_name": "Helper Bot",
+            "avatar": "av-new",
+            "profile": { "content": "I help." }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(answer))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let user = client(&server).edit_bot_user("b1", &edit).await.unwrap();
+    assert_eq!(user.id, "b1");
+    assert_eq!(user.display_name.as_deref(), Some("Helper Bot"));
+    assert_eq!(user.avatar.map(|file| file.id).as_deref(), Some("av-new"));
+}

@@ -25,7 +25,7 @@ use crate::permission_matrix::with_value;
 use crate::runtime::spawn_io;
 use crate::ui::chat::{ChatView, avatar};
 use crate::ui::permission_matrix::{Mode, PermissionMatrix};
-use crate::ui::profile_editor::field;
+use crate::ui::profile_editor::{ProfileEditor, field};
 use crate::ui::server_dialogs::name_field;
 use crate::ui::server_settings::{open_focused_dialog, section_heading};
 
@@ -497,13 +497,17 @@ enum Change {
     Token,
 }
 
-/// One bot's page: its username (with its own Save), whether it's public,
-/// its interactions URL and the permissions it asks for (saved together),
-/// its token to copy or reset, its ID and invite link to copy, and Delete.
+/// One bot's page: its profile (the Profile page's form), its username
+/// (with its own Save), whether it's public, its interactions URL and the
+/// permissions it asks for (saved together), its token to copy or reset,
+/// its ID and invite link to copy, and Delete.
 pub struct BotView {
     chat: WeakEntity<ChatView>,
     /// The bot as Stoat last sent it, token and all: never logged.
     bot: Bot,
+    /// Its avatar, banner, display name, pronouns and bio: the Profile
+    /// page's form, for the bot.
+    profile: Entity<ProfileEditor>,
     username: Entity<InputState>,
     url: Entity<InputState>,
     public: bool,
@@ -538,9 +542,11 @@ impl BotView {
                 _ => cx.notify(),
             }),
         ];
+        let profile = cx.new(|cx| ProfileEditor::for_bot(chat.clone(), bot.id.clone(), window, cx));
         let mut this = Self {
             chat: chat.downgrade(),
             bot,
+            profile,
             username,
             url,
             public: false,
@@ -1058,18 +1064,34 @@ impl Render for BotView {
             .w_full()
             .gap_4()
             .child(
+                h_flex().w_full().child(
+                    Button::new("bots-back")
+                        .label("My Bots")
+                        .icon(IconName::ChevronLeft)
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(BotEvent::Back))),
+                ),
+            )
+            .child(self.render_header(cx))
+            .child(
+                v_flex()
+                    .gap_4()
+                    .child(section_heading("Profile"))
+                    .child(self.profile.clone()),
+            )
+            .child(
+                v_flex()
+                    .gap_4()
+                    .child(section_heading("Settings"))
+                    .child(self.render_username(cx))
+                    .child(self.render_settings(cx)),
+            )
+            // The settings' own Reset and Save (the profile has its own).
+            .child(
                 h_flex()
-                    .w_full()
                     .gap_2()
-                    .child(
-                        Button::new("bots-back")
-                            .label("My Bots")
-                            .icon(IconName::ChevronLeft)
-                            .ghost()
-                            .small()
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(BotEvent::Back))),
-                    )
-                    .child(div().flex_1())
+                    .justify_end()
                     .child(
                         Button::new("bot-reset")
                             .label("Reset")
@@ -1087,14 +1109,6 @@ impl Render for BotView {
                             .disabled(!can_save)
                             .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
                     ),
-            )
-            .child(self.render_header(cx))
-            .child(
-                v_flex()
-                    .gap_4()
-                    .child(section_heading("Settings"))
-                    .child(self.render_username(cx))
-                    .child(self.render_settings(cx)),
             )
             .child(self.render_token(cx))
             .child(self.render_share(cx))

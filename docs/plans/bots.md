@@ -64,7 +64,7 @@ Milestone 29 of the [roadmap](roadmap.md) adds:
      - the username (with its own Save, since it's a rename);
      - "Public" ("Anyone can add this bot to their servers and groups.");
      - "Interactions URL" (optional, up to 2048; blank removes it);
-     - **Requested permissions:** the matrix in Values mode, server context, with every option enabled (the owner states what it asks for; nothing is granted here). These save together with the bar's Save;
+     - **Requested permissions:** the matrix in Values mode, server context, with every option enabled (the owner states what it asks for; nothing is granted here). These save together with the Reset and Save under the section (the Profile section has its own, so the page's top bar has only "‹ My Bots");
    - **Token:** shown as `••••••` with Copy token, and "Reset token…", which asks "Reset {name}'s token?" / "The old token stops working at once. Anything using it needs the new one." and toasts "Token reset." The new token is in the answer;
    - **Share:** Copy ID, Copy invite URL (`{app}/bot/{id}`, when the instance's web client is known), and "Add to a server or group…";
    - **Delete bot…**, which asks "Delete {name}?" / "It leaves every server and group it's in. This can't be undone."

@@ -8052,6 +8052,31 @@ impl ChatView {
         cx.notify();
     }
 
+    /// The user saved one of their bots' profile: show it now, as
+    /// [`Self::own_profile_saved`] does theirs.
+    pub fn bot_profile_saved(
+        &mut self,
+        user: crate::api::models::User,
+        bio: Option<Option<String>>,
+        banner_changed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let id = user.id.clone();
+        self.store.add_bot_user(user);
+        if banner_changed {
+            self.profiles.remove(&id);
+        } else if let Some(bio) = bio
+            && let Some(Some(profile)) = self.profiles.get_mut(&id)
+        {
+            profile.content = bio;
+        }
+        self.forget_member_lists();
+        for channel in self.store.channels_showing(&id) {
+            self.sync_pane(&channel, cx);
+        }
+        cx.notify();
+    }
+
     /// Log what makes up [`Self::sync_outside`]'s count.
     pub fn log_attention(&self) {
         for (channel, count) in self.store.attention_breakdown() {

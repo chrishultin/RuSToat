@@ -1,7 +1,8 @@
 //! The Profile page's form, for one account: avatar, banner, display name,
 //! pronouns and bio, saved together with one `PATCH /users/@me` (see
 //! [`crate::profile_edit`] for the rules and what's sent). New images are
-//! uploaded first, unchanged.
+//! uploaded first, unchanged. The same form edits one of the account's
+//! bots ([`ProfileEditor::for_bot`]), saved with `PATCH /users/{id}`.
 //!
 //! The settings window keeps one per account, so unsaved edits survive
 //! switching accounts while it's open.
@@ -25,8 +26,10 @@ use crate::profile_edit::{
 use crate::runtime::spawn_io;
 use crate::ui::chat::{ChatView, avatar};
 
-/// Shown when the bio and banner couldn't be loaded.
+/// Shown when the bio and banner couldn't be loaded: the account's, or a
+/// bot's.
 const PROFILE_FAILED_TEXT: &str = "Couldn't load your bio and banner.";
+const BOT_PROFILE_FAILED_TEXT: &str = "Couldn't load the bot's bio and banner.";
 
 /// Rows the bio field grows between before it scrolls.
 const BIO_ROWS: (usize, usize) = (3, 10);
@@ -384,11 +387,14 @@ pub(crate) fn render_image_row(
         .into_any_element()
 }
 
-/// One account's profile form.
+/// One account's profile form, or one of its bots'.
 pub struct ProfileEditor {
     /// The account's chat: its client, store and cached profiles.
     chat: WeakEntity<ChatView>,
-    me: String,
+    /// Whose profile it edits: the account's own, or one of its bots'.
+    user: String,
+    /// It's the account's own (else a bot's).
+    own: bool,
     display_name: Entity<InputState>,
     pronouns: Entity<InputState>,
     bio: Entity<TextareaState>,
@@ -407,13 +413,40 @@ pub struct ProfileEditor {
 }
 
 impl ProfileEditor {
+    /// The account's own profile (the Profile page).
     pub fn new(chat: Entity<ChatView>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let me = chat.read(cx).store().me().to_string();
+        Self::editing(chat, me, true, window, cx)
+    }
+
+    /// The profile of `bot`, one of the account's bots (its page in My
+    /// Bots).
+    pub fn for_bot(
+        chat: Entity<ChatView>,
+        bot: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::editing(chat, bot, false, window, cx)
+    }
+
+    fn editing(
+        chat: Entity<ChatView>,
+        user: String,
+        own: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let display_name = cx.new(|cx| InputState::new(window, cx));
         let pronouns = cx.new(|cx| InputState::new(window, cx).placeholder("they/them"));
         let bio = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(BIO_ROWS.0, BIO_ROWS.1)
-                .placeholder("Tell people about yourself")
+                .placeholder(if own {
+                    "Tell people about yourself"
+                } else {
+                    "Tell people about the bot"
+                })
         });
         // Counters and Save follow what's typed.
         let inputs = [
@@ -421,10 +454,10 @@ impl ProfileEditor {
             cx.subscribe(&pronouns, |_, _, _: &InputEvent, cx| cx.notify()),
             cx.subscribe(&bio, |_, _, _: &InputEvent, cx| cx.notify()),
         ];
-        let me = chat.read(cx).store().me().to_string();
         let mut this = Self {
             chat: chat.downgrade(),
-            me,
+            user,
+            own,
             display_name,
             pronouns,
             bio,
@@ -460,7 +493,7 @@ impl ProfileEditor {
         let Some(chat) = self.chat.upgrade() else {
             return false;
         };
-        let Some(user) = chat.read(cx).store().user(&self.me) else {
+        let Some(user) = chat.read(cx).store().user(&self.user) else {
             return false;
         };
         let (name, pronouns, username) = (
@@ -492,8 +525,8 @@ impl ProfileEditor {
             return;
         };
         let request = spawn_io({
-            let (client, me) = (chat.read(cx).client().clone(), self.me.clone());
-            async move { client.fetch_profile(&me).await }
+            let (client, user) = (chat.read(cx).client().clone(), self.user.clone());
+            async move { client.fetch_profile(&user).await }
         });
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = request.await;
@@ -513,17 +546,17 @@ impl ProfileEditor {
                         this.bio
                             .update(cx, |input, cx| input.set_value(bio, window, cx));
                         if let Some(chat) = this.chat.upgrade() {
-                            let me = this.me.clone();
-                            chat.update(cx, |chat, _| chat.cache_profile(me, profile));
+                            let user = this.user.clone();
+                            chat.update(cx, |chat, _| chat.cache_profile(user, profile));
                         }
                         this.profile = ProfileLoad::Loaded;
                     }
                     Ok(Err(err)) => {
-                        log::warn!("couldn't load the user's own profile: {err}");
+                        log::warn!("couldn't load the profile of {}: {err}", this.user);
                         this.profile = ProfileLoad::Failed;
                     }
                     Err(err) => {
-                        log::warn!("own profile task failed: {err:?}");
+                        log::warn!("profile task failed: {err:?}");
                         this.profile = ProfileLoad::Failed;
                     }
                 }
@@ -636,6 +669,7 @@ impl ProfileEditor {
             Saving::Uploading
         });
         cx.notify();
+        let (user, own) = (self.user.clone(), self.own);
         cx.spawn_in(window, async move |this, cx| {
             let mut edited = edited;
             for (kind, path) in uploads {
@@ -678,11 +712,17 @@ impl ProfileEditor {
             };
             let request = spawn_io({
                 let client = client.clone();
-                async move { client.edit_user(&edit).await }
+                async move {
+                    if own {
+                        client.edit_user(&edit).await
+                    } else {
+                        client.edit_bot_user(&user, &edit).await
+                    }
+                }
             });
             let result = request.await;
             this.update_in(cx, |this, window, cx| match result {
-                Ok(Ok(me)) => this.saved(me, edited, bio, window, cx),
+                Ok(Ok(user)) => this.saved(user, edited, bio, window, cx),
                 failed => this.save_failed(failed.map(|result| result.map(|_| ())), window, cx),
             })
             .ok();
@@ -690,11 +730,11 @@ impl ProfileEditor {
         .detach();
     }
 
-    /// Stoat took the change: it's what's loaded now, and the account shows
-    /// it at once.
+    /// Stoat took the change: it's what's loaded now, and the account (or
+    /// the bot) shows it at once.
     fn saved(
         &mut self,
-        me: crate::api::models::User,
+        user: crate::api::models::User,
         sent: ProfileForm,
         bio: Option<Option<String>>,
         window: &mut Window,
@@ -703,21 +743,26 @@ impl ProfileEditor {
         self.saving = None;
         let banner_changed = sent.banner != self.loaded.banner;
         self.loaded = ProfileForm {
-            display_name: me.display_name.clone().unwrap_or_default(),
-            pronouns: me.pronouns.clone().unwrap_or_default(),
+            display_name: user.display_name.clone().unwrap_or_default(),
+            pronouns: user.pronouns.clone().unwrap_or_default(),
             bio: match &bio {
                 Some(bio) => bio.clone().unwrap_or_default(),
                 None => self.loaded.bio.clone(),
             },
-            avatar: me.avatar.as_ref().map_or(ProfileImage::None, |file| {
+            avatar: user.avatar.as_ref().map_or(ProfileImage::None, |file| {
                 ProfileImage::Current(file.id.clone())
             }),
             banner: sent.banner,
         };
         self.reset(window, cx);
+        let own = self.own;
         if let Some(chat) = self.chat.upgrade() {
             chat.update(cx, |chat, cx| {
-                chat.own_profile_saved(me, bio, banner_changed, cx)
+                if own {
+                    chat.own_profile_saved(user, bio, banner_changed, cx)
+                } else {
+                    chat.bot_profile_saved(user, bio, banner_changed, cx)
+                }
             });
         }
         window.push_notification(Notification::success("Profile saved."), cx);
@@ -733,13 +778,17 @@ impl ProfileEditor {
         self.saving = None;
         let text = match result {
             Ok(Err(err)) => {
-                log::warn!("couldn't save the profile: {err:?}");
+                log::warn!("couldn't save the profile of {}: {err:?}", self.user);
                 save_error_text(&err)
             }
             Ok(Ok(())) => return,
             Err(err) => {
                 log::warn!("profile save task failed: {err:?}");
-                "Couldn't save your profile.".into()
+                if self.own {
+                    "Couldn't save your profile.".into()
+                } else {
+                    "Couldn't save the bot's profile.".into()
+                }
             }
         };
         window.push_notification(Notification::error(text), cx);
@@ -749,7 +798,7 @@ impl ProfileEditor {
     /// `@username#1234`, for the line saying which account is edited.
     fn handle(&self, cx: &App) -> Option<String> {
         let chat = self.chat.upgrade()?;
-        let user = chat.read(cx).store().user(&self.me)?;
+        let user = chat.read(cx).store().user(&self.user)?;
         Some(format!("@{}#{}", user.username, user.discriminator))
     }
 
@@ -760,10 +809,10 @@ impl ProfileEditor {
         let limits = chat.image_limits();
         let media = store.media();
         let name = store
-            .user(&self.me)
+            .user(&self.user)
             .map(crate::store::display_name)
             .unwrap_or_default();
-        let default_avatar = Preview::Url(media.default_avatar(&self.me));
+        let default_avatar = Preview::Url(media.default_avatar(&self.user));
         let avatar = avatar_preview(
             "profile-avatar-preview",
             Preview::of(
@@ -875,7 +924,10 @@ impl Render for ProfileEditor {
         v_flex()
             .w_full()
             .gap_4()
-            .child(div().text_sm().text_color(muted).child(editing))
+            // A bot's page names it already.
+            .when(self.own, |this| {
+                this.child(div().text_sm().text_color(muted).child(editing))
+            })
             .children(images.into_iter().flatten())
             .child(display_name)
             .child(pronouns)
@@ -886,7 +938,11 @@ impl Render for ProfileEditor {
                         .gap_2()
                         .text_sm()
                         .text_color(cx.theme().danger)
-                        .child(PROFILE_FAILED_TEXT)
+                        .child(if self.own {
+                            PROFILE_FAILED_TEXT
+                        } else {
+                            BOT_PROFILE_FAILED_TEXT
+                        })
                         .child(
                             Button::new("profile-retry")
                                 .label("Retry")
@@ -900,12 +956,15 @@ impl Render for ProfileEditor {
                         ),
                 )
             })
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(muted)
-                    .child("Your username can't be changed here yet."),
-            )
+            // A bot's username is in its Settings.
+            .when(self.own, |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child("Your username can't be changed here yet."),
+                )
+            })
             .child(
                 h_flex()
                     .gap_2()

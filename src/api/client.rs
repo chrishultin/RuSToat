@@ -767,6 +767,15 @@ impl StoatClient {
         self.send(Method::PATCH, "/users/@me", Some(&body)).await
     }
 
+    /// `PATCH /users/{id}`: change one of the user's bots' profile, as
+    /// [`Self::edit_user`] does the user's own (Stoat lets a bot's owner).
+    /// Stoat answers with the bot's user.
+    pub async fn edit_bot_user(&self, id: &str, edit: &DataEditUser) -> Result<User, ApiError> {
+        let body = edit_body(serde_json::to_value(edit).expect("user edit serialises"));
+        self.send(Method::PATCH, &format!("/users/{id}"), Some(&body))
+            .await
+    }
+
     /// `PATCH /users/@me/username`: change the user's username, confirmed
     /// with their current `password` (never an MFA ticket). Stoat answers
     /// with the user as stored: the name may be cleaned up, and the `#tag`

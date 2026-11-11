@@ -78,3 +78,30 @@ Look-ahead: chunk 3 adds a Profile section to `BotView`; chunk 4 adds "Add to a 
 
 ### Manual Validation
 Deferred to the end (batched): make a bot public, set its interactions URL and requested permissions, reset its token (the old one stops working with a bot client), copy the new one, and rename the bot.
+
+## Chunk 3: A bot's profile
+
+### Changes Made
+- `src/ui/profile_editor.rs`:
+  - `ProfileEditor::new` still edits the account (unchanged behaviour); `ProfileEditor::for_bot(chat, bot)` edits a bot's user. Both go through `editing(chat, user, own)`;
+  - the `me` field is now `user`, plus `own`. Filling from the store, fetching the bio and banner (`fetch_profile(user)`, which Stoat allows for any bot), the avatar preview's default, and caching the profile all use `user`;
+  - Save sends `edit_user` (own) or `edit_bot_user(user)`, and hands the answer to `own_profile_saved` or the new `bot_profile_saved`;
+  - for a bot: no "Editing @…" line (its page names it), no "Your username can't be changed here yet." (it's in Settings), the bio's placeholder is "Tell people about the bot", and the failure texts say "the bot's". Log lines name the user rather than "own".
+- `src/api/client.rs`: `edit_bot_user(id, &DataEditUser) -> User` (`PATCH /users/{id}`, through `edit_body`).
+- `src/ui/chat.rs`: `bot_profile_saved(user, bio, banner_changed)`, as `own_profile_saved` does for the account: the user goes to the store (`add_bot_user`), the cached profile follows (or is dropped when the banner changed), and panes showing the bot are re-synced.
+- `src/ui/bots_page.rs`: `BotView` holds a `ProfileEditor::for_bot`, shown as a **Profile** section under the header. The settings' Reset and Save moved from the top bar to under the Settings section.
+- `tests/api_bots.rs`: 1 new test. `PATCH /users/b1` sends exactly what `ProfileForm::changes` gives (display name, avatar ID, bio) and parses the bot's `User`.
+
+### Divergences
+- **The settings' Reset and Save sit under the Settings section,** not in the top bar: the Profile section has its own Save, and two unrelated Saves at opposite ends of the page would mislead. The plan's Assumption 3 is amended.
+- **`ChatView::bot_profile_saved`** was added beside `own_profile_saved`, rather than applying the answer with `add_user`/`apply_user_update` directly, so the cached profile (bio, banner) follows too.
+
+Look-ahead: chunks 4–5 are unaffected.
+
+### Verification Performed
+- `cargo test --test profile` (unchanged): 38 passed. `cargo test --test api_bots`: 7 passed.
+- Full suite: `cargo test` gave 1,416 passed, 0 failed. `cargo clippy --all-targets -- -D warnings` is clean.
+- Rustfmt: `src/ui/chat.rs` 17 and `src/api/client.rs` 3 are unchanged; `src/ui/profile_editor.rs` stays clean; the new files are clean.
+
+### Manual Validation
+Deferred to the end (batched): give a bot an avatar, banner, display name and bio; its messages and profile card show them. Your own Profile page behaves as before.
