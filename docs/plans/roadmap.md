@@ -151,8 +151,11 @@ Some milestones lay foundations that later ones reuse. When the earlier one's pl
 - Reorder channels and categories, and move channels between categories, by dragging in the sidebar or with a "Move to ›" submenu. Creating, renaming and deleting categories came in milestone 19.
 - The web client's `"default"` category is drawn as the top, headerless section, as the web client does
 
-### Milestone 27: Channel permission overrides (M)
-- Allow or deny, per role and for the default permissions, reusing milestone 25's matrix
+### Milestone 27: Channel permission overrides (M). Plan: [`channel-permissions.md`](channel-permissions.md)
+- Allow or deny, per role and for the default permissions, reusing milestone 25's matrix, on a Permissions page in milestone 26's Channel Settings window
+- Exactly Stoat's grant rule, which for a role's override compares with the role's server-wide permissions
+- Only the permissions that apply in a channel (23) or group (12)
+- A group's member permissions, on or off, for its owner
 
 ### Milestone 28: Emoji and webhooks (M)
 - Server emoji: upload, rename, delete

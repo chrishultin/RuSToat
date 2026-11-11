@@ -35,6 +35,7 @@ use crate::channel_settings::{
 use crate::profile_edit::ProfileImage;
 use crate::runtime::spawn_io;
 use crate::themes;
+use crate::ui::channel_permissions::ChannelPermissionsPage;
 use crate::ui::chat::ChatView;
 use crate::ui::profile_editor::{
     ImageSlot, Preview, avatar_preview, field, prompt_for_image, render_image_row, upload_image,
@@ -143,12 +144,13 @@ pub struct ChannelSettingsView {
     /// The window's title, as last set.
     title: String,
     overview: Entity<ChannelOverviewPage>,
+    permissions: Entity<ChannelPermissionsPage>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl ChannelSettingsView {
     /// The pages, in sidebar order.
-    pub const PAGES: [ChannelPageFn; 1] = [overview_page];
+    pub const PAGES: [ChannelPageFn; 2] = [overview_page, permissions_page];
 
     pub fn new(
         chat: Entity<ChatView>,
@@ -176,6 +178,7 @@ impl ChannelSettingsView {
         ];
         let title = window_title(chat.read(cx).store().channel(&channel));
         let overview = cx.new(|cx| ChannelOverviewPage::new(&chat, channel.clone(), window, cx));
+        let permissions = cx.new(|cx| ChannelPermissionsPage::new(&chat, channel.clone(), cx));
         Self {
             chat: chat.downgrade(),
             channel,
@@ -184,6 +187,7 @@ impl ChannelSettingsView {
             page_key: 0,
             title,
             overview,
+            permissions,
             _subscriptions: subscriptions,
         }
     }
@@ -258,6 +262,28 @@ fn overview_page(view: &ChannelSettingsView, cx: &mut App) -> Option<SettingPage
                     "slowmode",
                     "mature",
                     "nsfw",
+                ]),
+            )),
+    )
+}
+
+/// Permissions: a server channel's overrides, or a group's member
+/// permissions.
+fn permissions_page(view: &ChannelSettingsView, cx: &mut App) -> Option<SettingPage> {
+    if !view.access(cx).permissions {
+        return None;
+    }
+    let permissions = view.permissions.clone();
+    Some(
+        SettingPage::new("Permissions")
+            .icon(IconName::ShieldCheck)
+            .resettable(false)
+            .group(SettingGroup::new().item(
+                SettingItem::render(move |_, _, _| permissions.clone()).keywords([
+                    "permissions",
+                    "overrides",
+                    "roles",
+                    "everyone",
                 ]),
             )),
     )

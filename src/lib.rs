@@ -11,6 +11,7 @@ pub mod assets;
 pub mod attachment;
 pub mod banners;
 pub mod channel_order;
+pub mod channel_permissions;
 pub mod channel_settings;
 pub mod complete;
 pub mod dock;

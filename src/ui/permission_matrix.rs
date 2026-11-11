@@ -1,9 +1,10 @@
-//! The permission matrix: every permission under its group's heading, each
-//! with its title, what it does, and a control. In [`Mode::Values`] (the
-//! server's default permissions) that's a checkbox; in [`Mode::Overrides`]
-//! (a role, later a channel's overrides) it's Deny / Neutral / Allow. The
-//! caller says which choices the user may make, and hears each change. The
-//! list and the rules are [`crate::permission_matrix`].
+//! The permission matrix: every permission that means something in its
+//! context (a server, a channel or a group) under its group's heading, each
+//! with its title, what it does there, and a control. In [`Mode::Values`]
+//! (the server's default permissions, a group's) that's a checkbox; in
+//! [`Mode::Overrides`] (a role, a channel's overrides) it's Deny / Neutral /
+//! Allow. The caller says which choices the user may make, and hears each
+//! change. The list and the rules are [`crate::permission_matrix`].
 
 use std::rc::Rc;
 
@@ -15,7 +16,9 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use revolt_permissions::Override;
 
-use crate::permission_matrix::{PERMISSIONS, PermissionEntry, Setting, setting_of};
+use crate::permission_matrix::{
+    MatrixContext, PermissionEntry, Setting, ShownEntry, entries, setting_of,
+};
 
 /// What the matrix shows.
 #[derive(Debug, Clone)]
@@ -53,6 +56,7 @@ const UNHELD_OVERRIDE: &str = "You don't have this permission, so you can only m
 pub struct PermissionMatrix {
     id: SharedString,
     mode: Mode,
+    context: MatrixContext,
     enabled: Enabled,
     on_change: Option<OnChange>,
     read_only: bool,
@@ -66,10 +70,18 @@ impl PermissionMatrix {
         Self {
             id: id.into(),
             mode,
+            context: MatrixContext::Server,
             enabled: Rc::new(|_, _| true),
             on_change: None,
             read_only: false,
         }
+    }
+
+    /// Where its permissions apply (a server's, unless said): only those
+    /// that mean something there are shown, described as they apply there.
+    pub fn context(mut self, context: MatrixContext) -> Self {
+        self.context = context;
+        self
     }
 
     /// Which choices the user may make; the others are greyed out, with a
@@ -171,7 +183,8 @@ impl PermissionMatrix {
             .into_any_element()
     }
 
-    fn render_row(&self, entry: &PermissionEntry, cx: &App) -> AnyElement {
+    fn render_row(&self, shown: &ShownEntry, cx: &App) -> AnyElement {
+        let entry = shown.entry;
         let control = match self.mode {
             Mode::Values(_) => self.render_checkbox(entry),
             Mode::Overrides(_) => self.render_override(entry),
@@ -194,7 +207,7 @@ impl PermissionMatrix {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(entry.server_description),
+                            .child(shown.description),
                     ),
             )
             .child(div().flex_none().child(control))
@@ -205,8 +218,8 @@ impl PermissionMatrix {
 impl RenderOnce for PermissionMatrix {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let mut matrix = v_flex().w_full().gap_1();
-        for entry in &PERMISSIONS {
-            if let Some(heading) = entry.heading {
+        for shown in entries(self.context) {
+            if let Some(heading) = shown.heading {
                 matrix = matrix.child(
                     div()
                         .pt_3()
@@ -217,7 +230,7 @@ impl RenderOnce for PermissionMatrix {
                         .child(heading.to_uppercase()),
                 );
             }
-            matrix = matrix.child(self.render_row(entry, cx));
+            matrix = matrix.child(self.render_row(&shown, cx));
         }
         matrix
     }

@@ -8,8 +8,8 @@ use revolt_result::ErrorType;
 use serde_json::{Value, json};
 use stoat_gpui::api::ApiError;
 use stoat_gpui::permission_matrix::{
-    PERMISSIONS, PermissionEntry, Setting, default_change, follow_override, follow_value,
-    may_grant, missing_from_default, missing_note, override_change, override_of,
+    MatrixContext, PERMISSIONS, PermissionEntry, Setting, default_change, entries, follow_override,
+    follow_value, may_grant, missing_from_default, missing_note, override_change, override_of,
     permissions_error_text, setting_enabled, setting_of, value_enabled, with_setting,
 };
 
@@ -84,8 +84,12 @@ fn every_entry_is_described_and_titles_are_unique() {
     let mut titles = HashSet::new();
     for entry in &PERMISSIONS {
         assert!(!entry.server_description.is_empty(), "{}", entry.title);
-        // Channel descriptions come with channel overrides (milestone 27).
-        assert_eq!(entry.channel_description, None, "{}", entry.title);
+        for description in [entry.channel_description, entry.group_description]
+            .into_iter()
+            .flatten()
+        {
+            assert!(!description.is_empty(), "{}", entry.title);
+        }
         assert!(titles.insert(entry.title), "{} twice", entry.title);
     }
 }
@@ -414,4 +418,133 @@ fn untouched_settings_follow_and_edited_ones_stay() {
     assert_eq!(setting_of(&followed, REACT), Setting::Deny);
     assert_eq!(setting_of(&followed, VIDEO), Setting::Allow);
     assert_eq!(follow_override(&filled, &filled, &now), now);
+}
+
+/// The permissions `context` shows, in order.
+fn shown(context: MatrixContext) -> Vec<ChannelPermission> {
+    entries(context)
+        .iter()
+        .map(|shown| shown.entry.permission)
+        .collect()
+}
+
+/// The headings `context` shows, each with the permission it's above.
+fn headings(context: MatrixContext) -> Vec<(&'static str, ChannelPermission)> {
+    entries(context)
+        .iter()
+        .filter_map(|shown| Some((shown.heading?, shown.entry.permission)))
+        .collect()
+}
+
+#[test]
+fn the_server_context_is_every_permission_as_before() {
+    let server = entries(MatrixContext::Server);
+    assert_eq!(server.len(), PERMISSIONS.len());
+    for (shown, entry) in server.iter().zip(&PERMISSIONS) {
+        assert_eq!(shown.entry, entry);
+        assert_eq!(shown.description, entry.server_description);
+        assert_eq!(shown.heading, entry.heading);
+    }
+}
+
+#[test]
+fn a_channel_shows_the_23_that_mean_something_there() {
+    use ChannelPermission::*;
+    assert_eq!(
+        shown(MatrixContext::Channel),
+        [
+            ManageChannel,
+            ManagePermissions,
+            ViewChannel,
+            ReadMessageHistory,
+            SendMessage,
+            ManageMessages,
+            ManageWebhooks,
+            InviteOthers,
+            SendEmbeds,
+            UploadFiles,
+            Masquerade,
+            React,
+            UseExternalEmojis,
+            BypassSlowmode,
+            Connect,
+            Speak,
+            Video,
+            MuteMembers,
+            DeafenMembers,
+            MoveMembers,
+            Listen,
+            MentionEveryone,
+            MentionRoles,
+        ]
+    );
+    // Members has nothing there, so no heading.
+    assert_eq!(
+        headings(MatrixContext::Channel),
+        [
+            ("Admin", ManageChannel),
+            ("Channels", ViewChannel),
+            ("Messaging", SendEmbeds),
+            ("Voice", Connect),
+            ("Mentions", MentionEveryone),
+        ]
+    );
+}
+
+#[test]
+fn a_group_shows_the_12_that_mean_something_there() {
+    use ChannelPermission::*;
+    assert_eq!(
+        shown(MatrixContext::Group),
+        [
+            ManageChannel,
+            ManagePermissions,
+            SendMessage,
+            ManageMessages,
+            ManageWebhooks,
+            InviteOthers,
+            SendEmbeds,
+            UploadFiles,
+            Masquerade,
+            React,
+            MentionEveryone,
+            MentionRoles,
+        ]
+    );
+    // View Channel, which starts Channels, isn't shown in a group, so the
+    // heading moves to Send Messages.
+    assert_eq!(
+        headings(MatrixContext::Group),
+        [
+            ("Admin", ManageChannel),
+            ("Channels", SendMessage),
+            ("Messaging", SendEmbeds),
+            ("Mentions", MentionEveryone),
+        ]
+    );
+}
+
+#[test]
+fn contexts_describe_permissions_their_own_way() {
+    let describe = |context, permission| {
+        entries(context)
+            .into_iter()
+            .find(|shown| shown.entry.permission == permission)
+            .map(|shown| shown.description)
+    };
+    use ChannelPermission::*;
+    assert_eq!(
+        describe(MatrixContext::Channel, ViewChannel),
+        Some("Able to access this channel")
+    );
+    assert_eq!(
+        describe(MatrixContext::Group, InviteOthers),
+        Some("Add new members to the group")
+    );
+    assert_eq!(
+        describe(MatrixContext::Server, InviteOthers),
+        Some("Create invites for others to use")
+    );
+    assert_eq!(describe(MatrixContext::Channel, KickMembers), None);
+    assert_eq!(describe(MatrixContext::Group, UseExternalEmojis), None);
 }

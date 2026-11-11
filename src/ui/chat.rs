@@ -4378,7 +4378,8 @@ impl ChatView {
             };
             let store = &this.read(cx).store;
             let invitable = store.can_invite(&channel_id);
-            let editable = store.can_edit_channel(&channel_id);
+            // Its settings show with Manage Channels or Manage Permissions.
+            let editable = crate::channel_settings::access(store, &channel_id).any();
             let deletable = in_server && store.can_manage_channel(&channel_id);
             let group = matches!(store.channel(&channel_id), Some(Channel::Group { .. }));
             let dm = matches!(
@@ -13774,9 +13775,9 @@ fn open_info_dialog(view: WeakEntity<ChatView>, info: Info, window: &mut Window,
                 Some(("Server settings…", open))
             }
             Info::Channel(channel)
-                if view
-                    .upgrade()
-                    .is_some_and(|chat| chat.read(cx).store().can_edit_channel(channel)) =>
+                if view.upgrade().is_some_and(|chat| {
+                    crate::channel_settings::access(chat.read(cx).store(), channel).any()
+                }) =>
             {
                 let (view, channel) = (view.clone(), channel.clone());
                 let open: OnSettings = Rc::new(move |window, cx| {

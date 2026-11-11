@@ -111,15 +111,26 @@ fn api_error(body: Value) -> ApiError {
     )
 }
 
-const SHOWN: ChannelAccess = ChannelAccess { overview: true };
+/// The Overview, without Manage Permissions.
+const SHOWN: ChannelAccess = ChannelAccess {
+    overview: true,
+    permissions: false,
+};
+
+/// Both pages.
+const EVERY_PAGE: ChannelAccess = ChannelAccess {
+    overview: true,
+    permissions: true,
+};
 
 #[test]
 fn the_owner_and_a_channel_manager_may_edit_every_channel() {
-    for me in ["u-owner", "u-mod"] {
-        let store = store(me);
-        assert_eq!(access(&store, "ch-a"), SHOWN, "{me}");
-        assert_eq!(access(&store, "ch-b"), SHOWN, "{me}");
-    }
+    let owner = store("u-owner");
+    assert_eq!(access(&owner, "ch-a"), EVERY_PAGE);
+    assert_eq!(access(&owner, "ch-b"), EVERY_PAGE);
+    let moderator = store("u-mod");
+    assert_eq!(access(&moderator, "ch-a"), SHOWN);
+    assert_eq!(access(&moderator, "ch-b"), SHOWN);
 }
 
 #[test]
@@ -144,6 +155,9 @@ fn a_group_is_editable_by_its_owner_and_by_default_its_members() {
     // A group that takes Manage Channels from its members.
     assert!(access(&store("u-owner"), "strict").any());
     assert!(!access(&store("u-plain"), "strict").any());
+    // Only the owner may change a group's permissions, by default.
+    assert_eq!(access(&store("u-owner"), "grp"), EVERY_PAGE);
+    assert_eq!(access(&store("u-plain"), "grp"), SHOWN);
 }
 
 #[test]

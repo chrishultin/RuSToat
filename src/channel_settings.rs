@@ -29,13 +29,16 @@ pub struct ChannelAccess {
     /// Name, description, icon, slowmode and the mature flag (Manage
     /// Channels on the channel).
     pub overview: bool,
+    /// Its overrides, or a group's member permissions (Manage Permissions
+    /// in it).
+    pub permissions: bool,
 }
 
 impl ChannelAccess {
     /// Whether any page shows: the window opens only then, and closes once
     /// none does.
     pub fn any(&self) -> bool {
-        self.overview
+        self.overview || self.permissions
     }
 }
 
@@ -43,6 +46,7 @@ impl ChannelAccess {
 pub fn access(store: &ChatStore, channel: &str) -> ChannelAccess {
     ChannelAccess {
         overview: store.can_edit_channel(channel),
+        permissions: crate::channel_permissions::can_manage_channel_permissions(store, channel),
     }
 }
 

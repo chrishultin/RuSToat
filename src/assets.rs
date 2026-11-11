@@ -237,6 +237,10 @@ mod tests {
             IconName::Lock,
             IconName::Plus,
             IconName::Users,
+            // Channel Settings' Permissions page, and its rows.
+            IconName::ShieldCheck,
+            IconName::ChevronRight,
+            IconName::ChevronLeft,
             // The permission matrix's Deny / Neutral / Allow.
             IconName::Close,
             IconName::Minus,

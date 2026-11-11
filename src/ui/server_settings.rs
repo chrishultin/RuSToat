@@ -1354,7 +1354,7 @@ const COLOUR_DOT: f32 = 12.;
 
 /// A role's colour as a dot, or a dashed circle with no colour (or one
 /// that isn't a solid colour).
-fn colour_dot(colour: Option<&str>, cx: &App) -> Div {
+pub(crate) fn colour_dot(colour: Option<&str>, cx: &App) -> Div {
     let dot = div().size(px(COLOUR_DOT)).flex_none().rounded_full();
     match colour.and_then(parse_colour) {
         Some(colour) => dot.bg(colour),
@@ -2135,7 +2135,7 @@ impl RoleEditor {
 }
 
 /// A line saying why something on the page can't be changed, with a lock.
-fn lock_note(text: &'static str, cx: &App) -> AnyElement {
+pub(crate) fn lock_note(text: &'static str, cx: &App) -> AnyElement {
     h_flex()
         .gap_2()
         .text_sm()
@@ -2146,7 +2146,7 @@ fn lock_note(text: &'static str, cx: &App) -> AnyElement {
 }
 
 /// A section's heading in an editor.
-fn section_heading(text: &'static str) -> Div {
+pub(crate) fn section_heading(text: &'static str) -> Div {
     div()
         .text_base()
         .font_weight(FontWeight::SEMIBOLD)

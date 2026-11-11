@@ -25,8 +25,11 @@ pub struct PermissionEntry {
     pub title: &'static str,
     /// What it allows across a server.
     pub server_description: &'static str,
-    /// What it allows in one channel, where that reads differently.
+    /// What it allows in one server channel, if it means anything there
+    /// (Kick Members, say, doesn't).
     pub channel_description: Option<&'static str>,
+    /// What it allows in a group, if it means anything there.
+    pub group_description: Option<&'static str>,
     /// The heading of the group this entry starts, if it starts one.
     pub heading: Option<&'static str>,
 }
@@ -36,6 +39,62 @@ impl PermissionEntry {
     pub fn bit(&self) -> u64 {
         self.permission as u64
     }
+
+    /// What it allows in `context`, or `None` if it means nothing there
+    /// (so the matrix leaves it out). Every permission means something
+    /// across a server.
+    pub fn description(&self, context: MatrixContext) -> Option<&'static str> {
+        match context {
+            MatrixContext::Server => Some(self.server_description),
+            MatrixContext::Channel => self.channel_description,
+            MatrixContext::Group => self.group_description,
+        }
+    }
+}
+
+/// Where a matrix's permissions apply: which rows it shows, and how each
+/// reads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MatrixContext {
+    /// A server's roles and default permissions: every permission.
+    #[default]
+    Server,
+    /// One server channel's overrides.
+    Channel,
+    /// A group's member permissions.
+    Group,
+}
+
+/// One row of a matrix in some context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShownEntry {
+    pub entry: &'static PermissionEntry,
+    /// What it allows there.
+    pub description: &'static str,
+    /// The heading to show above it: its group's, if it's the first of the
+    /// group shown.
+    pub heading: Option<&'static str>,
+}
+
+/// The rows of a matrix in `context`, in order. A group of permissions
+/// none of which mean anything there has no heading; one whose first
+/// permission is left out has its heading on the first one shown.
+pub fn entries(context: MatrixContext) -> Vec<ShownEntry> {
+    let mut pending = None;
+    let mut shown = Vec::new();
+    for entry in &PERMISSIONS {
+        if entry.heading.is_some() {
+            pending = entry.heading;
+        }
+        if let Some(description) = entry.description(context) {
+            shown.push(ShownEntry {
+                entry,
+                description,
+                heading: pending.take(),
+            });
+        }
+    }
+    shown
 }
 
 const fn entry(
@@ -48,6 +107,7 @@ const fn entry(
         title,
         server_description,
         channel_description: None,
+        group_description: None,
         heading: None,
     }
 }
@@ -63,7 +123,7 @@ const fn starts(heading: &'static str, entry: PermissionEntry) -> PermissionEntr
 /// `GrantAll` pair, which aren't single permissions), in display order, as
 /// the web client lists them, plus View Audit Logs and Use External Emojis,
 /// which it leaves out but Stoat enforces.
-pub const PERMISSIONS: [PermissionEntry; 35] = {
+pub const PERMISSIONS: [PermissionEntry; 35] = with_contexts({
     use ChannelPermission::*;
     [
         starts(
@@ -216,7 +276,111 @@ pub const PERMISSIONS: [PermissionEntry; 35] = {
         ),
         entry(MentionRoles, "Mention Roles", "Mention specific roles"),
     ]
+});
+
+/// What each permission that means something in one server channel allows
+/// there: the web client's 22, and Use External Emojis, which Stoat checks
+/// per channel.
+const CHANNEL_DESCRIPTIONS: [(ChannelPermission, &str); 23] = {
+    use ChannelPermission::*;
+    [
+        (ManageChannel, "Edit and delete this channel"),
+        (
+            ManagePermissions,
+            "Edit this channel's role and default permissions",
+        ),
+        (ViewChannel, "Able to access this channel"),
+        (
+            ReadMessageHistory,
+            "Read past messages sent in this channel",
+        ),
+        (SendMessage, "Send messages in this channel"),
+        (
+            ManageMessages,
+            "Delete and pin messages sent by other members",
+        ),
+        (ManageWebhooks, "Create and edit webhooks"),
+        (InviteOthers, "Create invites for others to use"),
+        (
+            SendEmbeds,
+            "Send embedded content such as link embeds or custom embeds",
+        ),
+        (UploadFiles, "Send attachments to chat"),
+        (
+            Masquerade,
+            "Allow members to change name and avatar per-message",
+        ),
+        (React, "React to messages with emoji"),
+        (UseExternalEmojis, "Use custom emoji from other servers"),
+        (BypassSlowmode, "Bypass this channel's slowmode"),
+        (Connect, "Connect to this voice channel"),
+        (Speak, "Able to speak in voice call"),
+        (Video, "Share camera or screen in voice call"),
+        (MuteMembers, "Mute lower-ranking members in voice call"),
+        (DeafenMembers, "Deafen lower-ranking members in voice call"),
+        (MoveMembers, "Move members between voice channels"),
+        (Listen, "Hear other people and see their video"),
+        (
+            MentionEveryone,
+            "Mention everyone and online members inside the server",
+        ),
+        (MentionRoles, "Mention specific roles"),
+    ]
 };
+
+/// What each permission that means something in a group allows there, as
+/// the web client lists them.
+const GROUP_DESCRIPTIONS: [(ChannelPermission, &str); 12] = {
+    use ChannelPermission::*;
+    [
+        (ManageChannel, "Edit the group's name, description and icon"),
+        (ManagePermissions, "Change what members may do in the group"),
+        (SendMessage, "Send messages in the group"),
+        (
+            ManageMessages,
+            "Delete and pin messages sent by other members",
+        ),
+        (ManageWebhooks, "Create and edit webhooks"),
+        (InviteOthers, "Add new members to the group"),
+        (
+            SendEmbeds,
+            "Send embedded content such as link embeds or custom embeds",
+        ),
+        (UploadFiles, "Send attachments to chat"),
+        (
+            Masquerade,
+            "Allow members to change name and avatar per-message",
+        ),
+        (React, "React to messages with emoji"),
+        (MentionEveryone, "Mention everyone in the group"),
+        (MentionRoles, "Mention specific roles"),
+    ]
+};
+
+/// `list` with each entry's channel and group descriptions filled in from
+/// [`CHANNEL_DESCRIPTIONS`] and [`GROUP_DESCRIPTIONS`].
+const fn with_contexts(mut list: [PermissionEntry; 35]) -> [PermissionEntry; 35] {
+    let mut i = 0;
+    while i < list.len() {
+        let bit = list[i].permission as u64;
+        let mut j = 0;
+        while j < CHANNEL_DESCRIPTIONS.len() {
+            if CHANNEL_DESCRIPTIONS[j].0 as u64 == bit {
+                list[i].channel_description = Some(CHANNEL_DESCRIPTIONS[j].1);
+            }
+            j += 1;
+        }
+        let mut j = 0;
+        while j < GROUP_DESCRIPTIONS.len() {
+            if GROUP_DESCRIPTIONS[j].0 as u64 == bit {
+                list[i].group_description = Some(GROUP_DESCRIPTIONS[j].1);
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    list
+}
 
 /// What a role (or a channel override) does with one permission. Ordered
 /// from strictest: `Deny < Neutral < Allow`.
