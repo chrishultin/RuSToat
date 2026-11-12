@@ -79,6 +79,9 @@ pub enum AttachmentView {
         image: Option<(std::path::PathBuf, u32, u32)>,
         /// Uploaded so far, in thousandths.
         progress: u16,
+        /// Marked as a spoiler: an image is drawn covered, as the sent one
+        /// will be.
+        spoiler: bool,
     },
 }
 

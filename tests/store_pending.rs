@@ -807,3 +807,49 @@ fn the_users_own_files_are_never_handed_back() {
     store.discard_pending(CH, "n2");
     assert!(released(&mut store).is_empty());
 }
+
+#[test]
+fn a_marked_image_is_covered_while_it_sends_and_keeps_its_name_on_a_retry() {
+    let mut store = store();
+    let mut photo = file("photo.png", 4000).with_dimensions(Some((640, 480)));
+    photo.spoiler = true;
+    let mut notes = file("notes.pdf", 10);
+    notes.spoiler = true;
+    let plain = file("plain.png", 10);
+    store.add_pending(with_files("n1", "", &[photo, notes, plain]));
+
+    let row = rows(&store).pop().unwrap();
+    assert!(matches!(
+        &row.attachments[0],
+        AttachmentView::Local {
+            image: Some((_, 400, 300)),
+            spoiler: true,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &row.attachments[1],
+        AttachmentView::Local {
+            image: None,
+            spoiler: true,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &row.attachments[2],
+        AttachmentView::Local { spoiler: false, .. }
+    ));
+
+    // A failed send is retried with the same files, still marked.
+    assert!(store.fail_pending(CH, "n1", "offline".into(), true));
+    let retried = store.retry_pending(CH, "n1", || "n2".into()).unwrap();
+    let names: Vec<String> = retried
+        .attachments
+        .iter()
+        .map(|a| a.file.upload_name())
+        .collect();
+    assert_eq!(
+        names,
+        ["SPOILER_photo.png", "SPOILER_notes.pdf", "plain.png"]
+    );
+}

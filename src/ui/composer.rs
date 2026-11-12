@@ -1091,6 +1091,32 @@ impl Composer {
                         .child(Icon::new(file_icon(kind)).text_color(theme.muted_foreground))
                         .into_any_element(),
                 };
+                // Marked as a spoiler: the thumbnail dimmed, under a closed eye.
+                let spoiler = file.spoiler;
+                let thumb = div()
+                    .relative()
+                    .flex_none()
+                    .child(thumb)
+                    .when(spoiler, |el| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(4.))
+                                .bg(black().opacity(0.6))
+                                .text_color(white())
+                                .child(Icon::new(IconName::EyeOff).small()),
+                        )
+                    });
+                let size = crate::attachment::size_label(file.size);
+                let detail = if spoiler {
+                    format!("Spoiler · {size}")
+                } else {
+                    size
+                };
                 h_flex()
                     .id(SharedString::from(format!("tray-{local_id}")))
                     .max_w(px(TRAY_CHIP_WIDTH))
@@ -1111,8 +1137,28 @@ impl Composer {
                                 div()
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
-                                    .child(crate::attachment::size_label(file.size)),
+                                    .truncate()
+                                    .child(detail),
                             ),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("tray-spoiler-{local_id}")))
+                            .xsmall()
+                            .ghost()
+                            .icon(if spoiler {
+                                IconName::Eye
+                            } else {
+                                IconName::EyeOff
+                            })
+                            .tooltip(if spoiler {
+                                "Unmark spoiler"
+                            } else {
+                                "Mark as spoiler"
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.draft.toggle_spoiler(local_id);
+                                cx.notify();
+                            })),
                     )
                     .child(
                         Button::new(SharedString::from(format!("tray-remove-{local_id}")))
@@ -1122,8 +1168,11 @@ impl Composer {
                             .tooltip("Remove")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 // A pasted image removed from the tray is gone for good.
-                                if let Some(file) =
-                                    this.draft.attachments.iter().find(|a| a.local_id == local_id)
+                                if let Some(file) = this
+                                    .draft
+                                    .attachments
+                                    .iter()
+                                    .find(|a| a.local_id == local_id)
                                 {
                                     crate::draft::remove_temporary(file);
                                 }

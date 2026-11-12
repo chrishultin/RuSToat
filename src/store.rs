@@ -322,6 +322,7 @@ impl PendingAttachment {
             kind: file.kind,
             image,
             progress: self.progress(),
+            spoiler: file.spoiler,
         }
     }
 }

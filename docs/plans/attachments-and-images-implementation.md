@@ -122,3 +122,37 @@ Look-ahead: chunk 4 can draw a marked pending image with `covered_image`. Chunk 
 
 ### Manual Validation
 Batched at the end (Manual Test 3).
+
+## Chunk 4: Mark an upload as a spoiler
+
+### Changes Made
+- `src/draft.rs`:
+  - `DraftAttachment.spoiler`. `from_path` starts it marked when the file's name already starts with `spoiler_` (any case).
+  - `upload_name()`: a marked file gets `SPOILER_` once. A marked file already named as a spoiler keeps its name. An unmarked one named `spoiler_…` loses the prefix, so it isn't sent as a spoiler.
+  - `Draft::toggle_spoiler(local_id)`.
+  - Unit tests: `a_marked_file_uploads_with_the_spoiler_prefix_once` and `files_in_the_tray_are_marked_and_unmarked_by_id`.
+- `src/ui/composer.rs` (`render_tray`): each chip has an eye button. It shows `EyeOff` with "Mark as spoiler", or `Eye` with "Unmark spoiler" when marked. A marked chip's thumbnail is dimmed under a closed eye, and its second line reads "Spoiler · {size}".
+- `src/ui/chat.rs`:
+  - `upload_file` uploads under `file.upload_name()`. It's the one path for first sends and retries.
+  - A marked pending image is drawn with `covered_image` (no ThumbHash yet, so the dark box and pill) with its upload bar. A marked pending file's card has the tag.
+- `src/attachment.rs`: `AttachmentView::Local.spoiler`.
+- `src/store.rs`: `PendingAttachment::view` passes `file.spoiler`. The flag lives on the `DraftAttachment` the pending message carries, so `PendingAttachment` needed no field of its own. The draft keeps it, and so does an edit stash (it stashes the whole `Draft`).
+- Tests:
+  - `tests/store_pending.rs` (+1): a marked image is covered at its fitted size while sending, and a marked file's card is tagged. After a failure and a retry, the files' upload names are still `SPOILER_photo.png`, `SPOILER_notes.pdf` and `plain.png`.
+  - `tests/api_upload.rs` (+1): the multipart part is `filename="SPOILER_photo.png"` for a marked file.
+
+### Divergences
+- **A file already named `spoiler_…` starts marked, and unmarking it drops the prefix on upload.** The name is what makes a spoiler on Stoat, so the chip's flag must decide it. Otherwise an unmarked chip could still arrive covered.
+- **The marked chip shows a closed eye over the dimmed thumbnail, and "Spoiler" goes in its size line** ("Spoiler · 1.2 MB"). The plan put "Spoiler" over the thumbnail, but the thumbnail is 36 px, too small to read it there.
+- **`PendingAttachment` gained no field.** It already carries the `DraftAttachment`.
+- **Reformatting `render_tray` also cleared one older rustfmt hunk there** (composer drift 14 → 13).
+
+Look-ahead: chunk 5 is unaffected.
+
+### Verification Performed
+- `cargo test --lib draft`, `--test store_pending`, `--test api_upload`: pass.
+- Full suite, `cargo test && cargo clippy --all-targets -- -D warnings`: 1,452 passed, 0 failed; clippy clean.
+- Rustfmt: `src/ui/composer.rs` 13 (from 14), `src/ui/chat.rs` 13, `src/store.rs` 14, `tests/store_pending.rs` 18 and `tests/api_upload.rs` 10 (unchanged); `src/draft.rs` and `src/attachment.rs` clean.
+
+### Manual Validation
+Batched at the end (Manual Test 4).

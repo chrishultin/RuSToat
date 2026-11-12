@@ -419,3 +419,35 @@ async fn a_server_icon_is_uploaded_then_saved_by_its_id() {
     let saved = client.edit_server("srv", &edit).await.unwrap();
     assert_eq!(saved.icon.map(|icon| icon.id).as_deref(), Some("f-icon"));
 }
+
+#[tokio::test]
+async fn a_marked_file_uploads_under_its_spoiler_name() {
+    let autumn = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/attachments"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "f-photo" })))
+        .expect(1)
+        .mount(&autumn)
+        .await;
+
+    let (_dir, path) = temp_file("photo.png", b"not really a png");
+    let mut file = stoat_gpui::draft::DraftAttachment::from_path(path.clone(), 16);
+    file.spoiler = true;
+    client("http://unused.invalid")
+        .upload_attachment(
+            &autumn.uri(),
+            &file.upload_name(),
+            &file.content_type,
+            &path,
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+
+    let request = &autumn.received_requests().await.unwrap()[0];
+    let head = String::from_utf8_lossy(&request.body[..request.body.len().min(400)]).to_string();
+    assert!(
+        head.contains(r#"name="file"; filename="SPOILER_photo.png""#),
+        "{head}"
+    );
+}

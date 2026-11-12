@@ -13068,7 +13068,7 @@ async fn upload_file(
         async move {
             // Read from disk as it's sent (see `upload_attachment`).
             client
-                .upload_attachment(&file_server, &file.name, &file.content_type, &file.path, move |sent, total| {
+                .upload_attachment(&file_server, &file.upload_name(), &file.content_type, &file.path, move |sent, total| {
                     tx.unbounded_send((sent, total)).ok();
                 })
                 .await
@@ -13503,7 +13503,17 @@ fn attachment_element(
             kind,
             image,
             progress,
+            spoiler,
         } => match image {
+            // Marked as a spoiler: covered, as the sent one will be.
+            Some((_, width, height)) if *spoiler => {
+                covered_image(id, (*width, *height), None, colors).child(
+                    upload_bar(*progress, colors)
+                        .bottom(px(6.))
+                        .left(px(6.))
+                        .right(px(6.)),
+                )
+            }
             Some((path, width, height)) => div()
                 .id(id.clone())
                 .relative()
@@ -13532,6 +13542,7 @@ fn attachment_element(
                 ),
             None => file_card(id, file_icon(*kind), name, size_label, colors)
                 .relative()
+                .when(*spoiler, |card| card.child(spoiler_tag(colors)))
                 .child(
                     upload_bar(*progress, colors)
                         .bottom(px(3.))
