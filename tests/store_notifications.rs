@@ -143,6 +143,68 @@ fn a_muted_channel_is_muted_and_shows_no_unread_dot() {
 }
 
 #[test]
+fn a_ready_without_the_settings_keeps_the_mutes_held() {
+    let mut store = store();
+    change(&mut store, |s| {
+        s.mute_channel("dm-bob", None);
+        s.set_server_level("srv-alpha", Level::All);
+    });
+    let updated = store.notifications_updated();
+
+    // Stoat sends `Ready` without the user settings, even when asked.
+    let mut reconnect = ready();
+    reconnect.notifications = None;
+    store.apply_ready(reconnect);
+    assert!(entry(&store, "dm-bob").muted);
+    assert_eq!(alpha_level(&store), Level::All);
+    assert_eq!(store.notifications_updated(), updated);
+
+    // A `Ready` that does bring them is taken.
+    let mut reconnect = ready();
+    reconnect.notifications = Some((updated + 1, NotificationSettings::parse("{}")));
+    store.apply_ready(reconnect);
+    assert!(!entry(&store, "dm-bob").muted);
+}
+
+/// A first connect: `Ready` without the settings, as Stoat sends it.
+fn store_before_the_fetch() -> ChatStore {
+    let mut ready = ready();
+    ready.notifications = None;
+    let mut store = ChatStore::new("u-me");
+    store.apply_ready(ready);
+    store
+}
+
+#[test]
+fn the_settings_arent_loaded_until_fetched() {
+    let mut store = store_before_the_fetch();
+    assert!(!store.notifications_loaded(), "defaults aren't the user's");
+
+    assert!(store.notifications_fetched(Some((2000, with_level(Level::All)))));
+    assert!(store.notifications_loaded());
+    assert_eq!(alpha_level(&store), Level::All);
+    assert_eq!(store.notifications_updated(), 2000);
+}
+
+#[test]
+fn a_user_who_never_wrote_the_setting_has_the_defaults_loaded() {
+    let mut store = store_before_the_fetch();
+    assert!(!store.notifications_fetched(None));
+    assert!(store.notifications_loaded());
+    assert_eq!(alpha_level(&store), Level::Mention);
+}
+
+#[test]
+fn a_fetched_copy_older_than_the_one_held_is_ignored() {
+    let mut store = store();
+    // A change landed (or was made here) while the fetch was on its way.
+    store.set_notification_settings(3000, with_level(Level::None));
+    assert!(!store.notifications_fetched(Some((2000, with_level(Level::All)))));
+    assert_eq!(alpha_level(&store), Level::None);
+    assert!(store.notifications_loaded());
+}
+
+#[test]
 fn a_channel_in_a_muted_server_is_muted() {
     let mut store = store();
     change(&mut store, |s| s.mute_server("srv-alpha", None));

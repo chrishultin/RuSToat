@@ -599,6 +599,10 @@ pub struct ChatStore {
     /// When the copy of `notifications` held was written (ms since the
     /// epoch), so an older copy arriving late can't undo a newer one.
     notifications_updated: i64,
+    /// Whether `notifications` came from Stoat (`Ready`, the fetch after it
+    /// or a `UserSettingsUpdate`). Until then it's the defaults, and as the
+    /// setting is written whole, writing it would wipe the user's.
+    notifications_loaded: bool,
     /// Messages the user sent that aren't confirmed yet, by channel, in send order.
     pending: HashMap<String, Vec<PendingMessage>>,
     /// Temporary files (pasted images) of pending messages that are gone
@@ -628,7 +632,12 @@ impl ChatStore {
         &self.me
     }
 
-    /// Replace everything with a fresh `Ready` (on first connect and every reconnect).
+    /// Replace everything with a fresh `Ready` (on first connect and every
+    /// reconnect), except the user settings `Ready` doesn't bring: the
+    /// copies held stay until the fetch after `Ready` lands. Stoat leaves
+    /// them out even when asked (see [`Ready::ordering`]), so without this a
+    /// reconnect would forget every mute and level, and the next change
+    /// would write that empty copy over the user's settings.
     pub fn apply_ready(&mut self, ready: Ready) {
         // Events may have been missed: a Webhooks page fetches its list again.
         self.webhooks.clear();
@@ -654,7 +663,10 @@ impl ChatStore {
             .into_iter()
             .map(|e| (e.id.clone(), e))
             .collect();
-        (self.notifications_updated, self.notifications) = ready.notifications.unwrap_or_default();
+        if let Some((updated, settings)) = ready.notifications {
+            (self.notifications_updated, self.notifications) = (updated, settings);
+            self.notifications_loaded = true;
+        }
         self.read_states = ready
             .unreads
             .into_iter()
@@ -690,7 +702,9 @@ impl ChatStore {
         }
 
         self.ready_order = ready_order;
-        (self.ordering_updated, self.ordering) = ready.ordering.unwrap_or_default();
+        if let Some((updated, ordering)) = ready.ordering {
+            (self.ordering_updated, self.ordering) = (updated, ordering);
+        }
         // Replaces everything, so leaves missed while offline don't linger.
         self.voice.clear();
         for state in ready.voice_states {
@@ -1427,6 +1441,7 @@ impl ChatStore {
         updated: i64,
         settings: NotificationSettings,
     ) -> bool {
+        self.notifications_loaded = true;
         if updated < self.notifications_updated {
             let now = notify::now_ms();
             if settings.to_json(now) == self.notifications.to_json(now) {
@@ -1437,6 +1452,21 @@ impl ChatStore {
         self.notifications_updated = updated;
         self.notifications = settings;
         true
+    }
+
+    /// The `notifications` setting fetched from Stoat, with when it was
+    /// written: `None` if the user has never written it. Taken as
+    /// [`Self::set_notification_settings`] takes a copy; returns true if
+    /// it changed the settings held.
+    pub fn notifications_fetched(&mut self, fetched: Option<(i64, NotificationSettings)>) -> bool {
+        self.notifications_loaded = true;
+        fetched.is_some_and(|(updated, settings)| self.set_notification_settings(updated, settings))
+    }
+
+    /// Whether the notification settings held came from Stoat, so a change
+    /// to them can be written.
+    pub fn notifications_loaded(&self) -> bool {
+        self.notifications_loaded
     }
 
     /// A channel's own mute, if it's muted now (as

@@ -17,6 +17,8 @@ use crate::friends::FRIENDS;
 use crate::markdown;
 use crate::store::{ChatStore, channel_id, display_name};
 
+/// The user setting's key.
+pub const SETTINGS_KEY: &str = "notifications";
 /// The author ID Stoat uses for system messages.
 const SYSTEM_AUTHOR: &str = "00000000000000000000000000";
 /// Notification bodies are cut to this many characters.

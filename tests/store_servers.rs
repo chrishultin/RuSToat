@@ -434,6 +434,16 @@ fn a_new_ready_brings_the_order_and_keeps_the_folders() {
     // `Ready` can't carry `server-folders`; they're fetched after it.
     assert_eq!(store.server_folders(), &one);
     assert_eq!(store.server_folders_updated(), 10);
+
+    // Stoat sends `Ready` without `ordering`, even when asked: the order
+    // held stays until the fetch after it lands.
+    let Some(ServerEvent::Ready(mut ready)) = parse_frame(&fixture("ready.json")).pop() else {
+        panic!("ready fixture");
+    };
+    ready.ordering = None;
+    store.apply_ready(*ready);
+    assert_eq!(store.ordering_updated(), READY_ORDERING);
+    assert_eq!(store.ordering().servers(), ["srv-beta", "srv-alpha"]);
 }
 
 #[test]

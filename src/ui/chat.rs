@@ -996,7 +996,7 @@ impl ChatView {
                 let reconnect = self.has_ready;
                 self.store.apply_ready(*ready);
                 self.fetch_voice_users(cx);
-                self.fetch_rail_settings(cx);
+                self.fetch_settings(cx);
                 self.schedule_mute_tick(cx);
                 self.card = None;
                 self.has_ready = true;
@@ -3896,12 +3896,22 @@ impl ChatView {
     /// whole to Stoat, which passes them on to their other clients. If the
     /// write fails, the settings from before it come back (unless a later
     /// write is on its way, or a newer copy has landed) and a toast says so.
+    ///
+    /// Before the settings have loaded from Stoat, nothing is written (it
+    /// would replace the user's with the defaults plus this change): a
+    /// toast says so, and they're fetched again.
     fn update_notifications(
         &mut self,
         change: impl FnOnce(&mut NotificationSettings),
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.store.notifications_loaded() {
+            log::warn!("notification settings changed before they loaded; not saved");
+            window.push_notification(Notification::error(NOTIFICATIONS_LOADING_TEXT), cx);
+            self.fetch_settings(cx);
+            return;
+        }
         let before = (
             self.store.notifications_updated(),
             self.store.notification_settings().clone(),
@@ -3920,7 +3930,7 @@ impl ChatView {
             let client = self.client.clone();
             async move {
                 client
-                    .set_settings(&[("notifications", json)], updated)
+                    .set_settings(&[(notify::SETTINGS_KEY, json)], updated)
                     .await
             }
         });
@@ -3947,16 +3957,17 @@ impl ChatView {
         .detach();
     }
 
-    /// Fetch the rail's order and folders (after `Ready`, which can't carry
-    /// `server-folders`, and brings `ordering` only so the rail doesn't
-    /// jump when this lands). If it fails, the rail keeps `Ready`'s order
-    /// (and the folders held before), until a change arrives.
-    fn fetch_rail_settings(&mut self, cx: &mut Context<Self>) {
+    /// Fetch the user's notification settings and the rail's order and
+    /// folders, after every `Ready` (which Stoat sends without them; see
+    /// [`events::Ready::ordering`]). Each is taken unless the copy held is newer.
+    /// If the fetch fails, the copies held stay (on first connect, the
+    /// defaults) until a change arrives.
+    fn fetch_settings(&mut self, cx: &mut Context<Self>) {
         let request = spawn_io({
             let client = self.client.clone();
             async move {
                 client
-                    .fetch_settings(&[rail::ORDERING_KEY, rail::FOLDERS_KEY])
+                    .fetch_settings(&[notify::SETTINGS_KEY, rail::ORDERING_KEY, rail::FOLDERS_KEY])
                     .await
             }
         });
@@ -3965,16 +3976,26 @@ impl ChatView {
             this.update(cx, |this, cx| match result {
                 Ok(Ok(mut settings)) => {
                     let mut take = |key: &str| settings.remove(key);
+                    let notifications = take(notify::SETTINGS_KEY)
+                        .map(|(updated, json)| (updated, NotificationSettings::parse(&json)));
                     let ordering = take(rail::ORDERING_KEY)
                         .map(|(updated, json)| (updated, Ordering::parse(&json)));
                     let folders = take(rail::FOLDERS_KEY)
                         .map(|(updated, json)| (updated, ServerFolders::parse(&json)));
-                    if this.apply_rail_settings(ordering, folders) {
+                    let mut changed = false;
+                    // Loaded even if absent: the user has never written it.
+                    if this.store.notifications_fetched(notifications) {
+                        log::debug!("notification settings fetched: changed");
+                        this.schedule_mute_tick(cx);
+                        changed = true;
+                    }
+                    changed |= this.apply_rail_settings(ordering, folders);
+                    if changed {
                         cx.notify();
                     }
                 }
-                Ok(Err(err)) => log::warn!("couldn't load the server list's order: {err}"),
-                Err(err) => log::warn!("server list order task failed: {err:?}"),
+                Ok(Err(err)) => log::warn!("couldn't load the user's settings: {err}"),
+                Err(err) => log::warn!("user settings task failed: {err:?}"),
             })
             .ok();
         })
@@ -11318,6 +11339,9 @@ const STATUS_FAILED_TEXT: &str = "Couldn't change your status.";
 const MUTED_ICON_OPACITY: f32 = 0.3;
 /// A notification settings change Stoat didn't take.
 const NOTIFICATIONS_FAILED_TEXT: &str = "Couldn't save notification settings.";
+/// A notification settings change made before they loaded from Stoat.
+const NOTIFICATIONS_LOADING_TEXT: &str =
+    "Notification settings are still loading. Try again in a moment.";
 /// A server order or folder change Stoat didn't take.
 const RAIL_FAILED_TEXT: &str = "Couldn't save the server list. Try again.";
 /// Each server's icon in a closed folder's two-by-two preview.
