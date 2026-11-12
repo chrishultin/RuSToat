@@ -104,6 +104,7 @@ fn attachments_and_edits_are_flagged() {
             size_label: "12.1 KB".into(),
             url: None,
             kind: FileKind::Image,
+            spoiler: false,
         }]
     );
     assert!(look.edited);

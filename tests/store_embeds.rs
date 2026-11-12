@@ -35,7 +35,8 @@ fn view(value: Value) -> Option<EmbedView> {
 
 fn view_with(value: Value, media: &MediaUrls) -> Option<EmbedView> {
     let store = ChatStore::new("u-me");
-    EmbedView::new(&embed(value), media, &store, &HashSet::new(), "m:embed0")
+    let none = HashSet::new();
+    EmbedView::new(&embed(value), media, &store, &none, &none, "m:embed0")
 }
 
 fn card(value: Value) -> EmbedCard {

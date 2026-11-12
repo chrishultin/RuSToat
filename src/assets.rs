@@ -173,6 +173,21 @@ mod tests {
         }
     }
 
+    /// The file actions (menus and the image viewer's bar) and spoilers.
+    #[test]
+    fn file_icons_load() {
+        for icon in [
+            IconName::Download,
+            IconName::Copy,
+            IconName::Link,
+            IconName::ExternalLink,
+            IconName::EyeOff,
+        ] {
+            let path = icon.path();
+            assert!(AppAssets.load(&path).unwrap().is_some(), "{path} missing");
+        }
+    }
+
     /// The slowmode badge by the message box.
     #[test]
     fn slowmode_icon_loads() {

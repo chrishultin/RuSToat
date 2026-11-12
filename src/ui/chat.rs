@@ -1661,6 +1661,10 @@ impl ChatView {
                 self.store.reveal_image(&file_id);
                 self.sync_pane(channel, cx);
             }
+            RowAction::RevealAttachment(file_id) => {
+                self.store.reveal_attachment(&file_id);
+                self.sync_pane(channel, cx);
+            }
             RowAction::ViewImage(image) => {
                 self.viewer = Some(image);
                 window.focus(&self.viewer_focus, cx);
@@ -1686,9 +1690,10 @@ impl ChatView {
                 }
             }
             RowAction::Edit(id) => self.start_edit(channel, id, window, cx),
-            RowAction::Delete { id, confirmed: true } => {
-                self.delete_message(channel.to_string(), id, window, cx)
-            }
+            RowAction::Delete {
+                id,
+                confirmed: true,
+            } => self.delete_message(channel.to_string(), id, window, cx),
             RowAction::Delete {
                 id,
                 confirmed: false,
@@ -11733,6 +11738,8 @@ struct GroupLeave {
 enum RowAction {
     /// "Show image": load a large image after all (by file ID).
     RevealImage(String),
+    /// Show a spoiler attachment (by file ID).
+    RevealAttachment(String),
     /// Open an inline image in the full-size viewer.
     ViewImage(ViewedImage),
     /// Save, copy or open a file or picture (from its right-click menu).
@@ -13411,6 +13418,23 @@ fn attachment_element(
     on_action: &OnRowAction,
 ) -> Stateful<Div> {
     match attachment {
+        // A spoiler: covered until it's clicked.
+        AttachmentView::Image {
+            id: file_id,
+            width,
+            height,
+            thumbhash,
+            too_big: false,
+            spoiler: true,
+            ..
+        } => {
+            let (on_action, file_id) = (on_action.clone(), file_id.clone());
+            covered_image(id, (*width, *height), thumbhash.clone(), colors)
+                .cursor_pointer()
+                .on_click(move |_, window, cx| {
+                    on_action(RowAction::RevealAttachment(file_id.clone()), window, cx)
+                })
+        }
         AttachmentView::Image {
             url,
             width,
@@ -13418,6 +13442,7 @@ fn attachment_element(
             original,
             thumbhash,
             too_big: false,
+            spoiler: false,
             ..
         } => {
             let target = attachment
@@ -13441,32 +13466,35 @@ fn attachment_element(
             name,
             size_label,
             too_big: true,
+            spoiler,
             ..
         } => {
             let on_action = on_action.clone();
             let file_id = file_id.clone();
-            file_card(id.clone(), IconName::FileImage, name, size_label, colors).child(
-                Button::new(SharedString::from(format!("{id}-show")))
-                    .xsmall()
-                    .label("Show image")
-                    .on_click(move |_, window, cx| {
-                        on_action(RowAction::RevealImage(file_id.clone()), window, cx)
-                    }),
-            )
+            file_card(id.clone(), IconName::FileImage, name, size_label, colors)
+                .when(*spoiler, |card| card.child(spoiler_tag(colors)))
+                .child(
+                    Button::new(SharedString::from(format!("{id}-show")))
+                        .xsmall()
+                        .label("Show image")
+                        .on_click(move |_, window, cx| {
+                            on_action(RowAction::RevealImage(file_id.clone()), window, cx)
+                        }),
+                )
         }
         AttachmentView::File {
             name,
             size_label,
             url,
             kind,
-        } => file_card(id, file_icon(*kind), name, size_label, colors).when_some(
-            url.clone(),
-            |card, url| {
+            spoiler,
+        } => file_card(id, file_icon(*kind), name, size_label, colors)
+            .when(*spoiler, |card| card.child(spoiler_tag(colors)))
+            .when_some(url.clone(), |card, url| {
                 card.cursor_pointer()
                     .on_click(move |_, _, cx| cx.open_url(&url))
                     .child(Icon::new(IconName::Download).text_color(colors.muted))
-            },
-        ),
+            }),
         // Still uploading: the local copy, with a progress bar along its
         // bottom edge (over it, so the row's height doesn't change).
         AttachmentView::Local {
@@ -13512,6 +13540,71 @@ fn attachment_element(
                 ),
         },
     }
+}
+
+/// A spoiler picture before it's shown, at its display size (so the row
+/// keeps its height when it is): its ThumbHash darkened, or a dark box
+/// without one, with a "Spoiler" pill in the middle. Callers add the click.
+fn covered_image(
+    id: SharedString,
+    (width, height): (u32, u32),
+    thumbhash: Option<Arc<[u8]>>,
+    colors: RowColors,
+) -> Stateful<Div> {
+    div()
+        .id(id.clone())
+        .relative()
+        .w(px(width as f32))
+        .h(px(height as f32))
+        .flex_none()
+        .rounded(px(ATTACHMENT_RADIUS))
+        .overflow_hidden()
+        .bg(colors.image_bg)
+        .when_some(thumbhash, |el, hash| {
+            el.child(
+                crate::ui::thumbhash::preview(hash)
+                    .id(SharedString::from(format!("{id}-hash")))
+                    .absolute()
+                    .inset_0()
+                    .size_full()
+                    .object_fit(ObjectFit::Fill),
+            )
+        })
+        .child(div().absolute().inset_0().bg(black().opacity(0.6)))
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_full()
+                        .bg(black().opacity(0.6))
+                        .text_color(white())
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(Icon::new(IconName::EyeOff).xsmall())
+                        .child("Spoiler"),
+                ),
+        )
+}
+
+/// "Spoiler" on a spoiler file's card.
+fn spoiler_tag(colors: RowColors) -> Div {
+    div()
+        .flex_none()
+        .px_1()
+        .rounded_sm()
+        .border_1()
+        .border_color(colors.border)
+        .text_xs()
+        .text_color(colors.muted)
+        .child("Spoiler")
 }
 
 /// How much of a file has uploaded (`progress` in thousandths): a thin

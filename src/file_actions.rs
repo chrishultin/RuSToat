@@ -89,6 +89,15 @@ pub fn embed_name(url: &str) -> String {
 /// clients have it).
 const SPOILER_PREFIX: &str = "spoiler_";
 
+/// Whether a file is a spoiler: its name starts with `spoiler_`, in any case.
+/// (Stoat has no field for it; its clients upload a marked file as
+/// `SPOILER_{name}`.)
+pub fn is_spoiler(filename: &str) -> bool {
+    filename
+        .get(..SPOILER_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(SPOILER_PREFIX))
+}
+
 /// A file's name as shown: without a leading `spoiler_` (in any case), as
 /// long as something is left.
 pub fn display_name(filename: &str) -> &str {
@@ -103,10 +112,11 @@ pub fn display_name(filename: &str) -> &str {
     }
 }
 
-/// The name the save panel suggests: the shown name, with characters macOS
-/// won't take in a file name (`/`, `:`) replaced, and "file" if nothing's left.
+/// The name the save panel suggests for a shown name (already without a
+/// spoiler prefix): with characters macOS won't take in a file name (`/`,
+/// `:`) replaced, not hidden, and "file" if nothing's left.
 pub fn suggested_save_name(name: &str) -> String {
-    let name: String = display_name(name)
+    let name: String = name
         .trim()
         .chars()
         .map(|c| match c {

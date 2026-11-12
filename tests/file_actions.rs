@@ -68,7 +68,8 @@ fn shown_names_drop_a_spoiler_prefix_while_something_is_left() {
 
 #[test]
 fn the_save_panel_suggests_a_name_macos_takes() {
-    assert_eq!(suggested_save_name("SPOILER_cat.png"), "cat.png");
+    // Given the shown name, which already lost any spoiler prefix.
+    assert_eq!(suggested_save_name("cat.png"), "cat.png");
     assert_eq!(suggested_save_name("a/b:c.txt"), "a_b_c.txt");
     assert_eq!(suggested_save_name("  report.pdf "), "report.pdf");
     // Not a hidden file.

@@ -84,3 +84,41 @@ Look-ahead: no remaining chunk is affected.
 
 ### Manual Validation
 Batched at the end (Manual Test 2).
+
+## Chunk 3: Spoiler attachments
+
+### Changes Made
+- `src/file_actions.rs`:
+  - `is_spoiler(name)`: the name starts with `spoiler_` in any case. A name that's only the prefix counts, as in Stoat's SDK.
+  - `suggested_save_name` no longer strips the prefix itself: it's given the shown name, which already lost it. Stripping twice would turn `spoiler_spoiler_x` into `x`.
+- `src/attachment.rs`:
+  - `AttachmentView::Image.spoiler`: covered, not shown yet. `AttachmentView::File.spoiler`: the tag.
+  - Both views' `name` is now the shown name (`display_name`), so the card, the viewer and the file actions all use it. `file_target()` takes it as is.
+  - `uncovered(shown)` clears an image's cover.
+- `src/store.rs`: `revealed_attachments` (by file ID) and `reveal_attachment(file_id)`. `message_row` applies it to attachments, and passes it to `EmbedView::new` for a bot embed's file.
+- `src/embed.rs`: `EmbedView::new` takes `shown` (spoilers the user clicked to see) beside `revealed`, for a bot embed's file.
+- `src/ui/chat.rs`:
+  - `RowAction::RevealAttachment(file_id)` reveals it and re-syncs the pane.
+  - `covered_image`: at the image's display size, its ThumbHash under a 60% black overlay (or the image backdrop and the overlay without one), with an `EyeOff` + "Spoiler" pill. Clicking it reveals the image; right-clicking gives the file menu (Chunk 1), which works while it's covered.
+  - `spoiler_tag` on a spoiler file's card and on a large spoiler image's "Show image" card. "Show image" loads it, and it's still covered until clicked.
+- `src/assets.rs`: `file_icons_load` checks Download, Copy, Link, ExternalLink and EyeOff.
+- Tests:
+  - `tests/store_attachments.rs` (+4): `is_spoiler` (the plan's names, plus `spoiler_`, an empty name and a multi-byte character); spoiler images covered and revealed by file ID (another spoiler in the same message stays covered; same size; the row is remeasured); a spoiler file's tag and shown name (and a name that's only the prefix); a large spoiler stays covered after "Show image";
+  - `tests/store_history.rs`, `tests/store_embeds.rs`, `tests/file_actions.rs`: the new fields and `EmbedView::new`'s argument.
+
+### Divergences
+- **`AttachmentView::new` keeps its signature;** `.uncovered(shown)` applies a reveal. That leaves the 14 existing callers alone.
+- **`EmbedView::new` takes the reveal set too,** so a spoiler file in a bot embed can be revealed like a message's own.
+- **The shown name is set once, in `AttachmentView`,** and `suggested_save_name` no longer strips the prefix (see above).
+- **There's no extra blur pass.** The ThumbHash under the overlay reads as covered, as the plan's risk allowed.
+- **Reformatting `on_row_action`** (for the new arm) also cleared one older rustfmt hunk there (`RowAction::Delete { id, confirmed: true }`).
+
+Look-ahead: chunk 4 can draw a marked pending image with `covered_image`. Chunk 5's "spoiler text preview hidden until revealed" can use `revealed_attachments`. No plan amendments are needed.
+
+### Verification Performed
+- `cargo test --test store_attachments --test file_actions`: pass.
+- Full suite, `cargo test && cargo clippy --all-targets -- -D warnings`: 1,448 passed, 0 failed; clippy clean.
+- Rustfmt: `src/ui/chat.rs` 13, `src/store.rs` 14 (unchanged); every other touched file is clean.
+
+### Manual Validation
+Batched at the end (Manual Test 3).

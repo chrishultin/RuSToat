@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use crate::api::models::{File, Metadata};
-use crate::file_actions::{FileTarget, display_name};
+use crate::file_actions::{FileTarget, display_name, is_spoiler};
 use crate::media::MediaUrls;
 
 /// Inline images fit within this box (logical px), keeping their aspect ratio.
@@ -54,6 +54,9 @@ pub enum AttachmentView {
         /// Over [`MAX_AUTO_LOAD_BYTES`] and not revealed yet: drawn as a card
         /// with a "Show image" button instead.
         too_big: bool,
+        /// A spoiler not shown yet: drawn covered, at the same size, until
+        /// it's clicked.
+        spoiler: bool,
     },
     /// A card (icon, name, size) that opens the file in the browser.
     File {
@@ -62,6 +65,8 @@ pub enum AttachmentView {
         /// `None` until the file server is known.
         url: Option<String>,
         kind: FileKind,
+        /// A spoiler: its card has a tag.
+        spoiler: bool,
     },
     /// A file of a message that's still being sent, drawn from the local
     /// copy with how much of it has uploaded.
@@ -78,8 +83,12 @@ pub enum AttachmentView {
 }
 
 impl AttachmentView {
-    /// `revealed`: the user asked to load this image despite its size.
+    /// `revealed`: the user asked to load this image despite its size. A
+    /// spoiler image starts covered (see [`Self::uncovered`]). Names are
+    /// shown without a spoiler prefix.
     pub fn new(file: &File, media: &MediaUrls, revealed: bool) -> Self {
+        let spoiler = is_spoiler(&file.filename);
+        let name = display_name(&file.filename).to_string();
         let size = u64::try_from(file.size).unwrap_or(0);
         let size_label = size_label(size);
         let url = media.file(file);
@@ -98,22 +107,32 @@ impl AttachmentView {
                 AttachmentView::Image {
                     id: file.id.clone(),
                     url,
-                    name: file.filename.clone(),
+                    name,
                     size_label,
                     width,
                     height,
                     original,
                     thumbhash: thumbhash.as_deref().map(Arc::from),
                     too_big: size > MAX_AUTO_LOAD_BYTES && !revealed,
+                    spoiler,
                 }
             }
             (metadata, url) => AttachmentView::File {
-                name: file.filename.clone(),
+                name,
                 size_label,
                 url,
                 kind: file_kind(metadata, &file.content_type),
+                spoiler,
             },
         }
+    }
+
+    /// With `shown` (the user clicked it), a spoiler image isn't covered.
+    pub fn uncovered(mut self, shown: bool) -> Self {
+        if let AttachmentView::Image { spoiler, .. } = &mut self {
+            *spoiler &= !shown;
+        }
+        self
     }
 }
 
@@ -132,7 +151,7 @@ impl AttachmentView {
             AttachmentView::File { url: None, .. } | AttachmentView::Local { .. } => return None,
         };
         Some(FileTarget {
-            name: display_name(name).to_string(),
+            name: name.clone(),
             url: url.clone(),
             link: url.clone(),
             page: None,

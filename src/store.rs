@@ -583,6 +583,8 @@ pub struct ChatStore {
     webhooks: HashMap<String, Vec<crate::api::models::Webhook>>,
     /// Large images the user chose to load ("Show image"), by file ID.
     revealed_images: HashSet<String>,
+    /// Spoiler attachments the user clicked to see, by file ID.
+    revealed_attachments: HashSet<String>,
     /// Spoilers the user clicked to see, as (message ID, spoiler index).
     revealed_spoilers: HashSet<(String, usize)>,
     /// Messages from blocked users the user clicked to see, by ID.
@@ -2429,6 +2431,12 @@ impl ChatStore {
         self.revealed_images.insert(file_id.to_string());
     }
 
+    /// Show a spoiler attachment (by file ID) for the rest of the session.
+    /// Its row's image changes from covered to the picture, at the same size.
+    pub fn reveal_attachment(&mut self, file_id: &str) {
+        self.revealed_attachments.insert(file_id.to_string());
+    }
+
     /// Show spoiler `index` (counting from 0) of `message` for the rest of
     /// the session. Its row's body changes from bars to the text.
     pub fn reveal_spoiler(&mut self, message: &str, index: usize) {
@@ -2701,6 +2709,7 @@ impl ChatStore {
                 .map(|file| {
                     let revealed = self.revealed_images.contains(&file.id);
                     AttachmentView::new(file, &self.media, revealed)
+                        .uncovered(self.revealed_attachments.contains(&file.id))
                 })
                 .collect(),
             embeds: message
@@ -2714,7 +2723,14 @@ impl ChatStore {
                 })
                 .filter_map(|(ix, embed)| {
                     let key = format!("{}:embed{ix}", message.id);
-                    EmbedView::new(embed, &self.media, self, &self.revealed_images, &key)
+                    EmbedView::new(
+                        embed,
+                        &self.media,
+                        self,
+                        &self.revealed_images,
+                        &self.revealed_attachments,
+                        &key,
+                    )
                 })
                 .collect(),
             invites,

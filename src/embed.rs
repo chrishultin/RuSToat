@@ -82,11 +82,13 @@ impl EmbedView {
     /// `None` for embeds with nothing to show. `key` identifies the embed
     /// within the timeline (message ID and position), for Markdown state.
     /// `revealed`: large images the user chose to load (by file ID).
+    /// `shown`: spoilers the user clicked to see (by file ID).
     pub fn new(
         embed: &Embed,
         media: &MediaUrls,
         names: &impl Names,
         revealed: &HashSet<String>,
+        shown: &HashSet<String>,
         key: &str,
     ) -> Option<Self> {
         match embed {
@@ -97,7 +99,7 @@ impl EmbedView {
             }
             Embed::Video(video) => gif_poster(video, media)
                 .or_else(|| link(&video.url).map(|url| EmbedView::Video { url })),
-            Embed::Text(text) => text_embed(text, media, names, revealed, key),
+            Embed::Text(text) => text_embed(text, media, names, revealed, shown, key),
             Embed::None => None,
         }
     }
@@ -240,6 +242,7 @@ fn text_embed(
     media: &MediaUrls,
     names: &impl Names,
     revealed: &HashSet<String>,
+    shown: &HashSet<String>,
     key: &str,
 ) -> Option<EmbedView> {
     let description = non_empty(&text.description).map(|source| {
@@ -259,10 +262,10 @@ fn text_embed(
         thumbnail: None,
         image: None,
         playable: false,
-        media: text
-            .media
-            .as_ref()
-            .map(|file| AttachmentView::new(file, media, revealed.contains(&file.id))),
+        media: text.media.as_ref().map(|file| {
+            AttachmentView::new(file, media, revealed.contains(&file.id))
+                .uncovered(shown.contains(&file.id))
+        }),
     };
     has_content(&card).then(|| EmbedView::Card(Box::new(card)))
 }

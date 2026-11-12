@@ -88,6 +88,7 @@ fn images_show_inline_from_the_file_server() {
             original: (640, 480),
             thumbhash: None,
             too_big: false,
+            spoiler: false,
         }
     );
 }
@@ -164,6 +165,7 @@ fn other_files_are_cards_that_link_to_the_file() {
             size_label: "1.2 MB".into(),
             url: Some(format!("{CDN}/attachments/f-pdf")),
             kind: FileKind::File,
+            spoiler: false,
         }
     );
     // Videos are cards too (no in-app playback).
@@ -297,4 +299,142 @@ fn show_image_reveals_it_and_remeasures_the_row() {
     ));
     // Row 0 is the start-of-channel marker (a one-message page is the whole history).
     assert_eq!(diff_rows(&before, &after), vec![RowOp::Remeasure { at: 1 }]);
+}
+
+#[test]
+fn spoiler_names_are_spotted_in_any_case() {
+    use stoat_gpui::file_actions::is_spoiler;
+    for name in [
+        "SPOILER_a.png",
+        "spoiler_a.png",
+        "Spoiler_A.PNG",
+        "spoiler_",
+    ] {
+        assert!(is_spoiler(name), "{name}");
+    }
+    for name in [
+        "spoiler.png",
+        "my_spoiler_a.png",
+        "spoile",
+        "",
+        "spoileré_a.png",
+    ] {
+        assert!(!is_spoiler(name), "{name}");
+    }
+}
+
+fn named_image(id: &str, name: &str) -> File {
+    file(
+        id,
+        name,
+        json!({ "type": "Image", "width": 640, "height": 480, "thumbhash": [1, 2, 3] }),
+        "image/png",
+        1000,
+    )
+}
+
+#[test]
+fn spoiler_images_are_covered_until_shown_by_file_id() {
+    let mut store = store_with(vec![
+        named_image("f-a", "SPOILER_a.png"),
+        named_image("f-b", "spoiler_b.png"),
+        named_image("f-c", "c.png"),
+    ]);
+    let before = store.timeline("ch-pics");
+    let views = attachments(&before);
+    let covered: Vec<bool> = views
+        .iter()
+        .map(|view| matches!(view, AttachmentView::Image { spoiler: true, .. }))
+        .collect();
+    assert_eq!(covered, [true, true, false]);
+    // Shown without the prefix.
+    assert!(matches!(&views[0], AttachmentView::Image { name, .. } if name == "a.png"));
+
+    store.reveal_attachment("f-a");
+    let after = store.timeline("ch-pics");
+    let shown = attachments(&after);
+    // Only that one: the other spoiler in the message stays covered.
+    assert!(matches!(
+        &shown[0],
+        AttachmentView::Image { spoiler: false, .. }
+    ));
+    assert!(matches!(
+        &shown[1],
+        AttachmentView::Image { spoiler: true, .. }
+    ));
+    // The same size, covered or not.
+    let size = |view: &AttachmentView| match view {
+        AttachmentView::Image { width, height, .. } => (*width, *height),
+        _ => panic!("{view:?}"),
+    };
+    assert_eq!(size(&views[0]), size(&shown[0]));
+    assert_eq!(size(&views[0]), (400, 300));
+    // The row changes, so it's redrawn.
+    assert_eq!(diff_rows(&before, &after), vec![RowOp::Remeasure { at: 1 }]);
+}
+
+#[test]
+fn spoiler_files_are_tagged_and_named_without_the_prefix() {
+    let pdf = file(
+        "f-pdf",
+        "SPOILER_report.pdf",
+        json!({ "type": "File" }),
+        "application/pdf",
+        2048,
+    );
+    assert_eq!(
+        AttachmentView::new(&pdf, &media(), false),
+        AttachmentView::File {
+            name: "report.pdf".into(),
+            size_label: "2.0 KB".into(),
+            url: Some(format!("{CDN}/attachments/f-pdf")),
+            kind: FileKind::File,
+            spoiler: true,
+        }
+    );
+    // A name that's only the prefix keeps it.
+    let bare = file(
+        "f-bare",
+        "spoiler_",
+        json!({ "type": "File" }),
+        "text/plain",
+        1,
+    );
+    assert!(matches!(
+        AttachmentView::new(&bare, &media(), false),
+        AttachmentView::File { name, spoiler: true, .. } if name == "spoiler_"
+    ));
+}
+
+#[test]
+fn a_large_spoiler_stays_covered_after_show_image() {
+    let mut big = named_image("f-big", "SPOILER_big.png");
+    big.size = (MAX_AUTO_LOAD_BYTES * 2) as isize;
+    let mut store = store_with(vec![big]);
+    assert!(matches!(
+        attachments(&store.timeline("ch-pics"))[0],
+        AttachmentView::Image {
+            too_big: true,
+            spoiler: true,
+            ..
+        }
+    ));
+    store.reveal_image("f-big");
+    assert!(matches!(
+        attachments(&store.timeline("ch-pics"))[0],
+        AttachmentView::Image {
+            too_big: false,
+            spoiler: true,
+            ..
+        }
+    ));
+    store.reveal_attachment("f-big");
+    assert!(matches!(
+        attachments(&store.timeline("ch-pics"))[0],
+        AttachmentView::Image {
+            too_big: false,
+            spoiler: false,
+            ..
+        }
+    ));
 }
