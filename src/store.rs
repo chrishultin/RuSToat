@@ -588,6 +588,10 @@ pub struct ChatStore {
     /// When the copy of `notifications` held was written (ms since the
     /// epoch), so an older copy arriving late can't undo a newer one.
     notifications_updated: i64,
+    /// Whether `notifications` came from Stoat (`Ready`, the fetch after it
+    /// or a `UserSettingsUpdate`). Until then it's the defaults, and as the
+    /// setting is written whole, writing it would wipe the user's.
+    notifications_loaded: bool,
     /// Messages the user sent that aren't confirmed yet, by channel, in send order.
     pending: HashMap<String, Vec<PendingMessage>>,
     /// Temporary files (pasted images) of pending messages that are gone
@@ -648,6 +652,7 @@ impl ChatStore {
             .collect();
         if let Some((updated, settings)) = ready.notifications {
             (self.notifications_updated, self.notifications) = (updated, settings);
+            self.notifications_loaded = true;
         }
         self.read_states = ready
             .unreads
@@ -1423,6 +1428,7 @@ impl ChatStore {
         updated: i64,
         settings: NotificationSettings,
     ) -> bool {
+        self.notifications_loaded = true;
         if updated < self.notifications_updated {
             let now = notify::now_ms();
             if settings.to_json(now) == self.notifications.to_json(now) {
@@ -1433,6 +1439,21 @@ impl ChatStore {
         self.notifications_updated = updated;
         self.notifications = settings;
         true
+    }
+
+    /// The `notifications` setting fetched from Stoat, with when it was
+    /// written: `None` if the user has never written it. Taken as
+    /// [`Self::set_notification_settings`] takes a copy; returns true if
+    /// it changed the settings held.
+    pub fn notifications_fetched(&mut self, fetched: Option<(i64, NotificationSettings)>) -> bool {
+        self.notifications_loaded = true;
+        fetched.is_some_and(|(updated, settings)| self.set_notification_settings(updated, settings))
+    }
+
+    /// Whether the notification settings held came from Stoat, so a change
+    /// to them can be written.
+    pub fn notifications_loaded(&self) -> bool {
+        self.notifications_loaded
     }
 
     /// A channel's own mute, if it's muted now (as

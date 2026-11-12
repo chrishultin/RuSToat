@@ -3712,12 +3712,22 @@ impl ChatView {
     /// whole to Stoat, which passes them on to their other clients. If the
     /// write fails, the settings from before it come back (unless a later
     /// write is on its way, or a newer copy has landed) and a toast says so.
+    ///
+    /// Before the settings have loaded from Stoat, nothing is written (it
+    /// would replace the user's with the defaults plus this change): a
+    /// toast says so, and they're fetched again.
     fn update_notifications(
         &mut self,
         change: impl FnOnce(&mut NotificationSettings),
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.store.notifications_loaded() {
+            log::warn!("notification settings changed before they loaded; not saved");
+            window.push_notification(Notification::error(NOTIFICATIONS_LOADING_TEXT), cx);
+            self.fetch_settings(cx);
+            return;
+        }
         let before = (
             self.store.notifications_updated(),
             self.store.notification_settings().clone(),
@@ -3789,13 +3799,11 @@ impl ChatView {
                     let folders = take(rail::FOLDERS_KEY)
                         .map(|(updated, json)| (updated, ServerFolders::parse(&json)));
                     let mut changed = false;
-                    if let Some((updated, settings)) = notifications {
-                        let taken = this.store.set_notification_settings(updated, settings);
-                        log::debug!("notification settings from {updated}: changed {taken}");
-                        if taken {
-                            this.schedule_mute_tick(cx);
-                            changed = true;
-                        }
+                    // Loaded even if absent: the user has never written it.
+                    if this.store.notifications_fetched(notifications) {
+                        log::debug!("notification settings fetched: changed");
+                        this.schedule_mute_tick(cx);
+                        changed = true;
                     }
                     changed |= this.apply_rail_settings(ordering, folders);
                     if changed {
@@ -10340,6 +10348,9 @@ const STATUS_FAILED_TEXT: &str = "Couldn't change your status.";
 const MUTED_ICON_OPACITY: f32 = 0.3;
 /// A notification settings change Stoat didn't take.
 const NOTIFICATIONS_FAILED_TEXT: &str = "Couldn't save notification settings.";
+/// A notification settings change made before they loaded from Stoat.
+const NOTIFICATIONS_LOADING_TEXT: &str =
+    "Notification settings are still loading. Try again in a moment.";
 /// A server order or folder change Stoat didn't take.
 const RAIL_FAILED_TEXT: &str = "Couldn't save the server list. Try again.";
 /// Each server's icon in a closed folder's two-by-two preview.
