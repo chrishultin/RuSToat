@@ -206,3 +206,43 @@ Batched at the end (Manual Test 4).
 
 ### Manual Validation
 Batched at the end (Manual Test 5).
+
+## Summary
+
+_Completed: 2026-11-12_
+
+### Chunks Completed
+1. File actions on attachments: Save…, Copy image, Copy link and Open in browser from an inline image's or a file card's right-click menu, followed by the message's own items.
+2. The viewer and embed pictures: the same actions in the image viewer's bar and right-click menu, and on link-preview pictures, card images and GIF stills.
+3. Spoiler attachments: spoiler images covered until clicked, spoiler files tagged, and names shown without the prefix.
+4. Mark an upload as a spoiler: the tray's eye button, `SPOILER_{name}` uploads, and covered pending images.
+5. Text-file previews: a scrolling monospace block, loaded at once up to 50,000 bytes, else on "Load file"; spoiler previews hidden until clicked.
+
+Before the merge into `main`, `main` (66de472, the notification-settings fixes) was merged into this branch. The full suite passed on the result: 1,462 tests, 0 failed, and clippy clean.
+
+### Divergences
+- Chunk 1: `download(url, max)` keeps the first `max` bytes rather than refusing (Copy image asks for one byte over 50 MB to refuse a bigger picture). The clipboard format is sniffed from the bytes. Open in browser goes through `open_external`. The row's menu became `MessageMenu`. Another session's `git restore` briefly reverted `chat.rs`; the lost hunks were redone and checked.
+- Chunk 2: `FileTarget.page`, so a GIF still's Open in browser goes to its page while Copy link copies the still. `embed_target` takes the page, not the title. Outside pictures open through the link-safety prompt.
+- Chunk 3: `AttachmentView::uncovered(shown)` instead of a new constructor argument. `EmbedView::new` takes the reveal set. The shown name is set once in `AttachmentView`. There's no extra blur pass.
+- Chunk 4: files already named `spoiler_…` start marked, and unmarking drops the prefix on upload. A marked chip has a closed eye over the thumbnail, and "Spoiler" goes in its size line. `PendingAttachment` needed no field.
+- Chunk 5: `TextLoad` in the store and `TextPreview` in the view, holding `Arc<str>`. `AttachmentView::File.id`. Small files show "Loading…" from the start. No previews in search results or bot embeds. A `ScrollHandle` per file ID is kept on the view. CRLF and tabs are normalised. Fetches aren't throttled.
+- Small rustfmt cleanups inside reformatted functions cleared older hunks: `chat.rs` 17 → 12, `composer.rs` 14 → 13.
+
+### Definition of Done
+- [x] Inline images, embed pictures and file cards have a right-click menu with Save…, Copy image (pictures), Copy link and Open in browser, followed by the message's own items.
+- [x] The image viewer's bar and its right-click menu offer the same actions, for attachments, link previews and GIF links. Gifbox stills keep opening their page and aren't viewed, but have the menu in the message.
+- [x] Save… uses the macOS save panel (Downloads, with the name filled in) and offers Show in Finder; Copy image writes PNG or JPEG. *Pasting into Preview is still to be checked by hand (Manual Test 1).*
+- [x] Attachments named `spoiler_…` (any case) are covered until clicked (images) or tagged (other files), and their names are shown without the prefix.
+- [x] Files marked in the tray upload as `SPOILER_{name}` and show covered here. *Showing covered in the web client is still to be checked by hand (Manual Test 4).*
+- [x] Text attachments preview in a scrolling monospace block: at once up to 50,000 bytes, else on "Load file"; spoiler previews stay hidden until clicked.
+- [x] `cargo test` and `cargo clippy --all-targets -- -D warnings` pass. No touched file's rustfmt drift grew (`chat.rs` 12, `store.rs` 14, `client.rs` 3, `events.rs` 3, `composer.rs` 13), and the new files are clean.
+- [x] The roadmap links this plan.
+
+### Remaining Manual Steps
+The plan's manual tests, batched as the user asked. Run them with the web client in a test channel:
+1. **Attachments' menu:** on an image and a PDF, try Save… (the panel opens in Downloads, then "Show in Finder"), Copy image (paste into Preview with File › New from Clipboard, and into Messages), Copy link and Open in browser.
+2. **The viewer:** try each bar button and the right-click menu for an attachment, a link preview and a GIF link. Also right-click a Gifbox GIF in a message, where Open in browser should open its page. Check the menu draws above the viewer, and that clicking an item doesn't close the viewer.
+3. **Spoilers in:** a spoiler image from the web client arrives covered and shows on click; a spoiler PDF has its tag.
+4. **Spoilers out:** mark a picked file and a pasted image with the tray's eye button; they show covered while sending, and arrive covered here and on the web.
+5. **Text files:** a small `.txt` shows at once; a large `.log` shows on "Load file"; a spoiler `.txt` shows on click. Scroll inside a long preview, and past a short one.
+6. **Themes:** the covered image, the tag, the tray's spoiler chip and the preview block read well in light and dark.
