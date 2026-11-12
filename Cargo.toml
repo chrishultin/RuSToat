@@ -37,8 +37,10 @@ unicode-properties = "0.1"
 svgtypes = "0.16"
 # Blurred previews of uploads while they load (Stoat stores a ThumbHash with each image).
 thumbhash = "0.1"
-# Pixel buffers for those previews, as GPUI takes them. The version GPUI already uses.
-image = { version = "0.25", default-features = false }
+# Pixel buffers for those previews, as GPUI takes them, and pictures turned
+# into PNG for the clipboard (src/file_actions.rs). The version and decoders
+# GPUI already uses.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # Local-time formatting for message timestamps.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # An attachment's MIME type from its extension. Already in the tree.

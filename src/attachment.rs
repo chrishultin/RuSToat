@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use crate::api::models::{File, Metadata};
+use crate::file_actions::{FileTarget, display_name};
 use crate::media::MediaUrls;
 
 /// Inline images fit within this box (logical px), keeping their aspect ratio.
@@ -113,6 +114,29 @@ impl AttachmentView {
                 kind: file_kind(metadata, &file.content_type),
             },
         }
+    }
+}
+
+impl AttachmentView {
+    /// What Save…, Copy image, Copy link and Open in browser act on: the
+    /// file server's original. `None` while it's still uploading, or before
+    /// the file server is known.
+    pub fn file_target(&self) -> Option<FileTarget> {
+        let (name, url, picture) = match self {
+            AttachmentView::Image { name, url, .. } => (name, url, true),
+            AttachmentView::File {
+                name,
+                url: Some(url),
+                ..
+            } => (name, url, false),
+            AttachmentView::File { url: None, .. } | AttachmentView::Local { .. } => return None,
+        };
+        Some(FileTarget {
+            name: display_name(name).to_string(),
+            url: url.clone(),
+            link: url.clone(),
+            picture,
+        })
     }
 }
 

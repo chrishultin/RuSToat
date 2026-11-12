@@ -558,6 +558,39 @@ impl StoatClient {
         parse::<Uploaded>(status, &body).map(|u| u.id)
     }
 
+    /// `GET url` on the file server or media proxy (both public, so no
+    /// session token): the file's bytes. With `max`, reading stops after
+    /// that many, and the rest is never fetched. Error statuses become
+    /// [`ApiError`] (a 404 is `Unexpected { status: 404 }`).
+    pub async fn download(&self, url: &str, max: Option<u64>) -> Result<Vec<u8>, ApiError> {
+        use futures::StreamExt as _;
+
+        log::debug!("GET {url} (download, max {max:?})");
+        let response = self
+            .http
+            .get(url)
+            .timeout(UPLOAD_TIMEOUT)
+            .send()
+            .await
+            .map_err(ApiError::Network)?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.bytes().await.map_err(ApiError::Network)?;
+            return Err(ApiError::from_response(status, &body));
+        }
+        let max = max.map_or(usize::MAX, |max| usize::try_from(max).unwrap_or(usize::MAX));
+        let mut bytes = Vec::new();
+        let mut body = response.bytes_stream();
+        while bytes.len() < max
+            && let Some(chunk) = body.next().await
+        {
+            let chunk = chunk.map_err(ApiError::Network)?;
+            let take = chunk.len().min(max - bytes.len());
+            bytes.extend_from_slice(&chunk[..take]);
+        }
+        Ok(bytes)
+    }
+
     /// `PATCH /channels/{channel}/messages/{message}`: replace the text of
     /// one of the user's messages. `content` must not be empty.
     pub async fn edit_message(

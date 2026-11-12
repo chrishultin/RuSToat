@@ -20,6 +20,7 @@ pub mod dock;
 pub mod draft;
 pub mod embed;
 pub mod emoji;
+pub mod file_actions;
 pub mod friends;
 pub mod groups;
 pub mod http;

@@ -171,7 +171,7 @@ Some milestones lay foundations that later ones reuse. When the earlier one's pl
 
 ## F. Media
 
-### Milestone 30: Attachments and images (M)
+### Milestone 30: Attachments and images (M). Plan: [`attachments-and-images.md`](attachments-and-images.md)
 - Image and file actions: Save, Copy image, Copy link, Open in browser, also in the image viewer's right-click menu
 - Mark an upload as a spoiler (new in 0.16); spoiler attachments stay blurred until clicked
 - Inline previews of text-file attachments

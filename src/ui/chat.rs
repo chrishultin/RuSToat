@@ -47,6 +47,7 @@ use crate::channel_order::{
 use crate::complete::{Query, QueryKind, Suggestion, TokenRef, rank, rank_mentions};
 use crate::draft::{AttachmentLimits, DraftAttachment, ReplyTarget};
 use crate::embed::{Description, EmbedCard, EmbedImage, EmbedView};
+use crate::file_actions::{self as files, FileAction, FileTarget};
 use crate::friends::{AddFriendState, FRIENDS, FriendsTab};
 use crate::invites::{InviteHosts, InvitePreview};
 use crate::markdown::{
@@ -1664,6 +1665,7 @@ impl ChatView {
                 self.viewer = Some(image);
                 window.focus(&self.viewer_focus, cx);
             }
+            RowAction::File(action, target) => self.file_action(action, target, window, cx),
             RowAction::ToggleReaction { message, emoji } => {
                 self.picker_for = None;
                 self.toggle_reaction(channel.to_string(), message, emoji, window, cx);
@@ -1737,6 +1739,127 @@ impl ChatView {
             RowAction::OpenLink(url) => self.open_external(url, None, window, cx),
         }
         cx.notify();
+    }
+
+    /// Save, copy or open a file or picture.
+    fn file_action(
+        &mut self,
+        action: FileAction,
+        target: FileTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            FileAction::Save => self.save_file(target, window, cx),
+            FileAction::CopyImage => self.copy_image(target, window, cx),
+            FileAction::CopyLink => {
+                cx.write_to_clipboard(ClipboardItem::new_string(target.link));
+                window.push_notification(Notification::success(files::LINK_COPIED_TEXT), cx);
+            }
+            FileAction::OpenInBrowser => self.open_external(target.link, None, window, cx),
+        }
+    }
+
+    /// Save…: ask where with the save panel (in Downloads, with the name
+    /// filled in), then download the file there. The whole file is held in
+    /// memory on the way (attachments are at most tens of MB).
+    fn save_file(&mut self, target: FileTarget, window: &mut Window, cx: &mut Context<Self>) {
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let directory = files::save_directory(home.as_deref());
+        let chosen =
+            cx.prompt_for_new_path(&directory, Some(&files::suggested_save_name(&target.name)));
+        let client = self.client.clone();
+        let name = target.name.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            let path = match chosen.await {
+                Ok(Ok(Some(path))) => path,
+                Ok(Ok(None)) | Err(_) => return,
+                Ok(Err(err)) => {
+                    log::warn!("couldn't open the save panel: {err:?}");
+                    return;
+                }
+            };
+            let saving = spawn_io({
+                let (url, path) = (target.url.clone(), path.clone());
+                async move {
+                    let bytes = client
+                        .download(&url, None)
+                        .await
+                        .map_err(|err| files::download_failure(&err))?;
+                    tokio::fs::write(&path, bytes)
+                        .await
+                        .map_err(|err| format!("couldn't write the file ({err})"))
+                }
+            });
+            let result = match saving.await {
+                Ok(result) => result,
+                Err(err) => Err(format!("{err}")),
+            };
+            cx.update(|window, cx| {
+                let toast = match result {
+                    Ok(()) => {
+                        Notification::success(files::saved_text(&name)).action(move |_, _, _| {
+                            let path = path.clone();
+                            Button::new("show-in-finder")
+                                .small()
+                                .label(files::SHOW_IN_FINDER_TEXT)
+                                .on_click(move |_, _, cx| cx.reveal_path(&path))
+                        })
+                    }
+                    Err(reason) => {
+                        log::warn!("couldn't save {name}: {reason}");
+                        Notification::error(files::save_failed_text(&name, &reason))
+                    }
+                };
+                window.push_notification(toast, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Copy image: download the picture and put it on the clipboard (as PNG
+    /// unless it's PNG or JPEG already).
+    fn copy_image(&mut self, target: FileTarget, window: &mut Window, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let copying = spawn_io(async move {
+            // One byte over the limit tells a picture that's too big.
+            let bytes = client
+                .download(&target.url, Some(files::COPY_IMAGE_MAX_BYTES + 1))
+                .await
+                .map_err(|err| files::download_failure(&err))?;
+            if bytes.len() as u64 > files::COPY_IMAGE_MAX_BYTES {
+                return Err("it's too big".to_string());
+            }
+            files::clipboard_image(bytes)
+        });
+        cx.spawn_in(window, async move |_, cx| {
+            let result = match copying.await {
+                Ok(result) => result,
+                Err(err) => Err(format!("{err}")),
+            };
+            cx.update(|window, cx| {
+                let toast = match result {
+                    Ok((format, bytes)) => {
+                        let format = match format {
+                            files::ClipboardFormat::Png => ImageFormat::Png,
+                            files::ClipboardFormat::Jpeg => ImageFormat::Jpeg,
+                        };
+                        cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
+                            format, bytes,
+                        )));
+                        Notification::success(files::IMAGE_COPIED_TEXT)
+                    }
+                    Err(reason) => {
+                        log::warn!("couldn't copy an image: {reason}");
+                        Notification::error(files::copy_failed_text(&reason))
+                    }
+                };
+                window.push_notification(toast, cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Scroll to message `id` in `channel` and highlight it. If it isn't
@@ -11595,6 +11718,8 @@ enum RowAction {
     RevealImage(String),
     /// Open an inline image in the full-size viewer.
     ViewImage(ViewedImage),
+    /// Save, copy or open a file or picture (from its right-click menu).
+    File(FileAction, FileTarget),
     /// Add the user's `emoji` reaction to `message`, or take it back if
     /// they've already reacted with it.
     ToggleReaction { message: String, emoji: String },
@@ -12241,6 +12366,10 @@ fn render_message_row(
     } else {
         on_action.clone()
     };
+    // Search results and messages still sending have no right-click menu,
+    // nor do the files in them.
+    let message_menu = (!preview && message.pending.is_none())
+        .then(|| Rc::new(MessageMenu::new(message, on_action, pickers)));
     // Previews are all on one side, whoever wrote them.
     let right = message.mine && !preview;
     let alignment = if right {
@@ -12267,89 +12396,98 @@ fn render_message_row(
             .rounded_tl(top)
             .rounded_bl(bottom)
     };
-    let surface =
-        surface
-            .when_some(message.body.clone(), |el, body| {
-                el.child(
-                    // Keyed by `render_key`, so an edit (or a renamed mention)
-                    // gets a fresh parse instead of the cached one.
-                    TextView::markdown(SharedString::from(message.render_key.clone()), body)
-                        // `$$…$$` formatting (colour, size), drawn natively.
-                        .plugin(MathPlugin)
-                        // Timestamps, and spoilers revealed by a click
-                        // (not in search results, where a click jumps).
-                        .plugin(
-                            if preview {
-                                MarkupPlugin::default()
-                            } else {
-                                MarkupPlugin::revealing(people.spoiler_revealer(&message.id))
-                            }
-                            // Channel pills, which open the channel (but in
-                            // search results the row's click jumps).
-                            .with_channels(people.channel_pills(!preview)),
-                        )
-                        // A copy button (and the language) on each code block.
-                        .code_block_actions(code_block_actions)
-                        // Emoji-only messages are drawn big (custom ones are sized
-                        // in the Markdown itself).
-                        .map(|text| {
-                            if message.jumbo {
-                                text.text_size(px(JUMBO_TEXT_PX))
-                            } else {
-                                text.text_sm()
-                            }
-                        })
-                        // A click on a result jumps; it doesn't select.
-                        .selectable(!preview)
-                        .on_link_click({
-                            let on_link = people.link_handler();
-                            move |url, _, window, cx| on_link(url, window, cx)
-                        }),
-                )
-            })
-            .when(!message.attachments.is_empty(), |el| {
-                el.child(
-                    v_flex()
-                        .gap_1()
-                        .when(message.body.is_some(), |el| el.mt_1())
-                        .children(message.attachments.iter().enumerate().map(
-                            |(ix, attachment)| {
+    let surface = surface
+        .when_some(message.body.clone(), |el, body| {
+            el.child(
+                // Keyed by `render_key`, so an edit (or a renamed mention)
+                // gets a fresh parse instead of the cached one.
+                TextView::markdown(SharedString::from(message.render_key.clone()), body)
+                    // `$$…$$` formatting (colour, size), drawn natively.
+                    .plugin(MathPlugin)
+                    // Timestamps, and spoilers revealed by a click
+                    // (not in search results, where a click jumps).
+                    .plugin(
+                        if preview {
+                            MarkupPlugin::default()
+                        } else {
+                            MarkupPlugin::revealing(people.spoiler_revealer(&message.id))
+                        }
+                        // Channel pills, which open the channel (but in
+                        // search results the row's click jumps).
+                        .with_channels(people.channel_pills(!preview)),
+                    )
+                    // A copy button (and the language) on each code block.
+                    .code_block_actions(code_block_actions)
+                    // Emoji-only messages are drawn big (custom ones are sized
+                    // in the Markdown itself).
+                    .map(|text| {
+                        if message.jumbo {
+                            text.text_size(px(JUMBO_TEXT_PX))
+                        } else {
+                            text.text_sm()
+                        }
+                    })
+                    // A click on a result jumps; it doesn't select.
+                    .selectable(!preview)
+                    .on_link_click({
+                        let on_link = people.link_handler();
+                        move |url, _, window, cx| on_link(url, window, cx)
+                    }),
+            )
+        })
+        .when(!message.attachments.is_empty(), |el| {
+            el.child(
+                v_flex()
+                    .gap_1()
+                    .when(message.body.is_some(), |el| el.mt_1())
+                    .children(
+                        message
+                            .attachments
+                            .iter()
+                            .enumerate()
+                            .map(|(ix, attachment)| {
                                 let id =
                                     SharedString::from(format!("attachment-{}-{ix}", message.id));
-                                render_attachment(id, attachment, colors, &attachment_action)
-                            },
-                        )),
-                )
-            })
-            .when(!preview && !message.embeds.is_empty(), |el| {
-                el.child(
-                    v_flex()
-                        .gap_1()
-                        .when(
-                            message.body.is_some() || !message.attachments.is_empty(),
-                            |el| el.mt_1(),
-                        )
-                        .children(message.embeds.iter().enumerate().map(|(ix, embed)| {
-                            let id = SharedString::from(format!("embed-{}-{ix}", message.id));
-                            render_embed(id, embed, colors, on_action, people)
-                        })),
-                )
-            })
-            .when(!preview && !message.invites.is_empty(), |el| {
-                el.child(
-                    v_flex()
-                        .gap_1()
-                        .mt_1()
-                        .children(message.invites.iter().map(|code| {
-                            let id = SharedString::from(format!("invite-{}-{code}", message.id));
-                            let card = pickers.invites.get(code);
-                            render_invite_card(id, code, card, colors, on_action)
-                        })),
-                )
-            })
-            .when(message.edited, |el| {
-                el.child(div().text_xs().text_color(colors.muted).child("(edited)"))
-            });
+                                render_attachment(
+                                    id,
+                                    attachment,
+                                    colors,
+                                    &attachment_action,
+                                    message_menu.as_ref(),
+                                )
+                            }),
+                    ),
+            )
+        })
+        .when(!preview && !message.embeds.is_empty(), |el| {
+            el.child(
+                v_flex()
+                    .gap_1()
+                    .when(
+                        message.body.is_some() || !message.attachments.is_empty(),
+                        |el| el.mt_1(),
+                    )
+                    .children(message.embeds.iter().enumerate().map(|(ix, embed)| {
+                        let id = SharedString::from(format!("embed-{}-{ix}", message.id));
+                        render_embed(id, embed, colors, on_action, people, message_menu.as_ref())
+                    })),
+            )
+        })
+        .when(!preview && !message.invites.is_empty(), |el| {
+            el.child(
+                v_flex()
+                    .gap_1()
+                    .mt_1()
+                    .children(message.invites.iter().map(|code| {
+                        let id = SharedString::from(format!("invite-{}-{code}", message.id));
+                        let card = pickers.invites.get(code);
+                        render_invite_card(id, code, card, colors, on_action)
+                    })),
+            )
+        })
+        .when(message.edited, |el| {
+            el.child(div().text_xs().text_color(colors.muted).child("(edited)"))
+        });
 
     // Big emoji and bare attachments stand on their own: same bubble (so it
     // keeps its width and side), with the surface made invisible. Not
@@ -12468,20 +12606,52 @@ fn render_message_row(
         return row.into_any_element();
     }
     // Right-click anywhere on the row (text, padding, avatar).
-    let (on_action, id, mine) = (on_action.clone(), message.id.clone(), message.mine);
-    // Someone else's message (not Stoat's own) can be reported.
-    let report_author = message
-        .author_id
-        .clone()
-        .filter(|_| !mine && !message.system);
-    let (can_pin, pinned) = (message.can_pin, message.pinned);
-    let can_link = pickers.can_link;
-    // Only messages with text can be quoted.
-    let has_text = message.body.is_some();
-    let reply = reply_target(message);
-    row.context_menu(move |menu, _, _| {
+    match message_menu {
+        Some(items) => row
+            .context_menu(move |menu, _, _| items.items(menu))
+            .into_any_element(),
+        None => row.into_any_element(),
+    }
+}
+
+/// A message's own right-click items (Reply, Quote, …). The row's menu is
+/// these; the files and pictures in it end theirs with them.
+struct MessageMenu {
+    on_action: OnRowAction,
+    id: String,
+    mine: bool,
+    /// Someone else's message (not Stoat's own) can be reported.
+    report_author: Option<String>,
+    can_pin: bool,
+    pinned: bool,
+    can_link: bool,
+    /// Only messages with text can be quoted.
+    has_text: bool,
+    reply: ReplyTarget,
+}
+
+impl MessageMenu {
+    fn new(message: &MessageRow, on_action: &OnRowAction, pickers: &Pickers) -> Self {
+        let mine = message.mine;
+        MessageMenu {
+            on_action: on_action.clone(),
+            id: message.id.clone(),
+            mine,
+            report_author: message
+                .author_id
+                .clone()
+                .filter(|_| !mine && !message.system),
+            can_pin: message.can_pin,
+            pinned: message.pinned,
+            can_link: pickers.can_link,
+            has_text: message.body.is_some(),
+            reply: reply_target(message),
+        }
+    }
+
+    fn items(&self, menu: PopupMenu) -> PopupMenu {
         let act = |action: RowAction| {
-            let on_action = on_action.clone();
+            let on_action = self.on_action.clone();
             move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                 on_action(action.clone(), window, cx)
             }
@@ -12489,40 +12659,41 @@ fn render_message_row(
         menu.item(
             PopupMenuItem::new("Reply")
                 .icon(IconName::Reply)
-                .on_click(act(RowAction::Reply(reply.clone()))),
+                .on_click(act(RowAction::Reply(self.reply.clone()))),
         )
-        .when(has_text, |menu| {
+        .when(self.has_text, |menu| {
             menu.item(
                 PopupMenuItem::new("Quote")
                     .icon(IconName::TextQuote)
-                    .on_click(act(RowAction::Quote(id.clone()))),
+                    .on_click(act(RowAction::Quote(self.id.clone()))),
             )
         })
         .item(
             PopupMenuItem::new("Mark as unread")
                 .icon(IconName::Mail)
-                .on_click(act(RowAction::MarkUnread(id.clone()))),
+                .on_click(act(RowAction::MarkUnread(self.id.clone()))),
         )
         .item(
             PopupMenuItem::new("Copy text")
                 .icon(IconName::Copy)
-                .on_click(act(RowAction::CopyText(id.clone()))),
+                .on_click(act(RowAction::CopyText(self.id.clone()))),
         )
-        .when(can_link, |menu| {
+        .when(self.can_link, |menu| {
             menu.item(
                 PopupMenuItem::new("Copy message link")
                     .icon(IconName::Link)
-                    .on_click(act(RowAction::CopyLink(id.clone()))),
+                    .on_click(act(RowAction::CopyLink(self.id.clone()))),
             )
         })
         .item(
             PopupMenuItem::new("Copy message ID")
                 .icon(IconName::IdCard)
-                .on_click(act(RowAction::CopyId(id.clone()))),
+                .on_click(act(RowAction::CopyId(self.id.clone()))),
         )
-        .when(can_pin, |menu| {
+        .when(self.can_pin, |menu| {
             let toggle = {
-                let (on_action, id) = (on_action.clone(), id.clone());
+                let (on_action, id, pinned) =
+                    (self.on_action.clone(), self.id.clone(), self.pinned);
                 move |event: &ClickEvent, window: &mut Window, cx: &mut App| {
                     let confirmed = event.modifiers().shift;
                     let action = RowAction::TogglePin {
@@ -12533,16 +12704,16 @@ fn render_message_row(
                     on_action(action, window, cx)
                 }
             };
-            let (label, icon) = if pinned {
+            let (label, icon) = if self.pinned {
                 ("Unpin message", IconName::PinOff)
             } else {
                 ("Pin message", IconName::Pin)
             };
             menu.item(PopupMenuItem::new(label).icon(icon).on_click(toggle))
         })
-        .when(mine, |menu| {
+        .when(self.mine, |menu| {
             let delete = {
-                let (on_action, id) = (on_action.clone(), id.clone());
+                let (on_action, id) = (self.on_action.clone(), self.id.clone());
                 move |event: &ClickEvent, window: &mut Window, cx: &mut App| {
                     let confirmed = event.modifiers().shift;
                     on_action(RowAction::Delete { id: id.clone(), confirmed }, window, cx)
@@ -12552,7 +12723,7 @@ fn render_message_row(
                 .item(
                     PopupMenuItem::new("Edit")
                         .icon(IconName::Pencil)
-                        .on_click(act(RowAction::Edit(id.clone()))),
+                        .on_click(act(RowAction::Edit(self.id.clone()))),
                 )
                 .item(
                     PopupMenuItem::element(|_, cx| {
@@ -12566,18 +12737,17 @@ fn render_message_row(
                     .on_click(delete),
                 )
         })
-        .when_some(report_author.clone(), |menu, author| {
+        .when_some(self.report_author.clone(), |menu, author| {
             menu.separator().item(
                 PopupMenuItem::new("Report message…")
                     .icon(IconName::TriangleAlert)
                     .on_click(act(RowAction::Report {
-                        id: id.clone(),
+                        id: self.id.clone(),
                         author,
                     })),
             )
         })
-    })
-    .into_any_element()
+    }
 }
 
 /// Replying to `message`: pinging its author by default, unless it's ours.
@@ -13145,12 +13315,84 @@ const FILE_CARD_WIDTH: f32 = 320.;
 
 /// An inline image at its precomputed size (so the row never changes height
 /// when it loads), or a file card. `id` is unique within the list.
+/// Right-clicking a sent one gives what can be done with the file, then
+/// `message`'s own items (none without them: a search result, or a message
+/// still sending).
 fn render_attachment(
     id: SharedString,
     attachment: &AttachmentView,
     colors: RowColors,
     on_action: &OnRowAction,
+    message: Option<&Rc<MessageMenu>>,
 ) -> AnyElement {
+    let element = attachment_element(id, attachment, colors, on_action);
+    match (attachment.file_target(), message) {
+        (Some(target), Some(message)) => {
+            with_file_menu(element, target, Some(message.clone()), on_action)
+        }
+        _ => element.into_any_element(),
+    }
+}
+
+/// `element` (a file or picture) with a right-click menu of what can be
+/// done with `target`, then the message's own items, if any. Its menu wins
+/// over the row's.
+fn with_file_menu(
+    element: Stateful<Div>,
+    target: FileTarget,
+    message: Option<Rc<MessageMenu>>,
+    on_action: &OnRowAction,
+) -> AnyElement {
+    let run: RunFileAction = {
+        let on_action = on_action.clone();
+        Rc::new(move |action, target, window, cx| {
+            on_action(RowAction::File(action, target), window, cx)
+        })
+    };
+    element
+        .context_menu(move |menu, _, _| {
+            let menu = file_menu_items(menu, &target, &run);
+            match &message {
+                Some(message) => message.items(menu.separator()),
+                None => menu,
+            }
+        })
+        .into_any_element()
+}
+
+/// Runs a file action on a target, wherever it was asked for.
+type RunFileAction = Rc<dyn Fn(FileAction, FileTarget, &mut Window, &mut App)>;
+
+/// The items for what can be done with `target`: Save…, Copy image
+/// (pictures), Copy link and Open in browser.
+fn file_menu_items(menu: PopupMenu, target: &FileTarget, run: &RunFileAction) -> PopupMenu {
+    files::actions(target)
+        .into_iter()
+        .fold(menu, |menu, action| {
+            let (run, target) = (run.clone(), target.clone());
+            menu.item(
+                PopupMenuItem::new(action.label())
+                    .icon(file_action_icon(action))
+                    .on_click(move |_, window, cx| run(action, target.clone(), window, cx)),
+            )
+        })
+}
+
+fn file_action_icon(action: FileAction) -> IconName {
+    match action {
+        FileAction::Save => IconName::Download,
+        FileAction::CopyImage => IconName::Copy,
+        FileAction::CopyLink => IconName::Link,
+        FileAction::OpenInBrowser => IconName::ExternalLink,
+    }
+}
+
+fn attachment_element(
+    id: SharedString,
+    attachment: &AttachmentView,
+    colors: RowColors,
+    on_action: &OnRowAction,
+) -> Stateful<Div> {
     match attachment {
         AttachmentView::Image {
             url,
@@ -13173,7 +13415,6 @@ fn render_attachment(
                 .on_click(move |_, window, cx| {
                     on_action(RowAction::ViewImage(viewed.clone()), window, cx)
                 })
-                .into_any_element()
         }
         AttachmentView::Image {
             id: file_id,
@@ -13184,31 +13425,28 @@ fn render_attachment(
         } => {
             let on_action = on_action.clone();
             let file_id = file_id.clone();
-            file_card(id.clone(), IconName::FileImage, name, size_label, colors)
-                .child(
-                    Button::new(SharedString::from(format!("{id}-show")))
-                        .xsmall()
-                        .label("Show image")
-                        .on_click(move |_, window, cx| {
-                            on_action(RowAction::RevealImage(file_id.clone()), window, cx)
-                        }),
-                )
-                .into_any_element()
+            file_card(id.clone(), IconName::FileImage, name, size_label, colors).child(
+                Button::new(SharedString::from(format!("{id}-show")))
+                    .xsmall()
+                    .label("Show image")
+                    .on_click(move |_, window, cx| {
+                        on_action(RowAction::RevealImage(file_id.clone()), window, cx)
+                    }),
+            )
         }
         AttachmentView::File {
             name,
             size_label,
             url,
             kind,
-        } => {
-            file_card(id, file_icon(*kind), name, size_label, colors)
-                .when_some(url.clone(), |card, url| {
-                    card.cursor_pointer()
-                        .on_click(move |_, _, cx| cx.open_url(&url))
-                        .child(Icon::new(IconName::Download).text_color(colors.muted))
-                })
-                .into_any_element()
-        }
+        } => file_card(id, file_icon(*kind), name, size_label, colors).when_some(
+            url.clone(),
+            |card, url| {
+                card.cursor_pointer()
+                    .on_click(move |_, _, cx| cx.open_url(&url))
+                    .child(Icon::new(IconName::Download).text_color(colors.muted))
+            },
+        ),
         // Still uploading: the local copy, with a progress bar along its
         // bottom edge (over it, so the row's height doesn't change).
         AttachmentView::Local {
@@ -13238,12 +13476,20 @@ fn render_attachment(
                                 .into_any_element()
                         }),
                 )
-                .child(upload_bar(*progress, colors).bottom(px(6.)).left(px(6.)).right(px(6.)))
-                .into_any_element(),
+                .child(
+                    upload_bar(*progress, colors)
+                        .bottom(px(6.))
+                        .left(px(6.))
+                        .right(px(6.)),
+                ),
             None => file_card(id, file_icon(*kind), name, size_label, colors)
                 .relative()
-                .child(upload_bar(*progress, colors).bottom(px(3.)).left(px(8.)).right(px(8.)))
-                .into_any_element(),
+                .child(
+                    upload_bar(*progress, colors)
+                        .bottom(px(3.))
+                        .left(px(8.))
+                        .right(px(8.)),
+                ),
         },
     }
 }
@@ -13398,6 +13644,7 @@ fn render_embed(
     colors: RowColors,
     on_action: &OnRowAction,
     people: &People,
+    message: Option<&Rc<MessageMenu>>,
 ) -> AnyElement {
     match embed {
         EmbedView::Image(image) => {
@@ -13439,7 +13686,7 @@ fn render_embed(
                 )
                 .into_any_element()
         }
-        EmbedView::Card(card) => render_embed_card(id, card, colors, on_action, people),
+        EmbedView::Card(card) => render_embed_card(id, card, colors, on_action, people, message),
     }
 }
 
@@ -13576,6 +13823,7 @@ fn render_embed_card(
     colors: RowColors,
     on_action: &OnRowAction,
     people: &People,
+    message: Option<&Rc<MessageMenu>>,
 ) -> AnyElement {
     let bar = card
         .colour
@@ -13719,10 +13967,15 @@ fn render_embed_card(
             }
         }
     });
-    let media = card
-        .media
-        .as_ref()
-        .map(|media| render_attachment(format!("{id}-media").into(), media, colors, on_action));
+    let media = card.media.as_ref().map(|media| {
+        render_attachment(
+            format!("{id}-media").into(),
+            media,
+            colors,
+            on_action,
+            message,
+        )
+    });
 
     div()
         .flex()
