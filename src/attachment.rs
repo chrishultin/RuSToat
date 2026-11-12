@@ -25,6 +25,67 @@ pub const FALLBACK_IMAGE_SIZE: (u32, u32) = (300, 200);
 /// server-side resizing, so they'd arrive in full.
 pub const MAX_AUTO_LOAD_BYTES: u64 = 8 * 1024 * 1024;
 
+/// Text files up to this size (bytes) are previewed as soon as their row is
+/// built; bigger ones on "Load file". A preview never holds more than this.
+pub const TEXT_AUTO_LOAD: u64 = 50_000;
+
+/// How fetching a text file's preview went. The store keeps these by file
+/// ID, for the session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TextLoad {
+    Loading,
+    Loaded(Arc<str>),
+    Failed,
+}
+
+/// What a text file shows under its card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TextPreview {
+    /// Too big to load at once: "Load file ({size})".
+    NotLoaded,
+    Loading,
+    Loaded(Arc<str>),
+    /// "Couldn't load the file.", with Try again.
+    Failed,
+    /// A spoiler not shown yet: "Spoiler: click to show".
+    Hidden,
+}
+
+/// The preview for `file`, if it's a text file (by its metadata): hidden
+/// while it's a spoiler not `shown` yet, else as far as `load` has got. A
+/// small file not asked for yet is about to be: it's loading.
+pub fn text_preview(file: &File, shown: bool, load: Option<&TextLoad>) -> Option<TextPreview> {
+    if !matches!(file.metadata, Metadata::Text) {
+        return None;
+    }
+    if is_spoiler(&file.filename) && !shown {
+        return Some(TextPreview::Hidden);
+    }
+    Some(match load {
+        Some(TextLoad::Loading) => TextPreview::Loading,
+        Some(TextLoad::Loaded(text)) => TextPreview::Loaded(text.clone()),
+        Some(TextLoad::Failed) => TextPreview::Failed,
+        None if loads_at_once(file) => TextPreview::Loading,
+        None => TextPreview::NotLoaded,
+    })
+}
+
+/// A text file small enough to preview without being asked.
+pub fn loads_at_once(file: &File) -> bool {
+    u64::try_from(file.size).is_ok_and(|size| size <= TEXT_AUTO_LOAD)
+}
+
+/// A downloaded preview as text: UTF-8 (anything else replaced), from at
+/// most [`TEXT_AUTO_LOAD`] bytes even if the file was longer than it said,
+/// with Windows line ends and tabs (which don't draw) made plain.
+pub fn preview_text(mut bytes: Vec<u8>) -> Arc<str> {
+    bytes.truncate(TEXT_AUTO_LOAD as usize);
+    let text = String::from_utf8_lossy(&bytes)
+        .replace("\r\n", "\n")
+        .replace('\t', "    ");
+    Arc::from(text)
+}
+
 /// What a file card's icon shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileKind {
@@ -60,6 +121,8 @@ pub enum AttachmentView {
     },
     /// A card (icon, name, size) that opens the file in the browser.
     File {
+        /// The file's ID, for its preview and reveal.
+        id: String,
         name: String,
         size_label: String,
         /// `None` until the file server is known.
@@ -67,6 +130,8 @@ pub enum AttachmentView {
         kind: FileKind,
         /// A spoiler: its card has a tag.
         spoiler: bool,
+        /// A text file's preview, under the card (see [`text_preview`]).
+        preview: Option<TextPreview>,
     },
     /// A file of a message that's still being sent, drawn from the local
     /// copy with how much of it has uploaded.
@@ -121,13 +186,23 @@ impl AttachmentView {
                 }
             }
             (metadata, url) => AttachmentView::File {
+                id: file.id.clone(),
                 name,
                 size_label,
                 url,
                 kind: file_kind(metadata, &file.content_type),
                 spoiler,
+                preview: None,
             },
         }
+    }
+
+    /// A text file's preview (see [`text_preview`]).
+    pub fn with_preview(mut self, text: Option<TextPreview>) -> Self {
+        if let AttachmentView::File { preview, .. } = &mut self {
+            *preview = text;
+        }
+        self
     }
 
     /// With `shown` (the user clicked it), a spoiler image isn't covered.

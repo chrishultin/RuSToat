@@ -4,8 +4,8 @@
 use serde_json::json;
 use stoat_gpui::api::models::{BulkMessageResponse, File, Metadata};
 use stoat_gpui::attachment::{
-    AttachmentView, FALLBACK_IMAGE_SIZE, FileKind, MAX_AUTO_LOAD_BYTES, file_kind, fit_into,
-    fit_within, size_label,
+    AttachmentView, FALLBACK_IMAGE_SIZE, FileKind, MAX_AUTO_LOAD_BYTES, TEXT_AUTO_LOAD, TextLoad,
+    TextPreview, file_kind, fit_into, fit_within, preview_text, size_label,
 };
 use stoat_gpui::media::MediaUrls;
 use stoat_gpui::store::{ChatStore, RowOp, TimelineRow, diff_rows};
@@ -161,11 +161,13 @@ fn other_files_are_cards_that_link_to_the_file() {
     assert_eq!(
         AttachmentView::new(&pdf, &media(), false),
         AttachmentView::File {
+            id: "f-pdf".into(),
             name: "report.pdf".into(),
             size_label: "1.2 MB".into(),
             url: Some(format!("{CDN}/attachments/f-pdf")),
             kind: FileKind::File,
             spoiler: false,
+            preview: None,
         }
     );
     // Videos are cards too (no in-app playback).
@@ -385,11 +387,13 @@ fn spoiler_files_are_tagged_and_named_without_the_prefix() {
     assert_eq!(
         AttachmentView::new(&pdf, &media(), false),
         AttachmentView::File {
+            id: "f-pdf".into(),
             name: "report.pdf".into(),
             size_label: "2.0 KB".into(),
             url: Some(format!("{CDN}/attachments/f-pdf")),
             kind: FileKind::File,
             spoiler: true,
+            preview: None,
         }
     );
     // A name that's only the prefix keeps it.
@@ -437,4 +441,124 @@ fn a_large_spoiler_stays_covered_after_show_image() {
             ..
         }
     ));
+}
+
+fn text_file(id: &str, name: &str, size: u64) -> File {
+    file(id, name, json!({ "type": "Text" }), "text/plain", size)
+}
+
+fn preview(rows: &[TimelineRow], ix: usize) -> Option<TextPreview> {
+    match &attachments(rows)[ix] {
+        AttachmentView::File { preview, .. } => preview.clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn small_text_files_are_wanted_once_and_big_ones_when_asked() {
+    let mut store = store_with(vec![
+        text_file("f-small", "notes.txt", TEXT_AUTO_LOAD),
+        text_file("f-big", "server.log", TEXT_AUTO_LOAD + 1),
+    ]);
+    let rows = store.timeline("ch-pics");
+    // The small one is about to load; the big one waits for "Load file".
+    assert_eq!(preview(&rows, 0), Some(TextPreview::Loading));
+    assert_eq!(preview(&rows, 1), Some(TextPreview::NotLoaded));
+    assert_eq!(
+        store.text_previews_wanted("ch-pics"),
+        vec![("f-small".to_string(), format!("{CDN}/attachments/f-small"))]
+    );
+
+    // Marked loading before it's fetched: a sync meanwhile doesn't ask again.
+    store.set_text_preview("f-small", TextLoad::Loading);
+    assert!(store.text_previews_wanted("ch-pics").is_empty());
+
+    // "Load file" on the big one.
+    store.set_text_preview("f-big", TextLoad::Loading);
+    assert_eq!(
+        preview(&store.timeline("ch-pics"), 1),
+        Some(TextPreview::Loading)
+    );
+    assert!(store.text_previews_wanted("ch-pics").is_empty());
+}
+
+#[test]
+fn loaded_text_reaches_the_row_and_remeasures_it() {
+    let mut store = store_with(vec![text_file("f-small", "notes.txt", 12)]);
+    store.set_text_preview("f-small", TextLoad::Loading);
+    let before = store.timeline("ch-pics");
+    store.set_text_preview("f-small", TextLoad::Loaded("hello\nworld".into()));
+    let after = store.timeline("ch-pics");
+    assert_eq!(
+        preview(&after, 0),
+        Some(TextPreview::Loaded("hello\nworld".into()))
+    );
+    assert_eq!(diff_rows(&before, &after), vec![RowOp::Remeasure { at: 1 }]);
+}
+
+#[test]
+fn a_failed_preview_offers_try_again() {
+    let mut store = store_with(vec![text_file("f-small", "notes.txt", 12)]);
+    store.set_text_preview("f-small", TextLoad::Failed);
+    assert_eq!(
+        preview(&store.timeline("ch-pics"), 0),
+        Some(TextPreview::Failed)
+    );
+    // It isn't fetched again by itself, only on Try again.
+    assert!(store.text_previews_wanted("ch-pics").is_empty());
+}
+
+#[test]
+fn a_spoiler_text_files_preview_stays_hidden_until_revealed() {
+    let mut store = store_with(vec![text_file("f-secret", "SPOILER_plot.txt", 30)]);
+    assert_eq!(
+        preview(&store.timeline("ch-pics"), 0),
+        Some(TextPreview::Hidden)
+    );
+    // Nothing is fetched while it's hidden.
+    assert!(store.text_previews_wanted("ch-pics").is_empty());
+
+    store.reveal_attachment("f-secret");
+    assert_eq!(
+        preview(&store.timeline("ch-pics"), 0),
+        Some(TextPreview::Loading)
+    );
+    assert_eq!(store.text_previews_wanted("ch-pics").len(), 1);
+}
+
+#[test]
+fn only_text_files_with_a_file_server_get_previews() {
+    // A text/* file the server didn't call Text: a plain card.
+    let csv = file(
+        "f-csv",
+        "data.csv",
+        json!({ "type": "File" }),
+        "text/csv",
+        10,
+    );
+    let store = store_with(vec![csv]);
+    assert_eq!(preview(&store.timeline("ch-pics"), 0), None);
+    assert!(store.text_previews_wanted("ch-pics").is_empty());
+
+    // No file server known yet: nothing to fetch from.
+    let mut store = ChatStore::new("u-me");
+    let page: BulkMessageResponse = serde_json::from_value(json!([{
+        "_id": "01M6GDKW80AAAAAAAAAAAAAAAA",
+        "channel": "ch-pics",
+        "author": "u-ada",
+        "attachments": [text_file("f-small", "notes.txt", 12)],
+    }]))
+    .unwrap();
+    store.set_history("ch-pics", page, 50);
+    assert_eq!(preview(&store.timeline("ch-pics"), 0), None);
+    assert!(store.text_previews_wanted("ch-pics").is_empty());
+}
+
+#[test]
+fn previews_are_lossy_utf8_capped_and_plain() {
+    assert_eq!(&*preview_text(b"a\tb\r\nc".to_vec()), "a    b\nc");
+    assert_eq!(&*preview_text(vec![b'o', b'k', 0xff]), "ok\u{fffd}");
+    // Longer than it said: only the first 50,000 bytes.
+    let long = vec![b'x'; TEXT_AUTO_LOAD as usize + 10];
+    assert_eq!(preview_text(long).len(), TEXT_AUTO_LOAD as usize);
 }

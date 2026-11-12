@@ -100,11 +100,13 @@ fn attachments_and_edits_are_flagged() {
     assert_eq!(
         look.attachments,
         vec![AttachmentView::File {
+            id: "file-cat".into(),
             name: "cat.png".into(),
             size_label: "12.1 KB".into(),
             url: None,
             kind: FileKind::Image,
             spoiler: false,
+            preview: None,
         }]
     );
     assert!(look.edited);

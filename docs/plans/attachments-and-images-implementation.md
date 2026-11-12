@@ -156,3 +156,53 @@ Look-ahead: chunk 5 is unaffected.
 
 ### Manual Validation
 Batched at the end (Manual Test 4).
+
+## Chunk 5: Text-file previews
+
+### Changes Made
+- `src/attachment.rs`:
+  - `TEXT_AUTO_LOAD` (50,000);
+  - `TextLoad { Loading, Loaded(Arc<str>), Failed }`, which the store keeps by file ID;
+  - `TextPreview { NotLoaded, Loading, Loaded(Arc<str>), Failed, Hidden }`, what the row shows;
+  - `text_preview(file, shown, load)`, for files whose metadata is `Text` only: `Hidden` for a spoiler not shown yet; otherwise as far as `load` has got; a small file not asked for yet is `Loading` (it's fetched on the sync that builds it); a big one is `NotLoaded`;
+  - `loads_at_once(file)`;
+  - `preview_text(bytes)`: at most 50,000 bytes, lossy UTF-8, CRLF made LF and tabs four spaces (they don't draw);
+  - `AttachmentView::File` gains `id` and `preview`, and `with_preview` sets it.
+- `src/store.rs`:
+  - `text_previews: HashMap<String, TextLoad>` and `set_text_preview(file_id, load)`;
+  - `text_previews_wanted(channel)` → `(file ID, URL)`: the small text files in the channel's loaded messages, not hidden, and not asked for yet;
+  - `message_row` applies `text_preview` once there's a file server to fetch from.
+- `src/ui/chat.rs`:
+  - `sync_pane` ends with `fetch_text_previews`. `load_text(channel, file_id, url)` marks the file `Loading`, fetches `download(url, Some(TEXT_AUTO_LOAD))` on the IO runtime, stores `Loaded` or `Failed`, and re-syncs, so the row is remeasured through the normal diff.
+  - `RowAction::LoadText { id, url }` is "Load file ({size})" and Try again.
+  - `text_preview_block` draws under the card:
+    - "Spoiler: click to show" (it reveals the file, through `RevealAttachment`);
+    - the Load file button;
+    - "Loading…";
+    - "Couldn't load the file." with Try again;
+    - or the text in Menlo `text_xs`, wrapped, at most 120 px tall and scrolling inside.
+  - A text file with a preview is a 432 px column: the card (widened to match), then the block.
+  - `TextScrolls` keeps a `ScrollHandle` per file ID on the view, handed to rows through `Pickers`. It keeps a preview's place across redraws, and tells whether it overflows: only then does a scroll over it stop there rather than reach the timeline.
+  - Search results and bot embeds get no preview (`render_attachment`'s `scrolls` is `None` there).
+- Tests:
+  - `tests/store_attachments.rs` (+6): a small file is wanted once (not again while loading), a big one not until asked; loaded text reaches the row and the row is remeasured; a failure offers Try again and isn't fetched again by itself; a spoiler's preview stays hidden, and unfetched, until revealed; `text/*` files the server didn't call Text, and files without a file server, get none; `preview_text` (tabs, CRLF, invalid UTF-8, the cap);
+  - `tests/store_history.rs`, existing `store_attachments` literals: the new fields.
+  - The download cap at 50,000 bytes was already covered by chunk 1's `tests/api_files.rs`.
+
+### Divergences
+- **The store's state is `TextLoad`, and `text_preview` combines it with the reveal set into the view's `TextPreview`.** The plan named it `TextPreviewState`. Text is held as `Arc<str>`, so the rows rebuilt on every sync don't copy it.
+- **`AttachmentView::File` gained `id`,** which "Load file" and the spoiler's reveal need.
+- **A small text file shows "Loading…" from the first build of its row,** since it's fetched on that same sync. "Not loaded" is for big files only.
+- **There are no previews in search results or bot embeds.** They aren't in a channel's loaded history, so nothing would fetch them.
+- **Overflow is read from a `ScrollHandle` per file ID kept on `ChatView`,** passed down through `Pickers`. A handle made fresh on each render would reset the scroll position.
+- **Previews also normalise CRLF and tabs.**
+- **Fetches aren't throttled.** Each small text file is one request, made once per session.
+- **Reformatting `sync_pane` also cleared one older rustfmt hunk** (a mis-indented `fetch_missing_emojis` line).
+
+### Verification Performed
+- `cargo test --test store_attachments --test store_history`: 21 and 28 passed.
+- Full suite, `cargo test && cargo clippy --all-targets -- -D warnings`: 1,458 passed, 0 failed; clippy clean (after replacing `or_insert_with(ScrollHandle::new)` with `or_default()`).
+- Rustfmt: `src/ui/chat.rs` 12, `src/store.rs` 14; `src/attachment.rs` and the tests are clean.
+
+### Manual Validation
+Batched at the end (Manual Test 5).

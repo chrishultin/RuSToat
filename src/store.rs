@@ -586,6 +586,8 @@ pub struct ChatStore {
     revealed_images: HashSet<String>,
     /// Spoiler attachments the user clicked to see, by file ID.
     revealed_attachments: HashSet<String>,
+    /// Text files' previews, by file ID, for the session.
+    text_previews: HashMap<String, crate::attachment::TextLoad>,
     /// Spoilers the user clicked to see, as (message ID, spoiler index).
     revealed_spoilers: HashSet<(String, usize)>,
     /// Messages from blocked users the user clicked to see, by ID.
@@ -2438,6 +2440,41 @@ impl ChatStore {
         self.revealed_attachments.insert(file_id.to_string());
     }
 
+    /// How fetching text file `file_id`'s preview went. Its row changes
+    /// (and is remeasured) on the next sync.
+    pub fn set_text_preview(&mut self, file_id: &str, load: crate::attachment::TextLoad) {
+        self.text_previews.insert(file_id.to_string(), load);
+    }
+
+    /// Text files in `channel`'s loaded messages whose previews should be
+    /// fetched now, as (file ID, URL): small enough to load at once, not a
+    /// hidden spoiler, and not asked for yet. Mark each
+    /// [`TextLoad::Loading`](crate::attachment::TextLoad) before fetching,
+    /// so a sync meanwhile doesn't ask again.
+    pub fn text_previews_wanted(&self, channel: &str) -> Vec<(String, String)> {
+        let Some(history) = self.histories.get(channel) else {
+            return Vec::new();
+        };
+        history
+            .messages
+            .iter()
+            .flat_map(|message| message.attachments.iter().flatten())
+            .filter(|file| {
+                crate::attachment::loads_at_once(file)
+                    && !self.text_previews.contains_key(&file.id)
+                    && matches!(
+                        crate::attachment::text_preview(
+                            file,
+                            self.revealed_attachments.contains(&file.id),
+                            None,
+                        ),
+                        Some(crate::attachment::TextPreview::Loading)
+                    )
+            })
+            .filter_map(|file| Some((file.id.clone(), self.media.file(file)?)))
+            .collect()
+    }
+
     /// Show spoiler `index` (counting from 0) of `message` for the rest of
     /// the session. Its row's body changes from bars to the text.
     pub fn reveal_spoiler(&mut self, message: &str, index: usize) {
@@ -2709,8 +2746,15 @@ impl ChatStore {
                 .flatten()
                 .map(|file| {
                     let revealed = self.revealed_images.contains(&file.id);
+                    let shown = self.revealed_attachments.contains(&file.id);
+                    // Only once there's somewhere to fetch it from.
+                    let preview = self.media.file(file).and_then(|_| {
+                        let load = self.text_previews.get(&file.id);
+                        crate::attachment::text_preview(file, shown, load)
+                    });
                     AttachmentView::new(file, &self.media, revealed)
-                        .uncovered(self.revealed_attachments.contains(&file.id))
+                        .uncovered(shown)
+                        .with_preview(preview)
                 })
                 .collect(),
             embeds: message

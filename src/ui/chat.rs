@@ -39,7 +39,7 @@ use crate::api::models::{
     FieldsMember, FieldsMessage, InviteJoinResponse, MessageSort, MutualResponse, Presence,
     ReplyIntent, Server, SystemMessage, UserProfile,
 };
-use crate::attachment::{AttachmentView, fit_into};
+use crate::attachment::{AttachmentView, TextPreview, fit_into};
 use crate::channel_order::{
     CategoryDrop, ChannelDrop, ChannelHover, category_target, channel_target, move_category,
     move_channel,
@@ -407,6 +407,9 @@ pub struct ChatView {
     invite_queue: VecDeque<String>,
     /// A lookup is on its way.
     invite_loading: bool,
+    /// Text previews' scroll positions, by file ID, so a preview keeps its
+    /// place and knows whether it overflows.
+    text_scrolls: TextScrolls,
     /// Invites being joined from their card.
     invite_joins: HashSet<String>,
     /// Servers whose own membership is being fetched, so a server added
@@ -915,6 +918,7 @@ impl ChatView {
             invites: HashMap::new(),
             invite_queue: VecDeque::new(),
             invite_loading: false,
+            text_scrolls: TextScrolls::default(),
             invite_joins: HashSet::new(),
             own_member_fetches: HashSet::new(),
             invite_max_days: None,
@@ -1663,6 +1667,10 @@ impl ChatView {
             }
             RowAction::RevealAttachment(file_id) => {
                 self.store.reveal_attachment(&file_id);
+                self.sync_pane(channel, cx);
+            }
+            RowAction::LoadText { id, url } => {
+                self.load_text(channel, id, url, cx);
                 self.sync_pane(channel, cx);
             }
             RowAction::ViewImage(image) => {
@@ -8524,8 +8532,9 @@ impl ChatView {
                 }
             });
             self.fetch_reply_sources(channel, cx);
-        self.fetch_missing_emojis(channel, cx);
+            self.fetch_missing_emojis(channel, cx);
             self.fetch_invites(channel, cx);
+            self.fetch_text_previews(channel, cx);
             return;
         }
 
@@ -8547,6 +8556,46 @@ impl ChatView {
         self.fetch_reply_sources(channel, cx);
         self.fetch_missing_emojis(channel, cx);
         self.fetch_invites(channel, cx);
+        self.fetch_text_previews(channel, cx);
+    }
+
+    /// Fetch the previews of `channel`'s small text files not asked for yet.
+    fn fetch_text_previews(&mut self, channel: &str, cx: &mut Context<Self>) {
+        for (file_id, url) in self.store.text_previews_wanted(channel) {
+            self.load_text(channel, file_id, url, cx);
+        }
+    }
+
+    /// Fetch text file `file_id`'s preview (its first
+    /// [`TEXT_AUTO_LOAD`](crate::attachment::TEXT_AUTO_LOAD) bytes), then
+    /// redraw `channel`.
+    fn load_text(&mut self, channel: &str, file_id: String, url: String, cx: &mut Context<Self>) {
+        use crate::attachment::{TEXT_AUTO_LOAD, TextLoad};
+
+        self.store.set_text_preview(&file_id, TextLoad::Loading);
+        let client = self.client.clone();
+        let request = spawn_io(async move { client.download(&url, Some(TEXT_AUTO_LOAD)).await });
+        let channel = channel.to_string();
+        cx.spawn(async move |this, cx| {
+            let load = match request.await {
+                Ok(Ok(bytes)) => TextLoad::Loaded(crate::attachment::preview_text(bytes)),
+                Ok(Err(err)) => {
+                    log::warn!("couldn't load text file {file_id}: {err:?}");
+                    TextLoad::Failed
+                }
+                Err(err) => {
+                    log::warn!("text file task for {file_id} failed: {err:?}");
+                    TextLoad::Failed
+                }
+            };
+            this.update(cx, |this, cx| {
+                this.store.set_text_preview(&file_id, load);
+                this.sync_pane(&channel, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Queue the invites in `channel`'s rows that haven't been looked up,
@@ -10499,6 +10548,7 @@ impl ChatView {
                             open_for: self.picker_for.clone(),
                             can_link: self.web_app.is_some(),
                             invites: Rc::new(self.invite_cards()),
+                            text_scrolls: self.text_scrolls.clone(),
                         });
                         let view = cx.entity().downgrade();
                         let channel_id = channel.id.clone();
@@ -11038,6 +11088,7 @@ impl ChatView {
             open_for: None,
             can_link: false,
             invites: Rc::default(),
+            text_scrolls: TextScrolls::default(),
         };
         let people = self.people(Some(channel.id.clone()), cx);
         v_flex()
@@ -11740,6 +11791,8 @@ enum RowAction {
     RevealImage(String),
     /// Show a spoiler attachment (by file ID).
     RevealAttachment(String),
+    /// Load a text file's preview: "Load file", or Try again after a failure.
+    LoadText { id: String, url: String },
     /// Open an inline image in the full-size viewer.
     ViewImage(ViewedImage),
     /// Save, copy or open a file or picture (from its right-click menu).
@@ -11885,6 +11938,8 @@ struct Pickers {
     can_link: bool,
     /// The invite cards' states, by code (see [`MessageRow::invites`]).
     invites: Rc<HashMap<String, InviteCard>>,
+    /// Text previews' scroll positions.
+    text_scrolls: TextScrolls,
 }
 
 fn render_row(
@@ -12480,6 +12535,8 @@ fn render_message_row(
                                     colors,
                                     &attachment_action,
                                     message_menu.as_ref(),
+                                    // Not in search results.
+                                    (!preview).then_some(&pickers.text_scrolls),
                                 )
                             }),
                     ),
@@ -13344,14 +13401,17 @@ const FILE_CARD_WIDTH: f32 = 320.;
 /// Right-clicking a sent one gives what can be done with the file, then
 /// `message`'s own items (none without them: a search result, or a message
 /// still sending).
+/// A text file's preview goes under its card where there are `scrolls` to
+/// keep its place (not in search results or embeds).
 fn render_attachment(
     id: SharedString,
     attachment: &AttachmentView,
     colors: RowColors,
     on_action: &OnRowAction,
     message: Option<&Rc<MessageMenu>>,
+    scrolls: Option<&TextScrolls>,
 ) -> AnyElement {
-    let element = attachment_element(id, attachment, colors, on_action);
+    let element = attachment_element(id, attachment, colors, on_action, scrolls);
     match attachment.file_target() {
         Some(target) => with_file_menu(element, target, message, on_action),
         None => element.into_any_element(),
@@ -13416,6 +13476,7 @@ fn attachment_element(
     attachment: &AttachmentView,
     colors: RowColors,
     on_action: &OnRowAction,
+    scrolls: Option<&TextScrolls>,
 ) -> Stateful<Div> {
     match attachment {
         // A spoiler: covered until it's clicked.
@@ -13483,18 +13544,40 @@ fn attachment_element(
                 )
         }
         AttachmentView::File {
+            id: file_id,
             name,
             size_label,
             url,
             kind,
             spoiler,
-        } => file_card(id, file_icon(*kind), name, size_label, colors)
-            .when(*spoiler, |card| card.child(spoiler_tag(colors)))
-            .when_some(url.clone(), |card, url| {
-                card.cursor_pointer()
-                    .on_click(move |_, _, cx| cx.open_url(&url))
-                    .child(Icon::new(IconName::Download).text_color(colors.muted))
-            }),
+            preview,
+        } => {
+            let card = file_card(id.clone(), file_icon(*kind), name, size_label, colors)
+                .when(*spoiler, |card| card.child(spoiler_tag(colors)))
+                .when_some(url.clone(), |card, url| {
+                    card.cursor_pointer()
+                        .on_click(move |_, _, cx| cx.open_url(&url))
+                        .child(Icon::new(IconName::Download).text_color(colors.muted))
+                });
+            match (preview, url, scrolls) {
+                (Some(preview), Some(url), Some(scrolls)) => {
+                    let text = TextBlock {
+                        file_id,
+                        url,
+                        size_label,
+                        scrolls,
+                    };
+                    v_flex()
+                        .id(SharedString::from(format!("{id}-file")))
+                        .w(px(TEXT_PREVIEW_WIDTH))
+                        .max_w_full()
+                        .gap_1()
+                        .child(card.w_full())
+                        .child(text_preview_block(&id, preview, text, colors, on_action))
+                }
+                _ => card,
+            }
+        }
         // Still uploading: the local copy, with a progress bar along its
         // bottom edge (over it, so the row's height doesn't change).
         AttachmentView::Local {
@@ -13603,6 +13686,128 @@ fn covered_image(
                         .child("Spoiler"),
                 ),
         )
+}
+
+/// Text previews (and their file cards) are this wide, within the bubble.
+const TEXT_PREVIEW_WIDTH: f32 = 432.;
+/// A preview taller than this scrolls inside.
+const TEXT_PREVIEW_MAX_HEIGHT: f32 = 120.;
+
+/// Text previews' scroll positions, by file ID (see [`ChatView::text_scrolls`]).
+#[derive(Clone, Default)]
+struct TextScrolls(Rc<RefCell<HashMap<String, ScrollHandle>>>);
+
+impl TextScrolls {
+    fn handle(&self, file_id: &str) -> ScrollHandle {
+        self.0
+            .borrow_mut()
+            .entry(file_id.to_string())
+            .or_default()
+            .clone()
+    }
+}
+
+/// The file a text preview belongs to.
+struct TextBlock<'a> {
+    file_id: &'a str,
+    url: &'a str,
+    size_label: &'a str,
+    scrolls: &'a TextScrolls,
+}
+
+/// What goes under a text file's card: its contents in a monospace block
+/// (wrapped, scrolling inside past [`TEXT_PREVIEW_MAX_HEIGHT`]), or "Load
+/// file", "Loading…", the failure with Try again, or a hidden spoiler.
+fn text_preview_block(
+    id: &SharedString,
+    preview: &TextPreview,
+    file: TextBlock,
+    colors: RowColors,
+    on_action: &OnRowAction,
+) -> AnyElement {
+    let frame = div()
+        .w_full()
+        .rounded(px(ATTACHMENT_RADIUS))
+        .border_1()
+        .border_color(colors.border)
+        .bg(colors.card_bg)
+        .px_2()
+        .py_1p5()
+        .text_xs();
+    let act = |action: RowAction| {
+        let on_action = on_action.clone();
+        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+            on_action(action.clone(), window, cx)
+        }
+    };
+    let load = RowAction::LoadText {
+        id: file.file_id.to_string(),
+        url: file.url.to_string(),
+    };
+    match preview {
+        TextPreview::Hidden => frame
+            .id(SharedString::from(format!("{id}-spoiler")))
+            .cursor_pointer()
+            .text_color(colors.muted)
+            .hover(|style| style.bg(colors.highlight))
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(Icon::new(IconName::EyeOff).xsmall())
+                    .child("Spoiler: click to show"),
+            )
+            .on_click(act(RowAction::RevealAttachment(file.file_id.to_string())))
+            .into_any_element(),
+        TextPreview::NotLoaded => frame
+            .child(
+                Button::new(SharedString::from(format!("{id}-load")))
+                    .xsmall()
+                    .label(format!("Load file ({})", file.size_label))
+                    .on_click(act(load)),
+            )
+            .into_any_element(),
+        TextPreview::Loading => frame
+            .text_color(colors.muted)
+            .child("Loading…")
+            .into_any_element(),
+        TextPreview::Failed => frame
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_color(colors.muted)
+                            .child("Couldn't load the file."),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("{id}-retry")))
+                            .xsmall()
+                            .label("Try again")
+                            .on_click(act(load)),
+                    ),
+            )
+            .into_any_element(),
+        TextPreview::Loaded(text) => {
+            let scroll = file.scrolls.handle(file.file_id);
+            let overflows = scroll.clone();
+            frame
+                .id(SharedString::from(format!("{id}-text")))
+                .max_h(px(TEXT_PREVIEW_MAX_HEIGHT))
+                .overflow_y_scroll()
+                .track_scroll(&scroll)
+                // The timeline scrolls past a preview that fits; one that
+                // scrolls itself keeps the wheel while over it.
+                .on_scroll(move |_, _, cx| {
+                    if overflows.max_offset().y > px(0.) {
+                        cx.stop_propagation();
+                    }
+                })
+                .font_family("Menlo")
+                .child(SharedString::from(text.clone()))
+                .into_any_element()
+        }
+    }
 }
 
 /// "Spoiler" on a spoiler file's card.
@@ -14104,6 +14309,7 @@ fn render_embed_card(
             colors,
             on_action,
             message,
+            None,
         )
     });
 
