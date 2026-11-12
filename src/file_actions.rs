@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::api::ApiError;
+use crate::embed::EmbedImage;
 
 /// Copy image downloads at most this much: anything bigger isn't a picture
 /// worth putting on the clipboard.
@@ -23,6 +24,9 @@ pub struct FileTarget {
     pub url: String,
     /// What Copy link copies and Open in browser opens.
     pub link: String,
+    /// Where Open in browser goes instead of `link`: a GIF's page, which is
+    /// what clicking its still opens.
+    pub page: Option<String>,
     /// A picture: it can be copied as an image.
     pub picture: bool,
 }
@@ -54,6 +58,31 @@ pub fn actions(target: &FileTarget) -> Vec<FileAction> {
     }
     actions.extend([FileAction::CopyLink, FileAction::OpenInBrowser]);
     actions
+}
+
+/// What the actions act on for an embed's picture: downloaded through
+/// the proxy, linked by its own address, named by it. `page`: see
+/// [`FileTarget::page`].
+pub fn embed_target(image: &EmbedImage, page: Option<&str>) -> FileTarget {
+    FileTarget {
+        name: embed_name(&image.source),
+        url: image.url.clone(),
+        link: image.source.clone(),
+        page: page.map(str::to_string),
+        picture: true,
+    }
+}
+
+/// A remote picture's name: its address's last path segment, percent-decoded,
+/// else "image".
+pub fn embed_name(url: &str) -> String {
+    let segment = url::Url::parse(url).ok().and_then(|url| {
+        let last = url.path_segments()?.rev().find(|s| !s.is_empty())?;
+        let decoded = percent_encoding::percent_decode_str(last).decode_utf8_lossy();
+        let decoded = decoded.trim();
+        (!decoded.is_empty()).then(|| decoded.to_string())
+    });
+    segment.unwrap_or_else(|| "image".into())
 }
 
 /// The prefix that makes a file a spoiler, in any case (as Stoat's own

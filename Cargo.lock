@@ -8108,6 +8108,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-service-management",
  "objc2-user-notifications",
+ "percent-encoding",
  "qrcodegen",
  "raw-window-handle",
  "reqwest 0.13.5",

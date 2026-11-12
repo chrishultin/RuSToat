@@ -1756,7 +1756,10 @@ impl ChatView {
                 cx.write_to_clipboard(ClipboardItem::new_string(target.link));
                 window.push_notification(Notification::success(files::LINK_COPIED_TEXT), cx);
             }
-            FileAction::OpenInBrowser => self.open_external(target.link, None, window, cx),
+            FileAction::OpenInBrowser => {
+                let url = target.page.unwrap_or(target.link);
+                self.open_external(url, None, window, cx)
+            }
         }
     }
 
@@ -6552,7 +6555,23 @@ impl ChatView {
         // Unknown dimensions: the whole space, letterboxed.
         let (w, h) =
             fit_into(image.original.0, image.original.1, max_w, max_h).unwrap_or((max_w, max_h));
-        let open = image.url.clone();
+        // The bar's buttons and the picture's menu run the file actions here.
+        let run: RunFileAction = {
+            let view = cx.entity().downgrade();
+            Rc::new(move |action, target, window, cx| {
+                view.update(cx, |this, cx| this.file_action(action, target, window, cx))
+                    .ok();
+            })
+        };
+        let buttons = files::actions(&image.target).into_iter().map(|action| {
+            let (run, target) = (run.clone(), image.target.clone());
+            Button::new(SharedString::from(format!("viewer-{action:?}")))
+                .ghost()
+                .small()
+                .icon(file_action_icon(action))
+                .label(action.label())
+                .on_click(move |_, window, cx| run(action, target.clone(), window, cx))
+        });
         let bar = h_flex()
             .h(px(VIEWER_BAR))
             .flex_none()
@@ -6573,14 +6592,7 @@ impl ChatView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(image.name.clone()),
             )
-            .child(
-                Button::new("viewer-open")
-                    .ghost()
-                    .small()
-                    .icon(IconName::ExternalLink)
-                    .label("Open in browser")
-                    .on_click(move |_, _, cx| cx.open_url(&open)),
-            )
+            .children(buttons)
             .child(
                 Button::new("viewer-close")
                     .ghost()
@@ -6619,6 +6631,7 @@ impl ChatView {
                     .justify_center()
                     .child(
                         div()
+                            .id("image-viewer-picture")
                             .w(px(w as f32))
                             .h(px(h as f32))
                             // Clicking the picture itself doesn't close it.
@@ -6629,7 +6642,11 @@ impl ChatView {
                                     .size_full()
                                     .object_fit(ObjectFit::Contain)
                                     .with_loading(move || image_loading(muted, 0.)),
-                            ),
+                            )
+                            .context_menu({
+                                let target = image.target.clone();
+                                move |menu, _, _| file_menu_items(menu, &target, &run)
+                            }),
                     ),
             )
     }
@@ -11791,6 +11808,8 @@ struct ViewedImage {
     name: String,
     /// From the upload's metadata; zero if unknown.
     original: (usize, usize),
+    /// What the bar's and the picture's menu actions act on.
+    target: FileTarget,
 }
 
 /// Space around the image in the full-size viewer.
@@ -13326,23 +13345,25 @@ fn render_attachment(
     message: Option<&Rc<MessageMenu>>,
 ) -> AnyElement {
     let element = attachment_element(id, attachment, colors, on_action);
-    match (attachment.file_target(), message) {
-        (Some(target), Some(message)) => {
-            with_file_menu(element, target, Some(message.clone()), on_action)
-        }
-        _ => element.into_any_element(),
+    match attachment.file_target() {
+        Some(target) => with_file_menu(element, target, message, on_action),
+        None => element.into_any_element(),
     }
 }
 
 /// `element` (a file or picture) with a right-click menu of what can be
-/// done with `target`, then the message's own items, if any. Its menu wins
-/// over the row's.
+/// done with `target`, then `message`'s own items. Its menu wins over the
+/// row's. Without `message` (a search result, or a message still sending),
+/// there's no menu.
 fn with_file_menu(
     element: Stateful<Div>,
     target: FileTarget,
-    message: Option<Rc<MessageMenu>>,
+    message: Option<&Rc<MessageMenu>>,
     on_action: &OnRowAction,
 ) -> AnyElement {
+    let Some(message) = message.cloned() else {
+        return element.into_any_element();
+    };
     let run: RunFileAction = {
         let on_action = on_action.clone();
         Rc::new(move |action, target, window, cx| {
@@ -13351,11 +13372,7 @@ fn with_file_menu(
     };
     element
         .context_menu(move |menu, _, _| {
-            let menu = file_menu_items(menu, &target, &run);
-            match &message {
-                Some(message) => message.items(menu.separator()),
-                None => menu,
-            }
+            message.items(file_menu_items(menu, &target, &run).separator())
         })
         .into_any_element()
 }
@@ -13396,7 +13413,6 @@ fn attachment_element(
     match attachment {
         AttachmentView::Image {
             url,
-            name,
             width,
             height,
             original,
@@ -13404,10 +13420,14 @@ fn attachment_element(
             too_big: false,
             ..
         } => {
+            let target = attachment
+                .file_target()
+                .expect("an image has a file target");
             let viewed = ViewedImage {
                 url: url.clone(),
-                name: name.clone(),
+                name: target.name.clone(),
                 original: *original,
+                target,
             };
             let on_action = on_action.clone();
             inline_image(id, url, (*width, *height), thumbhash.clone(), colors)
@@ -13609,23 +13629,29 @@ fn image_loading(icon_color: Hsla, radius: f32) -> AnyElement {
         .into_any_element()
 }
 
-/// An embed picture that opens in the full-size viewer.
+/// An embed picture that opens in the full-size viewer (under `title`, else
+/// its name), with the file actions on right-click.
 fn viewable_embed_image(
     id: SharedString,
     image: &EmbedImage,
+    title: Option<String>,
     colors: RowColors,
     on_action: &OnRowAction,
-) -> Stateful<Div> {
+    message: Option<&Rc<MessageMenu>>,
+) -> AnyElement {
+    let target = files::embed_target(image, None);
     let viewed = ViewedImage {
         url: image.url.clone(),
-        name: "Image".into(),
+        name: title.unwrap_or_else(|| target.name.clone()),
         original: image.original,
+        target: target.clone(),
     };
-    let on_action = on_action.clone();
+    let open = on_action.clone();
     // Remote images have no ThumbHash: they get the pulsing box.
-    inline_image(id, &image.url, (image.width, image.height), None, colors)
+    let picture = inline_image(id, &image.url, (image.width, image.height), None, colors)
         .cursor_pointer()
-        .on_click(move |_, window, cx| on_action(RowAction::ViewImage(viewed.clone()), window, cx))
+        .on_click(move |_, window, cx| open(RowAction::ViewImage(viewed.clone()), window, cx));
+    with_file_menu(picture, target, message, on_action)
 }
 
 /// Widest the age gate's card gets.
@@ -13648,7 +13674,7 @@ fn render_embed(
 ) -> AnyElement {
     match embed {
         EmbedView::Image(image) => {
-            viewable_embed_image(id, image, colors, on_action).into_any_element()
+            viewable_embed_image(id, image, None, colors, on_action, message)
         }
         EmbedView::Video { url } => {
             let open = url.clone();
@@ -13665,11 +13691,14 @@ fn render_embed(
                 .into_any_element()
         }
         EmbedView::GifPoster { image, link } => {
-            let (open, on_action) = (link.clone(), on_action.clone());
-            inline_image(id, &image.url, (image.width, image.height), None, colors)
+            // Copy link gives the still's own address; Open in browser, the
+            // GIF's page, like a click.
+            let target = files::embed_target(image, Some(link));
+            let (open, on_click) = (link.clone(), on_action.clone());
+            let poster = inline_image(id, &image.url, (image.width, image.height), None, colors)
                 .cursor_pointer()
                 .on_click(move |_, window, cx| {
-                    on_action(RowAction::OpenLink(open.clone()), window, cx)
+                    on_click(RowAction::OpenLink(open.clone()), window, cx)
                 })
                 .child(
                     div()
@@ -13683,8 +13712,8 @@ fn render_embed(
                         .text_xs()
                         .font_weight(FontWeight::BOLD)
                         .child("GIF"),
-                )
-                .into_any_element()
+                );
+            with_file_menu(poster, target, message, on_action)
         }
         EmbedView::Card(card) => render_embed_card(id, card, colors, on_action, people, message),
     }
@@ -13912,26 +13941,28 @@ fn render_embed_card(
                     .into_any_element()
             }
         });
-    let thumbnail = card
-        .thumbnail
+    let thumbnail = card.thumbnail.as_ref().map(|image| {
+        let id = format!("{id}-thumb").into();
+        viewable_embed_image(id, image, None, colors, on_action, message)
+    });
+    let image = card
+        .image
         .as_ref()
-        .map(|image| viewable_embed_image(format!("{id}-thumb").into(), image, colors, on_action));
-    let image = card.image.as_ref().map(|image| {
-        let picture = inline_image(
-            format!("{id}-image").into(),
-            &image.url,
-            (image.width, image.height),
-            None,
-            colors,
-        )
-        .cursor_pointer();
-        match (card.playable, card.link.clone()) {
-            // A video's picture: a play badge, and a click opens the video.
-            (true, Some(link)) => picture
-                .on_click({
-                    let on_action = on_action.clone();
-                    move |_, window, cx| on_action(RowAction::OpenLink(link.clone()), window, cx)
-                })
+        .map(|image| match (card.playable, card.link.clone()) {
+            // A video's picture: a play badge, and a click (or Open in browser)
+            // opens the video.
+            (true, Some(link)) => {
+                let target = files::embed_target(image, Some(&link));
+                let open = on_action.clone();
+                let picture = inline_image(
+                    format!("{id}-image").into(),
+                    &image.url,
+                    (image.width, image.height),
+                    None,
+                    colors,
+                )
+                .cursor_pointer()
+                .on_click(move |_, window, cx| open(RowAction::OpenLink(link.clone()), window, cx))
                 .child(
                     div()
                         .absolute()
@@ -13950,23 +13981,18 @@ fn render_embed_card(
                                 .text_color(white())
                                 .child(Icon::new(IconName::Play).large()),
                         ),
-                )
-                .into_any_element(),
-            _ => {
-                let viewed = ViewedImage {
-                    url: image.url.clone(),
-                    name: card.title.clone().unwrap_or_else(|| "Image".into()),
-                    original: image.original,
-                };
-                let on_action = on_action.clone();
-                picture
-                    .on_click(move |_, window, cx| {
-                        on_action(RowAction::ViewImage(viewed.clone()), window, cx)
-                    })
-                    .into_any_element()
+                );
+                with_file_menu(picture, target, message, on_action)
             }
-        }
-    });
+            _ => viewable_embed_image(
+                format!("{id}-image").into(),
+                image,
+                card.title.clone(),
+                colors,
+                on_action,
+                message,
+            ),
+        });
     let media = card.media.as_ref().map(|media| {
         render_attachment(
             format!("{id}-media").into(),

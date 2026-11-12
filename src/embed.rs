@@ -70,6 +70,8 @@ pub enum Description {
 pub struct EmbedImage {
     /// Proxied.
     pub url: String,
+    /// The picture's own address (not proxied): what Copy link copies.
+    pub source: String,
     pub width: u32,
     pub height: u32,
     /// As reported by the server (zero if unknown), for the full-size viewer.
@@ -111,6 +113,7 @@ impl EmbedImage {
             });
         Some(EmbedImage {
             url,
+            source: image.url.clone(),
             width,
             height,
             original: (image.width, image.height),

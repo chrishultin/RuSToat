@@ -135,6 +135,7 @@ impl AttachmentView {
             name: display_name(name).to_string(),
             url: url.clone(),
             link: url.clone(),
+            page: None,
             picture,
         })
     }

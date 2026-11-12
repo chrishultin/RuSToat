@@ -113,6 +113,7 @@ fn website_previews_become_cards_with_proxied_pictures() {
             // 1200×630 into 400×300: 400×210.
             image: Some(EmbedImage {
                 url: proxied("https://news.example/hero.jpg"),
+                source: "https://news.example/hero.jpg".into(),
                 width: 400,
                 height: 210,
                 original: (1200, 630),
@@ -174,6 +175,7 @@ fn gifs_and_image_links_show_just_the_picture() {
         gif,
         Some(EmbedView::Image(EmbedImage {
             url: proxied("https://gifs.example/cat.gif"),
+            source: "https://gifs.example/cat.gif".into(),
             width: 200,
             height: 100,
             original: (200, 100),
@@ -241,6 +243,7 @@ fn a_video_only_gifbox_gif_shows_its_still_badged() {
         Some(EmbedView::GifPoster {
             image: EmbedImage {
                 url: proxied("https://media.gifbox.me/media/post/smGy30kWfDtNbJyWRnq8a/poster"),
+                source: "https://media.gifbox.me/media/post/smGy30kWfDtNbJyWRnq8a/poster".into(),
                 // Capped like other embed images.
                 width: 400,
                 height: 225,
@@ -281,6 +284,7 @@ fn other_videos_and_gifbox_images_are_unchanged() {
         view(json!({ "type": "Image", "url": page, "width": 498, "height": 280, "size": "Large" })),
         Some(EmbedView::Image(EmbedImage {
             url: proxied(page),
+            source: page.into(),
             width: 400,
             height: 225,
             original: (498, 280),
@@ -509,6 +513,7 @@ fn a_gifbox_gif_shows_its_poster_linking_to_the_gif() {
         Some(EmbedView::GifPoster {
             image: EmbedImage {
                 url: proxied("https://media.gifbox.me/poster.jpg"),
+                source: "https://media.gifbox.me/poster.jpg".into(),
                 width: 400,
                 height: 225,
                 original: (640, 360),
@@ -522,6 +527,7 @@ fn a_gifbox_gif_shows_its_poster_linking_to_the_gif() {
         Some(EmbedView::GifPoster {
             image: EmbedImage {
                 url: proxied("https://media.gifbox.me/media/post/smGy30kWfDtNbJyWRnq8a/poster"),
+                source: "https://media.gifbox.me/media/post/smGy30kWfDtNbJyWRnq8a/poster".into(),
                 width: 400,
                 height: 225,
                 original: (640, 360),

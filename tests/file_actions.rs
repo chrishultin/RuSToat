@@ -7,9 +7,11 @@ use serde_json::json;
 use stoat_gpui::api::ApiError;
 use stoat_gpui::api::models::File;
 use stoat_gpui::attachment::AttachmentView;
+use stoat_gpui::embed::EmbedImage;
 use stoat_gpui::file_actions::{
     ClipboardFormat, FileAction, FileTarget, actions, clipboard_image, display_name,
-    download_failure, save_directory, save_failed_text, suggested_save_name,
+    download_failure, embed_name, embed_target, save_directory, save_failed_text,
+    suggested_save_name,
 };
 use stoat_gpui::media::MediaUrls;
 
@@ -18,6 +20,7 @@ fn target(picture: bool) -> FileTarget {
         name: "a.png".into(),
         url: "https://cdn.example/attachments/a".into(),
         link: "https://cdn.example/attachments/a".into(),
+        page: None,
         picture,
     }
 }
@@ -228,4 +231,47 @@ fn attachments_act_on_the_file_servers_original() {
         AttachmentView::new(&pdf, &unknown, false).file_target(),
         None
     );
+}
+
+#[test]
+fn embed_pictures_are_named_by_their_address() {
+    assert_eq!(embed_name("https://example.com/pics/cat.png"), "cat.png");
+    assert_eq!(
+        embed_name("https://example.com/pics/cat.png?size=2#x"),
+        "cat.png"
+    );
+    assert_eq!(
+        embed_name("https://example.com/pics/a%20cat%C3%A9.png"),
+        "a caté.png"
+    );
+    // A trailing slash: the last segment with something in it.
+    assert_eq!(embed_name("https://example.com/pics/cat/"), "cat");
+    assert_eq!(embed_name("https://example.com/"), "image");
+    assert_eq!(embed_name("https://example.com"), "image");
+    assert_eq!(embed_name("not a url"), "image");
+    // `+` is a plus in a path, not a space.
+    assert_eq!(embed_name("https://example.com/a+b.gif"), "a+b.gif");
+}
+
+#[test]
+fn embed_pictures_download_through_the_proxy_and_link_to_themselves() {
+    let image = EmbedImage {
+        url: "https://proxy.example/proxy?url=https%3A%2F%2Fgifs.example%2Fcat.gif".into(),
+        source: "https://gifs.example/cat.gif".into(),
+        width: 200,
+        height: 100,
+        original: (200, 100),
+    };
+    let target = embed_target(&image, None);
+    assert_eq!(target.name, "cat.gif");
+    assert_eq!(target.url, image.url);
+    assert_eq!(target.link, "https://gifs.example/cat.gif");
+    assert_eq!(target.page, None);
+    assert!(target.picture);
+    assert_eq!(actions(&target).len(), 4);
+
+    // A GIF's still: Open in browser goes to the GIF's page.
+    let target = embed_target(&image, Some("https://gifbox.me/view/abc"));
+    assert_eq!(target.link, "https://gifs.example/cat.gif");
+    assert_eq!(target.page.as_deref(), Some("https://gifbox.me/view/abc"));
 }

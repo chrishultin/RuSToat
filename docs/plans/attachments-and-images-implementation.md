@@ -48,3 +48,39 @@ Look-ahead: chunk 2 can reuse `with_file_menu`, `file_menu_items` and `RunFileAc
 
 ### Manual Validation
 Batched at the end (Manual Test 1).
+
+## Chunk 2: The viewer and embed pictures
+
+### Changes Made
+- `src/embed.rs`: `EmbedImage.source`, the picture's own address (not proxied), set in `EmbedImage::new`. That covers every embed picture: image links, cards' images and thumbnails, GIF links and Gifbox stills.
+- `src/file_actions.rs`:
+  - `FileTarget.page`: where Open in browser goes instead of `link` (a GIF still's page);
+  - `embed_target(&EmbedImage, page)`: downloaded through the proxy (`url`), linked by `source`, named by `embed_name`;
+  - `embed_name(url)`: the URL's last non-empty path segment, percent-decoded (a `+` stays a plus), else "image".
+- `src/attachment.rs`: `file_target()` sets `page: None`.
+- `src/ui/chat.rs`:
+  - `ViewedImage.target`. An attachment's viewer title is now its shown name (`target.name`).
+  - The viewer's bar has Save…, Copy image, Copy link and Open in browser (ghost buttons with icons), then Close. The picture has a right-click menu with the same four. Both run `ChatView::file_action` through a `RunFileAction` holding a weak handle on the view.
+  - `with_file_menu` takes `Option<&Rc<MessageMenu>>` and adds no menu without one, so callers don't check.
+  - `viewable_embed_image(id, image, title, …, message)` returns the picture with its menu. Its viewer title is `title`, else the picture's name (it was "Image").
+  - The menu is on standalone embed pictures, card thumbnails and large pictures, and GIF stills. A GIF still and a video's play picture keep their click (opening the page) and get `page` set, so Open in browser goes there and Copy link copies the picture's own address.
+  - `file_action`'s Open in browser opens `page`, else `link`, through `open_external` (so an outside site gets the usual link-safety prompt).
+- `Cargo.toml`: `percent-encoding = "2"` (already in the tree, through `url`).
+- Tests:
+  - `tests/store_embeds.rs`: every `EmbedImage` expected has its `source`: an image link, a card's image, a GIF link and Gifbox stills (from a video embed and from a website embed's poster).
+  - `tests/file_actions.rs` (+2 tests): embed names (query and fragment dropped, percent-decoding, trailing slash, no path, not a URL, `+`); embed targets (proxy to download, own address to link, four actions, and a GIF's page for Open in browser).
+
+### Divergences
+- **`FileTarget.page` was added** for the plan's risk "a GIF poster's link is its page": Copy link copies the still's address and Open in browser opens the page. A video's play picture in a card works the same way.
+- **`embed_target(image, page)` takes the page, not the title.** Assumption 6 names an embed picture by its URL, so a title isn't needed for the name. The card's title is still the viewer's heading for its large picture.
+- **Open in browser on an outside picture asks first** (`open_external`), like any other link from a message. The old viewer button opened the proxied address directly; it now opens the picture's own address.
+
+Look-ahead: no remaining chunk is affected.
+
+### Verification Performed
+- `cargo test --test store_embeds --test file_actions`: 16 and 12 passed.
+- Full suite, `cargo test && cargo clippy --all-targets -- -D warnings`: 1,443 passed, 0 failed; clippy clean.
+- Rustfmt: `src/ui/chat.rs` 14 (unchanged from chunk 1); `src/embed.rs`, `src/file_actions.rs` and the tests are clean.
+
+### Manual Validation
+Batched at the end (Manual Test 2).

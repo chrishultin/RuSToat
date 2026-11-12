@@ -31,6 +31,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_urlencoded = "0.7"
 url = "2"
+# Decoding an embed picture's name from its address (src/file_actions.rs).
+# Already in the tree, through `url`.
+percent-encoding = "2"
 # Emoji character classes, for "only emoji" (jumbo) messages. Already in the tree.
 unicode-properties = "0.1"
 # CSS colour names for `$$\color{…}$$` (see src/math.rs). Already in the tree (via resvg).
