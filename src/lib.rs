@@ -37,6 +37,7 @@ pub mod notify;
 pub mod permission_matrix;
 pub mod permissions;
 pub mod places;
+pub mod playback;
 pub mod prefs;
 pub mod profile;
 pub mod profile_edit;

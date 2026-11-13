@@ -1,5 +1,5 @@
 //! How a message's attachments are shown: images inline at a fixed display
-//! size, everything else as a file card. Plain data with no GPUI, so the
+//! size, audio with a player, everything else as a file card. Plain data with no GPUI, so the
 //! sizing maths and the size guard are unit-testable.
 //!
 //! The file server only serves originals (it ignores resize parameters), so
@@ -133,6 +133,18 @@ pub enum AttachmentView {
         /// A text file's preview, under the card (see [`text_preview`]).
         preview: Option<TextPreview>,
     },
+    /// An audio file AVFoundation may play: its card, with a player under
+    /// it (play/pause, a seek bar and the time).
+    Audio {
+        /// The file's ID: what's playing is known by it.
+        id: String,
+        /// The original's own address (see [`MediaUrls::original`]).
+        url: String,
+        name: String,
+        size_label: String,
+        /// A spoiler: its card has a tag (it isn't covered).
+        spoiler: bool,
+    },
     /// A file of a message that's still being sent, drawn from the local
     /// copy with how much of it has uploaded.
     Local {
@@ -185,6 +197,15 @@ impl AttachmentView {
                     spoiler,
                 }
             }
+            (Metadata::Audio, Some(_)) if let Some(url) = media.original(file) => {
+                AttachmentView::Audio {
+                    id: file.id.clone(),
+                    url,
+                    name,
+                    size_label,
+                    spoiler,
+                }
+            }
             (metadata, url) => AttachmentView::File {
                 id: file.id.clone(),
                 name,
@@ -221,6 +242,7 @@ impl AttachmentView {
     pub fn file_target(&self) -> Option<FileTarget> {
         let (name, url, picture) = match self {
             AttachmentView::Image { name, url, .. } => (name, url, true),
+            AttachmentView::Audio { name, url, .. } => (name, url, false),
             AttachmentView::File {
                 name,
                 url: Some(url),

@@ -250,6 +250,10 @@ impl MainWindow {
                     return true;
                 }
                 log::info!("main window hidden; still running");
+                let root = cx.global::<Self>().current.as_ref();
+                if let Some(root) = root.and_then(|(_, root)| root.upgrade()) {
+                    root.update(cx, |root, cx| root.window_hidden(cx));
+                }
                 if !stoat_gpui::window_hide::hide(window) {
                     cx.hide();
                 }

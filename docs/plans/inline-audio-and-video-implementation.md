@@ -116,3 +116,83 @@ A fully clean release build wasn't timed: `cargo clean` deletes the 277 MB WebRT
 
 ### Manual Validation
 Deferred to the end, batched (user's choice): play real mp3, m4a, ogg, mp4 and webm attachments from a test channel, by link, through the spike (`--audible` only when the user runs it).
+
+## Chunk 2: Audio in the message
+
+### Changes Made
+- `src/playback.rs` (new, plain data):
+  - `MediaKind { Audio, Video }`, `NowPlaying { channel, file_id, kind }`;
+  - `Change { Play(&NowPlaying), OpenChannel(Option<&str>), SwitchAccount, HideWindow }` and `stops(current, change)`:
+    - another file stops what's playing, and the same file resumes;
+    - another channel (or none) stops audio but not a video;
+    - closing (hiding) the main window stops audio;
+    - switching account stops anything.
+  - `time_label(position, duration)` ("0:42 / 3:15", "1:02 / 1:02:03", "–:–– / –:––" while the length is unknown; the position never shows past the length; NaN reads as 0) and `clock(seconds)`;
+  - `seek_target(fraction, duration)` (clamped; NaN reads as 0), `progress(position, duration)` (the bar's fill), and `fraction_along(x, start, width)` (a click or drag on the bar).
+- `src/media.rs`: `MediaUrls::original(file)`, `{files}/{tag}/{id}/{name}`, with the name percent-encoded (everything but RFC 3986's unreserved characters).
+- `src/attachment.rs`: `AttachmentView::Audio { id, url, name, size_label, spoiler }`, for `Metadata::Audio` when there's a file server. `url` is the original's. `file_target()` gives that URL (not a picture).
+- `src/ui/chat.rs`:
+  - `ChatView` has three new fields:
+    - `playing: Option<Playing { now, player, snapshot }>`;
+    - `playback_polling`;
+    - `unplayable: Rc<HashSet<String>>` (file IDs, for the session).
+  - `RowAction::{PlayAudio { file_id, url }, PauseAudio, SeekAudio(fraction)}`, handled by `play_audio`, `pause_playback`, `seek_playback`. No `Player` exists until play is pressed.
+  - `poll_playback` / `read_player`:
+    - reads the player at once, then every 250 ms (`PLAYBACK_POLL`) on a detached task, while it's playing or loading;
+    - stops polling when it's paused, gone, or the view is dropped;
+    - on a failure, logs AVFoundation's error (`can't play {file}: {domain code: …}`), marks the file unplayable and drops the player;
+    - at the end, pauses and goes back to 0:00.
+  - `stop_playback(change)` drops the player when `playback::stops` says so (dropping a `Player` pauses it). It's called:
+    - at the top of `render`, with the open channel (`OpenChannel`), which catches every way of changing channel;
+    - from `set_active(false)` (`SwitchAccount`);
+    - from `AppRoot::window_hidden` (`HideWindow`).
+    - Signing out drops the view, and the player with it.
+  - `Pickers.playback: PlaybackRows { current: Option<(file ID, snapshot)>, unplayable }`, so the playing row redraws without its row data changing. Search results and embeds get `PlaybackRows::default()` or no pickers.
+  - `render_attachment` / `attachment_element` take `Option<&Pickers>` instead of `Option<&TextScrolls>` (text previews read `pickers.text_scrolls`).
+  - The `Audio` arm:
+    - the card (music icon, name, size, spoiler tag), then a 24 px line, 420 px wide (`AUDIO_WIDTH`);
+    - the line holds a play/pause button (with tooltip), the seek bar and the time label;
+    - an unplayable file's line reads "Can't play this format here" with Open in browser, at the same height;
+    - without pickers (embeds, search results), it's the card, which opens the file.
+    - The right-click menu wraps the whole block.
+  - `seek_bar`:
+    - a 4 px track in a 16 px hit strip, filled in the theme's primary colour;
+    - only the file playing or paused (with a known length) is seekable;
+    - a click seeks via the bar's bounds, recorded by a `canvas` while it's laid out, and stops propagation;
+    - a drag (`on_drag(SeekDrag)` with an empty preview, `on_drag_move` filtered by file ID) seeks as it moves.
+    - GPUI calls `on_drag`'s pending-press listener before `on_mouse_down`'s in the bubble phase, so stopping propagation doesn't block the drag.
+  - `cant_play_line`, `seek_to`, and constants `AUDIO_WIDTH`, `AUDIO_LINE_HEIGHT`, `SEEK_TRACK_HEIGHT`, `SEEK_HIT_HEIGHT`.
+- `src/ui/app_root.rs`: `window_hidden()` stops audio in every account's view.
+- `src/main.rs`: the close handler, when it hides the window (Keep running on), calls `AppRoot::window_hidden` through `MainWindow.current`.
+- `src/lib.rs`: `pub mod playback`.
+- `tests/playback.rs` (new): clocks, time labels (0, 59 s, 1 h, unknown, NaN, position past the end), seek targets, the bar's fill, click fractions, and the stop rules for a new play, a channel change, an account switch and closing the window.
+- `tests/store_attachments.rs`:
+  - an `Audio` file becomes `AttachmentView::Audio` with the original's encoded URL, its file target and the spoiler tag (shown without the prefix, unaffected by revealing);
+  - without a file server it's a card with no link;
+  - an `audio/*` MIME type without `Audio` metadata stays a card;
+  - timeline rows carry it.
+- `tests/media_urls.rs`: `original` encodes spaces, `#`, brackets, `/` and non-ASCII, and keeps the spoiler prefix; there's no URL without a file server.
+
+### Divergences
+- **Redraws:** each poll notifies the whole `ChatView`, as the relative-time tick does, not "only the pane": panes aren't their own entities. The notify happens only when the snapshot changed, and only while something plays.
+- **Channel changes are caught in `render`**, not at each place the channel changes (there are several: `select_channel`, places, `open_channel`, Friends). `stop_playback` is a no-op unless audio from another channel is playing.
+- **Closing the window** needed `AppRoot::window_hidden` and a line in `main.rs`'s close handler, neither listed in the plan. With Keep running off, closing quits, and the player goes with the view.
+- **Closing the window stops audio but not a video** (`Change::HideWindow`), following Assumption 3's "closing the window stops audio". The video window is separate.
+- **`render_attachment`'s last parameter is now `Option<&Pickers>`**, so the audio arm can reach `Pickers.playback`. Chunk 3's video arm can use the same.
+- **On other platforms**, an audio row shows its controls until Play is pressed, and only then says "Can't play this format here" (`Player::open` fails). The plan said such files fall back to the card at once. Only macOS is shipped.
+- **The audio card itself isn't clickable** in the timeline (its player is the action). Save…, Copy link and Open in browser stay in its right-click menu, and on the unplayable line.
+
+### Verification Performed
+- `cargo test --test playback --test store_attachments --test media_urls`: 10, 23 and 6 passed.
+- Full suite, `cargo test`: 90 suites, 1,476 passed, 0 failed. It includes `media_player` (muted). Nothing in it plays aloud: the view's players aren't exercised by tests.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt:
+  - `src/ui/chat.rs` 12 → 12; my two hunks were formatted by hand.
+  - `src/media.rs`, `src/attachment.rs`, `src/ui/app_root.rs`, `src/main.rs` (checked only), `tests/store_attachments.rs`, `tests/media_urls.rs`: 0 → 0.
+  - New `src/playback.rs` and `tests/playback.rs`: clean.
+
+### Manual Validation
+Deferred to the batched manual tests at the end (user's choice):
+- play an mp3 and an m4a: pause, seek by click and drag, play to the end;
+- a second file stops the first; changing channel or account stops it;
+- a webm says "Can't play this format here".

@@ -1,6 +1,6 @@
 //! The signed-in UI: server rail, channel list, and the selected channel.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -54,8 +54,10 @@ use crate::markdown::{
     InternalLink, JUMBO_TEXT_PX, has_relative_time, is_external_link, parse_internal_link,
 };
 use crate::media::MediaUrls;
+use crate::media_player::{Player, PlayerSnapshot, PlayerStatus};
 use crate::notify::{self, Delivery, Level, MuteFor, Notice, NotificationSettings, Viewing};
 use crate::places::{Place, Places, PlacesFile};
+use crate::playback::{self, Change, MediaKind, NowPlaying};
 use crate::profile::{RelationshipAction, UserMenuItem};
 use crate::profile_edit::ImageLimits;
 use crate::rail::{self, DropTarget, Folder, Ordering, RailEntry, ServerFolders};
@@ -410,6 +412,14 @@ pub struct ChatView {
     /// Text previews' scroll positions, by file ID, so a preview keeps its
     /// place and knows whether it overflows.
     text_scrolls: TextScrolls,
+    /// The file playing or paused, with its player (see
+    /// [`crate::playback`]).
+    playing: Option<Playing>,
+    /// The player is being polled (only while it plays).
+    playback_polling: bool,
+    /// Files whose player failed, by ID, for the session: they say they
+    /// can't be played here.
+    unplayable: Rc<HashSet<String>>,
     /// Invites being joined from their card.
     invite_joins: HashSet<String>,
     /// Servers whose own membership is being fetched, so a server added
@@ -547,6 +557,9 @@ pub struct ChatView {
 
 /// How often relative timestamps ("in 3 hours") are worked out again.
 const RELATIVE_TIME_TICK: Duration = Duration::from_secs(60);
+
+/// How often a playing file's player is read (for its time and seek bar).
+const PLAYBACK_POLL: Duration = Duration::from_millis(250);
 
 /// The voice call an account is in, or joining.
 struct ActiveCall {
@@ -919,6 +932,9 @@ impl ChatView {
             invite_queue: VecDeque::new(),
             invite_loading: false,
             text_scrolls: TextScrolls::default(),
+            playing: None,
+            playback_polling: false,
+            unplayable: Rc::default(),
             invite_joins: HashSet::new(),
             own_member_fetches: HashSet::new(),
             invite_max_days: None,
@@ -1677,6 +1693,9 @@ impl ChatView {
                 self.viewer = Some(image);
                 window.focus(&self.viewer_focus, cx);
             }
+            RowAction::PlayAudio { file_id, url } => self.play_audio(channel, file_id, &url, cx),
+            RowAction::PauseAudio => self.pause_playback(cx),
+            RowAction::SeekAudio(fraction) => self.seek_playback(fraction, cx),
             RowAction::File(action, target) => self.file_action(action, target, window, cx),
             RowAction::ToggleReaction { message, emoji } => {
                 self.picker_for = None;
@@ -8294,12 +8313,152 @@ impl ChatView {
     /// Show or hide this account. Only the account on screen marks things
     /// read, and its open channel doesn't count as being looked at while
     /// hidden.
+    /// What audio players show, for the rows.
+    fn playback_rows(&self) -> PlaybackRows {
+        PlaybackRows {
+            current: self
+                .playing
+                .as_ref()
+                .map(|playing| (playing.now.file_id.clone(), playing.snapshot.clone())),
+            unplayable: self.unplayable.clone(),
+        }
+    }
+
+    /// Play `file_id` (audio in `channel`) from `url`: carry on if it's the
+    /// one paused, else stop what's playing and start it. No player is made
+    /// until now, so a channel full of audio costs nothing.
+    fn play_audio(&mut self, channel: &str, file_id: String, url: &str, cx: &mut Context<Self>) {
+        let next = NowPlaying {
+            channel: channel.to_string(),
+            file_id,
+            kind: MediaKind::Audio,
+        };
+        self.stop_playback(Change::Play(&next), cx);
+        if let Some(playing) = &mut self.playing {
+            playing.player.play();
+            playing.snapshot.playing = true;
+        } else {
+            match Player::open(url) {
+                Ok(player) => {
+                    player.play();
+                    let snapshot = PlayerSnapshot {
+                        playing: true,
+                        ..PlayerSnapshot::LOADING
+                    };
+                    self.playing = Some(Playing {
+                        now: next,
+                        player,
+                        snapshot,
+                    });
+                }
+                Err(err) => {
+                    log::warn!("can't play {url}: {err}");
+                    Rc::make_mut(&mut self.unplayable).insert(next.file_id);
+                }
+            }
+        }
+        self.poll_playback(cx);
+    }
+
+    fn pause_playback(&mut self, cx: &mut Context<Self>) {
+        if let Some(playing) = &mut self.playing {
+            playing.player.pause();
+            playing.snapshot.playing = false;
+            cx.notify();
+        }
+    }
+
+    /// Move what's playing `fraction` of the way through (once its length
+    /// is known).
+    fn seek_playback(&mut self, fraction: f64, cx: &mut Context<Self>) {
+        let Some(playing) = &mut self.playing else {
+            return;
+        };
+        let Some(duration) = playing.snapshot.duration else {
+            return;
+        };
+        let to = playback::seek_target(fraction, duration);
+        playing.player.seek(to);
+        playing.snapshot.position = to;
+        playing.snapshot.ended = false;
+        cx.notify();
+    }
+
+    /// Stop what's playing if `change` stops it (see [`playback::stops`]).
+    pub fn stop_playback(&mut self, change: Change<'_>, cx: &mut Context<Self>) {
+        if self
+            .playing
+            .as_ref()
+            .is_some_and(|playing| playback::stops(&playing.now, change))
+        {
+            // Dropping the player stops it.
+            self.playing = None;
+            cx.notify();
+        }
+    }
+
+    /// Read the player now, and every [`PLAYBACK_POLL`] while it plays (or
+    /// is loading). A file that fails is marked unplayable for the session;
+    /// one that reaches its end goes back to the start, paused.
+    fn poll_playback(&mut self, cx: &mut Context<Self>) {
+        if !self.read_player(cx) || self.playback_polling {
+            return;
+        }
+        self.playback_polling = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(PLAYBACK_POLL).await;
+                let more = this.update(cx, |this, cx| {
+                    let more = this.read_player(cx);
+                    if !more {
+                        this.playback_polling = false;
+                    }
+                    more
+                });
+                if !matches!(more, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Take a snapshot of the player; whether it's worth polling again.
+    fn read_player(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(playing) = &mut self.playing else {
+            return false;
+        };
+        let mut snapshot = playing.player.snapshot();
+        if let PlayerStatus::Failed(err) = &snapshot.status {
+            log::warn!("can't play {}: {err}", playing.now.file_id);
+            let file_id = playing.now.file_id.clone();
+            Rc::make_mut(&mut self.unplayable).insert(file_id);
+            self.playing = None;
+            cx.notify();
+            return false;
+        }
+        if snapshot.ended {
+            playing.player.pause();
+            playing.player.seek(0.0);
+            snapshot.position = 0.0;
+            snapshot.ended = false;
+            snapshot.playing = false;
+        }
+        let more = snapshot.playing;
+        if playing.snapshot != snapshot {
+            playing.snapshot = snapshot;
+            cx.notify();
+        }
+        more
+    }
+
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
         if self.active == active {
             return;
         }
         self.active = active;
         if !active {
+            self.stop_playback(Change::SwitchAccount, cx);
             self.pending_ack = None;
             // Coming back counts as opening the channel again.
             self.held_unread = None;
@@ -10570,6 +10729,7 @@ impl ChatView {
                             can_link: self.web_app.is_some(),
                             invites: Rc::new(self.invite_cards()),
                             text_scrolls: self.text_scrolls.clone(),
+                            playback: self.playback_rows(),
                         });
                         let view = cx.entity().downgrade();
                         let channel_id = channel.id.clone();
@@ -11110,6 +11270,7 @@ impl ChatView {
             can_link: false,
             invites: Rc::default(),
             text_scrolls: TextScrolls::default(),
+            playback: PlaybackRows::default(),
         };
         let people = self.people(Some(channel.id.clone()), cx);
         v_flex()
@@ -11819,6 +11980,13 @@ enum RowAction {
     LoadText { id: String, url: String },
     /// Open an inline image in the full-size viewer.
     ViewImage(ViewedImage),
+    /// Play an audio file in its message (by file ID, from its address),
+    /// or carry on with it if it's the one paused.
+    PlayAudio { file_id: String, url: String },
+    /// Pause what's playing.
+    PauseAudio,
+    /// Move what's playing this fraction of the way through.
+    SeekAudio(f64),
     /// Save, copy or open a file or picture (from its right-click menu).
     File(FileAction, FileTarget),
     /// Add the user's `emoji` reaction to `message`, or take it back if
@@ -11964,6 +12132,27 @@ struct Pickers {
     invites: Rc<HashMap<String, InviteCard>>,
     /// Text previews' scroll positions.
     text_scrolls: TextScrolls,
+    /// What audio players show.
+    playback: PlaybackRows,
+}
+
+/// A file playing (or paused) and its player.
+struct Playing {
+    now: NowPlaying,
+    player: Player,
+    /// As last polled.
+    snapshot: PlayerSnapshot,
+}
+
+/// What the rows need to draw audio players: they change while a row is
+/// on screen without changing its height, so they come through
+/// [`Pickers`], not the row's data.
+#[derive(Default)]
+struct PlaybackRows {
+    /// The file playing or paused (by ID), as last polled.
+    current: Option<(String, PlayerSnapshot)>,
+    /// Files whose player failed.
+    unplayable: Rc<HashSet<String>>,
 }
 
 fn render_row(
@@ -12560,7 +12749,7 @@ fn render_message_row(
                                     &attachment_action,
                                     message_menu.as_ref(),
                                     // Not in search results.
-                                    (!preview).then_some(&pickers.text_scrolls),
+                                    (!preview).then_some(pickers),
                                 )
                             }),
                     ),
@@ -13425,17 +13614,18 @@ const FILE_CARD_WIDTH: f32 = 320.;
 /// Right-clicking a sent one gives what can be done with the file, then
 /// `message`'s own items (none without them: a search result, or a message
 /// still sending).
-/// A text file's preview goes under its card where there are `scrolls` to
-/// keep its place (not in search results or embeds).
+/// A text file's preview, and an audio file's player, go under its card in
+/// the timeline, where there are `pickers` (not in search results or
+/// embeds).
 fn render_attachment(
     id: SharedString,
     attachment: &AttachmentView,
     colors: RowColors,
     on_action: &OnRowAction,
     message: Option<&Rc<MessageMenu>>,
-    scrolls: Option<&TextScrolls>,
+    pickers: Option<&Pickers>,
 ) -> AnyElement {
-    let element = attachment_element(id, attachment, colors, on_action, scrolls);
+    let element = attachment_element(id, attachment, colors, on_action, pickers);
     match attachment.file_target() {
         Some(target) => with_file_menu(element, target, message, on_action),
         None => element.into_any_element(),
@@ -13500,8 +13690,9 @@ fn attachment_element(
     attachment: &AttachmentView,
     colors: RowColors,
     on_action: &OnRowAction,
-    scrolls: Option<&TextScrolls>,
+    pickers: Option<&Pickers>,
 ) -> Stateful<Div> {
+    let scrolls = pickers.map(|pickers| &pickers.text_scrolls);
     match attachment {
         // A spoiler: covered until it's clicked.
         AttachmentView::Image {
@@ -13602,6 +13793,48 @@ fn attachment_element(
                 _ => card,
             }
         }
+        AttachmentView::Audio {
+            id: file_id,
+            url,
+            name,
+            size_label,
+            spoiler,
+        } => {
+            let card = file_card(
+                format!("{id}-card").into(),
+                IconName::FileMusic,
+                name,
+                size_label,
+                colors,
+            )
+            .when(*spoiler, |card| card.child(spoiler_tag(colors)));
+            // Without a timeline (an embed, a search result), just the card.
+            let Some(pickers) = pickers else {
+                let url = url.clone();
+                return card
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| cx.open_url(&url))
+                    .child(Icon::new(IconName::Download).text_color(colors.muted));
+            };
+            let playback = &pickers.playback;
+            let controls = if playback.unplayable.contains(file_id) {
+                cant_play_line(&id, url, colors)
+            } else {
+                let state = playback
+                    .current
+                    .as_ref()
+                    .filter(|(playing, _)| playing == file_id)
+                    .map(|(_, snapshot)| snapshot);
+                audio_controls(&id, file_id, url, state, colors, on_action)
+            };
+            v_flex()
+                .id(id)
+                .w(px(AUDIO_WIDTH))
+                .max_w_full()
+                .gap_1()
+                .child(card.w_full())
+                .child(controls)
+        }
         // Still uploading: the local copy, with a progress bar along its
         // bottom edge (over it, so the row's height doesn't change).
         AttachmentView::Local {
@@ -13658,6 +13891,190 @@ fn attachment_element(
                 ),
         },
     }
+}
+
+/// An audio player's width, as the web client's.
+const AUDIO_WIDTH: f32 = 420.;
+/// The height of the line under an audio file's card, whatever it shows.
+const AUDIO_LINE_HEIGHT: f32 = 24.;
+/// The seek bar's track, and the taller strip that takes clicks on it.
+const SEEK_TRACK_HEIGHT: f32 = 4.;
+const SEEK_HIT_HEIGHT: f32 = 16.;
+
+/// An audio file's controls: play/pause, the seek bar and the time.
+/// `state`: how it's playing, if it's the file playing or paused.
+fn audio_controls(
+    id: &SharedString,
+    file_id: &str,
+    url: &str,
+    state: Option<&PlayerSnapshot>,
+    colors: RowColors,
+    on_action: &OnRowAction,
+) -> Div {
+    let playing = state.is_some_and(|state| state.playing);
+    let (position, duration) = state.map_or((0.0, None), |state| (state.position, state.duration));
+    let action = if playing {
+        RowAction::PauseAudio
+    } else {
+        RowAction::PlayAudio {
+            file_id: file_id.to_string(),
+            url: url.to_string(),
+        }
+    };
+    let button = Button::new(SharedString::from(format!("{id}-play")))
+        .ghost()
+        .xsmall()
+        .icon(if playing {
+            IconName::Pause
+        } else {
+            IconName::Play
+        })
+        .tooltip(if playing { "Pause" } else { "Play" })
+        .on_click({
+            let on_action = on_action.clone();
+            move |_, window, cx| on_action(action.clone(), window, cx)
+        });
+    // Only the file playing or paused can be moved through.
+    let seekable = state.is_some_and(|state| state.duration.is_some());
+    h_flex()
+        .h(px(AUDIO_LINE_HEIGHT))
+        .gap_2()
+        .items_center()
+        .child(button)
+        .child(seek_bar(
+            id,
+            file_id,
+            playback::progress(position, duration),
+            seekable,
+            colors,
+            on_action,
+        ))
+        .child(
+            div()
+                .flex_none()
+                .text_xs()
+                .text_color(colors.muted)
+                .child(playback::time_label(position, duration)),
+        )
+}
+
+/// Dragging along an audio file's seek bar (by file ID).
+#[derive(Clone)]
+struct SeekDrag {
+    file_id: String,
+}
+
+/// A thin track filled `fill` of the way. When `seekable`, a click or
+/// drag on it (or a little above or below) moves the file there.
+fn seek_bar(
+    id: &SharedString,
+    file_id: &str,
+    fill: f32,
+    seekable: bool,
+    colors: RowColors,
+    on_action: &OnRowAction,
+) -> Stateful<Div> {
+    let track = div()
+        .w_full()
+        .h(px(SEEK_TRACK_HEIGHT))
+        .rounded_full()
+        .bg(colors.border)
+        .child(
+            div()
+                .h_full()
+                .w(relative(fill))
+                .rounded_full()
+                .bg(colors.mine),
+        );
+    let bar = div()
+        .id(SharedString::from(format!("{id}-seek")))
+        .relative()
+        .flex_1()
+        .min_w_0()
+        .h(px(SEEK_HIT_HEIGHT))
+        .flex()
+        .items_center()
+        .child(track);
+    if !seekable {
+        return bar;
+    }
+    // Where the bar was laid out, for a click (a drag is told).
+    let laid_out = Rc::new(Cell::new(None::<Bounds<Pixels>>));
+    bar.cursor_pointer()
+        .child(
+            canvas(
+                {
+                    let laid_out = laid_out.clone();
+                    move |bounds, _, _| laid_out.set(Some(bounds))
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        )
+        .on_mouse_down(MouseButton::Left, {
+            let on_action = on_action.clone();
+            move |event, window, cx| {
+                // Not a selection, nor a click on the row.
+                cx.stop_propagation();
+                if let Some(bounds) = laid_out.get() {
+                    seek_to(&on_action, event.position.x, bounds, window, cx);
+                }
+            }
+        })
+        .on_drag(
+            SeekDrag {
+                file_id: file_id.to_string(),
+            },
+            |_, _, _, cx| DragPreview::new(Rc::new(|_| div().into_any_element()), cx),
+        )
+        .on_drag_move({
+            let (on_action, file_id) = (on_action.clone(), file_id.to_string());
+            move |event: &DragMoveEvent<SeekDrag>, window, cx| {
+                if event.drag(cx).file_id == file_id {
+                    seek_to(&on_action, event.event.position.x, event.bounds, window, cx);
+                }
+            }
+        })
+}
+
+/// Seek to where `x` is along a seek bar laid out at `bounds`.
+fn seek_to(
+    on_action: &OnRowAction,
+    x: Pixels,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let fraction = playback::fraction_along(
+        f32::from(x),
+        f32::from(bounds.origin.x),
+        f32::from(bounds.size.width),
+    );
+    on_action(RowAction::SeekAudio(fraction), window, cx)
+}
+
+/// What an audio file that won't play shows in place of its controls, at
+/// the same height.
+fn cant_play_line(id: &SharedString, url: &str, colors: RowColors) -> Div {
+    let url = url.to_string();
+    h_flex()
+        .h(px(AUDIO_LINE_HEIGHT))
+        .gap_2()
+        .items_center()
+        .child(
+            div()
+                .text_xs()
+                .text_color(colors.muted)
+                .child("Can't play this format here"),
+        )
+        .child(
+            Button::new(SharedString::from(format!("{id}-open")))
+                .ghost()
+                .xsmall()
+                .label("Open in browser")
+                .on_click(move |_, _, cx| cx.open_url(&url)),
+        )
 }
 
 /// A spoiler picture before it's shown, at its display size (so the row
@@ -15128,6 +15545,9 @@ pub(crate) fn mention_badge(count: usize, cx: &App) -> Div {
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_unread_marker(cx);
+        // However the open channel changed, audio from another one stops.
+        let open = self.current_channel().map(|c| c.id);
+        self.stop_playback(Change::OpenChannel(open.as_deref()), cx);
         // After layout, check whether the open channel is scrolled to its top
         // (or too short to scroll) and has more history to load.
         if let Some(channel) = self.current_channel().map(|c| c.id) {

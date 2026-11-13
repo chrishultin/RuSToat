@@ -197,6 +197,83 @@ fn other_files_are_cards_that_link_to_the_file() {
 }
 
 #[test]
+fn audio_files_get_a_player_from_the_original() {
+    let song = file(
+        "f-song",
+        "a song.mp3",
+        json!({ "type": "Audio" }),
+        "audio/mpeg",
+        3_145_728,
+    );
+    let view = AttachmentView::new(&song, &media(), false);
+    assert_eq!(
+        view,
+        AttachmentView::Audio {
+            id: "f-song".into(),
+            url: format!("{CDN}/attachments/f-song/a%20song.mp3"),
+            name: "a song.mp3".into(),
+            size_label: "3.0 MB".into(),
+            spoiler: false,
+        }
+    );
+    // Its file actions act on the same original; it isn't a picture.
+    let target = view.file_target().unwrap();
+    assert_eq!(target.url, format!("{CDN}/attachments/f-song/a%20song.mp3"));
+    assert_eq!(target.name, "a song.mp3");
+    assert!(!target.picture);
+
+    // A spoiler keeps its tag (it isn't covered), shown without the prefix.
+    let hidden = file(
+        "f-hush",
+        "SPOILER_hush.ogg",
+        json!({ "type": "Audio" }),
+        "audio/ogg",
+        100,
+    );
+    let view = AttachmentView::new(&hidden, &media(), false);
+    assert!(matches!(
+        &view,
+        AttachmentView::Audio { name, spoiler: true, url, .. }
+            if name == "hush.ogg" && url.ends_with("/SPOILER_hush.ogg")
+    ));
+    // Revealing it changes nothing.
+    assert_eq!(view.clone().uncovered(true), view);
+
+    // Without a file server it's a card with no link, as before.
+    assert!(matches!(
+        AttachmentView::new(&song, &MediaUrls::default(), false),
+        AttachmentView::File {
+            url: None,
+            kind: FileKind::Audio,
+            ..
+        }
+    ));
+    // An audio MIME type without audio metadata stays a card.
+    let unknown = file("f-raw", "x.ogg", json!({ "type": "File" }), "audio/ogg", 1);
+    assert!(matches!(
+        AttachmentView::new(&unknown, &media(), false),
+        AttachmentView::File {
+            kind: FileKind::Audio,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn timeline_rows_carry_audio_players() {
+    let song = file(
+        "f-song",
+        "song.m4a",
+        json!({ "type": "Audio" }),
+        "audio/mp4",
+        2048,
+    );
+    let store = store_with(vec![song]);
+    let views = attachments(&store.timeline("ch-pics"));
+    assert!(matches!(&views[0], AttachmentView::Audio { id, .. } if id == "f-song"));
+}
+
+#[test]
 fn file_kinds_come_from_metadata_then_mime_type() {
     let image = Metadata::Image {
         width: 1,
