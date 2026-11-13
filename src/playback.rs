@@ -103,6 +103,40 @@ pub fn fraction_along(x: f32, start: f32, width: f32) -> f64 {
     f64::from(((x - start) / width).clamp(0.0, 1.0))
 }
 
+/// The video window is never smaller than this (points), however small
+/// the video.
+pub const MIN_VIDEO_WINDOW: (f64, f64) = (320.0, 180.0);
+
+/// A video's window takes at most this much of the screen, each way.
+pub const MAX_SCREEN_SHARE: f64 = 0.8;
+
+/// The window for a video whose size isn't known: the shape of an image
+/// without one (`attachment::FALLBACK_IMAGE_SIZE`, 3:2).
+pub const UNKNOWN_VIDEO_WINDOW: (f64, f64) = (720.0, 480.0);
+
+/// The video window's content size for a video of `original` pixels (zero
+/// if unknown) on a screen with `screen` points free: the video's own
+/// size, grown to [`MIN_VIDEO_WINDOW`] if it's smaller, then shrunk to
+/// [`MAX_SCREEN_SHARE`] of the screen if it's bigger, keeping its shape
+/// (the screen wins), in whole points.
+pub fn window_size(original: (usize, usize), screen: (f64, f64)) -> (f64, f64) {
+    let (width, height) = match original {
+        (0, _) | (_, 0) => UNKNOWN_VIDEO_WINDOW,
+        (width, height) => (width as f64, height as f64),
+    };
+    let grow = (MIN_VIDEO_WINDOW.0 / width)
+        .max(MIN_VIDEO_WINDOW.1 / height)
+        .max(1.0);
+    let (width, height) = (width * grow, height * grow);
+    let (room_width, room_height) = (screen.0 * MAX_SCREEN_SHARE, screen.1 * MAX_SCREEN_SHARE);
+    let shrink = if room_width > 0.0 && room_height > 0.0 {
+        (room_width / width).min(room_height / height).min(1.0)
+    } else {
+        1.0
+    };
+    ((width * shrink).round(), (height * shrink).round())
+}
+
 /// `value`, or 0 if it's NaN or infinite.
 fn finite(value: f64) -> f64 {
     if value.is_finite() { value } else { 0.0 }

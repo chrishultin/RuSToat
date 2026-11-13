@@ -112,6 +112,7 @@ use crate::ui::server_dialogs::{
 };
 use crate::ui::server_settings::ServerSettingsWindow;
 use crate::ui::voice_global::ActiveVoice;
+use crate::video_window::VideoWindow;
 use crate::voice::{EndReason, MuteState, VoiceCall, VoiceError, VoiceEvent, VoiceEvents};
 
 actions!(
@@ -1693,7 +1694,15 @@ impl ChatView {
                 self.viewer = Some(image);
                 window.focus(&self.viewer_focus, cx);
             }
-            RowAction::PlayAudio { file_id, url } => self.play_audio(channel, file_id, &url, cx),
+            RowAction::PlayAudio { file_id, url } => {
+                self.play_audio(channel, file_id, &url, window, cx)
+            }
+            RowAction::PlayVideo {
+                file_id,
+                url,
+                name,
+                original,
+            } => self.play_video(channel, file_id, url, &name, original, window, cx),
             RowAction::PauseAudio => self.pause_playback(cx),
             RowAction::SeekAudio(fraction) => self.seek_playback(fraction, cx),
             RowAction::File(action, target) => self.file_action(action, target, window, cx),
@@ -8327,16 +8336,29 @@ impl ChatView {
     /// Play `file_id` (audio in `channel`) from `url`: carry on if it's the
     /// one paused, else stop what's playing and start it. No player is made
     /// until now, so a channel full of audio costs nothing.
-    fn play_audio(&mut self, channel: &str, file_id: String, url: &str, cx: &mut Context<Self>) {
+    fn play_audio(
+        &mut self,
+        channel: &str,
+        file_id: String,
+        url: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let next = NowPlaying {
             channel: channel.to_string(),
             file_id,
             kind: MediaKind::Audio,
         };
         self.stop_playback(Change::Play(&next), cx);
-        if let Some(playing) = &mut self.playing {
-            playing.player.play();
-            playing.snapshot.playing = true;
+        // Still here: it's this file, paused.
+        if let Some(Playing {
+            output: Output::Audio(player),
+            snapshot,
+            ..
+        }) = &mut self.playing
+        {
+            player.play();
+            snapshot.playing = true;
         } else {
             match Player::open(url) {
                 Ok(player) => {
@@ -8347,7 +8369,7 @@ impl ChatView {
                     };
                     self.playing = Some(Playing {
                         now: next,
-                        player,
+                        output: Output::Audio(player),
                         snapshot,
                     });
                 }
@@ -8357,13 +8379,78 @@ impl ChatView {
                 }
             }
         }
-        self.poll_playback(cx);
+        self.poll_playback(window, cx);
+    }
+
+    /// Play `file_id` (a video in `channel`) from `url` in the player
+    /// window. With the window open on another video, it switches to this
+    /// one; with this one, it comes forward. Anything else playing stops.
+    #[allow(clippy::too_many_arguments)]
+    fn play_video(
+        &mut self,
+        channel: &str,
+        file_id: String,
+        url: String,
+        name: &str,
+        original: (usize, usize),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let next = NowPlaying {
+            channel: channel.to_string(),
+            file_id,
+            kind: MediaKind::Video,
+        };
+        if let Some(playing) = &mut self.playing
+            && let Output::Video {
+                window: video,
+                url: shown,
+            } = &mut playing.output
+        {
+            if playing.now == next {
+                video.bring_forward();
+                return;
+            }
+            match video.replace(&url, name, original) {
+                Ok(()) => {
+                    playing.now = next;
+                    playing.snapshot = PlayerSnapshot::LOADING;
+                    *shown = url;
+                }
+                Err(err) => {
+                    log::warn!("can't play video {url}: {err}");
+                    window.push_notification(cant_play_video(url), cx);
+                }
+            }
+            self.poll_playback(window, cx);
+            return;
+        }
+        self.stop_playback(Change::Play(&next), cx);
+        match VideoWindow::open(&url, name, original) {
+            Ok(video) => {
+                self.playing = Some(Playing {
+                    now: next,
+                    output: Output::Video { window: video, url },
+                    snapshot: PlayerSnapshot::LOADING,
+                });
+            }
+            Err(err) => {
+                log::warn!("can't play video {url}: {err}");
+                window.push_notification(cant_play_video(url), cx);
+            }
+        }
+        self.poll_playback(window, cx);
     }
 
     fn pause_playback(&mut self, cx: &mut Context<Self>) {
-        if let Some(playing) = &mut self.playing {
-            playing.player.pause();
-            playing.snapshot.playing = false;
+        if let Some(Playing {
+            output: Output::Audio(player),
+            snapshot,
+            ..
+        }) = &mut self.playing
+        {
+            player.pause();
+            snapshot.playing = false;
             cx.notify();
         }
     }
@@ -8371,16 +8458,21 @@ impl ChatView {
     /// Move what's playing `fraction` of the way through (once its length
     /// is known).
     fn seek_playback(&mut self, fraction: f64, cx: &mut Context<Self>) {
-        let Some(playing) = &mut self.playing else {
+        let Some(Playing {
+            output: Output::Audio(player),
+            snapshot,
+            ..
+        }) = &mut self.playing
+        else {
             return;
         };
-        let Some(duration) = playing.snapshot.duration else {
+        let Some(duration) = snapshot.duration else {
             return;
         };
         let to = playback::seek_target(fraction, duration);
-        playing.player.seek(to);
-        playing.snapshot.position = to;
-        playing.snapshot.ended = false;
+        player.seek(to);
+        snapshot.position = to;
+        snapshot.ended = false;
         cx.notify();
     }
 
@@ -8391,25 +8483,24 @@ impl ChatView {
             .as_ref()
             .is_some_and(|playing| playback::stops(&playing.now, change))
         {
-            // Dropping the player stops it.
+            // Dropping the player stops it, and closes a video's window.
             self.playing = None;
             cx.notify();
         }
     }
 
-    /// Read the player now, and every [`PLAYBACK_POLL`] while it plays (or
-    /// is loading). A file that fails is marked unplayable for the session;
-    /// one that reaches its end goes back to the start, paused.
-    fn poll_playback(&mut self, cx: &mut Context<Self>) {
-        if !self.read_player(cx) || self.playback_polling {
+    /// Read the player now, and every [`PLAYBACK_POLL`] while audio plays
+    /// (or is loading) or the video window is open.
+    fn poll_playback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.read_player(window, cx) || self.playback_polling {
             return;
         }
         self.playback_polling = true;
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(PLAYBACK_POLL).await;
-                let more = this.update(cx, |this, cx| {
-                    let more = this.read_player(cx);
+                let more = this.update_in(cx, |this, window, cx| {
+                    let more = this.read_player(window, cx);
                     if !more {
                         this.playback_polling = false;
                     }
@@ -8424,11 +8515,33 @@ impl ChatView {
     }
 
     /// Take a snapshot of the player; whether it's worth polling again.
-    fn read_player(&mut self, cx: &mut Context<Self>) -> bool {
+    ///
+    /// - Audio that fails is marked unplayable for the session; audio that
+    ///   reaches its end goes back to the start, paused.
+    /// - A video window the user closed stops playback. A video that fails
+    ///   closes its window, with a toast offering the browser.
+    fn read_player(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(playing) = &mut self.playing else {
             return false;
         };
-        let mut snapshot = playing.player.snapshot();
+        let player = match &playing.output {
+            Output::Audio(player) => player,
+            Output::Video { window: video, url } => {
+                if !video.is_open() {
+                    self.playing = None;
+                    return false;
+                }
+                let PlayerStatus::Failed(err) = video.snapshot().status else {
+                    return true;
+                };
+                log::warn!("can't play video {}: {err}", playing.now.file_id);
+                let url = url.clone();
+                self.playing = None;
+                window.push_notification(cant_play_video(url), cx);
+                return false;
+            }
+        };
+        let mut snapshot = player.snapshot();
         if let PlayerStatus::Failed(err) = &snapshot.status {
             log::warn!("can't play {}: {err}", playing.now.file_id);
             let file_id = playing.now.file_id.clone();
@@ -8438,8 +8551,8 @@ impl ChatView {
             return false;
         }
         if snapshot.ended {
-            playing.player.pause();
-            playing.player.seek(0.0);
+            player.pause();
+            player.seek(0.0);
             snapshot.position = 0.0;
             snapshot.ended = false;
             snapshot.playing = false;
@@ -11985,6 +12098,14 @@ enum RowAction {
     PlayAudio { file_id: String, url: String },
     /// Pause what's playing.
     PauseAudio,
+    /// Play a video in the player window (by file ID, from its address,
+    /// titled with its name, sized for its metadata's size).
+    PlayVideo {
+        file_id: String,
+        url: String,
+        name: String,
+        original: (usize, usize),
+    },
     /// Move what's playing this fraction of the way through.
     SeekAudio(f64),
     /// Save, copy or open a file or picture (from its right-click menu).
@@ -12139,9 +12260,18 @@ struct Pickers {
 /// A file playing (or paused) and its player.
 struct Playing {
     now: NowPlaying,
-    player: Player,
+    output: Output,
     /// As last polled.
     snapshot: PlayerSnapshot,
+}
+
+/// Where a file plays. Dropping it stops it (and closes the window).
+enum Output {
+    /// Audio, in its message.
+    Audio(Player),
+    /// A video, in the player window; `url`, for Open in browser if it
+    /// can't play.
+    Video { window: VideoWindow, url: String },
 }
 
 /// What the rows need to draw audio players: they change while a row is
@@ -13809,12 +13939,24 @@ fn attachment_element(
                 })
         }
         AttachmentView::Video {
-            url, width, height, ..
+            id: file_id,
+            url,
+            name,
+            width,
+            height,
+            original,
+            ..
         } => {
-            let open = url.clone();
+            let play = RowAction::PlayVideo {
+                file_id: file_id.clone(),
+                url: url.clone(),
+                name: name.clone(),
+                original: *original,
+            };
+            let on_action = on_action.clone();
             video_poster(id, url, (*width, *height), colors)
                 .cursor_pointer()
-                .on_click(move |_, _, cx| cx.open_url(&open))
+                .on_click(move |_, window, cx| on_action(play.clone(), window, cx))
         }
         AttachmentView::Audio {
             id: file_id,
@@ -14075,6 +14217,20 @@ fn seek_to(
         f32::from(bounds.size.width),
     );
     on_action(RowAction::SeekAudio(fraction), window, cx)
+}
+
+/// The toast for a video that won't play in the player window.
+const CANT_PLAY_VIDEO_TEXT: &str = "Can't play this video here.";
+
+/// "Can't play this video here.", with Open in browser.
+fn cant_play_video(url: String) -> Notification {
+    Notification::error(CANT_PLAY_VIDEO_TEXT).action(move |_, _, _| {
+        let url = url.clone();
+        Button::new("open-video-in-browser")
+            .small()
+            .label("Open in browser")
+            .on_click(move |_, _, cx| cx.open_url(&url))
+    })
 }
 
 /// What an audio file that won't play shows in place of its controls, at

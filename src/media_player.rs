@@ -111,6 +111,12 @@ mod mac {
             unsafe { self.player.pause() };
         }
 
+        /// The AVFoundation player, for a view that shows it (the video
+        /// window).
+        pub(crate) fn av_player(&self) -> &AVPlayer {
+            &self.player
+        }
+
         /// Silence this player (not the device), for the spike and tests.
         pub fn set_muted(&self, muted: bool) {
             // SAFETY: as above.

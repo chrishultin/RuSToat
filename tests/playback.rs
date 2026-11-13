@@ -1,6 +1,6 @@
 use stoat_gpui::playback::{
-    Change, MediaKind, NowPlaying, UNKNOWN_TIME, clock, fraction_along, progress, seek_target,
-    stops, time_label,
+    Change, MediaKind, NowPlaying, UNKNOWN_TIME, UNKNOWN_VIDEO_WINDOW, clock, fraction_along,
+    progress, seek_target, stops, time_label, window_size,
 };
 
 fn audio(channel: &str, file: &str) -> NowPlaying {
@@ -118,4 +118,40 @@ fn switching_account_stops_anything() {
 fn closing_the_window_stops_audio_but_not_a_video() {
     assert!(stops(&audio("general", "song"), Change::HideWindow));
     assert!(!stops(&video("general", "clip"), Change::HideWindow));
+}
+
+/// A 1440 × 900 laptop screen's free space: 80% is 1152 × 720.
+const LAPTOP: (f64, f64) = (1440.0, 900.0);
+
+#[test]
+fn video_windows_are_the_videos_size_when_it_fits() {
+    assert_eq!(window_size((640, 360), LAPTOP), (640.0, 360.0));
+    assert_eq!(window_size((720, 1280), (2560.0, 1600.0)), (720.0, 1280.0));
+}
+
+#[test]
+fn big_videos_shrink_to_most_of_the_screen() {
+    // Landscape: width-bound.
+    assert_eq!(window_size((3840, 2160), LAPTOP), (1152.0, 648.0));
+    // Portrait: height-bound.
+    assert_eq!(window_size((1080, 1920), LAPTOP), (405.0, 720.0));
+}
+
+#[test]
+fn tiny_videos_grow_to_the_minimum() {
+    assert_eq!(window_size((160, 90), LAPTOP), (320.0, 180.0));
+    // Both sides reach it, keeping the shape.
+    assert_eq!(window_size((90, 160), LAPTOP), (320.0, 569.0));
+    // Unless the screen can't fit that: the screen wins.
+    assert_eq!(window_size((10, 1000), LAPTOP), (7.0, 720.0));
+}
+
+#[test]
+fn unknown_sizes_get_the_fallback_shape() {
+    assert_eq!(window_size((0, 0), LAPTOP), UNKNOWN_VIDEO_WINDOW);
+    assert_eq!(window_size((1920, 0), LAPTOP), UNKNOWN_VIDEO_WINDOW);
+    // A tiny screen still holds it.
+    assert_eq!(window_size((0, 0), (600.0, 500.0)), (480.0, 320.0));
+    // No screen reported: no limit.
+    assert_eq!(window_size((3840, 2160), (0.0, 0.0)), (3840.0, 2160.0));
 }

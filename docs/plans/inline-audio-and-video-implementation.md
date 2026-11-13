@@ -244,3 +244,69 @@ Deferred to the batched manual tests at the end:
 - a spoiler video is covered until clicked;
 - a webm shows the "Video" box and still opens in the browser;
 - the right-click menu has Save…, Copy link and Open in browser.
+
+## Chunk 4: The video player window
+
+### Changes Made
+- `src/video_window.rs` (new):
+  - `PlayerWindow`, an `NSWindow` subclass (`define_class!`, `RuSToatVideoWindow`). It overrides `performKeyEquivalent:`, so ⌘W closes it via `performClose:`, and `cancelOperation:`, so Escape does too.
+  - `VideoWindow`:
+    - `open(url, title, original)` makes the window (titled, closable, miniaturizable, resizable; `releasedWhenClosed` off) with an `AVPlayerView` showing a `media_player::Player`, titled with the file's name, sized by `playback::window_size` for the main screen's visible frame, centred, brought forward and playing;
+    - `replace(url, title, original)` gives the view a new player (the old one pauses as it's dropped), then retitles, resizes and brings the window forward;
+    - `bring_forward()`;
+    - `is_open()`: visible, or minimised;
+    - `snapshot()`: the player's, for failures.
+    - Dropping it pauses, detaches the player and closes the window.
+  - Stubs on other platforms (`open` fails).
+- `src/media_player.rs`: `Player::av_player()` (crate-only), for the view.
+- `src/playback.rs`: `window_size(original, screen)`:
+  - the video's own size, grown to at least 320 × 180 (`MIN_VIDEO_WINDOW`), then shrunk to 80% of the screen (`MAX_SCREEN_SHARE`), keeping its shape;
+  - 720 × 480 (`UNKNOWN_VIDEO_WINDOW`, the fallback box's 3:2) when the size is unknown;
+  - no limit when no screen is reported.
+- `src/ui/chat.rs`:
+  - `Playing.output: Output { Audio(Player), Video { window: VideoWindow, url } }`. Pause and seek only apply to audio.
+  - `RowAction::PlayVideo { file_id, url, name, original }` from the poster's click, handled by `play_video`:
+    - the window open on this video comes forward;
+    - on another video, it switches to this one;
+    - otherwise whatever plays stops and a window opens;
+    - if it can't open, a toast appears.
+  - `poll_playback` uses `spawn_in`/`update_in`, so `read_player` can show toasts. It keeps polling while the video window is open:
+    - a window the user closed (close button, ⌘W, Escape) drops the player;
+    - a video that fails is logged, its window closes, and the toast "Can't play this video here." appears with Open in browser (`cant_play_video`, `CANT_PLAY_VIDEO_TEXT`).
+  - Audio closes the window (`playback::stops`: another file). Switching account closes it (`set_active(false)`), and so does dropping the view.
+- `Cargo.toml`: `objc2-app-kit` gains `NSEvent`, `NSGraphics`, `NSScreen`; `objc2-foundation` gains `NSGeometry`.
+- `src/lib.rs`: `pub mod video_window`.
+- `tests/playback.rs`: `window_size`:
+  - videos that fit keep their size;
+  - big landscape and portrait videos shrink to 80%;
+  - tiny ones grow to the minimum (and the screen wins);
+  - unknown sizes get the fallback, even on a tiny screen;
+  - there's no limit without a screen.
+
+### Divergences
+- **⌘W and Escape are handled by an `NSWindow` subclass.** The app's menus have no Close item, so a plain `NSWindow` wouldn't get ⌘W at all. The plan's fallbacks were an `NSWindowController` or Escape only; the subclass gives both keys. ⌘Q goes through the app menu's key equivalent as before (to check by hand).
+- **No `close()` method:** dropping the `VideoWindow` closes it, and every stop path already drops `Playing`.
+- **`bring_forward()`** was added, for clicking the video that's already showing.
+- **Minimised counts as open** (`isVisible || isMiniaturized`). Otherwise minimising the window would have stopped playback.
+- **Closing the window takes up to 250 ms to stop sound:** the poll notices it, not a window delegate. That avoids a delegate class for a quarter-second.
+- **Closing the main window (Keep running) leaves the video window playing**, as decided in chunk 2 (`Change::HideWindow` stops audio only). Switching account still closes it.
+- **Embedded media videos** (a bot's text embed with an uploaded video) open in the window too, since they're `AttachmentView::Video`.
+
+### Verification Performed
+- `cargo test --test playback`: 14 passed.
+- A throwaway example, run once and deleted, not committed. It used video-only files (checked with `ffprobe`, so silent), on the main thread with `NSApplication`:
+  - `hevc.mp4` opened (`open=true status=Ready pos=1.13` after 1.2 s);
+  - replacing it with `portrait.mov` worked (`Ready`, `pos=0.98`);
+  - dropping it closed the window;
+  - `webm.webm` opened and reported `Failed`.
+- Full suite, `cargo test`: 90 suites, 1,483 passed, 0 failed. `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt: `src/ui/chat.rs` 12 → 12 (one import moved into order). New `src/video_window.rs` clean. `src/playback.rs`, `tests/playback.rs` and `src/media_player.rs` clean.
+
+### Manual Validation
+Deferred to the batched manual tests at the end:
+- an mp4 opens at its shape, playing, with AVKit's controls;
+- another video switches the window;
+- closing it stops the sound; audio closes it;
+- ⌘W and Escape close it, and ⌘Q quits;
+- a webm toasts with Open in browser;
+- switching account closes it.

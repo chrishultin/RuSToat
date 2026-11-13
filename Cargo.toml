@@ -82,11 +82,12 @@ rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Dock badge (AppKit's NSDockTile), checking whether banners can be posted
 # (bundle identifier, notification permission), hiding the main window
-# (NSWindow), and the notification sound (NSSound). The same versions GPUI
+# (NSWindow), the notification sound (NSSound), and the video player window
+# (src/video_window.rs: NSWindow, NSScreen, NSEvent). The same versions GPUI
 # already uses.
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSArray", "NSBundle", "NSDate", "NSError", "NSRunLoop", "NSString", "NSURL"] }
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile", "NSResponder", "NSSound", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSBundle", "NSDate", "NSError", "NSGeometry", "NSRunLoop", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile", "NSEvent", "NSGraphics", "NSResponder", "NSScreen", "NSSound", "NSView", "NSWindow"] }
 # Reaching a GPUI window's NSWindow, to hide it without closing it
 # (src/window_hide.rs). The version GPUI already uses.
 raw-window-handle = "0.6"

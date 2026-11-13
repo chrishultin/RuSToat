@@ -59,6 +59,7 @@ pub mod store;
 pub mod themes;
 pub mod time;
 pub mod typing;
+pub mod video_window;
 pub mod ui;
 pub mod voice;
 pub mod webhooks;
