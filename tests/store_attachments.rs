@@ -170,12 +170,12 @@ fn other_files_are_cards_that_link_to_the_file() {
             preview: None,
         }
     );
-    // Videos are cards too (no in-app playback).
+    // A video MIME type without video metadata stays a card.
     let video = file(
         "f-mov",
-        "clip.mp4",
-        json!({ "type": "Video", "width": 1920, "height": 1080 }),
-        "video/mp4",
+        "clip.webm",
+        json!({ "type": "File" }),
+        "video/webm",
         5_000_000,
     );
     assert!(matches!(
@@ -254,6 +254,97 @@ fn audio_files_get_a_player_from_the_original() {
         AttachmentView::new(&unknown, &media(), false),
         AttachmentView::File {
             kind: FileKind::Audio,
+            ..
+        }
+    ));
+}
+
+fn video(id: &str, name: &str, width: usize, height: usize) -> File {
+    file(
+        id,
+        name,
+        json!({ "type": "Video", "width": width, "height": height }),
+        "video/mp4",
+        5_000_000,
+    )
+}
+
+#[test]
+fn videos_are_posters_at_their_fitted_size() {
+    let view = AttachmentView::new(&video("f-mov", "my clip.mp4", 1920, 1080), &media(), false);
+    assert_eq!(
+        view,
+        AttachmentView::Video {
+            id: "f-mov".into(),
+            url: format!("{CDN}/attachments/f-mov/my%20clip.mp4"),
+            name: "my clip.mp4".into(),
+            size_label: "4.8 MB".into(),
+            width: 400,
+            height: 225,
+            original: (1920, 1080),
+            spoiler: false,
+        }
+    );
+    // Portrait, and small enough not to shrink.
+    assert!(matches!(
+        AttachmentView::new(&video("f-tall", "t.mov", 1080, 1920), &media(), false),
+        AttachmentView::Video {
+            width: 169,
+            height: 300,
+            ..
+        }
+    ));
+    assert!(matches!(
+        AttachmentView::new(&video("f-small", "s.mp4", 320, 180), &media(), false),
+        AttachmentView::Video {
+            width: 320,
+            height: 180,
+            ..
+        }
+    ));
+    // Without dimensions, the fallback box (the poster is letterboxed in it).
+    assert!(matches!(
+        AttachmentView::new(&video("f-zero", "z.mp4", 0, 0), &media(), false),
+        AttachmentView::Video { width, height, original: (0, 0), .. }
+            if (width, height) == FALLBACK_IMAGE_SIZE
+    ));
+    // Its file actions act on the original, and it isn't a picture (no Copy
+    // image).
+    let target = view.file_target().unwrap();
+    assert_eq!(target.url, format!("{CDN}/attachments/f-mov/my%20clip.mp4"));
+    assert!(!target.picture);
+    // Without a file server, a card with no link.
+    assert!(matches!(
+        AttachmentView::new(
+            &video("f-mov", "c.mp4", 1920, 1080),
+            &MediaUrls::default(),
+            false
+        ),
+        AttachmentView::File {
+            url: None,
+            kind: FileKind::Video,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn spoiler_videos_are_covered_until_revealed_at_the_same_size() {
+    let mut store = store_with(vec![video("f-boo", "SPOILER_boo.mp4", 1280, 720)]);
+    let before = attachments(&store.timeline("ch-pics"));
+    assert!(matches!(
+        &before[0],
+        AttachmentView::Video { spoiler: true, width: 400, height: 225, name, .. }
+            if name == "boo.mp4"
+    ));
+    store.reveal_attachment("f-boo");
+    let after = attachments(&store.timeline("ch-pics"));
+    assert!(matches!(
+        &after[0],
+        AttachmentView::Video {
+            spoiler: false,
+            width: 400,
+            height: 225,
             ..
         }
     ));

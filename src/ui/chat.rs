@@ -13793,6 +13793,29 @@ fn attachment_element(
                 _ => card,
             }
         }
+        // A spoiler: covered until it's clicked, with no poster made yet.
+        AttachmentView::Video {
+            id: file_id,
+            width,
+            height,
+            spoiler: true,
+            ..
+        } => {
+            let (on_action, file_id) = (on_action.clone(), file_id.clone());
+            covered_image(id, (*width, *height), None, colors)
+                .cursor_pointer()
+                .on_click(move |_, window, cx| {
+                    on_action(RowAction::RevealAttachment(file_id.clone()), window, cx)
+                })
+        }
+        AttachmentView::Video {
+            url, width, height, ..
+        } => {
+            let open = url.clone();
+            video_poster(id, url, (*width, *height), colors)
+                .cursor_pointer()
+                .on_click(move |_, _, cx| cx.open_url(&open))
+        }
         AttachmentView::Audio {
             id: file_id,
             url,
@@ -14331,6 +14354,69 @@ fn inline_image(
                         .child("Couldn't load image")
                         .into_any_element()
                 }),
+        )
+}
+
+/// A video's poster at its display size, letterboxed on black, with a
+/// play button over it: pulsing while the poster's made, and a dark box
+/// saying "Video" if it can't be. Callers add the click.
+fn video_poster(
+    id: SharedString,
+    url: &str,
+    (width, height): (u32, u32),
+    colors: RowColors,
+) -> Stateful<Div> {
+    // Sharp on a Retina screen.
+    let max = (width * 2, height * 2);
+    div()
+        .id(id.clone())
+        .relative()
+        .w(px(width as f32))
+        .h(px(height as f32))
+        .flex_none()
+        .rounded(px(ATTACHMENT_RADIUS))
+        .overflow_hidden()
+        .bg(black())
+        .child(
+            crate::ui::video_poster::poster(url.to_string(), max)
+                // Keeps its loading state between frames (see `inline_image`).
+                .id(SharedString::from(format!("{id}-poster")))
+                .size_full()
+                .object_fit(ObjectFit::Contain)
+                .with_loading(move || image_loading(colors.muted, ATTACHMENT_RADIUS))
+                .with_fallback(|| {
+                    div()
+                        .size_full()
+                        .flex()
+                        .items_end()
+                        .p_2()
+                        .text_xs()
+                        .text_color(white().opacity(0.7))
+                        .child("Video")
+                        .into_any_element()
+                }),
+        )
+        .child(play_badge())
+}
+
+/// A round play button over the middle of a picture.
+fn play_badge() -> Div {
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .size(px(48.))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(black().opacity(0.6))
+                .text_color(white())
+                .child(Icon::new(IconName::Play).large()),
         )
 }
 

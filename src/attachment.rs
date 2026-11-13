@@ -1,5 +1,6 @@
 //! How a message's attachments are shown: images inline at a fixed display
-//! size, audio with a player, everything else as a file card. Plain data with no GPUI, so the
+//! size, videos as a poster at theirs, audio with a player, everything
+//! else as a file card. Plain data with no GPUI, so the
 //! sizing maths and the size guard are unit-testable.
 //!
 //! The file server only serves originals (it ignores resize parameters), so
@@ -145,6 +146,23 @@ pub enum AttachmentView {
         /// A spoiler: its card has a tag (it isn't covered).
         spoiler: bool,
     },
+    /// A video: a poster frame drawn at exactly `width` × `height` (from its
+    /// metadata, as an image's), with a play button.
+    Video {
+        /// The file's ID, for its reveal and what's playing.
+        id: String,
+        /// The original's own address (see [`MediaUrls::original`]).
+        url: String,
+        name: String,
+        size_label: String,
+        width: u32,
+        height: u32,
+        /// The video's own size from its metadata (zero if unknown).
+        original: (usize, usize),
+        /// A spoiler not shown yet: drawn covered, at the same size, until
+        /// it's clicked. No poster is made meanwhile.
+        spoiler: bool,
+    },
     /// A file of a message that's still being sent, drawn from the local
     /// copy with how much of it has uploaded.
     Local {
@@ -206,6 +224,21 @@ impl AttachmentView {
                     spoiler,
                 }
             }
+            (Metadata::Video { width, height }, Some(_))
+                if let Some(url) = media.original(file) =>
+            {
+                let (display_width, display_height) = fit_within(*width, *height);
+                AttachmentView::Video {
+                    id: file.id.clone(),
+                    url,
+                    name,
+                    size_label,
+                    width: display_width,
+                    height: display_height,
+                    original: (*width, *height),
+                    spoiler,
+                }
+            }
             (metadata, url) => AttachmentView::File {
                 id: file.id.clone(),
                 name,
@@ -226,9 +259,12 @@ impl AttachmentView {
         self
     }
 
-    /// With `shown` (the user clicked it), a spoiler image isn't covered.
+    /// With `shown` (the user clicked it), a spoiler image or video isn't
+    /// covered.
     pub fn uncovered(mut self, shown: bool) -> Self {
-        if let AttachmentView::Image { spoiler, .. } = &mut self {
+        if let AttachmentView::Image { spoiler, .. } | AttachmentView::Video { spoiler, .. } =
+            &mut self
+        {
             *spoiler &= !shown;
         }
         self
@@ -242,7 +278,9 @@ impl AttachmentView {
     pub fn file_target(&self) -> Option<FileTarget> {
         let (name, url, picture) = match self {
             AttachmentView::Image { name, url, .. } => (name, url, true),
-            AttachmentView::Audio { name, url, .. } => (name, url, false),
+            AttachmentView::Audio { name, url, .. } | AttachmentView::Video { name, url, .. } => {
+                (name, url, false)
+            }
             AttachmentView::File {
                 name,
                 url: Some(url),

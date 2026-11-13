@@ -196,3 +196,51 @@ Deferred to the batched manual tests at the end (user's choice):
 - play an mp3 and an m4a: pause, seek by click and drag, play to the end;
 - a second file stops the first; changing channel or account stops it;
 - a webm says "Can't play this format here".
+
+## Chunk 3: Video posters
+
+### Changes Made
+- `src/attachment.rs`:
+  - `AttachmentView::Video { id, url, name, size_label, width, height, original, spoiler }`, for `Metadata::Video` when there's a file server. `url` is the original's (`MediaUrls::original`). The display size comes from `fit_within` (400 × 300 at most, `FALLBACK_IMAGE_SIZE` without dimensions).
+  - `uncovered` reveals spoiler videos as it does images. `file_target()` gives the original, not as a picture (no Copy image).
+- `src/ui/video_poster.rs` (new):
+  - `VideoPoster`, a GPUI `Asset` keyed by `PosterSource { url, max }`. It runs `media_player::poster` on the background executor, logs a failure (`no poster for {url}: {AVFoundation error}`), and returns a BGRA `RenderImage`, or `None`.
+  - `render_image` (RGBA → BGRA) and `poster(url, max) -> Img`, as `thumbhash.rs` does. A unit test checks the channel order and size.
+- `src/ui/mod.rs`: `pub mod video_poster`.
+- `src/ui/chat.rs`:
+  - The `Video` arm:
+    - a spoiler is `covered_image` (no ThumbHash, no poster made) until clicked (`RowAction::RevealAttachment`);
+    - otherwise `video_poster`, which opens the file in the browser on click until chunk 4;
+    - the file actions' right-click menu comes from `render_attachment`'s `file_target()`.
+  - `video_poster(id, url, size, colors)`:
+    - the poster at the display size, letterboxed (`ObjectFit::Contain`) on black, made at twice that size for Retina;
+    - it pulses (`image_loading`) while being made;
+    - if it can't be made, it stays black with a "Video" label in the corner;
+    - `play_badge()` sits over the middle: the same 48 px round badge as the link-preview thumbnails.
+- `tests/store_attachments.rs`:
+  - a video is `AttachmentView::Video` at its fitted size (landscape, portrait, small), with the fallback box without dimensions, the original's encoded URL, and a non-picture file target;
+  - without a file server it's a card;
+  - a `video/*` MIME type without `Video` metadata stays a card (this replaces the old "videos are cards" check);
+  - a spoiler video is covered, then revealed by file ID through the store at the same size.
+
+### Divergences
+- **No cap on concurrent poster generations.** The plan made a semaphore conditional on posters being slow. A poster took about 0.2 s per video in the spike (locally and over HTTP with ranges), and GPUI's asset cache dedupes by URL and size. It's left uncapped, to revisit if the manual test with a channel of videos is slow.
+- **The fallback** is the black box with "Video" in the bottom-left corner, under the play badge, rather than a dark box with a centred label: the badge already sits in the middle.
+- **Embedded text-embed media** (a bot's embed whose `media` is an uploaded video) is drawn as a poster too, since it's built by `AttachmentView::new`. Link-preview videos (`Embed::Video`) are untouched and stay cards, as planned.
+
+### Verification Performed
+- `cargo test --test store_attachments`: 25 passed. `cargo test --lib video_poster`: 1 passed.
+- Full suite, `cargo test`: 90 suites, 1,479 passed, 0 failed. `cargo clippy --all-targets -- -D warnings`: clean.
+- rustfmt:
+  - `src/ui/chat.rs` stays at 12;
+  - `src/attachment.rs` 0;
+  - `tests/store_attachments.rs` 0 (0 at HEAD; formatting it whole only touched the new tests);
+  - new `src/ui/video_poster.rs` clean;
+  - `src/ui/mod.rs` gained one line, unformatted.
+
+### Manual Validation
+Deferred to the batched manual tests at the end:
+- an mp4 and a mov show posters at their shape;
+- a spoiler video is covered until clicked;
+- a webm shows the "Video" box and still opens in the browser;
+- the right-click menu has Save…, Copy link and Open in browser.

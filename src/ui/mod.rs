@@ -31,6 +31,7 @@ pub mod sessions_page;
 pub mod settings;
 pub mod switcher;
 pub mod thumbhash;
+pub mod video_poster;
 pub mod voice_global;
 pub mod webhooks_page;
 
