@@ -176,7 +176,7 @@ Some milestones lay foundations that later ones reuse. When the earlier one's pl
 - Mark an upload as a spoiler (new in 0.16); spoiler attachments stay blurred until clicked
 - Inline previews of text-file attachments
 
-### Milestone 31: Inline audio and video (M)
+### Milestone 31: Inline audio and video (M). Plan: [`inline-audio-and-video.md`](inline-audio-and-video.md)
 - An audio player in the message, through AVFoundation (`AVPlayer` via `objc2`), with play/pause and seeking drawn in GPUI
 - Videos show a poster frame with a play button that opens a native player window. Playing video inside the message would be L, and is left out unless the player window turns out not to be enough.
 - **Risk:** the first use of AVFoundation here. Start with a small spike.
