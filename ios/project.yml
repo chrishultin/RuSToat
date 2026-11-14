@@ -46,6 +46,9 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: RuSToat
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        # Photos are picked out of process (PhotosPicker), so only the
+        # camera needs asking.
+        INFOPLIST_KEY_NSCameraUsageDescription: RuSToat uses the camera to take photos to send.
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # The pre-build script runs cargo, which reads and writes outside

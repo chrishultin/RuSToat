@@ -366,3 +366,51 @@ Deferred to the end:
 - send a PDF from Files and open it on desktop;
 - send one over the size limit and read the reason;
 - send in Airplane mode, then retry.
+
+## Chunk 6: Photos and the camera
+
+### Changes Made
+- `ios/RuSToat/Chat/OutgoingFiles.swift`:
+  - `PhotoEncoding`:
+    - `jpeg(Data)` makes a JPEG with `CGImageSourceCreateThumbnailAtIndex` (`WithTransform`, so EXIF orientation is applied to the pixels; at most 4096 px on the long side, never scaled up);
+    - `jpeg(CGImage)` writes it with `CGImageDestination` at quality 0.85 and no metadata dictionary, so no GPS, EXIF or orientation tag goes with it;
+    - `flattened` puts transparent pictures onto white;
+    - `jpeg(UIImage)` draws a camera shot upright (in its own orientation), capped at 4096 px, then encodes it the same way.
+  - `OutgoingFiles.photo(Data)` (encoded off the main actor), `photo(UIImage)`, and `file(from: PhotosPickerItem)`. A movie comes through `PickedMovie`, a `Transferable` `FileRepresentation` that copies it into the outgoing folder, then `mp4()`. Anything else loads as `Data` and is re-encoded.
+  - `mp4(_:)` exports a non-MP4 video to MP4 with `AVAssetExportSession`: `Passthrough` first, then `HighestQuality`. The original is deleted, and it's sent as it was if neither works.
+  - `photoName()`: "IMG_yyyyMMdd_HHmmss_n.jpg", with a counter under a `Mutex`.
+  - `AttachFailure`: user-facing reasons.
+  - `CameraPicker`: a `UIImagePickerController` wrapper. It uses the `.camera` source, or `.photoLibrary` where there's no camera (the simulator).
+- `ios/RuSToat/Chat/Composer.swift`: the ＋ menu offers Photo Library, Camera, then Files.
+- `ios/RuSToat/Chat/ChatView.swift`:
+  - `.photosPicker` for images and videos, allowing as many as there's room for in the tray;
+  - the camera in a `fullScreenCover`;
+  - `addPhotos` and `attachPrepared` add items in order and stop at the first that doesn't fit, showing why;
+  - DEBUG `RUSTOAT_DEV_PHOTO=<path>` runs a photo through the same re-encoding and sends it once connected.
+- `ios/project.yml`: `INFOPLIST_KEY_NSCameraUsageDescription: RuSToat uses the camera to take photos to send.` No Photos-library key, because `PhotosPicker` runs out of process.
+- `ios/RuSToatTests/OutgoingFilesTests.swift`: `PhotoEncodingTests` (6 tests):
+  - a 6000×4000 JPEG comes out at 4096×2731, and a small one isn't scaled up;
+  - EXIF orientation 6 on a 40×20 picture gives a 20×40 JPEG with no turning left to do;
+  - a photo with a GPS dictionary comes out without one;
+  - a transparent PNG becomes a JPEG with white where it was clear;
+  - a camera `UIImage` with `.right` orientation comes out upright;
+  - photo names are distinct.
+
+### Divergences
+- **No Rust change.** As found in chunk 5, the core reads a re-encoded JPEG's dimensions from its header (`local_image_size`), so the pending row already has the sent one's shape. `OutgoingFile` didn't need a `dimensions` field. The plan was amended in chunk 5.
+- **The simulator check doesn't drive the photo picker.** `PhotosPicker` runs out of process and `simctl` can't tap it. DEBUG `RUSTOAT_DEV_PHOTO` sends a file through the same `OutgoingFiles.photo` pipeline that picked photos use instead. The picker itself, videos and the camera are left to the manual check on a device, as the plan expected for the camera.
+- **Transparency is flattened onto white**, so a transparent PNG doesn't turn black as a JPEG. The plan said only that PNGs are sent as JPEG.
+
+### Verification Performed
+- Swift: 49 tests in 13 suites passed (PhotoEncodingTests 6, OutgoingFilesTests 4).
+- `cargo test -p stoat-ffi`: 90 passed. Desktop `cargo test`: 1499 passed, 0 failed, 5 ignored. Both clippy runs are clean.
+- Simulator against `fake_stoat`, with `RUSTOAT_DEV_PHOTO` and a 6000×4000 JPEG stored sideways (EXIF orientation 6) with a GPS location (51°30′N, 0°7′W):
+  - The pending row showed the picture upright, turned as its orientation says, at 2:3 portrait, with the upload tick.
+  - The file the fake server received (`/attachments/up-0`) was a JPEG of 2731×4096, with no orientation tag and no GPS. Its only EXIF tag left is ImageIO's own EXIF pointer.
+- The built app's Info.plist has `NSCameraUsageDescription` and no Photos-library key.
+
+### Manual Validation
+Deferred to the end:
+- send a photo from the library and a camera shot from your iPhone;
+- check they're upright on desktop;
+- check (by downloading one) that location isn't included.

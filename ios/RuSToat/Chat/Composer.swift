@@ -9,8 +9,10 @@ struct Composer: View {
     /// The tray: files to send with the message.
     @Binding var files: [TrayFile]
     var onRemoveFile: (TrayFile) -> Void = { _ in }
-    /// Pick files from Files.
+    /// Pick files from Files, photos and videos from Photos, or take a photo.
     var onPickFiles: () -> Void = {}
+    var onPickPhotos: () -> Void = {}
+    var onTakePhoto: () -> Void = {}
     /// Editing one of the user's messages: the box holds its text, and
     /// sending saves it.
     var editing = false
@@ -71,6 +73,8 @@ struct Composer: View {
                 HStack(alignment: .bottom, spacing: 8) {
                     if !editing {
                         Menu {
+                            Button("Photo Library", systemImage: "photo.on.rectangle", action: onPickPhotos)
+                            Button("Camera", systemImage: "camera", action: onTakePhoto)
                             Button("Files", systemImage: "folder", action: onPickFiles)
                         } label: {
                             Image(systemName: "plus")

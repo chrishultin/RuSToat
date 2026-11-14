@@ -1,3 +1,4 @@
+import PhotosUI
 import SwiftUI
 
 extension MessageItem: Identifiable {}
@@ -44,6 +45,9 @@ struct ChatView: View {
     /// The pictures open full screen.
     @State private var viewing: ViewerRequest?
     @State private var pickingFiles = false
+    @State private var pickingPhotos = false
+    @State private var photoItems: [PhotosPickerItem] = []
+    @State private var takingPhoto = false
     /// Sends iOS is asked to let finish in the background, by message key.
     @State private var backgroundSends: [String: UIBackgroundTaskIdentifier] = [:]
     @Environment(\.scenePhase) private var scenePhase
@@ -125,6 +129,26 @@ struct ChatView: View {
         .fileImporter(isPresented: $pickingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) {
             addPicked($0)
         }
+        .photosPicker(
+            isPresented: $pickingPhotos,
+            selection: $photoItems,
+            // As many as there's room for in the tray.
+            maxSelectionCount: max(1, Int(model.core.attachmentLimits().maxCount) - (model.trays[route.id]?.count ?? 0)),
+            matching: .any(of: [.images, .videos])
+        )
+        .onChange(of: photoItems) { _, items in
+            guard !items.isEmpty else { return }
+            photoItems = []
+            Task { await addPhotos(items) }
+        }
+        .fullScreenCover(isPresented: $takingPhoto) {
+            CameraPicker { image in
+                Task {
+                    await attachPrepared { try await OutgoingFiles.photo(image) }
+                }
+            }
+            .ignoresSafeArea()
+        }
         .sheet(item: $reactingTo) { message in
             ReactionPickerView(model: model, channelId: route.id, message: message) { key in
                 react(message.id, key)
@@ -159,6 +183,8 @@ struct ChatView: View {
                         files: tray,
                         onRemoveFile: removeFromTray,
                         onPickFiles: { pickingFiles = true },
+                        onPickPhotos: { pickingPhotos = true },
+                        onTakePhoto: { takingPhoto = true },
                         editing: editing != nil,
                         onCancelEdit: finishEditing,
                         placeholder: placeholderText,
@@ -207,6 +233,31 @@ struct ChatView: View {
                 return
             }
         }
+    }
+
+    /// Photos re-encoded and videos copied into the tray, in order, while
+    /// the limits allow.
+    private func addPhotos(_ items: [PhotosPickerItem]) async {
+        for item in items {
+            guard await attachPrepared({ try await OutgoingFiles.file(from: item) }) else { return }
+        }
+    }
+
+    /// Make a file for the tray and add it, showing why if either fails.
+    /// Whether it was added.
+    @discardableResult
+    private func attachPrepared(_ make: () async throws -> TrayFile) async -> Bool {
+        do {
+            try attach(await make())
+            return true
+        } catch let CoreError.Failed(message) {
+            show(message)
+        } catch let failure as AttachFailure {
+            show(failure.message)
+        } catch {
+            show("Couldn't attach that.")
+        }
+        return false
     }
 
     /// Add `file` to the tray if the instance's limits allow it with the
@@ -407,6 +458,18 @@ struct ChatView: View {
                 try? await Task.sleep(for: .seconds(1))
                 try? attach(OutgoingFiles.copy(picked: URL(filePath: path)))
                 send()
+            }
+            // Or send a photo as the photo library would (re-encoded):
+            // SIMCTL_CHILD_RUSTOAT_DEV_PHOTO=<path> xcrun simctl launch …
+            if let path = ProcessInfo.processInfo.environment["RUSTOAT_DEV_PHOTO"],
+               let data = try? Data(contentsOf: URL(filePath: path)) {
+                while model.status != .connected {
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+                try? await Task.sleep(for: .seconds(1))
+                if await attachPrepared({ try await OutgoingFiles.photo(data) }) {
+                    send()
+                }
             }
             // Or attach files without sending them (paths, comma-separated):
             // SIMCTL_CHILD_RUSTOAT_DEV_TRAY=<path>,<path> xcrun simctl launch …
