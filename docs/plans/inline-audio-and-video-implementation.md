@@ -310,3 +310,52 @@ Deferred to the batched manual tests at the end:
 - ⌘W and Escape close it, and ⌘Q quits;
 - a webm toasts with Open in browser;
 - switching account closes it.
+
+## Summary
+
+_Completed: 2026-11-13_
+
+### Chunks Completed
+1. Spike: AVFoundation next to GPUI. Bindings, `src/media_player.rs`, the muted spike example and main-thread WAV test; go decision (`5da7f7e`).
+2. Audio in the message: play/pause, the seek bar, the time, one at a time, and "Can't play this format here" (`28b3ab0`).
+3. Video posters at their own size with a play button; spoiler videos covered (`0ee94f0`).
+4. The video player window: AVKit, one per account, replaced by the next video, closed by ⌘W/Escape, with a toast on failure (`25b9dd5`).
+
+### Divergences
+- Spike and tests are muted (after one unannounced audible run); `Player::set_muted` / `is_muted` were added.
+- The WAV test is a `harness = false` integration test: players need the main thread and its run loop.
+- Ogg Vorbis and Opus play on macOS 26; WebM is the unplayable format.
+- Audio and video play from the original's own URL (`MediaUrls::original`), not the preview route's unencoded redirect.
+- The clean build cost was measured as the new crates' own compile time.
+- Polls notify the whole `ChatView`. Channel changes are caught in `render`.
+- Closing the main window stops audio, but not a video.
+- On other platforms, audio controls show until Play, then say it can't play.
+- The audio card isn't clickable; its actions are in the right-click menu.
+- No cap on concurrent poster generations.
+- The poster fallback is a black box with "Video" in the corner.
+- Embedded upload media gets posters and the window too.
+- ⌘W and Escape close the video window through an `NSWindow` subclass.
+- There's no `close()`; dropping closes. `bring_forward()` was added. Minimised counts as open.
+- A closed window's sound stops within 250 ms (polled).
+
+### Definition of Done
+- [x] Spike results (formats, streaming, build time, binary size) and the go decision are in this record.
+- [~] Audio plays with play/pause, a seek bar (click and drag) and "position / duration". Starting one stops another; changing channel or account stops it. Built and unit-tested; **not checked by hand**.
+- [~] Unplayable audio says "Can't play this format here", and unplayable video toasts "Can't play this video here."; both offer Open in browser. Built; the failure path was seen in the spike and the window smoke test; **not checked in the app**.
+- [~] Videos show a poster at their metadata's shape (within 400 × 300) with a play button; spoiler videos are covered until clicked. Built and unit-tested; **not checked by hand**.
+- [~] Clicking a poster plays the video in a native window with AVKit's controls; another video replaces it; closing stops playback. ⌘W and ⌘Q **not checked by hand**. Opening, replacing and dropping were smoke-tested silently.
+- [x] Audio cards and video posters keep the file actions' right-click menu (through `file_target()`, as images).
+- [x] `cargo test` (90 suites, 1,483 passed) and `cargo clippy --all-targets -- -D warnings` pass. Drift: `src/ui/chat.rs` 12, `src/store.rs` 14, `src/api/client.rs` 3, `src/api/events.rs` 3, `src/ui/composer.rs` 13, all unchanged. New files are clean.
+- [x] The roadmap links this plan.
+
+### Remaining Manual Steps
+The user chose to merge into main without running the manual tests. All five of the plan's manual test groups are still to be done:
+- audio playback and the stop rules;
+- video posters;
+- the player window (including ⌘W and ⌘Q);
+- accounts;
+- themes.
+
+They also include confirming streaming with real attachments rather than generated files. Turn the volume down first, and don't use the generated test tones in `/tmp/m31`.
+
+Out of scope, found on the way: Save… and the image viewer get the file server's 1280 px webp preview of an image, not the original (`MediaUrls::file` is the preview route).
