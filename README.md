@@ -127,6 +127,13 @@ They're pinned to the live API's version (`=0.16.2`), so bump all `revolt-*` cra
 cargo test && cargo clippy --all-targets -- -D warnings
 ```
 
+The library's GPUI views, voice and macOS integrations sit behind the `desktop` feature, which is on by default. To check that the rest still builds without them, as the iOS app needs:
+
+```bash
+cargo clippy --lib --no-default-features -- -D warnings
+cargo check --lib --no-default-features --target aarch64-apple-ios
+```
+
 The tests use a mock Stoat API (`wiremock`) and an in-memory token store, so they need no network and never touch your Keychain. There are three opt-in checks:
 
 ```bash

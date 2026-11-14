@@ -17,6 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+#[cfg(feature = "desktop")]
 use gpui_kit::{Rgba, rgb};
 use serde_json::{Map, Value};
 
@@ -722,6 +723,7 @@ fn settle(ordering: &mut Ordering, folders: &mut ServerFolders, mut sidebar: Vec
 
 /// A folder's colour as drawn: `#rgb` or `#rrggbb`. Anything else the web
 /// client allows (a CSS name, `rgb()`) isn't drawn.
+#[cfg(feature = "desktop")]
 pub fn parse_colour(colour: &str) -> Option<Rgba> {
     let digits = colour.trim().strip_prefix('#')?;
     if !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -1555,6 +1557,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "desktop")]
     fn colours_are_read_from_short_and_long_hex() {
         assert_eq!(parse_colour("#abc"), Some(rgb(0xaabbcc)));
         assert_eq!(parse_colour("#AABBCC"), Some(rgb(0xaabbcc)));

@@ -3,3 +3,5 @@
 [toolchain]
 channel = "1.99.1"
 components = ["clippy", "rustfmt"]
+# The iOS app (ios/) builds the library for devices and the simulator.
+targets = ["aarch64-apple-ios", "aarch64-apple-ios-sim"]

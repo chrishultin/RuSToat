@@ -5,9 +5,24 @@ edition = "2024"
 description = "Proof-of-concept Stoat Chat desktop client built with GPUI"
 publish = false
 
+[workspace]
+members = ["."]
+
+[features]
+default = ["desktop"]
+# The desktop app: GPUI, voice (LiveKit) and the Keychain through `keyring`.
+# Without it the library builds for iOS (see ios/), keeping only the
+# networking, state and logic modules.
+desktop = ["dep:gpui-kit", "dep:livekit", "dep:keyring"]
+
+[[bin]]
+name = "stoat-gpui"
+path = "src/main.rs"
+required-features = ["desktop"]
+
 [dependencies]
 # Pinned: gpui-kit bundles a specific gpui-pre snapshot plus gpui-component.
-gpui-kit = "=0.9.0"
+gpui-kit = { version = "=0.9.0", optional = true }
 
 # Wire types straight from the Stoat backend (MIT). Pinned to the live API
 # version; bump all revolt-* crates together. Default features pull in the
@@ -25,8 +40,8 @@ iso8601-timestamp = "0.2"
 
 # `multipart` and `stream` for attachment uploads with progress.
 reqwest = { version = "0.13", features = ["json", "multipart", "stream"] }
-# Events websocket. rustls with the macOS trust store, matching reqwest's TLS stack.
-tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
+# Events websocket: rustls, with its trust roots per platform (below).
+tokio-tungstenite = "0.30"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_urlencoded = "0.7"
@@ -48,7 +63,7 @@ mime_guess = "2"
 qrcodegen = "1.8"
 thiserror = "2"
 # Session token storage: macOS Keychain (Windows/Linux stores come along with the v1 feature).
-keyring = "4.2"
+keyring = { version = "4.2", optional = true }
 # `fs` and `io-util` for streaming uploads from disk.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "fs", "io-util"] }
 futures = "0.3"
@@ -68,11 +83,20 @@ ulid = "3"
 # downloads a prebuilt WebRTC (~264 MB) into the target directory, and the
 # app binary needs `-ObjC` (see build.rs). rustls with the macOS trust store,
 # matching tokio-tungstenite.
-livekit = { version = "=0.10.1", features = ["rustls-tls-native-roots"] }
+livekit = { version = "=0.10.1", features = ["rustls-tls-native-roots"], optional = true }
 # Picking rustls's crypto provider at startup (src/main.rs): livekit brings
 # `ring` alongside reqwest's `aws-lc-rs`, and with both rustls won't choose.
 # The version already in the tree.
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+
+# The events websocket's TLS roots: the system trust store on desktop, matching
+# reqwest's TLS stack, and Mozilla's bundled roots on iOS, where there are no
+# macOS trust settings for rustls-native-certs to read.
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Dock badge (AppKit's NSDockTile), checking whether banners can be posted

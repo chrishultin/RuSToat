@@ -33,10 +33,12 @@ pub trait TokenStore: Send + Sync + 'static {
 }
 
 /// The real store: one generic-password item per account in the login Keychain.
+#[cfg(feature = "desktop")]
 pub struct KeychainStore {
     service: String,
 }
 
+#[cfg(feature = "desktop")]
 impl KeychainStore {
     pub fn new() -> Self {
         Self::with_service(KEYCHAIN_SERVICE)
@@ -54,12 +56,14 @@ impl KeychainStore {
     }
 }
 
+#[cfg(feature = "desktop")]
 impl Default for KeychainStore {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "desktop")]
 impl TokenStore for KeychainStore {
     fn load(&self, key: &str) -> anyhow::Result<Option<String>> {
         match self.entry(key)?.get_password() {
@@ -97,6 +101,7 @@ impl<C: TokenStore, L: TokenStore> MigratingStore<C, L> {
     }
 }
 
+#[cfg(feature = "desktop")]
 impl MigratingStore<KeychainStore, KeychainStore> {
     /// The real store: [`KEYCHAIN_SERVICE`], taking over items from
     /// [`LEGACY_KEYCHAIN_SERVICE`].
@@ -297,6 +302,7 @@ mod tests {
     /// Writes, reads and deletes a throwaway item in the real login Keychain
     /// (service `com.chrishultin.rustoat.test`). Run with `cargo test -- --ignored`.
     #[test]
+    #[cfg(feature = "desktop")]
     #[ignore = "touches the real macOS Keychain"]
     fn keychain_store_round_trips() {
         let store = KeychainStore::with_service(format!("{KEYCHAIN_SERVICE}.test"));
