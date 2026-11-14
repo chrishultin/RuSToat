@@ -93,3 +93,35 @@ Deferred to the end: compare a real channel with code blocks and quotes against 
 
 ### Manual Validation
 Deferred to the end: tap a spoiler on a real message; tap a disguised link and see the warning.
+
+## Chunk 3: Custom emoji
+
+### Changes Made
+- `ios/stoat-ffi/src/rich_text.rs`:
+  - `SpanKind::Emoji { url, jumbo }`, from the `<img>` `prepare` writes (`src`, `alt`, and `width >= markdown::JUMBO_EMOJI_PX` for jumbo). The span's `text` is the `:name:` alt, shown until the image loads.
+  - Other HTML stays as typed (the old `html_text` became `emoji`).
+  - Emoji spans never merge.
+- `ios/stoat-ffi/tests/rich_text.rs`: 22 tests. The emoji test now checks the `Emoji` span. Added: emoji-only messages through the real `prepare` give unmerged jumbo spans (and inline ones aren't jumbo); and other HTML stays as typed.
+- Swift:
+  - `ios/RuSToat/Shared/EmojiImages.swift` (new): an `@MainActor @Observable` cache of `UIImage`s keyed by size and URL.
+    - `image(url, size:)` returns the image or starts one download per key (de-duplicated while loading).
+    - Images are scaled to 20 pt inline or 48 pt jumbo, keeping their shape. The `URLSession` is injectable for tests.
+  - `ios/RuSToat/Chat/RichTextView.swift`:
+    - Emoji spans become `Text(Image(uiImage:))` with a small negative baseline offset once loaded, and a secondary-coloured `:name:` until then. Reading the cache in `body` makes Observation redraw the paragraph when the image arrives.
+    - `RichSpan.needsRenderer`: paragraphs with only text, breaks and emoji stay selectable.
+- `ios/RuSToatTests/EmojiImagesTests.swift` (new): a stub `URLProtocol`. Two requests while loading start one download, and the result is 20×20; scaling keeps the shape.
+- `ios/stoat-ffi/examples/fake_stoat.rs`: a higher-priority `GET /` whose `autumn` file server is the fake itself, and `GET /emojis/{id}` serving the app icon PNG.
+- `tests/fixtures/messages_rich.json`: an inline-emoji message and an emoji-only one.
+
+### Divergences
+- **No `id` or `name` field on the emoji span:** the `:name:` is the span's text, and the URL is enough to load it.
+- **Jumbo emoji are 48 pt** (desktop's 96 px is for a larger window), and inline ones 20 pt, as planned.
+
+### Verification Performed
+- `cargo test -p stoat-ffi`: 59 passed (rich_text 22).
+- Swift: 18 tests in 6 suites passed, no warnings.
+- Desktop: `cargo test`: 1499 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings`: clean.
+- Simulator against `fake_stoat`: "Ship it [emoji] today" with the emoji inline on the text line, and an emoji-only message drawing two large emoji.
+
+### Manual Validation
+Deferred to the end: custom emoji on a real server, inline and jumbo.

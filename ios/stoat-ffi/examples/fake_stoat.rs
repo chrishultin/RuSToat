@@ -85,6 +85,27 @@ async fn main() {
         .respond_with(ResponseTemplate::new(204))
         .mount(&api)
         .await;
+    // Custom emoji: the file server is this fake, and every emoji is the
+    // app icon.
+    let mut root = support::fixture("root.json");
+    root["ws"] = json!(events.url);
+    root["features"]["autumn"]["url"] = json!(api.uri());
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(root))
+        .with_priority(1)
+        .mount(&api)
+        .await;
+    let icon = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../RuSToat/Assets.xcassets/AppIcon.appiconset/AppIcon.png"
+    ))
+    .expect("the app icon");
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/emojis/[^/]+$"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(icon, "image/png"))
+        .mount(&api)
+        .await;
     println!("{}", api.uri());
     // Every 20 s, a new message in #random, to watch unread state live.
     let mut n = 0;

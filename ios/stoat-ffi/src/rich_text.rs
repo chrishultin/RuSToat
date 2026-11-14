@@ -103,6 +103,9 @@ pub enum SpanKind {
     /// A word of a hidden spoiler, drawn as a bar. Tapping it (its link is
     /// `stoat:spoiler/…`) reveals spoiler `index` of the message.
     Spoiler { index: u32 },
+    /// A custom emoji: its image, drawn `jumbo` (large) in a message of only
+    /// emoji. `text` is its `:name:`, shown until the image loads.
+    Emoji { url: String, jumbo: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -357,9 +360,13 @@ impl Parser {
                 let url = self.definitions.get(&label(&reference.identifier));
                 out.push(span(&reference.alt, style, url.map(String::as_str), SpanKind::Text));
             }
-            Node::Html(html) => {
-                out.push(span(&html_text(&html.value), style, link, kind.clone()))
-            }
+            Node::Html(html) => match emoji(&html.value) {
+                Some((url, name, jumbo)) => {
+                    out.push(span(&name, style, link, SpanKind::Emoji { url, jumbo }))
+                }
+                // Not an emoji: shown as typed, as Stoat never renders HTML.
+                None => out.push(span(&html.value, style, link, kind.clone())),
+            },
             other => {
                 if other.children().is_some() {
                     children(style, link, kind, out);
@@ -387,15 +394,16 @@ fn node_source(node: &Node) -> String {
     format!("[{}]", node.to_string())
 }
 
-/// Inline HTML as it's shown. A custom emoji's `<img>` (the only HTML
-/// `prepare` writes) shows as its `:name:`; anything else, as typed.
-fn html_text(html: &str) -> String {
-    if html.starts_with("<img ")
-        && let Some(alt) = attribute(html, "alt")
-    {
-        return alt;
+/// A custom emoji's `<img>` (the only HTML `prepare` writes): its image
+/// URL, `:name:`, and whether it's drawn at the jumbo size.
+fn emoji(html: &str) -> Option<(String, String, bool)> {
+    if !html.starts_with("<img ") {
+        return None;
     }
-    html.to_string()
+    let url = attribute(html, "src")?;
+    let name = attribute(html, "alt").unwrap_or_else(|| ":emoji:".into());
+    let width: u32 = attribute(html, "width")?.parse().ok()?;
+    Some((url, name, width >= stoat_gpui::markdown::JUMBO_EMOJI_PX))
 }
 
 /// The value of `name="…"` in an HTML tag `prepare` wrote (its values are
@@ -413,12 +421,12 @@ pub(crate) fn attribute(tag: &str, name: &str) -> Option<String> {
 }
 
 /// Join neighbouring spans with the same kind, style and link (a mention's
-/// words, say). Breaks stay on their own.
+/// words, say). Breaks and emoji stay on their own.
 fn merge(spans: Vec<RichSpan>) -> Vec<RichSpan> {
     let mut out: Vec<RichSpan> = Vec::with_capacity(spans.len());
     for span in spans {
         if let Some(last) = out.last_mut()
-            && last.kind != SpanKind::Break
+            && !matches!(last.kind, SpanKind::Break | SpanKind::Emoji { .. })
             && last.kind == span.kind
             && (last.bold, last.italic, last.strike, last.code, &last.link)
                 == (span.bold, span.italic, span.strike, span.code, &span.link)

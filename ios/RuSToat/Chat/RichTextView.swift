@@ -106,18 +106,19 @@ struct RichSpansText: View {
     let spans: [RichSpan]
 
     var body: some View {
-        if spans.contains(where: { $0.kind != .text && $0.kind != .break }) {
+        if spans.contains(where: \.needsRenderer) {
             Self.text(spans)
                 .textRenderer(RichTextRenderer())
                 .fixedSize(horizontal: false, vertical: true)
         } else {
-            Text(Self.attributed(spans))
+            Self.text(spans)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    /// The spans as one `Text`, each marked for the renderer as needed.
+    /// The spans as one `Text`, each marked for the renderer as needed, and
+    /// custom emoji as their images once loaded.
     static func text(_ spans: [RichSpan]) -> Text {
         spans.reduce(Text(verbatim: "")) { result, span in
             var part = Text(attributed([span]))
@@ -128,6 +129,14 @@ struct RichSpansText: View {
                 part = part.customAttribute(Pill(tint: .secondary))
             case .spoiler:
                 part = part.customAttribute(SpoilerBar())
+            case .emoji(let url, let jumbo):
+                let size = jumbo ? EmojiImages.jumboSize : EmojiImages.inlineSize
+                if let image = EmojiImages.shared.image(url, size: size) {
+                    // Sits on the baseline like a glyph, a little lower.
+                    part = Text(Image(uiImage: image)).baselineOffset(jumbo ? -6 : -4)
+                } else {
+                    part = part.foregroundStyle(.secondary)
+                }
             case .text, .break:
                 break
             }
@@ -171,6 +180,16 @@ struct RichSpansText: View {
             out.append(part)
         }
         return out
+    }
+}
+
+extension RichSpan {
+    /// Drawn by `RichTextRenderer` (a pill or a spoiler bar).
+    var needsRenderer: Bool {
+        switch kind {
+        case .mention, .time, .spoiler: true
+        case .text, .break, .emoji: false
+        }
     }
 }
 

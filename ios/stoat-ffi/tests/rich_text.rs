@@ -130,9 +130,42 @@ fn reference_links_resolve() {
 }
 
 #[test]
-fn custom_emoji_html_shows_its_name_for_now() {
+fn custom_emoji_are_emoji_spans() {
     let blocks = blocks(r#"hi <img src="https://cdn/emojis/01E" alt=":party:" title=":party:" width="20" height="20">"#);
-    assert_eq!(text(paragraph(&blocks[0])), "hi :party:");
+    let spans = paragraph(&blocks[0]);
+    assert_eq!(text(spans), "hi :party:", "the name stands in until the image loads");
+    assert_eq!(
+        spans[1].kind,
+        SpanKind::Emoji { url: "https://cdn/emojis/01E".into(), jumbo: false }
+    );
+}
+
+#[test]
+fn emoji_only_messages_have_jumbo_emoji() {
+    struct WithEmoji;
+    impl stoat_gpui::markdown::Names for WithEmoji {
+        fn user_name(&self, _: &str) -> Option<String> { None }
+        fn channel_name(&self, _: &str) -> Option<String> { None }
+        fn emoji_name(&self, _: &str) -> Option<String> { Some("party".into()) }
+        fn emoji_url(&self, id: &str) -> Option<String> { Some(format!("https://cdn/emojis/{id}")) }
+    }
+    let id = "01JE0000000000000000000E01";
+    let jumbo = stoat_gpui::markdown::prepare(&format!(":{id}::{id}:"), &WithEmoji);
+    let spans = paragraph(&blocks(&jumbo)[0]).to_vec();
+    assert_eq!(spans.len(), 2, "two emoji, not merged: {spans:#?}");
+    assert!(spans.iter().all(|s| matches!(&s.kind, SpanKind::Emoji { jumbo: true, url } if url.ends_with(id))));
+    assert_eq!(spans[0].text, ":party:");
+    let inline = stoat_gpui::markdown::prepare(&format!("so fun :{id}:"), &WithEmoji);
+    let spans = paragraph(&blocks(&inline)[0]).to_vec();
+    assert!(matches!(&spans[1].kind, SpanKind::Emoji { jumbo: false, .. }));
+}
+
+#[test]
+fn other_html_stays_as_typed() {
+    // `prepare` escapes typed `<`, so only hand-written input could do this;
+    // it still mustn't vanish.
+    let blocks = blocks("a <b>bold?</b> b");
+    assert_eq!(text(paragraph(&blocks[0])), "a <b>bold?</b> b");
 }
 
 #[test]
