@@ -8,6 +8,7 @@ uniffi::setup_scaffolding!();
 
 pub mod actions;
 pub mod controller;
+pub mod media;
 pub mod rich_text;
 pub mod session;
 pub mod timeline;

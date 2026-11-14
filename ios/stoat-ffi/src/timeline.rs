@@ -1,10 +1,9 @@
 //! A channel's rows as Swift draws them: [`TimelineRow`]s and their
-//! [`MessageRow`]s turned into plain records. Milestone 1 shows text,
-//! replies, and compact attachment and embed cards; reactions and full
-//! media come later.
+//! [`MessageRow`]s turned into plain records, with every attachment and
+//! embed kind desktop draws.
 
 use stoat_gpui::attachment::{AttachmentView, FileKind};
-use stoat_gpui::embed::{Description, EmbedView};
+use stoat_gpui::embed::{Description, EmbedImage, EmbedView};
 use stoat_gpui::store::{
     MessageRow, PendingState, PickerEmoji, ReactionChip, ReactionEmoji, ReplyPreview, ReplyState,
     TimelineRow,
@@ -162,145 +161,336 @@ pub struct ReplyItem {
     pub state: ReplyStateItem,
 }
 
-/// An attachment: a thumbnail for images, else a card with its name and
-/// size. Either opens `url`.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct AttachmentItem {
-    pub name: String,
-    pub size_label: String,
-    pub url: Option<String>,
-    pub is_image: bool,
-    /// The display size, for images (zero otherwise).
-    pub width: u32,
-    pub height: u32,
+/// What a file card's icon shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FileKindItem {
+    Image,
+    Video,
+    Audio,
+    Text,
+    File,
 }
 
-/// A link preview or bot embed, compactly.
+impl From<FileKind> for FileKindItem {
+    fn from(kind: FileKind) -> Self {
+        match kind {
+            FileKind::Image => FileKindItem::Image,
+            FileKind::Video => FileKindItem::Video,
+            FileKind::Audio => FileKindItem::Audio,
+            FileKind::Text => FileKindItem::Text,
+            FileKind::File => FileKindItem::File,
+        }
+    }
+}
+
+/// An attachment, as desktop shows it (see the store's `AttachmentView`).
+// Records inside, so Swift can pass each kind to its view whole.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum AttachmentItem {
+    /// Drawn inline at its display size.
+    Image { image: ImageAttachment },
+    /// A card (icon, name, size) that opens the file.
+    File { file: FileAttachment },
+    /// A card with a player.
+    Audio { audio: AudioAttachment },
+    /// A poster frame at its display size, with a play button.
+    Video { video: VideoAttachment },
+    /// A file of a message still being sent, with its upload progress.
+    Local { local: LocalAttachment },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct EmbedItem {
+pub struct ImageAttachment {
+    /// The file's ID, for "Show image" and spoiler reveals.
+    pub id: String,
+    pub url: String,
+    pub name: String,
+    pub size_label: String,
+    /// The display size: the upload's own, fitted within desktop's box (or
+    /// a fallback box when it's unknown). The row is laid out at this shape
+    /// before the picture arrives.
+    pub width: u32,
+    pub height: u32,
+    /// The upload's own size (zero if unknown), for the full-size viewer.
+    pub original_width: u32,
+    pub original_height: u32,
+    /// A ThumbHash, for a blurred preview while it loads (see
+    /// [`crate::media::thumbhash_image`]).
+    pub thumbhash: Option<Vec<u8>>,
+    /// Over 8 MB and not revealed yet: a "Show image" card instead.
+    pub too_big: bool,
+    /// A spoiler not shown yet: covered, at the same size, until tapped.
+    pub spoiler: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FileAttachment {
+    pub id: String,
+    pub name: String,
+    pub size_label: String,
+    /// `None` until the file server is known.
+    pub url: Option<String>,
+    pub kind: FileKindItem,
+    /// A spoiler: its card has a tag.
+    pub spoiler: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AudioAttachment {
+    /// The file's ID: what's playing is known by it.
+    pub id: String,
+    /// The original's own address, to stream.
+    pub url: String,
+    pub name: String,
+    pub size_label: String,
+    /// A spoiler: its card has a tag (it isn't covered).
+    pub spoiler: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct VideoAttachment {
+    /// The file's ID, for its reveal and what's playing.
+    pub id: String,
+    /// The original's own address, to stream.
+    pub url: String,
+    pub name: String,
+    pub size_label: String,
+    /// The display size, as an image's.
+    pub width: u32,
+    pub height: u32,
+    pub original_width: u32,
+    pub original_height: u32,
+    /// A spoiler not shown yet: covered, at the same size, until tapped.
+    pub spoiler: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct LocalAttachment {
+    pub name: String,
+    pub size_label: String,
+    pub kind: FileKindItem,
+    /// For images: the local copy to draw, at `width` × `height` (the size
+    /// the sent message will have).
+    pub image_path: Option<String>,
+    pub width: u32,
+    pub height: u32,
+    /// Uploaded so far, in thousandths.
+    pub progress: u16,
+    /// Marked as a spoiler: an image is drawn covered, as the sent one will be.
+    pub spoiler: bool,
+}
+
+/// A link preview or bot embed, as desktop shows it (see the store's
+/// `EmbedView`).
+// Most embeds are cards, and UniFFI can't box a variant's record.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum EmbedItem {
+    /// A link preview or bot embed: a card with a colour bar.
+    Card { card: EmbedCardItem },
+    /// Just a picture: a link to an image, or a GIF.
+    Image { image: EmbedImageItem },
+    /// Just a video link: a card that opens it.
+    Video { url: String },
+    /// A Gifbox GIF that only exists as video: its still, with a "GIF"
+    /// badge, opening `link` (its page).
+    GifPoster { image: EmbedImageItem, link: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct EmbedCardItem {
+    /// The colour bar, `0xRRGGBBAA`. `None` uses the separator colour.
+    pub colour: Option<u32>,
+    /// The site's icon (proxied).
+    pub icon: Option<String>,
     pub site_name: Option<String>,
     pub title: Option<String>,
-    /// As plain text.
+    /// Where the title links to (http(s) only).
+    pub link: Option<String>,
+    /// A website's description as written, or a bot embed's Markdown source.
     pub description: Option<String>,
     /// A bot embed's Markdown description as blocks (empty for a website's
     /// plain one).
     pub rich_description: Vec<RichBlock>,
-    /// Where it opens.
-    pub link: Option<String>,
-    pub image_url: Option<String>,
+    /// A small picture beside the text.
+    pub thumbnail: Option<EmbedImageItem>,
+    /// A large picture under the text.
+    pub image: Option<EmbedImageItem>,
+    /// The picture stands for a video (YouTube and the like): it gets a play
+    /// badge and opens `link`.
+    pub playable: bool,
+    /// A bot embed's uploaded file.
+    pub media: Option<AttachmentItem>,
 }
 
-fn attachment(view: &AttachmentView) -> AttachmentItem {
+/// A remote picture at its display size.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct EmbedImageItem {
+    /// Proxied.
+    pub url: String,
+    /// The picture's own address (not proxied).
+    pub source: String,
+    pub width: u32,
+    pub height: u32,
+    /// As reported by the server (zero if unknown).
+    pub original_width: u32,
+    pub original_height: u32,
+}
+
+fn side(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+pub fn attachment(view: &AttachmentView) -> AttachmentItem {
     match view {
         AttachmentView::Image {
+            id,
             url,
             name,
             size_label,
             width,
             height,
-            ..
-        } => AttachmentItem {
-            name: name.clone(),
-            size_label: size_label.clone(),
-            url: Some(url.clone()),
-            is_image: true,
-            width: *width,
-            height: *height,
+            original,
+            thumbhash,
+            too_big,
+            spoiler,
+        } => AttachmentItem::Image {
+            image: ImageAttachment {
+                id: id.clone(),
+                url: url.clone(),
+                name: name.clone(),
+                size_label: size_label.clone(),
+                width: *width,
+                height: *height,
+                original_width: side(original.0),
+                original_height: side(original.1),
+                thumbhash: thumbhash.as_deref().map(<[u8]>::to_vec),
+                too_big: *too_big,
+                spoiler: *spoiler,
+            },
         },
         AttachmentView::File {
+            id,
             name,
             size_label,
             url,
+            kind,
+            spoiler,
             ..
-        } => AttachmentItem {
-            name: name.clone(),
-            size_label: size_label.clone(),
-            url: url.clone(),
-            is_image: false,
-            width: 0,
-            height: 0,
+        } => AttachmentItem::File {
+            file: FileAttachment {
+                id: id.clone(),
+                name: name.clone(),
+                size_label: size_label.clone(),
+                url: url.clone(),
+                kind: (*kind).into(),
+                spoiler: *spoiler,
+            },
         },
-        // Played in Safari for now: inline media is iOS milestone 3.
         AttachmentView::Audio {
+            id,
             url,
             name,
             size_label,
-            ..
-        }
-        | AttachmentView::Video {
+            spoiler,
+        } => AttachmentItem::Audio {
+            audio: AudioAttachment {
+                id: id.clone(),
+                url: url.clone(),
+                name: name.clone(),
+                size_label: size_label.clone(),
+                spoiler: *spoiler,
+            },
+        },
+        AttachmentView::Video {
+            id,
             url,
             name,
             size_label,
-            ..
-        } => AttachmentItem {
-            name: name.clone(),
-            size_label: size_label.clone(),
-            url: Some(url.clone()),
-            is_image: false,
-            width: 0,
-            height: 0,
+            width,
+            height,
+            original,
+            spoiler,
+        } => AttachmentItem::Video {
+            video: VideoAttachment {
+                id: id.clone(),
+                url: url.clone(),
+                name: name.clone(),
+                size_label: size_label.clone(),
+                width: *width,
+                height: *height,
+                original_width: side(original.0),
+                original_height: side(original.1),
+                spoiler: *spoiler,
+            },
         },
         AttachmentView::Local {
             name,
             size_label,
             kind,
-            ..
-        } => AttachmentItem {
-            name: name.clone(),
-            size_label: size_label.clone(),
-            url: None,
-            is_image: *kind == FileKind::Image,
-            width: 0,
-            height: 0,
+            image,
+            progress,
+            spoiler,
+        } => AttachmentItem::Local {
+            local: LocalAttachment {
+                name: name.clone(),
+                size_label: size_label.clone(),
+                kind: (*kind).into(),
+                image_path: image
+                    .as_ref()
+                    .map(|(path, _, _)| path.to_string_lossy().into_owned()),
+                width: image.as_ref().map_or(0, |(_, w, _)| *w),
+                height: image.as_ref().map_or(0, |(_, _, h)| *h),
+                progress: *progress,
+                spoiler: *spoiler,
+            },
         },
+    }
+}
+
+fn embed_image(image: &EmbedImage) -> EmbedImageItem {
+    EmbedImageItem {
+        url: image.url.clone(),
+        source: image.source.clone(),
+        width: image.width,
+        height: image.height,
+        original_width: side(image.original.0),
+        original_height: side(image.original.1),
     }
 }
 
 fn embed(view: &EmbedView, cache: &RichCache) -> EmbedItem {
     match view {
-        EmbedView::Card(card) => EmbedItem {
-            site_name: card.site_name.clone(),
-            title: card.title.clone(),
-            description: card.description.as_ref().map(|d| match d {
-                Description::Plain(text) => text.clone(),
-                Description::Markdown { source, .. } => source.clone(),
-            }),
-            rich_description: match &card.description {
-                Some(Description::Markdown { source, render_key }) => {
-                    cache.get(render_key, source).as_ref().clone()
-                }
-                _ => Vec::new(),
+        EmbedView::Card(card) => EmbedItem::Card {
+            card: EmbedCardItem {
+                colour: card.colour,
+                icon: card.icon.clone(),
+                site_name: card.site_name.clone(),
+                title: card.title.clone(),
+                link: card.link.clone(),
+                description: card.description.as_ref().map(|d| match d {
+                    Description::Plain(text) => text.clone(),
+                    Description::Markdown { source, .. } => source.clone(),
+                }),
+                rich_description: match &card.description {
+                    Some(Description::Markdown { source, render_key }) => {
+                        cache.get(render_key, source).as_ref().clone()
+                    }
+                    _ => Vec::new(),
+                },
+                thumbnail: card.thumbnail.as_ref().map(embed_image),
+                image: card.image.as_ref().map(embed_image),
+                playable: card.playable,
+                media: card.media.as_ref().map(attachment),
             },
-            link: card.link.clone(),
-            image_url: card
-                .image
-                .as_ref()
-                .or(card.thumbnail.as_ref())
-                .map(|i| i.url.clone()),
         },
-        EmbedView::Image(image) => EmbedItem {
-            site_name: None,
-            title: None,
-            description: None,
-            rich_description: Vec::new(),
-            link: Some(image.url.clone()),
-            image_url: Some(image.url.clone()),
+        EmbedView::Image(image) => EmbedItem::Image {
+            image: embed_image(image),
         },
-        EmbedView::Video { url } => EmbedItem {
-            site_name: None,
-            title: Some("Video".into()),
-            description: None,
-            rich_description: Vec::new(),
-            link: Some(url.clone()),
-            image_url: None,
-        },
-        EmbedView::GifPoster { image, link } => EmbedItem {
-            site_name: Some("GIF".into()),
-            title: None,
-            description: None,
-            rich_description: Vec::new(),
-            link: Some(link.clone()),
-            image_url: Some(image.url.clone()),
+        EmbedView::Video { url } => EmbedItem::Video { url: url.clone() },
+        EmbedView::GifPoster { image, link } => EmbedItem::GifPoster {
+            image: embed_image(image),
+            link: link.clone(),
         },
     }
 }

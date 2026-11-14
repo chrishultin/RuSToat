@@ -8320,9 +8320,11 @@ dependencies = [
  "stoat-gpui",
  "tempfile",
  "thiserror 2.0.21",
+ "thumbhash",
  "tokio",
  "tokio-tungstenite 0.30.0",
  "uniffi",
+ "url",
  "wiremock",
 ]
 

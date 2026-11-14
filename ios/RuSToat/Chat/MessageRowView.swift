@@ -24,6 +24,9 @@ struct MessageActions {
     /// Edit or delete one of the user's own messages.
     let edit: (MessageItem) -> Void
     let delete: (MessageItem) -> Void
+    /// Load a too-big image (by file ID), or uncover a spoiler attachment.
+    let revealImage: (String) -> Void
+    let revealAttachment: (String) -> Void
 }
 
 /// What tapping a `stoat:` link in a message does.
@@ -164,10 +167,10 @@ struct MessageRowView: View {
                             .id(message.renderKey)
                     }
                     ForEach(Array(message.attachments.enumerated()), id: \.offset) { _, attachment in
-                        AttachmentCard(attachment: attachment)
+                        AttachmentView(attachment: attachment, actions: actions)
                     }
                     ForEach(Array(message.embeds.enumerated()), id: \.offset) { _, embed in
-                        EmbedCard(embed: embed)
+                        EmbedCard(embed: embed, actions: actions)
                     }
                     if !message.reactions.isEmpty {
                         ReactionsView(
@@ -234,100 +237,193 @@ struct MessageRowView: View {
     }
 }
 
-/// An attachment, compactly: a thumbnail for images, else a card. Opens in
-/// Safari. (Full media comes in a later milestone.)
-struct AttachmentCard: View {
+/// An attachment: images inline, everything else as a card that opens in
+/// Safari for now.
+struct AttachmentView: View {
     let attachment: AttachmentItem
+    let actions: MessageActions
     @Environment(\.openURL) private var openURL
 
     var body: some View {
-        Button {
-            if let url = attachment.url.flatMap(URL.init(string:)) {
-                openURL(url)
+        switch attachment {
+        case .image(let image):
+            InlineImage(
+                image: image,
+                reveal: actions.revealImage,
+                uncover: actions.revealAttachment,
+                open: { open(image.url) }
+            )
+        case .file(let file):
+            FileCard(name: file.name, detail: file.sizeLabel, icon: file.kind.symbol, spoiler: file.spoiler) {
+                open(file.url)
             }
-        } label: {
-            if attachment.isImage, let url = attachment.url.flatMap(URL.init(string:)) {
-                let size = displaySize
-                AsyncImage(url: url) { image in
-                    image.resizable().scaledToFill()
-                } placeholder: {
-                    Rectangle().fill(.quaternary)
-                }
-                .frame(width: size.width, height: size.height)
-                .clipShape(.rect(cornerRadius: 12))
-            } else {
-                HStack(spacing: 10) {
-                    Image(systemName: "doc")
-                        .font(.title3)
-                        .foregroundStyle(.tint)
-                    VStack(alignment: .leading) {
-                        Text(attachment.name).lineLimit(1)
-                        Text(attachment.sizeLabel)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .padding(10)
-                .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 12))
+            .disabled(file.url == nil)
+        case .audio(let audio):
+            FileCard(name: audio.name, detail: audio.sizeLabel, icon: "waveform", spoiler: audio.spoiler) {
+                open(audio.url)
             }
+        case .video(let video):
+            FileCard(name: video.name, detail: video.sizeLabel, icon: "film", spoiler: video.spoiler) {
+                open(video.url)
+            }
+        case .local(let local):
+            FileCard(name: local.name, detail: local.sizeLabel, icon: local.kind.symbol, spoiler: local.spoiler) {}
+                .disabled(true)
         }
-        .buttonStyle(.plain)
-        .disabled(attachment.url == nil)
     }
 
-    /// The core's size, scaled to fit a phone (at most 240 points wide).
-    private var displaySize: CGSize {
-        let width = CGFloat(max(attachment.width, 1))
-        let height = CGFloat(max(attachment.height, 1))
-        let scale = min(1, 240 / width, 320 / height)
-        return CGSize(width: width * scale, height: height * scale)
+    private func open(_ url: String?) {
+        if let url = url.flatMap(URL.init(string:)) {
+            openURL(url)
+        }
     }
 }
 
-/// A link preview or bot embed, compactly.
-struct EmbedCard: View {
-    let embed: EmbedItem
-    @Environment(\.openURL) private var openURL
+extension FileKindItem {
+    /// The card's icon.
+    var symbol: String {
+        switch self {
+        case .image: "photo"
+        case .video: "film"
+        case .audio: "waveform"
+        case .text: "doc.text"
+        case .file: "doc"
+        }
+    }
+}
+
+/// A file's card: its icon, name and size, with a tag when it's a spoiler.
+struct FileCard: View {
+    let name: String
+    let detail: String
+    let icon: String
+    var spoiler = false
+    let action: () -> Void
 
     var body: some View {
-        Button {
-            if let url = embed.link.flatMap(URL.init(string:)) {
-                openURL(url)
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.title3)
+                    .foregroundStyle(.tint)
+                    .frame(width: 28)
+                VStack(alignment: .leading) {
+                    Text(name).lineLimit(1)
+                    HStack(spacing: 6) {
+                        Text(detail)
+                        if spoiler {
+                            Text("Spoiler").fontWeight(.semibold)
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
             }
+            .padding(10)
+            .frame(maxWidth: 280, alignment: .leading)
+            .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// A link preview or bot embed.
+struct EmbedCard: View {
+    let embed: EmbedItem
+    let actions: MessageActions
+    @Environment(\.openURL) private var openURL
+    @Environment(\.mediaMaxWidth) private var available
+
+    var body: some View {
+        switch embed {
+        case .card(let card):
+            cardView(card)
+        case .image(let image):
+            picture(image, opening: image.source)
+        case .gifPoster(let image, let link):
+            picture(image, opening: link)
+                .overlay(alignment: .bottomLeading) {
+                    Text("GIF")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.black.opacity(0.6), in: .rect(cornerRadius: 4))
+                        .padding(8)
+                }
+        case .video(let url):
+            FileCard(name: URL(string: url)?.host() ?? url, detail: "Video", icon: "play.rectangle") {
+                open(url)
+            }
+        }
+    }
+
+    private func size(_ image: EmbedImageItem) -> CGSize {
+        MediaLayout.fit(width: image.width, height: image.height, available: available)
+    }
+
+    private func picture(_ image: EmbedImageItem, opening link: String) -> some View {
+        Button {
+            open(link)
         } label: {
+            remote(image, size: size(image))
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder private func remote(_ image: EmbedImageItem, size: CGSize) -> some View {
+        Group {
+            if let url = URL(string: image.url) {
+                RemoteImage(url: url, size: size)
+            } else {
+                Rectangle().fill(.quaternary)
+            }
+        }
+        .frame(width: size.width, height: size.height)
+        .clipShape(.rect(cornerRadius: 8))
+    }
+
+    private func cardView(_ card: EmbedCardItem) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .top, spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
-                    if let site = embed.siteName {
+                    if let site = card.siteName {
                         Text(site).font(.caption).foregroundStyle(.secondary)
                     }
-                    if let title = embed.title {
+                    if let title = card.title {
                         Text(title).font(.subheadline.weight(.semibold)).lineLimit(2)
                     }
-                    if !embed.richDescription.isEmpty {
-                        RichTextView(blocks: embed.richDescription)
+                    if !card.richDescription.isEmpty {
+                        RichTextView(blocks: card.richDescription)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(6)
-                    } else if let description = embed.description {
+                    } else if let description = card.description {
                         Text(description).font(.caption).foregroundStyle(.secondary).lineLimit(3)
                     }
                 }
                 Spacer(minLength: 0)
-                if let image = embed.imageUrl.flatMap(URL.init(string:)) {
-                    AsyncImage(url: image) { image in
-                        image.resizable().scaledToFill()
-                    } placeholder: {
-                        Rectangle().fill(.quaternary)
-                    }
-                    .frame(width: 64, height: 64)
-                    .clipShape(.rect(cornerRadius: 8))
+                if let thumbnail = card.thumbnail {
+                    remote(thumbnail, size: CGSize(width: CGFloat(thumbnail.width), height: CGFloat(thumbnail.height)))
                 }
             }
-            .padding(10)
-            .frame(maxWidth: 320, alignment: .leading)
-            .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 12))
+            if let image = card.image {
+                remote(image, size: size(image))
+            }
+            if let media = card.media {
+                AttachmentView(attachment: media, actions: actions)
+            }
         }
-        .buttonStyle(.plain)
-        .disabled(embed.link == nil)
+        .padding(10)
+        .frame(maxWidth: 320, alignment: .leading)
+        .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 12))
+        .contentShape(.rect)
+        .onTapGesture { open(card.link) }
+    }
+
+    private func open(_ url: String?) {
+        if let url = url.flatMap(URL.init(string:)) {
+            openURL(url)
+        }
     }
 }

@@ -1,0 +1,378 @@
+{
+  "messages": [
+    {
+      "_id": "01JE0000000000000000000M07",
+      "channel": "ch-beta",
+      "author": "u-ada",
+      "content": "This one's on a slow connection",
+      "attachments": [
+        {
+          "_id": "f-slow",
+          "tag": "attachments",
+          "filename": "slow.jpg",
+          "metadata": {
+            "type": "Image",
+            "width": 1200,
+            "height": 800,
+            "thumbhash": [
+              87,
+              23,
+              10,
+              45,
+              136,
+              118,
+              136,
+              135,
+              140,
+              120,
+              135,
+              128,
+              120,
+              168,
+              119,
+              136,
+              118,
+              128,
+              112,
+              119,
+              8
+            ]
+          },
+          "content_type": "image/jpeg",
+          "size": 24796
+        }
+      ]
+    },
+    {
+      "_id": "01JE0000000000000000000M06",
+      "channel": "ch-beta",
+      "author": "u-bob",
+      "content": "Build finished",
+      "embeds": [
+        {
+          "type": "Text",
+          "title": "CI: main is green",
+          "description": "**42** tests passed in `3.1 s`.",
+          "colour": "#2ecc71",
+          "url": "https://ci.example/run/42",
+          "media": {
+            "_id": "f-badge",
+            "tag": "attachments",
+            "filename": "landscape.jpg",
+            "metadata": {
+              "type": "Image",
+              "width": 1200,
+              "height": 800,
+              "thumbhash": [
+                87,
+                23,
+                10,
+                45,
+                136,
+                118,
+                136,
+                135,
+                140,
+                120,
+                135,
+                128,
+                120,
+                168,
+                119,
+                136,
+                118,
+                128,
+                112,
+                119,
+                8
+              ]
+            },
+            "content_type": "image/jpeg",
+            "size": 24796
+          }
+        },
+        {
+          "type": "Video",
+          "url": "https://gifbox.me/view/abc123",
+          "width": 320,
+          "height": 240
+        },
+        {
+          "type": "Video",
+          "url": "https://videos.example/clip.mp4",
+          "width": 640,
+          "height": 360
+        },
+        {
+          "type": "Website",
+          "url": "https://git.example/repo",
+          "site_name": "Git",
+          "title": "stoat/rustoat",
+          "description": "A Stoat client.",
+          "image": {
+            "url": "https://git.example/portrait.jpg",
+            "width": 400,
+            "height": 200,
+            "size": "Preview"
+          }
+        }
+      ]
+    },
+    {
+      "_id": "01JE0000000000000000000M05",
+      "channel": "ch-beta",
+      "author": "u-ada",
+      "content": "https://news.example/story https://www.youtube.com/watch?v=abc https://pics.example/tower.jpg",
+      "embeds": [
+        {
+          "type": "Website",
+          "url": "https://news.example/story",
+          "site_name": "News",
+          "title": "Sunsets are getting better, say scientists",
+          "description": "A five-year study of evening skies finds more orange than ever.",
+          "icon_url": "https://news.example/favicon.png",
+          "colour": "#ff8800",
+          "image": {
+            "url": "https://news.example/landscape.jpg",
+            "width": 1200,
+            "height": 800,
+            "size": "Large"
+          }
+        },
+        {
+          "type": "Website",
+          "url": "https://www.youtube.com/watch?v=abc",
+          "special": {
+            "type": "YouTube",
+            "id": "abc"
+          },
+          "site_name": "YouTube",
+          "title": "Ten hours of towers",
+          "image": {
+            "url": "https://i.ytimg.com/vi/abc/landscape.jpg",
+            "width": 480,
+            "height": 360,
+            "size": "Large"
+          },
+          "video": {
+            "url": "https://www.youtube.com/embed/abc",
+            "width": 1280,
+            "height": 720
+          }
+        },
+        {
+          "type": "Image",
+          "url": "https://pics.example/portrait.jpg",
+          "width": 600,
+          "height": 900,
+          "size": "Large"
+        }
+      ]
+    },
+    {
+      "_id": "01JE0000000000000000000M04",
+      "channel": "ch-beta",
+      "author": "u-bob",
+      "content": "The minutes, a voice note and the clip",
+      "attachments": [
+        {
+          "_id": "f-notes",
+          "tag": "attachments",
+          "filename": "notes.pdf",
+          "metadata": {
+            "type": "File"
+          },
+          "content_type": "application/pdf",
+          "size": 48213
+        },
+        {
+          "_id": "f-voice",
+          "tag": "attachments",
+          "filename": "voice.m4a",
+          "metadata": {
+            "type": "Audio"
+          },
+          "content_type": "audio/mp4",
+          "size": 6144
+        },
+        {
+          "_id": "f-clip",
+          "tag": "attachments",
+          "filename": "clip.mp4",
+          "metadata": {
+            "type": "Video",
+            "width": 640,
+            "height": 360
+          },
+          "content_type": "video/mp4",
+          "size": 20480
+        }
+      ]
+    },
+    {
+      "_id": "01JE0000000000000000000M03",
+      "channel": "ch-beta",
+      "author": "u-ada",
+      "content": "Ending of the film, don't look",
+      "attachments": [
+        {
+          "_id": "f-spoiler",
+          "tag": "attachments",
+          "filename": "spoiler_landscape.jpg",
+          "metadata": {
+            "type": "Image",
+            "width": 1200,
+            "height": 800,
+            "thumbhash": [
+              87,
+              23,
+              10,
+              45,
+              136,
+              118,
+              136,
+              135,
+              140,
+              120,
+              135,
+              128,
+              120,
+              168,
+              119,
+              136,
+              118,
+              128,
+              112,
+              119,
+              8
+            ]
+          },
+          "content_type": "image/jpeg",
+          "size": 24796
+        }
+      ]
+    },
+    {
+      "_id": "01JE0000000000000000000M02",
+      "channel": "ch-beta",
+      "author": "u-bob",
+      "content": "The full-size scan (it's huge)",
+      "attachments": [
+        {
+          "_id": "f-huge",
+          "tag": "attachments",
+          "filename": "scan.jpg",
+          "metadata": {
+            "type": "Image",
+            "width": 600,
+            "height": 900,
+            "thumbhash": [
+              161,
+              167,
+              13,
+              77,
+              6,
+              103,
+              152,
+              143,
+              119,
+              72,
+              152,
+              103,
+              135,
+              122,
+              119,
+              120,
+              120,
+              112,
+              119,
+              4,
+              151
+            ]
+          },
+          "content_type": "image/jpeg",
+          "size": 9500000
+        }
+      ]
+    },
+    {
+      "_id": "01JE0000000000000000000M01",
+      "channel": "ch-beta",
+      "author": "u-ada",
+      "content": "Holiday photos",
+      "attachments": [
+        {
+          "_id": "f-landscape",
+          "tag": "attachments",
+          "filename": "landscape.jpg",
+          "metadata": {
+            "type": "Image",
+            "width": 1200,
+            "height": 800,
+            "thumbhash": [
+              87,
+              23,
+              10,
+              45,
+              136,
+              118,
+              136,
+              135,
+              140,
+              120,
+              135,
+              128,
+              120,
+              168,
+              119,
+              136,
+              118,
+              128,
+              112,
+              119,
+              8
+            ]
+          },
+          "content_type": "image/jpeg",
+          "size": 24796
+        },
+        {
+          "_id": "f-portrait",
+          "tag": "attachments",
+          "filename": "portrait.jpg",
+          "metadata": {
+            "type": "Image",
+            "width": 600,
+            "height": 900,
+            "thumbhash": [
+              161,
+              167,
+              13,
+              77,
+              6,
+              103,
+              152,
+              143,
+              119,
+              72,
+              152,
+              103,
+              135,
+              122,
+              119,
+              120,
+              120,
+              112,
+              119,
+              4,
+              151
+            ]
+          },
+          "content_type": "image/jpeg",
+          "size": 13055
+        }
+      ]
+    }
+  ],
+  "users": []
+}

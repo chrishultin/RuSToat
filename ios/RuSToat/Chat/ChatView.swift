@@ -40,6 +40,7 @@ struct ChatView: View {
     @State private var deleting: MessageItem?
     /// A disguised link waiting for "Open" (its address and its text).
     @State private var guarded: (url: URL, text: String)?
+    @State private var mediaMaxWidth: CGFloat = 300
     @Environment(\.scenePhase) private var scenePhase
 
     private var hasMore: Bool {
@@ -60,6 +61,11 @@ struct ChatView: View {
             .padding(.vertical, 8)
             .scrollTargetLayout()
         }
+        // Pictures fit the text column: the row less its padding and avatar.
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
+            mediaMaxWidth = max(width - 80, 120)
+        }
+        .environment(\.mediaMaxWidth, mediaMaxWidth)
         .scrollPosition($position)
         .scrollDismissesKeyboard(.interactively)
         // Start at the bottom, and keep the bottom where it is when the
@@ -190,7 +196,9 @@ struct ChatView: View {
             react: { id, key in react(id, key) },
             pickReaction: { message in reactingTo = message },
             edit: startEditing,
-            delete: { message in deleting = message }
+            delete: { message in deleting = message },
+            revealImage: { id in model.core.revealImage(channelId: route.id, fileId: id) },
+            revealAttachment: { id in model.core.revealAttachment(channelId: route.id, fileId: id) }
         )
     }
 
@@ -304,6 +312,14 @@ struct ChatView: View {
             try await model.core.openChannel(channelId: route.id)
             loaded = true
             refresh()
+            #if DEBUG
+            // Scroll to a message at launch, for screenshots:
+            // SIMCTL_CHILD_RUSTOAT_DEV_SCROLL=<message ID> xcrun simctl launch …
+            if let id = ProcessInfo.processInfo.environment["RUSTOAT_DEV_SCROLL"] {
+                try? await Task.sleep(for: .milliseconds(300))
+                position.scrollTo(id: id, anchor: .top)
+            }
+            #endif
         } catch let CoreError.Failed(message) {
             error = message
         } catch {

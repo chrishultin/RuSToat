@@ -37,6 +37,8 @@ markdown = "1"
 # Timestamps' local time, as the core formats them.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tokio = { version = "1", features = ["time"] }
+# Images' blurred previews, decoded as desktop decodes them.
+thumbhash = "0.1"
 
 [dev-dependencies]
 # A mock Stoat API, as the core's own tests use.
@@ -44,5 +46,7 @@ wiremock = "0.6"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
 serde_json = "1"
+# Proxied embed addresses in the media tests.
+url = "2"
 # A local events websocket for the controller tests.
 tokio-tungstenite = "0.30"

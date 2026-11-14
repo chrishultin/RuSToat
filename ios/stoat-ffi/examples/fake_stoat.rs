@@ -41,6 +41,14 @@ async fn main() {
         )
         .mount(&api)
         .await;
+    // Beta's #chat has every kind of attachment and embed.
+    Mock::given(method("GET"))
+        .and(path("/channels/ch-beta/messages"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(support::fixture("messages_media.json")),
+        )
+        .mount(&api)
+        .await;
     Mock::given(method("GET"))
         .and(path_regex(r"^/channels/[^/]+/messages$"))
         .respond_with(
@@ -85,11 +93,12 @@ async fn main() {
         .respond_with(ResponseTemplate::new(204))
         .mount(&api)
         .await;
-    // Custom emoji: the file server is this fake, and every emoji is the
-    // app icon.
+    // Custom emoji and attachments: the file server and the media proxy are
+    // this fake. Every emoji is the app icon.
     let mut root = support::fixture("root.json");
     root["ws"] = json!(events.url);
     root["features"]["autumn"]["url"] = json!(api.uri());
+    root["features"]["january"]["url"] = json!(api.uri());
     Mock::given(method("GET"))
         .and(path("/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(root))
@@ -103,9 +112,10 @@ async fn main() {
     .expect("the app icon");
     Mock::given(method("GET"))
         .and(path_regex(r"^/emojis/[^/]+$"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(icon, "image/png"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(icon.clone(), "image/png"))
         .mount(&api)
         .await;
+    serve_media(&api, icon).await;
     println!("{}", api.uri());
     // Every 20 s, a new message in #random, to watch unread state live.
     let mut n = 0;
@@ -116,4 +126,60 @@ async fn main() {
                             "channel": "ch-random", "author": "u-ada",
                             "content": format!("tick {n}") }));
     }
+}
+
+/// `tests/fixtures/media/{name}`.
+fn media(name: &str) -> Vec<u8> {
+    let path = format!("{}/../../tests/fixtures/media/{name}", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read(&path).unwrap_or_else(|err| panic!("{path}: {err}"))
+}
+
+/// The files `messages_media.json` refers to, and the proxied pictures of
+/// its embeds (by the name at the end of their address). `f-slow` takes
+/// 15 seconds, to see the blurred preview.
+async fn serve_media(api: &wiremock::MockServer, icon: Vec<u8>) {
+    let landscape = media("landscape.jpg");
+    let portrait = media("portrait.jpg");
+    for (id, bytes) in [
+        ("f-landscape", &landscape),
+        ("f-spoiler", &landscape),
+        ("f-badge", &landscape),
+        ("f-portrait", &portrait),
+        ("f-huge", &portrait),
+    ] {
+        Mock::given(method("GET"))
+            .and(path_regex(format!("^/attachments/{id}(/.*)?$")))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(bytes.clone(), "image/jpeg"))
+            .mount(api)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path_regex("^/attachments/f-slow(/.*)?$"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(landscape.clone(), "image/jpeg")
+                .set_delay(std::time::Duration::from_secs(15)),
+        )
+        .mount(api)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/proxy"))
+        .respond_with(move |request: &Request| {
+            let url = request
+                .url
+                .query_pairs()
+                .find(|(k, _)| k == "url")
+                .map(|(_, v)| v.into_owned())
+                .unwrap_or_default();
+            let (bytes, kind) = if url.ends_with("portrait.jpg") || url.ends_with("/poster") {
+                (portrait.clone(), "image/jpeg")
+            } else if url.ends_with(".jpg") {
+                (landscape.clone(), "image/jpeg")
+            } else {
+                (icon.clone(), "image/png")
+            };
+            ResponseTemplate::new(200).set_body_raw(bytes, kind)
+        })
+        .mount(api)
+        .await;
 }

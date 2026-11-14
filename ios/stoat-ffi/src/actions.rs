@@ -1,5 +1,6 @@
 //! What can be done to a message from its menu: copying its text or a link
-//! to it, pinning, reactions, and editing and deleting the user's own.
+//! to it, pinning, reactions, and editing and deleting the user's own; and
+//! from its attachments: loading a big image, and uncovering a spoiler.
 //!
 //! Each follows desktop's handling in `src/ui/chat.rs`.
 
@@ -352,5 +353,23 @@ impl AccountController {
             self.shared.changed_lists_and(&channel_id);
         }
         Err(CoreError::failed(error))
+    }
+}
+
+/// Attachments.
+#[uniffi::export]
+impl AccountController {
+    /// Load image `file_id` despite its size (the user tapped "Show
+    /// image"): its card becomes the picture for the rest of the session.
+    pub fn reveal_image(&self, channel_id: String, file_id: String) {
+        self.shared.store.lock().unwrap().reveal_image(&file_id);
+        self.shared.timeline_changed(&channel_id);
+    }
+
+    /// Uncover spoiler attachment `file_id` (the user tapped it) for the
+    /// rest of the session.
+    pub fn reveal_attachment(&self, channel_id: String, file_id: String) {
+        self.shared.store.lock().unwrap().reveal_attachment(&file_id);
+        self.shared.timeline_changed(&channel_id);
     }
 }
