@@ -17,6 +17,9 @@ settings:
     # LIBRARY_SEARCH_PATHS below).
     SWIFT_INCLUDE_PATHS[sdk=iphoneos*]: $(SRCROOT)/build/StoatCore.xcframework/ios-arm64/Headers
     SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]: $(SRCROOT)/build/StoatCore.xcframework/ios-arm64-simulator/Headers
+    # The core has no Intel simulator slice (Apple silicon only), so a
+    # generic simulator build ("Any iOS Simulator Device") mustn't try x86_64.
+    EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
 targets:
