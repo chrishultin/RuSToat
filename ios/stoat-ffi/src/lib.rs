@@ -6,11 +6,20 @@
 
 uniffi::setup_scaffolding!();
 
+pub mod session;
+
 /// An error Swift can show as it is: `message` is user-facing text.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum CoreError {
     #[error("{message}")]
     Failed { message: String },
+}
+
+/// A Swift callback (such as the Keychain vault) threw something it didn't declare.
+impl From<uniffi::UnexpectedUniFFICallbackError> for CoreError {
+    fn from(err: uniffi::UnexpectedUniFFICallbackError) -> Self {
+        Self::failed(err.reason)
+    }
 }
 
 impl CoreError {
@@ -19,6 +28,16 @@ impl CoreError {
             message: message.to_string(),
         }
     }
+}
+
+/// Send the core's logs to stderr, which Xcode's console shows. `RUST_LOG`
+/// (set in the scheme) overrides the default of `info`. Safe to call twice.
+#[uniffi::export]
+pub fn init_logging() {
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("stoat_gpui=info,stoat_ffi=info"),
+    )
+    .try_init();
 }
 
 /// This core's version, the `stoat-ffi` crate's.

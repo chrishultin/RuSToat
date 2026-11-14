@@ -254,6 +254,8 @@ pub struct StoatClient {
     http: Client,
     base_url: String,
     token: Option<String>,
+    /// The name a login gives its session (Stoat's Settings → Sessions).
+    session_name: String,
 }
 
 impl StoatClient {
@@ -267,6 +269,7 @@ impl StoatClient {
             http,
             base_url: base_url.into().trim_end_matches('/').to_string(),
             token: None,
+            session_name: SESSION_FRIENDLY_NAME.into(),
         }
     }
 
@@ -279,6 +282,15 @@ impl StoatClient {
     pub fn with_token(&self, token: impl Into<String>) -> Self {
         Self {
             token: Some(token.into()),
+            ..self.clone()
+        }
+    }
+
+    /// A copy of this client whose logins name their session `name`
+    /// instead of [`SESSION_FRIENDLY_NAME`].
+    pub fn with_session_name(&self, name: impl Into<String>) -> Self {
+        Self {
+            session_name: name.into(),
             ..self.clone()
         }
     }
@@ -303,7 +315,7 @@ impl StoatClient {
         let body = DataLogin::Email {
             email: email.to_string(),
             password: password.to_string(),
-            friendly_name: Some(SESSION_FRIENDLY_NAME.into()),
+            friendly_name: Some(self.session_name.clone()),
         };
         self.send(Method::POST, "/auth/session/login", Some(&body))
             .await
@@ -318,7 +330,7 @@ impl StoatClient {
         let body = DataLogin::MFA {
             mfa_ticket: ticket.to_string(),
             mfa_response: Some(response),
-            friendly_name: Some(SESSION_FRIENDLY_NAME.into()),
+            friendly_name: Some(self.session_name.clone()),
         };
         self.send(Method::POST, "/auth/session/login", Some(&body))
             .await

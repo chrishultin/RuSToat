@@ -82,3 +82,57 @@ Deferred to the end of the milestone: `cargo run` still launches the desktop app
 
 ### Manual Validation
 Deferred to the end of the milestone: watch the tab bar shrink while scrolling in the simulator.
+
+## Chunk 3: Log in, 2FA, and staying logged in
+
+### Changes Made
+- `src/api/client.rs`: `StoatClient` has a `session_name` field (default `SESSION_FRIENDLY_NAME`) and a `with_session_name()` builder, and both login calls send it as `friendly_name`. Desktop behaviour is unchanged.
+- `ios/stoat-ffi/src/session.rs` (new):
+  - `TokenVault` callback interface (`load`/`save`/`clear`, throwing `CoreError`), bridged to `session::TokenStore` by `VaultStore`.
+  - Records and enums: `Account { id, instance, user_id, name }`; `LoginOutcome { LoggedIn, NeedsMfa { instance, ticket, allows_totp, allows_recovery }, Disabled }`; `MfaAnswer { Totp, Recovery }`; `RestoreOutcome { SignedIn, NeedsLogin, Offline { account, message } }`.
+  - The `Core` object, holding the token store, the account file and the current session (account plus token):
+    - `Core::new(vault, data_dir)` keeps `accounts.json` in `data_dir`, and `Core::with_stores` is for tests.
+    - `account()`, `saved_account()`.
+    - `login(server, email, password)` runs `resolve_instance`, then `login` with session name "RuSToat (iPhone)".
+    - `login_mfa(instance, ticket, answer)` strips spaces from TOTP codes.
+    - On success, the account's name is fetched with `fetch_self`; the account is added or updated, `set_session` and `set_active` are recorded, and the token is saved under `{instance}#{user_id}`.
+    - `restore()` wraps `session::restore`.
+    - `log_out()` clears the token, ends the Stoat session and removes the account from the list.
+    - A Rust-only `client()` returns the signed-in client with its token, for chunk 4.
+  - `From<ApiError> for CoreError`, using `ApiError`'s own user-facing `Display` text, as desktop does.
+- `ios/stoat-ffi/src/lib.rs`:
+  - `mod session`.
+  - `From<UnexpectedUniFFICallbackError> for CoreError`.
+  - `init_logging()`: env_logger to stderr (shown in Xcode's console), default `stoat_gpui=info,stoat_ffi=info`.
+- `ios/stoat-ffi/Cargo.toml`: added `anyhow`, `log` and `env_logger`, and dev-dependencies `wiremock`, `tempfile`, `tokio` and `serde_json`.
+- `ios/stoat-ffi/tests/login.rs` (new, 11 tests): plain login (token, account list, active and session ID), MFA then TOTP with spaces, wrong password text, disabled account, blank fields refused, restore signs in, restore with a rejected token clears the vault, restore offline (a closed port) keeps the token, nothing saved, log out forgets everything, and the account file round-trip through `FileAccounts`. Fixtures come from `../../tests/fixtures/`.
+- `scripts/ios/build-core.sh`: bindings are generated from a slice built in this run (`targets[0]`), not `slices[0]`. Before, a simulator-only build generated them from a stale device library.
+- Swift:
+  - `Session/KeychainVault.swift`: `TokenVault` over `SecItem*`, using `kSecAttrAccessibleAfterFirstUnlock` and service `com.chrishultin.rustoat.ios`. Saving again updates the existing item.
+  - `AppModel.swift`: an `@MainActor @Observable` model with phases `restoring`, `offline(account, message)`, `signedOut` and `signedIn(account)`.
+  - `Login/LoginView.swift`: a gradient background with a `.glassEffect` card, Server/Email/Password fields, and a 2FA step that switches between authenticator and recovery codes. It uses `.buttonStyle(.glassProminent)` and `.glass`.
+  - `RootView.swift`: switches on the phase. The offline view (`ContentUnavailableView`) offers Retry and "Log in again". The You tab has a temporary Log Out until chunk 7.
+  - `RuSToatApp.swift`: calls `initLogging()`, uses `AppModel.live()` (Application Support), and restores on launch.
+- Swift tests:
+  - `KeychainVaultTests`: round-trip under service `com.chrishultin.rustoat.ios.tests`.
+  - `LiveInstanceTests`: opt-in with `TEST_RUNNER_RUSTOAT_LIVE=1`. A bogus login at api.stoat.chat must fail with "Incorrect email or password."
+- `README.md`: a line on the live test.
+
+### Divergences
+- **No separate `ios/stoat-ffi/src/accounts.rs`.** The account-file path is `Core::new`'s `data_dir` argument, so the account handling lives in `session.rs`.
+- **Session naming needed a small core change** (`StoatClient::with_session_name`). The friendly name was a constant.
+- **Rejected sessions keep their account entry,** as desktop does. Only the token is cleared, and logging in again updates the same entry.
+- **Bindgen bug fixed in `build-core.sh`** (described above).
+- **An extra opt-in live Swift test.** It proved HTTPS from the iOS simulator works with reqwest's rustls platform verifier, and that error text comes through correctly.
+- **A temporary Log Out button** in the You tab, so logging out can be checked before chunk 7 builds `YouView`.
+- **Placeholders use `Text(verbatim:)`.** SwiftUI rendered "you@example.com" as a Markdown link.
+
+### Verification Performed
+- `cargo test -p stoat-ffi`: 2 unit tests and 11 login tests passed. `cargo clippy -p stoat-ffi --all-targets -- -D warnings`: clean.
+- `scripts/ios/test.sh`: exit 0. `CoreBridgeTests` (3) and `KeychainVaultTests` (1) passed; `LiveInstanceTests` was skipped.
+- `TEST_RUNNER_RUSTOAT_LIVE=1 xcodebuild … test`: 5/5, including the live login at api.stoat.chat (1.7 s).
+- Desktop: `cargo test`: 1128 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings`: clean.
+- Screenshot of the login screen on the simulator: a glass card over the gradient.
+
+### Manual Validation
+Deferred to the end: log in with your real account and 2FA, relaunch and land signed in, then log out and check the session is gone from Stoat's Settings → Sessions.

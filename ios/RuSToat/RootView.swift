@@ -1,7 +1,28 @@
 import SwiftUI
 
-/// The app's tabs. Each is a placeholder until its milestone chunk lands.
+/// Login, or the app's tabs once signed in.
 struct RootView: View {
+    let model: AppModel
+
+    var body: some View {
+        switch model.phase {
+        case .restoring:
+            ProgressView("Signing in…")
+        case .offline(let account, let message):
+            OfflineView(account: account, message: message, model: model)
+        case .signedOut:
+            LoginView(core: model.core) { model.loggedIn($0) }
+        case .signedIn(let account):
+            SignedInTabs(account: account, model: model)
+        }
+    }
+}
+
+/// The app's tabs. Home and Servers are placeholders until their chunks land.
+private struct SignedInTabs: View {
+    let account: Account
+    let model: AppModel
+
     var body: some View {
         TabView {
             Tab("Home", systemImage: "bubble.left.and.bubble.right") {
@@ -11,10 +32,39 @@ struct RootView: View {
                 PlaceholderList(title: "Servers")
             }
             Tab("You", systemImage: "person.crop.circle") {
-                PlaceholderList(title: "You")
+                NavigationStack {
+                    List {
+                        LabeledContent("Signed in as", value: account.name)
+                        LabeledContent("Server", value: account.instance)
+                        Button("Log Out", role: .destructive) {
+                            Task { await model.logOut() }
+                        }
+                    }
+                    .navigationTitle("You")
+                }
             }
         }
         .tabBarMinimizeBehavior(.onScrollDown)
+    }
+}
+
+/// The saved session couldn't be checked: offer to try again.
+private struct OfflineView: View {
+    let account: Account
+    let message: String
+    let model: AppModel
+
+    var body: some View {
+        ContentUnavailableView {
+            Label("Can't reach Stoat", systemImage: "wifi.exclamationmark")
+        } description: {
+            Text(message)
+        } actions: {
+            Button("Retry") { Task { await model.restore() } }
+                .buttonStyle(.glassProminent)
+            Button("Log in again") { model.showLogin() }
+                .buttonStyle(.glass)
+        }
     }
 }
 
@@ -37,8 +87,4 @@ private struct PlaceholderList: View {
             .navigationTitle(title)
         }
     }
-}
-
-#Preview {
-    RootView()
 }

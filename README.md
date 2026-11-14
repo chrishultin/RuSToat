@@ -155,6 +155,8 @@ cargo check --lib --no-default-features --target aarch64-apple-ios
 
 `scripts/ios/test.sh` runs those, the `stoat-ffi` tests and the iPhone app's Swift tests on a simulator (the first available iPhone, or `IOS_SIMULATOR="iPhone 17"`).
 
+`TEST_RUNNER_RUSTOAT_LIVE=1 xcodebuild … test` also runs `LiveInstanceTests`, which checks HTTPS from iOS with a deliberately wrong login at `api.stoat.chat`.
+
 The tests use a mock Stoat API (`wiremock`) and an in-memory token store, so they need no network and never touch your Keychain. There are three opt-in checks:
 
 ```bash

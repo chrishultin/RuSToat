@@ -85,11 +85,13 @@ if [ "$stale" = 0 ]; then
     exit 0
 fi
 
-# Bindings, read from the library's own metadata so they always match it.
+# Bindings, read from the metadata of a library just built, so they always
+# match it. (A slice from an earlier run may be older; Xcode rebuilds it
+# before building for that platform.)
 bindings="$build/bindings"
 rm -rf "$bindings"
 cargo run -q -p stoat-ffi --features bindgen --bin uniffi-bindgen -- \
-    generate --library "${slices[0]}" --language swift --out-dir "$bindings"
+    generate --library "target/${targets[0]}/release/$lib" --language swift --out-dir "$bindings"
 
 headers="$build/headers"
 rm -rf "$headers"
