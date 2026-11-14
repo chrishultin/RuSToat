@@ -276,3 +276,28 @@ fn junk_hashes_decode_to_nothing() {
         let _ = thumbhash_image(LANDSCAPE_HASH[..len].to_vec());
     }
 }
+
+#[tokio::test]
+async fn gifs_come_through_as_images_and_gif_links_as_picture_embeds() {
+    let events = Events::start().await;
+    let api = api(&events).await;
+    let (controller, _) = opened(&api).await;
+    let row = message(&controller, "M08");
+    let gif = image(&row.attachments[0]);
+    assert_eq!(gif.name, "orbit.gif");
+    assert_eq!((gif.width, gif.height), (160, 120));
+    // A GIF link is just its picture: Swift animates it, by its bytes.
+    assert_eq!(
+        row.embeds,
+        vec![EmbedItem::Image {
+            image: EmbedImageItem {
+                url: proxied("https://gifs.example/orbit.gif"),
+                source: "https://gifs.example/orbit.gif".into(),
+                width: 160,
+                height: 120,
+                original_width: 160,
+                original_height: 120,
+            }
+        }]
+    );
+}

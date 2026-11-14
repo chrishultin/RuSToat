@@ -174,7 +174,7 @@ struct MessageRowView: View {
                         }
                     }
                     ForEach(Array(message.embeds.enumerated()), id: \.offset) { _, embed in
-                        EmbedCard(embed: embed, actions: actions) { id in
+                        EmbedCardView(embed: embed, actions: actions) { id in
                             actions.viewImage(message, id)
                         }
                     }
@@ -328,117 +328,5 @@ struct FileCard: View {
             .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 12))
         }
         .buttonStyle(.plain)
-    }
-}
-
-/// A link preview or bot embed.
-struct EmbedCard: View {
-    let embed: EmbedItem
-    let actions: MessageActions
-    /// Open a picture full screen (by its address, or a file's ID).
-    let view: (String) -> Void
-    @Environment(\.openURL) private var openURL
-    @Environment(\.mediaMaxWidth) private var available
-
-    var body: some View {
-        switch embed {
-        case .card(let card):
-            cardView(card)
-        case .image(let image):
-            Button {
-                view(image.url)
-            } label: {
-                remote(image, size: size(image))
-            }
-            .buttonStyle(.plain)
-        case .gifPoster(let image, let link):
-            picture(image, opening: link)
-                .overlay(alignment: .bottomLeading) {
-                    Text("GIF")
-                        .font(.caption2.bold())
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(.black.opacity(0.6), in: .rect(cornerRadius: 4))
-                        .padding(8)
-                }
-        case .video(let url):
-            FileCard(name: URL(string: url)?.host() ?? url, detail: "Video", icon: "play.rectangle") {
-                open(url)
-            }
-        }
-    }
-
-    private func size(_ image: EmbedImageItem) -> CGSize {
-        MediaLayout.fit(width: image.width, height: image.height, available: available)
-    }
-
-    private func picture(_ image: EmbedImageItem, opening link: String) -> some View {
-        Button {
-            open(link)
-        } label: {
-            remote(image, size: size(image))
-        }
-        .buttonStyle(.plain)
-    }
-
-    @ViewBuilder private func remote(_ image: EmbedImageItem, size: CGSize) -> some View {
-        Group {
-            if let url = URL(string: image.url) {
-                RemoteImage(url: url, size: size)
-            } else {
-                Rectangle().fill(.quaternary)
-            }
-        }
-        .frame(width: size.width, height: size.height)
-        .clipShape(.rect(cornerRadius: 8))
-    }
-
-    private func cardView(_ card: EmbedCardItem) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .top, spacing: 10) {
-                VStack(alignment: .leading, spacing: 2) {
-                    if let site = card.siteName {
-                        Text(site).font(.caption).foregroundStyle(.secondary)
-                    }
-                    if let title = card.title {
-                        Text(title).font(.subheadline.weight(.semibold)).lineLimit(2)
-                    }
-                    if !card.richDescription.isEmpty {
-                        RichTextView(blocks: card.richDescription)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(6)
-                    } else if let description = card.description {
-                        Text(description).font(.caption).foregroundStyle(.secondary).lineLimit(3)
-                    }
-                }
-                Spacer(minLength: 0)
-                if let thumbnail = card.thumbnail {
-                    remote(thumbnail, size: CGSize(width: CGFloat(thumbnail.width), height: CGFloat(thumbnail.height)))
-                }
-            }
-            if let image = card.image {
-                // Inside the card's padding.
-                remote(image, size: MediaLayout.fit(
-                    width: image.width, height: image.height, available: min(available, 320) - 20
-                ))
-            }
-            if let media = card.media {
-                AttachmentView(attachment: media, actions: actions, view: view)
-                    .environment(\.mediaMaxWidth, min(available, 320) - 20)
-            }
-        }
-        .padding(10)
-        .frame(maxWidth: 320, alignment: .leading)
-        .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 12))
-        .contentShape(.rect)
-        .onTapGesture { open(card.link) }
-    }
-
-    private func open(_ url: String?) {
-        if let url = url.flatMap(URL.init(string:)) {
-            openURL(url)
-        }
     }
 }

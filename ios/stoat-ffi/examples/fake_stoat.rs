@@ -140,6 +140,12 @@ fn media(name: &str) -> Vec<u8> {
 async fn serve_media(api: &wiremock::MockServer, icon: Vec<u8>) {
     let landscape = media("landscape.jpg");
     let portrait = media("portrait.jpg");
+    let gif = media("orbit.gif");
+    Mock::given(method("GET"))
+        .and(path_regex("^/attachments/f-gif(/.*)?$"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(gif.clone(), "image/gif"))
+        .mount(api)
+        .await;
     for (id, bytes) in [
         ("f-landscape", &landscape),
         ("f-spoiler", &landscape),
@@ -184,7 +190,10 @@ async fn serve_media(api: &wiremock::MockServer, icon: Vec<u8>) {
                 .find(|(k, _)| k == "url")
                 .map(|(_, v)| v.into_owned())
                 .unwrap_or_default();
-            let (bytes, kind) = if url.ends_with("portrait.jpg") || url.ends_with("/poster") {
+            // January serves GIFs as they are.
+            let (bytes, kind) = if url.ends_with(".gif") {
+                (gif.clone(), "image/gif")
+            } else if url.ends_with("portrait.jpg") || url.ends_with("/poster") {
                 (portrait.clone(), "image/jpeg")
             } else if url.ends_with(".jpg") {
                 (landscape.clone(), "image/jpeg")

@@ -17,6 +17,8 @@ final class ImageLoader {
     private let images = NSCache<NSString, UIImage>()
     private var decoding: [String: Task<UIImage?, Never>] = [:]
     private var downloads: [URL: Task<Data?, Never>] = [:]
+    /// Pictures found to be animated GIFs: views play these.
+    private var animated: Set<URL> = []
     /// How many downloads were started (for tests).
     private(set) var downloadsStarted = 0
 
@@ -70,6 +72,9 @@ final class ImageLoader {
         }
         let task = Task<UIImage?, Never> {
             guard let data = await data(url) else { return nil }
+            if AnimatedFrames.frameCount(data) > 1 {
+                animated.insert(url)
+            }
             return await Task.detached(priority: .userInitiated) {
                 Self.decode(data, maxPixels: pixels, scale: scale)
             }.value
@@ -81,6 +86,24 @@ final class ImageLoader {
             images.setObject(image, forKey: key, cost: Self.cost(of: image))
         }
         return image
+    }
+
+    /// Whether the picture at `url`, once loaded, turned out to be an
+    /// animated GIF (by its bytes, not its address or type).
+    func isAnimated(_ url: URL) -> Bool {
+        animated.contains(url)
+    }
+
+    /// The GIF at `url`'s frames, decoded to fit `size` points at `scale`.
+    /// Not cached: they're big, and dropped when the GIF leaves the screen.
+    /// The bytes come from the disk cache. `nil` if it isn't animated, or
+    /// has too many frames.
+    func frames(_ url: URL, fitting size: CGSize, scale: CGFloat) async -> AnimatedFrames? {
+        guard let data = await data(url) else { return nil }
+        let pixels = Self.pixels(fitting: size, scale: scale)
+        return await Task.detached(priority: .utility) {
+            AnimatedFrames.decode(data, maxPixels: pixels, scale: scale)
+        }.value
     }
 
     /// The first frame of the video at `url`, upright, fitted to `size`

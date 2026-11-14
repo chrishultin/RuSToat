@@ -328,8 +328,12 @@ struct ChatView: View {
             // Scroll to a message at launch, for screenshots:
             // SIMCTL_CHILD_RUSTOAT_DEV_SCROLL=<message ID> xcrun simctl launch …
             if let id = ProcessInfo.processInfo.environment["RUSTOAT_DEV_SCROLL"] {
-                try? await Task.sleep(for: .milliseconds(300))
-                position.scrollTo(id: id, anchor: .top)
+                // Twice: the lazy list only knows the rows' real heights
+                // once it's laid them out.
+                for _ in 0..<2 {
+                    try? await Task.sleep(for: .milliseconds(400))
+                    position.scrollTo(id: id, anchor: .top)
+                }
             }
             // Or open a picture full screen (by file ID):
             // SIMCTL_CHILD_RUSTOAT_DEV_VIEW=<file ID> xcrun simctl launch …

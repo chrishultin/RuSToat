@@ -74,7 +74,7 @@ struct PicturePlaceholder: View {
 
 /// A remote picture drawn at exactly `size`, filling it: the placeholder
 /// until it arrives, then the picture fading in over it. Already-loaded
-/// pictures show at once.
+/// pictures show at once. Animated GIFs play.
 struct RemoteImage: View {
     let url: URL
     let size: CGSize
@@ -93,7 +93,10 @@ struct RemoteImage: View {
                 PicturePlaceholder(thumbhash: thumbhash)
                     .transition(.opacity)
             }
-            if let image {
+            if let image, loader.isAnimated(url) {
+                AnimatedImage(url: url, size: size, still: image, loader: loader)
+                    .transition(.opacity)
+            } else if let image {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()

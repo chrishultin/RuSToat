@@ -216,3 +216,60 @@ Deferred to the end, because `simctl` can't drive gestures: pinch-zoom a photo, 
 
 ### Manual Validation
 Deferred to the end: play a video inline and full screen; play a voice note; start one while another plays. Also check on a device that a large video from Stoat's real file server streams, which depends on its range support.
+
+## Chunk 4: Link embeds and GIFs
+
+### Changes Made
+- `ios/RuSToat/Chat/Media/EmbedCardView.swift` (new), replacing `EmbedCard` in `MessageRowView.swift`:
+  - Cards have a 4 pt colour bar (the embed's `0xRRGGBBAA`, or the separator colour) and the site's icon (16 pt, through `RemoteImage`) beside its name.
+  - The title is a tinted button that opens `link`.
+  - The description is a bot's Markdown through `RichTextView`, or a website's plain text (5 lines).
+  - A thumbnail sits beside the text at its 80 pt box. A large image goes under the text, sized inside the bar and padding.
+  - A `playable` picture gets a play badge, and opens the link: the system hands YouTube links to their app when it's installed. Any other large image opens the page too.
+  - A bot's `media` goes through `AttachmentView`, so images, video and audio work there as well.
+  - Image embeds open the viewer. GIF posters keep their badge and open their page. Bare video links are cards.
+  - `Color(rgba:)`.
+- `ios/RuSToat/Chat/Media/AnimatedImage.swift` (new):
+  - `AnimatedFrames`:
+    - `isGIF` (the `GIF8` signature) and `frameCount`;
+    - `decode`, which reads frames with `CGImageSourceCreateThumbnailAtIndex` at the drawn size. It gives nil for stills and for GIFs over 200 frames.
+    - Frame delays work as in browsers: an unclamped delay, and anything under 20 ms becomes 100 ms.
+    - `side(maxPixels:width:height:frames:)` decodes smaller when all the frames would pass a 48 MB budget.
+    - `index(at:)` loops through the frames by their delays.
+  - `AnimatedImage` shows the still until the frames are decoded, then plays them in `TimelineView(.animation)`. It decodes in its `.task` and drops the frames `onDisappear`, so only GIFs on screen hold frames.
+- `ios/RuSToat/Shared/ImageLoader.swift`:
+  - when it downloads a picture, it notes animated GIFs by their bytes (`isAnimated(url)`);
+  - `frames(_:fitting:scale:)` decodes them from the bytes in the disk cache, off the main actor, without caching the frames.
+- `ios/RuSToat/Chat/Media/InlineImage.swift`: `RemoteImage` plays a picture that turned out to be animated through `AnimatedImage`. That covers GIF attachments, GIF links and bot media alike.
+- `tests/fixtures/media/orbit.gif` (new, 5 kB): 16 frames at 160×120, a ball circling, made with PIL.
+- `tests/fixtures/messages_media.json`: message M08 has `orbit.gif` uploaded (with its ThumbHash) and linked (a `special: GIF` website, which the core makes an image embed).
+- `ios/stoat-ffi/examples/fake_stoat.rs`: serves `/attachments/f-gif`, and proxied `.gif` addresses as `image/gif`.
+- `ios/stoat-ffi/tests/media.rs`: one more test, 9 in all. It checks that a GIF upload is an `Image` at 160×120, and a GIF link is a bare picture embed.
+- `ios/RuSToat/Chat/ChatView.swift`: DEBUG `RUSTOAT_DEV_SCROLL` scrolls twice, 400 ms apart, because the lazy list only knows the rows' real heights once it has laid them out.
+- `ios/RuSToatTests/AnimatedImageTests.swift` (new, 5 tests):
+  - the frames and delays of a two-frame GIF built in the test with `CGImageDestination`, decoded at the size drawn;
+  - 201 frames aren't animated, but 200 are;
+  - stills and PNGs aren't animated;
+  - looping by delays;
+  - the memory budget.
+
+### Divergences
+- **A memory budget of 48 MB per GIF** was added on top of the plan's "decode at the displayed size". 200 frames at a 300×200 pt row at 3× would be about 430 MB, so big or long GIFs are decoded smaller.
+- **A GIF is detected when it's downloaded**, by its bytes, and every remote picture plays if it turns out to be animated. No URL or content-type checks, as the plan's risk said.
+- **A card's large image opens the page** when it isn't a video, like the title, rather than opening the viewer.
+- **The bot description's Markdown keeps `RichTextView`'s own sizes.** `.font(.footnote)` doesn't reach its blocks, so it's drawn at body size, as desktop draws it.
+
+### Verification Performed
+- `cargo test -p stoat-ffi`: 85 passed (media 9).
+- Swift: 39 tests in 11 suites passed (AnimatedImageTests 5).
+- Desktop `cargo test`: 1499 passed, 0 failed, 5 ignored. Both clippy runs are clean.
+- Simulator against `fake_stoat`:
+  - the news card with its orange bar, site icon, "News", the title link, the description and the large sunset;
+  - the YouTube card with its title link and a play badge on the picture;
+  - the tower image embed;
+  - the CI bot card with its green bar, title link, rich description (bold "42", code "3.1 s") and media image;
+  - the Gifbox poster with its badge, the bare video card, and the repo card with its thumbnail.
+- Both GIFs in M08, uploaded and linked, were animating. Two screenshots a third of a second apart show the ball moved from (583, 1555) to (571, 1513) in both.
+
+### Manual Validation
+Deferred to the end: paste a YouTube link and a news article on desktop and compare the cards on the phone; send a GIF from desktop's GIF picker and watch it play on the phone.

@@ -1,6 +1,64 @@
 {
   "messages": [
     {
+      "_id": "01JE0000000000000000000M08",
+      "channel": "ch-beta",
+      "author": "u-bob",
+      "content": "Two GIFs: one uploaded, one linked https://gifs.example/orbit.gif",
+      "attachments": [
+        {
+          "_id": "f-gif",
+          "tag": "attachments",
+          "filename": "orbit.gif",
+          "metadata": {
+            "type": "Image",
+            "width": 160,
+            "height": 120,
+            "thumbhash": [
+              75,
+              7,
+              6,
+              21,
+              128,
+              177,
+              57,
+              46,
+              119,
+              119,
+              119,
+              224,
+              101,
+              140,
+              119,
+              62,
+              161,
+              135,
+              16,
+              138,
+              8
+            ]
+          },
+          "content_type": "image/gif",
+          "size": 5160
+        }
+      ],
+      "embeds": [
+        {
+          "type": "Website",
+          "url": "https://gifs.example/orbit.gif",
+          "special": {
+            "type": "GIF"
+          },
+          "image": {
+            "url": "https://gifs.example/orbit.gif",
+            "width": 160,
+            "height": 120,
+            "size": "Large"
+          }
+        }
+      ]
+    },
+    {
       "_id": "01JE0000000000000000000M07",
       "channel": "ch-beta",
       "author": "u-ada",
