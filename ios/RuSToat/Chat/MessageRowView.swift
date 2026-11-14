@@ -17,6 +17,10 @@ struct MessageActions {
     /// The user may pin and unpin here.
     let canPin: Bool
     let setPinned: (String, Bool) -> Void
+    /// Join or leave a reaction (a message ID and the emoji's key).
+    let react: (String, String) -> Void
+    /// Open the reaction picker for a message.
+    let pickReaction: (MessageItem) -> Void
 }
 
 /// What tapping a `stoat:` link in a message does.
@@ -88,6 +92,7 @@ struct MessageRowView: View {
     @ViewBuilder private var menu: some View {
         if message.pending == nil {
             Button("Reply", systemImage: "arrowshape.turn.up.left") { actions.reply(message) }
+            Button("Add Reaction", systemImage: "face.smiling") { actions.pickReaction(message) }
         }
         if message.body != nil {
             Button("Copy Text", systemImage: "doc.on.doc") {
@@ -155,6 +160,14 @@ struct MessageRowView: View {
                     }
                     ForEach(Array(message.embeds.enumerated()), id: \.offset) { _, embed in
                         EmbedCard(embed: embed)
+                    }
+                    if !message.reactions.isEmpty {
+                        ReactionsView(
+                            reactions: message.reactions,
+                            toggle: { key in actions.react(message.id, key) },
+                            add: { actions.pickReaction(message) }
+                        )
+                        .padding(.top, 2)
                     }
                     if case .failed(let reason) = message.pending {
                         Button {

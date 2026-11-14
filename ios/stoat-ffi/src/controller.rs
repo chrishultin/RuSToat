@@ -214,6 +214,9 @@ pub(crate) struct Shared {
     pub(crate) rich: RichCache,
     /// The instance's web client (`app` from `GET /`), for message links.
     pub(crate) web_app: Mutex<Option<String>>,
+    /// Reactions on their way to Stoat, as (message, emoji): a second tap
+    /// waits for the first.
+    pub(crate) reacting: Mutex<HashSet<(String, String)>>,
 }
 
 fn now_ms() -> u64 {
@@ -535,6 +538,7 @@ impl AccountController {
                 reply_fetches: Mutex::new(HashSet::new()),
                 rich: RichCache::default(),
                 web_app: Mutex::new(None),
+                reacting: Mutex::new(HashSet::new()),
             }),
             running: Mutex::new(None),
             typing: Mutex::new(OutgoingTyping::default()),

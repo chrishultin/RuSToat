@@ -1,5 +1,7 @@
 import SwiftUI
 
+extension MessageItem: Identifiable {}
+
 extension TimelineItem: Identifiable {
     /// The row's identity across updates (a message's key), so SwiftUI
     /// keeps rows in place when older ones are added above.
@@ -28,6 +30,8 @@ struct ChatView: View {
     @State private var position = ScrollPosition(edge: .bottom)
     @State private var replyingTo: MessageItem?
     @State private var sendError: String?
+    /// The message whose reaction picker is open.
+    @State private var reactingTo: MessageItem?
     /// A disguised link waiting for "Open" (its address and its text).
     @State private var guarded: (url: URL, text: String)?
     @Environment(\.scenePhase) private var scenePhase
@@ -85,6 +89,11 @@ struct ChatView: View {
         } message: {
             if let guarded {
                 Text("“\(guarded.text)” goes to \(guarded.url.absoluteString)")
+            }
+        }
+        .sheet(item: $reactingTo) { message in
+            ReactionPickerView(model: model, channelId: route.id, message: message) { key in
+                react(message.id, key)
             }
         }
         .task(id: route.id) { await open() }
@@ -155,8 +164,14 @@ struct ChatView: View {
             canPin: model.core.canPin(channelId: route.id),
             setPinned: { id, pinned in
                 run { try await model.core.setPinned(channelId: route.id, messageId: id, pinned: pinned) }
-            }
+            },
+            react: { id, key in react(id, key) },
+            pickReaction: { message in reactingTo = message }
         )
+    }
+
+    private func react(_ id: String, _ key: String) {
+        run { try await model.core.toggleReaction(channelId: route.id, messageId: id, emoji: key) }
     }
 
     /// Run a message action, showing what went wrong if it fails.

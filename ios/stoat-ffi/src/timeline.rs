@@ -5,7 +5,10 @@
 
 use stoat_gpui::attachment::{AttachmentView, FileKind};
 use stoat_gpui::embed::{Description, EmbedView};
-use stoat_gpui::store::{MessageRow, PendingState, ReplyPreview, ReplyState, TimelineRow};
+use stoat_gpui::store::{
+    MessageRow, PendingState, PickerEmoji, ReactionChip, ReactionEmoji, ReplyPreview, ReplyState,
+    TimelineRow,
+};
 
 use crate::rich_text::{RichBlock, RichCache};
 
@@ -69,6 +72,70 @@ pub struct MessageItem {
     pub replies: Vec<ReplyItem>,
     pub attachments: Vec<AttachmentItem>,
     pub embeds: Vec<EmbedItem>,
+    /// Reactions, in the order they were first added.
+    pub reactions: Vec<ReactionItem>,
+}
+
+/// An emoji, as a reaction or a picker choice shows it.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum EmojiItem {
+    Unicode { text: String },
+    /// `url` is `None` until the file server is known.
+    Custom { id: String, name: String, url: Option<String> },
+}
+
+impl EmojiItem {
+    pub fn of(emoji: &ReactionEmoji) -> Self {
+        match emoji {
+            ReactionEmoji::Unicode(text) => EmojiItem::Unicode { text: text.clone() },
+            ReactionEmoji::Custom { id, url, name } => EmojiItem::Custom {
+                id: id.clone(),
+                name: name.clone(),
+                url: url.clone(),
+            },
+        }
+    }
+}
+
+/// One reaction under a message.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ReactionItem {
+    /// As the API names it (the Unicode emoji, or a custom emoji's ID):
+    /// what toggling it sends.
+    pub key: String,
+    pub emoji: EmojiItem,
+    pub count: u32,
+    /// The user is one of them.
+    pub mine: bool,
+    /// Others who used it, as the channel names them (at most 8, and only
+    /// those known); the rest are "others".
+    pub names: Vec<String>,
+}
+
+/// An emoji the reaction picker offers.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct PickerEmojiItem {
+    pub key: String,
+    pub emoji: EmojiItem,
+}
+
+impl PickerEmojiItem {
+    pub fn of(choice: &PickerEmoji) -> Self {
+        Self {
+            key: choice.key.clone(),
+            emoji: EmojiItem::of(&choice.emoji),
+        }
+    }
+}
+
+fn reaction(chip: &ReactionChip) -> ReactionItem {
+    ReactionItem {
+        key: chip.key.clone(),
+        emoji: EmojiItem::of(&chip.emoji),
+        count: u32::try_from(chip.count).unwrap_or(u32::MAX),
+        mine: chip.mine,
+        names: chip.names.clone(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
@@ -266,6 +333,7 @@ pub fn message(row: MessageRow, cache: &RichCache) -> MessageItem {
         replies: row.replies.iter().map(reply).collect(),
         attachments: row.attachments.iter().map(attachment).collect(),
         embeds: row.embeds.iter().map(|e| embed(e, cache)).collect(),
+        reactions: row.reactions.iter().map(reaction).collect(),
         pending: row.pending.map(|state| match state {
             PendingState::Sending => PendingItem::Sending,
             PendingState::Failed(reason) => PendingItem::Failed { reason },

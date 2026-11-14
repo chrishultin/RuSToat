@@ -10,13 +10,35 @@
       "_id": "01JE0000000000000000000R04",
       "channel": "ch-random",
       "author": "u-bob",
-      "content": "Ship it :01JE0000000000000000000E01: today"
+      "content": "Ship it :01JE0000000000000000000E01: today",
+      "reactions": {
+        "👍": [
+          "u-ada",
+          "u-me"
+        ],
+        "🎉": [
+          "u-ada"
+        ],
+        "01JE0000000000000000000E01": [
+          "u-ada",
+          "u-bob"
+        ],
+        "🔥": [
+          "u-bob"
+        ],
+        "😂": [
+          "u-ada"
+        ],
+        "🚀": [
+          "u-me"
+        ]
+      }
     },
     {
       "_id": "01JE0000000000000000000R03",
       "channel": "ch-random",
       "author": "u-ada",
-      "content": "Hey <@u-me>, see <#ch-general> @everyone \u2014 meeting <t:1800000000:F> (<t:1800000000:R>). Spoiler: ||the cake is a lie|| and [click me](https://example.com/totally-safe)"
+      "content": "Hey <@u-me>, see <#ch-general> @everyone — meeting <t:1800000000:F> (<t:1800000000:R>). Spoiler: ||the cake is a lie|| and [click me](https://example.com/totally-safe)"
     },
     {
       "_id": "01JE0000000000000000000R02",

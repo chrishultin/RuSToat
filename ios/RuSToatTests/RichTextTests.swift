@@ -89,3 +89,17 @@ struct InternalLinkTapTests {
         #expect(RichSpansText.mentionTint(.user, nil) == .accentColor)
     }
 }
+
+/// Reaction chips' "who reacted" text.
+struct ReactionsTests {
+    private func reaction(count: UInt32, mine: Bool, names: [String]) -> ReactionItem {
+        ReactionItem(key: "👍", emoji: .unicode(text: "👍"), count: count, mine: mine, names: names)
+    }
+
+    @Test func listsYouFirstThenNamesThenOthers() {
+        #expect(ReactionsView.who(reaction(count: 1, mine: true, names: [])) == "You")
+        #expect(ReactionsView.who(reaction(count: 2, mine: true, names: ["Ada"])) == "You and Ada")
+        #expect(ReactionsView.who(reaction(count: 5, mine: false, names: ["Ada", "Bob"])) == "Ada, Bob and 3 others")
+        #expect(ReactionsView.who(reaction(count: 2, mine: false, names: ["Ada"])) == "Ada and 1 other")
+    }
+}

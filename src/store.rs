@@ -356,6 +356,10 @@ pub struct PickerEmoji {
 /// it is refused with `InvalidOperation`; joining an existing one still works.
 pub const MAX_REACTIONS: usize = 20;
 
+/// Said when a message already has [`MAX_REACTIONS`] different emoji.
+pub const FULL_REACTIONS_TEXT: &str =
+    "This message has as many different reactions as it can (20). You can still join one.";
+
 /// What a message's reaction picker offers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PickerChoices {

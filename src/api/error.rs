@@ -139,6 +139,20 @@ impl ApiError {
         }
     }
 
+    /// What a failed reaction (or taking one back) says.
+    pub fn reaction_failure_text(&self) -> String {
+        match self.error_type() {
+            Some(ErrorType::MissingPermission { .. }) => "You can't react here.".into(),
+            // The reaction limit (checked before sending, but another client
+            // may have just filled it), an emoji the author didn't allow, or
+            // a custom emoji that isn't usable here.
+            Some(ErrorType::InvalidOperation) => "Stoat didn't accept that reaction. The message \
+                 may have the most reactions it can, or that emoji isn't allowed here."
+                .into(),
+            _ => format!("Couldn't update your reaction: {self}"),
+        }
+    }
+
     /// The Stoat error type, if the server sent one.
     pub fn error_type(&self) -> Option<&ErrorType> {
         match self {

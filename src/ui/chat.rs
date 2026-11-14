@@ -3510,7 +3510,7 @@ impl ChatView {
                 .would_exceed_reactions(&channel, &message, &emoji)
         {
             self.reacting.remove(&pending);
-            window.push_notification(Notification::warning(FULL_REACTIONS_TEXT), cx);
+            window.push_notification(Notification::warning(crate::store::FULL_REACTIONS_TEXT), cx);
             return;
         }
         let me = self.store.me().to_string();
@@ -3536,7 +3536,7 @@ impl ChatView {
                     Ok(Ok(())) => return,
                     Ok(Err(err)) => {
                         log::warn!("couldn't change reaction {emoji} on {message}: {err:?}");
-                        reaction_error_text(&err)
+                        SharedString::from(err.reaction_failure_text())
                     }
                     Err(err) => {
                         log::warn!("reaction task failed: {err:?}");
@@ -13400,7 +13400,7 @@ fn message_toolbar(
                 .tooltip("Add reaction"),
         )
         .content(move |_, _, cx| {
-            let note = choices.full.then_some(FULL_REACTIONS_TEXT);
+            let note = choices.full.then_some(crate::store::FULL_REACTIONS_TEXT);
             emoji_grid(&id, &choices.emoji, note, &chosen, on_pick.clone(), cx)
         });
     let reply = {
@@ -13442,10 +13442,6 @@ fn message_toolbar(
         .p_0()
         .child(toolbar)
 }
-
-/// Shown when a message is at [`MAX_REACTIONS`](crate::store::MAX_REACTIONS).
-const FULL_REACTIONS_TEXT: &str =
-    "This message has as many different reactions as it can (20). You can still join one.";
 
 /// How often a pending message's upload progress is redrawn.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
@@ -13522,21 +13518,6 @@ fn upload_error_text(err: &ApiError) -> String {
             Some(revolt_result::ErrorType::FileTooLarge { .. }) => "it's too big.".into(),
             _ => err.to_string(),
         },
-    }
-}
-
-/// What a refused reaction's toast says.
-fn reaction_error_text(err: &ApiError) -> SharedString {
-    use revolt_result::ErrorType;
-    match err.error_type() {
-        Some(ErrorType::MissingPermission { .. }) => "You can't react here.".into(),
-        // The reaction limit (checked before sending, but another client may
-        // have just filled it), an emoji the author didn't allow, or a
-        // custom emoji that isn't usable here.
-        Some(ErrorType::InvalidOperation) => "Stoat didn't accept that reaction. The message \
-             may have the most reactions it can, or that emoji isn't allowed here."
-            .into(),
-        _ => format!("Couldn't update your reaction: {err}").into(),
     }
 }
 

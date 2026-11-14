@@ -166,3 +166,54 @@ Deferred to the end: custom emoji on a real server, inline and jumbo.
 
 ### Manual Validation
 Deferred to the end: pin on the phone and see it on desktop (needs a server where you have Manage Messages); Copy Link and open it.
+
+## Chunk 5: Reactions
+
+### Changes Made
+- Core, so both apps share desktop's text:
+  - `src/api/error.rs`: `ApiError::reaction_failure_text()`, moved from the private `reaction_error_text` in `src/ui/chat.rs`.
+  - `src/store.rs`: `pub const FULL_REACTIONS_TEXT`, moved from `src/ui/chat.rs`.
+  - Desktop now uses both; the text is unchanged.
+- `ios/stoat-ffi/src/timeline.rs`: `MessageItem.reactions: Vec<ReactionItem { key, emoji, count, mine, names }>`, `EmojiItem` (Unicode, or Custom with id, name and URL) and `PickerEmojiItem`, mapped from the store's `ReactionChip`, `ReactionEmoji` and `PickerEmoji`.
+- `ios/stoat-ffi/src/actions.rs`:
+  - `ReactionPicker { choices, full, restricted, note }`.
+  - `reaction_picker(channel, message)`: `MessageRow::picker_choices` over `ChatStore::reaction_choices`, the message's row found in `store.timeline`.
+  - `search_emoji(channel, query)`: `emoji::search_all` over Unicode and `custom_emoji_for(channel)`, up to 200, ignoring surrounding `:`.
+  - `async toggle_reaction(channel, message, emoji) -> Result`, as desktop's `toggle_reaction`:
+    - a per-(message, emoji) in-flight guard, so a second tap waits;
+    - `has_reacted` decides add or remove;
+    - `would_exceed_reactions` refuses a new emoji on a full message with `FULL_REACTIONS_TEXT`, without a request;
+    - an optimistic `apply_react`, then `react`/`unreact`, undone with `reaction_failure_text` on failure.
+- `ios/stoat-ffi/src/controller.rs`: `Shared.reacting`.
+- `ios/stoat-ffi/tests/actions.rs`: 5 reaction tests, 10 in all:
+  - toggling adds (PUT) and shows at once, the `MessageReact` echo leaves the count at 1, and toggling again removes it (DELETE), each `expect(1)`;
+  - a 400 `InvalidOperation` is undone with desktop's text;
+  - a message with 20 emoji refuses a 21st without a request, and its picker offers its own 20 with a note;
+  - the picker offers only the emoji the author allowed (`interactions.restrict_reactions`), and the usual ones otherwise;
+  - search finds `:thumbsup` → 👍, and, after an `EmojiCreate`, a custom emoji by name (which the picker also offers last).
+- Swift:
+  - `ios/RuSToat/Chat/ReactionsView.swift` (new):
+    - `EmojiView` (Unicode text, or a custom image from `EmojiImages`).
+    - `ReactionsView`: capsule chips with emoji and count, tinted with a border when yours. Tap toggles; long-press shows who ("You, Ada and 3 others" from `who(_:)`). A trailing smiley button adds.
+    - `FlowLayout`, a wrapping `Layout`.
+  - `ios/RuSToat/Chat/ReactionPicker.swift` (new): `ReactionPickerView`, a medium/large sheet.
+    - The note, then a grid of the choices, with the ones you've used tinted.
+    - `.searchable` over `searchEmoji` unless the message is full or restricted.
+    - Picking toggles and closes.
+  - `ios/RuSToat/Chat/MessageRowView.swift`: `MessageActions.react` and `pickReaction`, "Add Reaction" in the menu, and reactions under the message.
+  - `ios/RuSToat/Chat/ChatView.swift`: `reactingTo` with `.sheet(item:)`, `react` through `run` (errors shown under the conversation), and `MessageItem: Identifiable`.
+- `ios/RuSToatTests/RichTextTests.swift`: `ReactionsTests` for the "who reacted" text.
+- `tests/fixtures/messages_rich.json`: reactions on one message, some yours, one a custom emoji.
+
+### Divergences
+- **Long-pressing a chip uses a context menu** to show who reacted (iOS has no hover tooltip).
+- **The picker uses the default skin tone,** as the plan assumed.
+
+### Verification Performed
+- `cargo test -p stoat-ffi`: 69 passed (actions 10).
+- Swift: 19 tests in 7 suites passed, no warnings.
+- Desktop: `cargo test`: 1499 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings`: clean.
+- Simulator against `fake_stoat`: six chips wrapping onto a second row, the custom emoji's image in its chip, 👍 and 🚀 tinted as yours, and the add button.
+
+### Manual Validation
+Deferred to the end: react and unreact between the phone and desktop; the 20-emoji limit.
