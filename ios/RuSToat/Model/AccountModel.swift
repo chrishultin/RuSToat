@@ -22,6 +22,9 @@ final class AccountModel {
     private(set) var readyCount = 0
     /// Unsent text per channel, kept while the app runs.
     var drafts: [String: String] = [:]
+    /// Files attached to each channel's message box (kept, like drafts, for
+    /// the session).
+    var trays: [String: [TrayFile]] = [:]
 
     @ObservationIgnored private var controller: AccountController?
     /// Called when Stoat ends the session.
@@ -75,6 +78,13 @@ final class AccountModel {
         }
         for channel in change.timelines {
             timelineVersions[channel, default: 0] += 1
+        }
+        if !change.timelines.isEmpty || change.ready {
+            // Files of messages now sent or discarded (wherever they were):
+            // delete our copies.
+            for path in controller?.releasedFiles() ?? [] {
+                OutgoingFiles.remove(path)
+            }
         }
     }
 

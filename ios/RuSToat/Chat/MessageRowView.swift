@@ -271,8 +271,7 @@ struct AttachmentView: View {
         case .video(let video):
             VideoAttachmentView(video: video, uncover: actions.revealAttachment)
         case .local(let local):
-            FileCard(name: local.name, detail: local.sizeLabel, icon: local.kind.symbol, spoiler: local.spoiler) {}
-                .disabled(true)
+            LocalAttachmentView(local: local)
         }
     }
 

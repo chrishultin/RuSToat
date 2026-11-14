@@ -43,6 +43,9 @@ struct ChatView: View {
     @State private var mediaMaxWidth: CGFloat = 300
     /// The pictures open full screen.
     @State private var viewing: ViewerRequest?
+    @State private var pickingFiles = false
+    /// Sends iOS is asked to let finish in the background, by message key.
+    @State private var backgroundSends: [String: UIBackgroundTaskIdentifier] = [:]
     @Environment(\.scenePhase) private var scenePhase
 
     private var hasMore: Bool {
@@ -119,6 +122,9 @@ struct ChatView: View {
         .fullScreenCover(item: $viewing) { request in
             ImageViewer(request: request)
         }
+        .fileImporter(isPresented: $pickingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) {
+            addPicked($0)
+        }
         .sheet(item: $reactingTo) { message in
             ReactionPickerView(model: model, channelId: route.id, message: message) { key in
                 react(message.id, key)
@@ -150,6 +156,9 @@ struct ChatView: View {
                     Composer(
                         text: draft,
                         replyingTo: $replyingTo,
+                        files: tray,
+                        onRemoveFile: removeFromTray,
+                        onPickFiles: { pickingFiles = true },
                         editing: editing != nil,
                         onCancelEdit: finishEditing,
                         placeholder: placeholderText,
@@ -166,6 +175,51 @@ struct ChatView: View {
                 CantSendBar()
             }
         }
+    }
+
+    private var tray: Binding<[TrayFile]> {
+        Binding(
+            get: { model.trays[route.id] ?? [] },
+            set: { model.trays[route.id] = $0 }
+        )
+    }
+
+    private func removeFromTray(_ file: TrayFile) {
+        model.trays[route.id]?.removeAll { $0.id == file.id }
+        OutgoingFiles.remove(file.url.path(percentEncoded: false))
+    }
+
+    /// Copy what the user picked into the tray, one by one, while the
+    /// instance's limits allow; the first that doesn't fit says why.
+    private func addPicked(_ result: Result<[URL], Error>) {
+        guard case .success(let urls) = result else {
+            show("Couldn't open those files.")
+            return
+        }
+        for url in urls {
+            do {
+                try attach(OutgoingFiles.copy(picked: url))
+            } catch let CoreError.Failed(message) {
+                show(message)
+                return
+            } catch {
+                show("Couldn't attach \(url.lastPathComponent).")
+                return
+            }
+        }
+    }
+
+    /// Add `file` to the tray if the instance's limits allow it with the
+    /// others; if not, it's deleted and the core's reason thrown.
+    private func attach(_ file: TrayFile) throws {
+        let files = (model.trays[route.id] ?? []) + [file]
+        do {
+            try model.core.checkAttachments(files: files.map(\.outgoing))
+        } catch {
+            OutgoingFiles.remove(file.url.path(percentEncoded: false))
+            throw error
+        }
+        model.trays[route.id] = files
     }
 
     private var draft: Binding<String> {
@@ -271,7 +325,15 @@ struct ChatView: View {
             return
         }
         do {
-            _ = try model.core.send(channelId: route.id, text: text, replyTo: replyingTo?.id)
+            let files = model.trays[route.id] ?? []
+            let key = try model.core.send(
+                channelId: route.id, text: text, replyTo: replyingTo?.id,
+                attachments: files.map(\.outgoing)
+            )
+            // The core has the files now, and hands them back once they're
+            // no longer needed.
+            model.trays[route.id] = nil
+            keepRunning(key)
             model.drafts[route.id] = nil
             replyingTo = nil
             sendError = nil
@@ -335,6 +397,22 @@ struct ChatView: View {
                     position.scrollTo(id: id, anchor: .top)
                 }
             }
+            // Or send a file (a path on the Mac running the simulator):
+            // SIMCTL_CHILD_RUSTOAT_DEV_ATTACH=<path> xcrun simctl launch …
+            if let path = ProcessInfo.processInfo.environment["RUSTOAT_DEV_ATTACH"] {
+                // Once connected, as a user would.
+                while model.status != .connected {
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+                try? await Task.sleep(for: .seconds(1))
+                try? attach(OutgoingFiles.copy(picked: URL(filePath: path)))
+                send()
+            }
+            // Or attach files without sending them (paths, comma-separated):
+            // SIMCTL_CHILD_RUSTOAT_DEV_TRAY=<path>,<path> xcrun simctl launch …
+            for path in ProcessInfo.processInfo.environment["RUSTOAT_DEV_TRAY"]?.split(separator: ",") ?? [] {
+                try? attach(OutgoingFiles.copy(picked: URL(filePath: String(path))))
+            }
             // Or open a picture full screen (by file ID):
             // SIMCTL_CHILD_RUSTOAT_DEV_VIEW=<file ID> xcrun simctl launch …
             if let id = ProcessInfo.processInfo.environment["RUSTOAT_DEV_VIEW"] {
@@ -353,8 +431,35 @@ struct ChatView: View {
         }
     }
 
+    /// Ask iOS for time to finish sending `key` if the app is sent to the
+    /// background meanwhile (enough for a short upload; longer ones fail
+    /// and can be retried).
+    private func keepRunning(_ key: String) {
+        let task = UIApplication.shared.beginBackgroundTask(withName: "Send message") {
+            if let task = backgroundSends.removeValue(forKey: key) {
+                UIApplication.shared.endBackgroundTask(task)
+            }
+        }
+        if task != .invalid {
+            backgroundSends[key] = task
+        }
+    }
+
+    /// Let iOS suspend the app again once a send has finished (or failed).
+    private func endFinishedSends() {
+        let sending = Set(rows.compactMap { row -> String? in
+            guard case .message(let message) = row, message.pending == .sending else { return nil }
+            return message.key
+        })
+        for (key, task) in backgroundSends where !sending.contains(key) {
+            backgroundSends[key] = nil
+            UIApplication.shared.endBackgroundTask(task)
+        }
+    }
+
     private func refresh() {
         rows = model.core.timeline(channelId: route.id)
+        endFinishedSends()
         if rows.isEmpty && loaded {
             // Dropped by a reconnect; the core reloads it.
             return

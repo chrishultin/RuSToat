@@ -7,6 +7,8 @@ struct RuSToatApp: App {
 
     init() {
         initLogging()
+        // Files left in a tray (or mid-send) when the app last quit.
+        OutgoingFiles.removeAll()
         _model = State(initialValue: AppModel.live())
     }
 

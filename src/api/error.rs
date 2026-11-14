@@ -119,6 +119,20 @@ impl ApiError {
         }
     }
 
+    /// Why an upload failed, after "Couldn't upload {name}: ".
+    pub fn upload_failure_text(&self) -> String {
+        match self {
+            ApiError::Network(_) => "couldn't reach the file server.".into(),
+            ApiError::File(err) => format!("couldn't read it ({err})."),
+            ApiError::Unexpected { status: 413, .. } => "it's too big.".into(),
+            ApiError::RateLimited { .. } => "uploading too fast. Wait a moment, then retry.".into(),
+            _ => match self.error_type() {
+                Some(ErrorType::FileTooLarge { .. }) => "it's too big.".into(),
+                _ => self.to_string(),
+            },
+        }
+    }
+
     /// What a failed pin (`pin`) or unpin says.
     pub fn pin_failure_text(&self, pin: bool) -> String {
         let (done, doing) = if pin {

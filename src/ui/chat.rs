@@ -13470,7 +13470,7 @@ async fn upload_file(
                     tx.unbounded_send((sent, total)).ok();
                 })
                 .await
-                .map_err(|err| upload_error_text(&err))
+                .map_err(|err| err.upload_failure_text())
         }
     })
     .fuse();
@@ -13504,20 +13504,6 @@ async fn upload_file(
                 return Ok(id);
             }
         }
-    }
-}
-
-/// Why an upload failed, after "Couldn't upload {name}: ".
-fn upload_error_text(err: &ApiError) -> String {
-    match err {
-        ApiError::Network(_) => "couldn't reach the file server.".into(),
-        ApiError::File(err) => format!("couldn't read it ({err})."),
-        ApiError::Unexpected { status: 413, .. } => "it's too big.".into(),
-        ApiError::RateLimited { .. } => "uploading too fast. Wait a moment, then retry.".into(),
-        _ => match err.error_type() {
-            Some(revolt_result::ErrorType::FileTooLarge { .. }) => "it's too big.".into(),
-            _ => err.to_string(),
-        },
     }
 }
 

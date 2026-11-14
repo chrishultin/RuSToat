@@ -11,7 +11,7 @@ use stoat_gpui::runtime::spawn_io;
 use stoat_gpui::store::{ChatStore, FULL_REACTIONS_TEXT, TimelineRow};
 
 use crate::CoreError;
-use crate::controller::AccountController;
+use crate::controller::{AccountController, OutgoingFile, check_files};
 use crate::timeline::{EmojiItem, PickerEmojiItem};
 
 /// What a message's reaction picker offers.
@@ -364,6 +364,17 @@ impl AccountController {
     pub fn reveal_image(&self, channel_id: String, file_id: String) {
         self.shared.store.lock().unwrap().reveal_image(&file_id);
         self.shared.timeline_changed(&channel_id);
+    }
+
+    /// Whether `files` may go with one message under the instance's limits
+    /// (how many, and how big each), with desktop's text if not: what the
+    /// tray checks as files are added.
+    pub fn check_attachments(&self, files: Vec<OutgoingFile>) -> Result<(), CoreError> {
+        let files = files
+            .iter()
+            .map(OutgoingFile::draft)
+            .collect::<Result<Vec<_>, _>>()?;
+        check_files(&files, &self.shared.limits.lock().unwrap())
     }
 
     /// Uncover spoiler attachment `file_id` (the user tapped it) for the

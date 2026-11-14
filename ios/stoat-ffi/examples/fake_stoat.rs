@@ -56,6 +56,10 @@ async fn main() {
         )
         .mount(&api)
         .await;
+    // Uploads: kept in memory, answered after two seconds (to see the
+    // pending row's progress), and served back by ID.
+    let uploads = Uploads::default();
+    serve_uploads(&api, &uploads).await;
     // Sending: Stoat creates the message with the send's idempotency key as
     // its nonce, and echoes it on the events socket.
     let sent = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -72,9 +76,10 @@ async fn main() {
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or_default();
             let message = json!({
-                "_id": format!("01JE00000000000000000S{n:04}"), "channel": channel,
+                "_id": ulid_now(n), "channel": channel,
                 "author": support::ME, "content": body["content"], "nonce": nonce,
                 "replies": body["replies"].as_array().map(|r| r.iter().map(|r| r["id"].clone()).collect::<Vec<_>>()),
+                "attachments": uploads.files(&body["attachments"]),
             });
             let mut frame = message.clone();
             frame["type"] = json!("Message");
@@ -233,4 +238,105 @@ fn ranged(request: &Request, bytes: &[u8], kind: &str) -> ResponseTemplate {
             .insert_header("Accept-Ranges", "bytes")
             .set_body_raw(bytes.to_vec(), kind),
     }
+}
+
+/// An uploaded file: its name, content type and bytes.
+type Upload = (String, String, Vec<u8>);
+
+/// Files uploaded to the fake: `up-{n}` is the `n`th.
+#[derive(Clone, Default)]
+struct Uploads(std::sync::Arc<std::sync::Mutex<Vec<Upload>>>);
+
+impl Uploads {
+    /// The files with these IDs, as a message's `attachments`.
+    fn files(&self, ids: &serde_json::Value) -> serde_json::Value {
+        let uploads = self.0.lock().unwrap();
+        let files: Vec<_> = ids
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|id| {
+                let id = id.as_str()?;
+                let index: usize = id.strip_prefix("up-")?.parse().ok()?;
+                let (name, kind, bytes) = uploads.get(index)?;
+                let metadata = if kind.starts_with("image/") {
+                    // No dimensions: the row uses the fallback box.
+                    json!({ "type": "Image", "width": 0, "height": 0 })
+                } else {
+                    json!({ "type": "File" })
+                };
+                Some(json!({ "_id": id, "tag": "attachments", "filename": name,
+                             "metadata": metadata, "content_type": kind, "size": bytes.len() }))
+            })
+            .collect();
+        json!(files)
+    }
+}
+
+/// One multipart upload's file: its name, content type and bytes.
+fn multipart_file(body: &[u8]) -> Option<Upload> {
+    let text = String::from_utf8_lossy(body);
+    let name = text.split("filename=\"").nth(1)?.split('"').next()?.to_string();
+    let kind = text
+        .split("Content-Type: ")
+        .nth(1)
+        .and_then(|rest| rest.split("\r\n").next())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let boundary = body.split(|&b| b == b'\r').next()?.to_vec();
+    let start = body.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
+    let mut end_marker = b"\r\n".to_vec();
+    end_marker.extend_from_slice(&boundary);
+    let end = start + body[start..].windows(end_marker.len()).position(|w| w == end_marker.as_slice())?;
+    Some((name, kind, body[start..end].to_vec()))
+}
+
+async fn serve_uploads(api: &wiremock::MockServer, uploads: &Uploads) {
+    Mock::given(method("POST"))
+        .and(path("/attachments"))
+        .respond_with({
+            let uploads = uploads.clone();
+            move |request: &Request| {
+                let Some(file) = multipart_file(&request.body) else {
+                    return ResponseTemplate::new(400);
+                };
+                let mut uploads = uploads.0.lock().unwrap();
+                uploads.push(file);
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "id": format!("up-{}", uploads.len() - 1) }))
+                    .set_delay(std::time::Duration::from_secs(2))
+            }
+        })
+        .mount(api)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/attachments/up-\d+(/.*)?$"))
+        .respond_with({
+            let uploads = uploads.clone();
+            move |request: &Request| {
+                let index = request.url.path().split('/').nth(2).and_then(|id| id.strip_prefix("up-")?.parse::<usize>().ok());
+                match index.and_then(|i| uploads.0.lock().unwrap().get(i).cloned()) {
+                    Some((_, kind, bytes)) => ranged(request, &bytes, &kind),
+                    None => ResponseTemplate::new(404),
+                }
+            }
+        })
+        .mount(api)
+        .await;
+}
+
+/// A message ID for now (a ULID: the time in milliseconds, then `n`), so
+/// sent messages sort after the fixtures' history, as on Stoat.
+fn ulid_now(n: usize) -> String {
+    const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    let mut ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let mut time = [b'0'; 10];
+    for c in time.iter_mut().rev() {
+        *c = CROCKFORD[(ms % 32) as usize];
+        ms /= 32;
+    }
+    format!("{}000000000000{n:04}", String::from_utf8_lossy(&time))
 }

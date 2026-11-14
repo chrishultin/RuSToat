@@ -1,10 +1,16 @@
 import SwiftUI
 
-/// The message box: a growing text field and a send button floating in
-/// Liquid Glass, with what's being replied to above it.
+/// The message box: a ＋ menu for attaching files, a growing text field and
+/// a send button floating in Liquid Glass, with what's being replied to and
+/// the attached files above it.
 struct Composer: View {
     @Binding var text: String
     @Binding var replyingTo: MessageItem?
+    /// The tray: files to send with the message.
+    @Binding var files: [TrayFile]
+    var onRemoveFile: (TrayFile) -> Void = { _ in }
+    /// Pick files from Files.
+    var onPickFiles: () -> Void = {}
     /// Editing one of the user's messages: the box holds its text, and
     /// sending saves it.
     var editing = false
@@ -16,6 +22,11 @@ struct Composer: View {
 
     private var empty: Bool {
         text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Nothing to send: no text, and no files (an edit can't have files).
+    private var nothing: Bool {
+        empty && (files.isEmpty || editing)
     }
 
     var body: some View {
@@ -53,7 +64,23 @@ struct Composer: View {
                     .glassEffect(.regular, in: .capsule)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
+                if !files.isEmpty && !editing {
+                    AttachmentTray(files: $files, remove: onRemoveFile)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
                 HStack(alignment: .bottom, spacing: 8) {
+                    if !editing {
+                        Menu {
+                            Button("Files", systemImage: "folder", action: onPickFiles)
+                        } label: {
+                            Image(systemName: "plus")
+                                .font(.body.weight(.semibold))
+                                .frame(width: 28, height: 28)
+                        }
+                        .buttonStyle(.glass)
+                        .buttonBorderShape(.circle)
+                        .accessibilityLabel("Attach")
+                    }
                     TextField(placeholder, text: $text, axis: .vertical)
                         .lineLimit(1...6)
                         .focused($focused)
@@ -68,7 +95,7 @@ struct Composer: View {
                     }
                     .buttonStyle(.glassProminent)
                     .buttonBorderShape(.circle)
-                    .disabled(empty && !editing)
+                    .disabled(nothing && !editing)
                     .accessibilityLabel(editing ? "Save" : "Send")
                 }
             }
@@ -77,6 +104,7 @@ struct Composer: View {
         .padding(.bottom, 8)
         .animation(.default, value: replyingTo?.key)
         .animation(.default, value: editing)
+        .animation(.default, value: files.count)
         .onChange(of: replyingTo?.key) { _, key in
             if key != nil { focused = true }
         }
@@ -87,7 +115,7 @@ struct Composer: View {
 
     private func send() {
         // An empty edit is refused by the core, with a hint to use Delete.
-        guard !empty || editing else { return }
+        guard !nothing || editing else { return }
         onSend()
     }
 }

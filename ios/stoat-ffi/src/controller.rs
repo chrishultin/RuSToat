@@ -22,10 +22,13 @@ use stoat_gpui::notify::{self, NotificationSettings};
 use stoat_gpui::rail::{self, Ordering, ServerFolders};
 use stoat_gpui::runtime::{runtime, spawn_io};
 use stoat_gpui::api::models::ReplyIntent;
-use stoat_gpui::draft::new_nonce;
+use stoat_gpui::draft::{
+    AttachError, AttachmentLimits, DraftAttachment, MAX_MESSAGE_CHARS, SendCheck, check_send,
+    new_nonce,
+};
 use stoat_gpui::store::{
-    ChannelEntry, ChannelKind, ChannelSection, ChatStore, PendingMessage, PendingState,
-    ServerEntry, with_unread_divider,
+    ChannelEntry, ChannelKind, ChannelSection, ChatStore, PendingAttachment, PendingMessage,
+    PendingState, ServerEntry, with_unread_divider,
 };
 use stoat_gpui::typing::{IDLE_AFTER, OutgoingTyping, TypingSignal};
 
@@ -43,6 +46,62 @@ pub const HISTORY_PAGE: usize = 50;
 
 /// Most reply originals fetched at once for one channel.
 const REPLY_FETCHES: usize = 5;
+
+/// How often an upload's progress is redrawn (desktop's
+/// `PROGRESS_INTERVAL`): the upload reports every chunk, which would redraw
+/// the list hundreds of times a second.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+
+/// A file to send with a message: a copy Swift made in its temporary
+/// folder, named as the user's file, which Swift deletes once
+/// [`AccountController::released_files`] hands it back.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct OutgoingFile {
+    /// Its type is guessed from this file's name.
+    pub path: String,
+    /// As the user sees it (and as it's uploaded, unless a spoiler).
+    pub name: String,
+    /// Sent as a spoiler (`SPOILER_{name}`).
+    pub spoiler: bool,
+}
+
+/// How many files a message may carry, and how big each may be, from the
+/// instance's `GET /`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct AttachmentLimitsItem {
+    pub max_bytes: u64,
+    pub max_count: u32,
+}
+
+impl OutgoingFile {
+    /// As the core's tray holds it: typed by its name, sized from disk, and
+    /// temporary (Swift's copy), so it's handed back for deleting once its
+    /// message is sent or discarded.
+    pub(crate) fn draft(&self) -> Result<DraftAttachment, CoreError> {
+        let path = std::path::PathBuf::from(&self.path);
+        let size = std::fs::metadata(&path)
+            .map_err(|err| CoreError::failed(format!("Couldn't read {}: {err}", self.name)))?
+            .len();
+        let mut file = DraftAttachment::from_path(path.clone(), size)
+            .with_dimensions(stoat_gpui::attachment::local_image_size(&path));
+        file.name = self.name.clone();
+        file.spoiler = self.spoiler;
+        file.temporary = true;
+        Ok(file)
+    }
+}
+
+/// Whether `files` may go with one message under `limits`, with desktop's
+/// texts: no more than `max_count`, none over `max_bytes`.
+pub(crate) fn check_files(files: &[DraftAttachment], limits: &AttachmentLimits) -> Result<(), CoreError> {
+    let mut draft = stoat_gpui::draft::Draft::default();
+    for file in files {
+        draft
+            .add_attachment(file.clone(), limits)
+            .map_err(|err: AttachError| CoreError::failed(err))?;
+    }
+    Ok(())
+}
 
 /// What changed, so Swift knows what to read again.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -217,6 +276,8 @@ pub(crate) struct Shared {
     /// Reactions on their way to Stoat, as (message, emoji): a second tap
     /// waits for the first.
     pub(crate) reacting: Mutex<HashSet<(String, String)>>,
+    /// The instance's attachment limits (defaults until `GET /` answers).
+    pub(crate) limits: Mutex<AttachmentLimits>,
 }
 
 fn now_ms() -> u64 {
@@ -305,9 +366,11 @@ impl Shared {
         Ok(more)
     }
 
-    /// `POST` a pending message (as desktop's `post_pending`, without
-    /// attachments). Success confirms it, unless its live echo already
-    /// has; failure marks it failed with the reason.
+    /// Upload a pending message's files, one at a time, then `POST` it
+    /// with their IDs (as desktop's `post_pending`). Files already uploaded
+    /// (by an earlier attempt) aren't sent again. A failed upload fails the
+    /// message with why, and nothing is posted. Success confirms it, unless
+    /// its live echo already has; failure marks it failed with the reason.
     async fn post(self: Arc<Self>, pending: PendingMessage) {
         let PendingMessage {
             key,
@@ -315,11 +378,30 @@ impl Shared {
             content,
             replies,
             nonce,
+            attachments,
             ..
         } = pending;
+        let mut ids = Vec::with_capacity(attachments.len());
+        for file in &attachments {
+            if let Some(id) = file.uploaded_id() {
+                ids.push(id.to_string());
+                continue;
+            }
+            match self.clone().upload(&channel, &key, &file.file).await {
+                Ok(id) => ids.push(id),
+                Err(reason) => {
+                    let reason = format!("Couldn't upload {}: {reason}", file.file.name);
+                    // Nothing was posted, so the key is still unused.
+                    if self.store.lock().unwrap().fail_pending(&channel, &key, reason, false) {
+                        self.timeline_changed(&channel);
+                    }
+                    return;
+                }
+            }
+        }
         let result = self
             .client
-            .send_message(&channel, &content, &[], &replies, &nonce)
+            .send_message(&channel, &content, &ids, &replies, &nonce)
             .await;
         match result {
             Ok(message) => {
@@ -357,6 +439,62 @@ impl Shared {
                 }
             }
         }
+    }
+
+    /// Upload `file` of pending message `key`, showing its progress in the
+    /// row at most every [`PROGRESS_INTERVAL`] (and when it's all sent).
+    /// Returns its ID, or why it failed (desktop's text).
+    async fn upload(
+        self: Arc<Self>,
+        channel: &str,
+        key: &str,
+        file: &DraftAttachment,
+    ) -> Result<String, String> {
+        let Some(server) = self.store.lock().unwrap().media().file_server().map(str::to_string)
+        else {
+            return Err("no file server".into());
+        };
+        let shown = Mutex::new(None::<std::time::Instant>);
+        let progress = {
+            let (this, channel, key, local_id) =
+                (self.clone(), channel.to_string(), key.to_string(), file.local_id);
+            move |sent: u64, total: u64| {
+                {
+                    let mut shown = shown.lock().unwrap();
+                    let due = shown.is_none_or(|at| at.elapsed() >= PROGRESS_INTERVAL);
+                    if !due && sent < total {
+                        return;
+                    }
+                    *shown = Some(std::time::Instant::now());
+                }
+                let changed = this
+                    .store
+                    .lock()
+                    .unwrap()
+                    .set_upload_progress(&channel, &key, local_id, sent, total);
+                if changed {
+                    this.timeline_changed(&channel);
+                }
+            }
+        };
+        let id = self
+            .client
+            .upload_attachment(&server, &file.upload_name(), &file.content_type, &file.path, progress)
+            .await
+            .map_err(|err| {
+                log::warn!("couldn't upload {}: {err:?}", file.name);
+                err.upload_failure_text()
+            })?;
+        log::info!("uploaded {} as {id}", file.name);
+        if self
+            .store
+            .lock()
+            .unwrap()
+            .set_uploaded(channel, key, file.local_id, id.clone())
+        {
+            self.timeline_changed(channel);
+        }
+        Ok(id)
     }
 
     /// Fetch the originals of replies that aren't loaded (as desktop's
@@ -433,8 +571,11 @@ impl Shared {
         match self.client.root_config().await {
             Ok(root) => {
                 let media = MediaUrls::from_root(self.client.base_url(), &root);
-                *self.web_app.lock().unwrap() = root.app.clone();
+                *self.limits.lock().unwrap() = AttachmentLimits::from_root(&root);
+                // The file server before the web client: tests wait for a
+                // message link to know uploads can start.
                 self.store.lock().unwrap().set_media(media);
+                *self.web_app.lock().unwrap() = root.app.clone();
                 self.changed(Changed {
                     lists: true,
                     ..Changed::default()
@@ -549,6 +690,7 @@ impl AccountController {
                 rich: RichCache::default(),
                 web_app: Mutex::new(None),
                 reacting: Mutex::new(HashSet::new()),
+                limits: Mutex::new(AttachmentLimits::default()),
             }),
             running: Mutex::new(None),
             typing: Mutex::new(OutgoingTyping::default()),
@@ -818,19 +960,33 @@ impl AccountController {
         self.shared.store.lock().unwrap().can_send(&channel_id)
     }
 
-    /// Send `text` to `channel_id`, replying to `reply_to` if given. It
-    /// shows at once as pending, then sent (or failed, to retry). Returns
-    /// its key: the row's ID until and after Stoat confirms it.
+    /// Send `text` to `channel_id` with `attachments`, replying to
+    /// `reply_to` if given. It shows at once as pending (with each file's
+    /// upload progress), then sent (or failed, to retry). Files over the
+    /// instance's limits are refused with desktop's text, and nothing is
+    /// sent. Returns its key: the row's ID until and after Stoat confirms it.
     pub fn send(
         &self,
         channel_id: String,
         text: String,
         reply_to: Option<String>,
+        attachments: Vec<OutgoingFile>,
     ) -> Result<String, CoreError> {
-        let content = text.trim().to_string();
-        if content.is_empty() {
-            return Err(CoreError::failed("Type a message first."));
-        }
+        // Trimmed at both ends, as before files could be sent.
+        let content = match check_send(text.trim(), !attachments.is_empty()) {
+            SendCheck::Ready(content) => content,
+            SendCheck::Empty => return Err(CoreError::failed("Type a message first.")),
+            SendCheck::TooLong(chars) => {
+                return Err(CoreError::failed(format!(
+                    "This message is too long ({chars} characters; the most is {MAX_MESSAGE_CHARS})."
+                )));
+            }
+        };
+        let files = attachments
+            .iter()
+            .map(OutgoingFile::draft)
+            .collect::<Result<Vec<_>, _>>()?;
+        check_files(&files, &self.shared.limits.lock().unwrap())?;
         // Sending ends typing.
         let stopped = self.typing.lock().unwrap().stop();
         self.send_typing(stopped);
@@ -849,7 +1005,7 @@ impl AccountController {
                     fail_if_not_exists: None,
                 })
                 .collect(),
-            attachments: Vec::new(),
+            attachments: files.into_iter().map(PendingAttachment::new).collect(),
             state: PendingState::Sending,
             sent_ms,
             nonce_used: false,
@@ -878,6 +1034,28 @@ impl AccountController {
             self.shared.timeline_changed(&channel_id);
             runtime().spawn(self.shared.clone().post(pending));
         }
+    }
+
+    /// The instance's limits on a message's files.
+    pub fn attachment_limits(&self) -> AttachmentLimitsItem {
+        let limits = *self.shared.limits.lock().unwrap();
+        AttachmentLimitsItem {
+            max_bytes: limits.max_bytes,
+            max_count: u32::try_from(limits.max_count).unwrap_or(u32::MAX),
+        }
+    }
+
+    /// Files of sent or discarded messages that nothing needs any more,
+    /// each handed back once: Swift deletes them. Ask after each change.
+    pub fn released_files(&self) -> Vec<String> {
+        self.shared
+            .store
+            .lock()
+            .unwrap()
+            .take_released_files()
+            .into_iter()
+            .map(|file| file.path.to_string_lossy().into_owned())
+            .collect()
     }
 
     /// Give up on an unsent message.

@@ -273,3 +273,96 @@ Deferred to the end: play a video inline and full screen; play a voice note; sta
 
 ### Manual Validation
 Deferred to the end: paste a YouTube link and a news article on desktop and compare the cards on the phone; send a GIF from desktop's GIF picker and watch it play on the phone.
+
+## Chunk 5: Sending files, with progress
+
+### Changes Made
+- `src/api/error.rs`: `ApiError::upload_failure_text()`, moved from `src/ui/chat.rs`'s `upload_error_text`, which desktop now calls.
+- `ios/stoat-ffi/src/controller.rs`:
+  - `OutgoingFile { path, name, spoiler }` (a UniFFI record).
+  - `OutgoingFile::draft()` makes a `DraftAttachment`:
+    - sized from disk;
+    - typed by the file name;
+    - with its dimensions from `attachment::local_image_size`;
+    - `temporary: true`, so the store hands it back when its message leaves the pending list;
+    - spoiler as marked.
+  - `check_files()` applies desktop's `Draft::add_attachment` rules and texts.
+  - `send(channel, text, reply_to, attachments)`:
+    - `check_send` lets a message of files alone through (the text is still trimmed at both ends, as before), and gives too-long text desktop's text;
+    - the files are checked against the limits before anything shows;
+    - the pending message carries them as `PendingAttachment`s.
+  - `Shared::post` runs desktop's loop:
+    - each file not yet uploaded goes through `Shared::upload` in order;
+    - a failure is `fail_pending(…, "Couldn't upload {name}: {reason}", false)`, and nothing is posted;
+    - then the POST carries the IDs.
+  - `Shared::upload`:
+    - `upload_attachment` with the file's `upload_name()` (so spoilers go up as `SPOILER_…`);
+    - progress through `set_upload_progress` at most every 100 ms (`PROGRESS_INTERVAL`), and always the last one;
+    - then `set_uploaded`.
+  - `Shared.limits`: the `AttachmentLimits` from `GET /` (defaults until then). `fetch_media` now sets the file server before `web_app`, so a message link being available means uploads can start.
+  - `attachment_limits()`.
+  - `released_files()`: `take_released_files()` as paths.
+- `ios/stoat-ffi/src/actions.rs`: `check_attachments(files)`, which applies the limits with desktop's texts.
+- `ios/stoat-ffi/tests/sending.rs`: five new tests (12 in all), and the existing calls pass `Vec::new()` for files.
+  - Two files upload in order before the message, whose POST carries their IDs. The spoiler goes up as `SPOILER_plot.txt`. Files alone are a message. The pending row shows `Local` items (name, "4.0 KB", text kind) at 1000 once uploaded. The copies are handed back once, after confirmation.
+  - A 413 fails the row with "Couldn't upload huge.mov: it's too big.", posts nothing, and resets progress. Discarding hands the file back.
+  - A 502 on the second file's first try leaves the first at 1000. Retry uploads only the second, and posts once with both IDs.
+  - A 16 MB upload (256 chunks) redraws at most 12 times and ends at 1000.
+  - A limit of 10 bytes and 2 files gives "A message can have at most 2 files." (from both `check_attachments` and `send`) and "big.bin is too big to send. Files can be up to 10 B.". Nothing is sent or uploaded.
+- `ios/stoat-ffi/examples/fake_stoat.rs`:
+  - `POST /attachments` keeps uploads in memory and answers after 2 s, so the pending row can be seen.
+  - Sent messages echo their files: images with no dimensions, other files as `File`.
+  - `GET /attachments/up-N` serves uploads back, with range support.
+  - Sent messages get time-based ULIDs (`ulid_now`). The old fixed `01JE…S0000` IDs sorted before the fixture history, so a confirmed message jumped to the top of the channel.
+- Swift:
+  - `ios/RuSToat/Chat/OutgoingFiles.swift` (new):
+    - `TrayFile` (the URL of our copy, name, size, spoiler, `outgoing`);
+    - `OutgoingFiles` keeps copies in `tmp/outgoing/<uuid>/<name>`:
+      - `copy(picked:)` copies inside `startAccessingSecurityScopedResource`;
+      - `write(_:named:)`;
+      - `safeName`;
+      - `remove(path)` deletes the copy's folder, and only inside `outgoing`;
+      - `removeAll()` runs at launch.
+  - `ios/RuSToat/Chat/AttachmentTray.swift` (new):
+    - `AttachmentTray`: chips with a 36 pt preview (images decoded with `ImageLoader.decode`, blurred when marked) or an icon, the name and size, a spoiler toggle, and remove;
+    - `LocalAttachmentView`: a pending image from its local copy at the size the sent one will have (blurred if a spoiler), with an `UploadRing` on a dark disc; other files as a card with the ring;
+    - `UploadRing`: progress in thousandths, with a tick at 1000.
+  - `ios/RuSToat/Chat/Composer.swift`: a ＋ `Menu` (Files for now), hidden while editing. The tray sits above the field. Send is enabled with files alone.
+  - `ios/RuSToat/Chat/ChatView.swift`:
+    - `.fileImporter` with multiple selection. Each picked file is copied and checked with `check_attachments` against the tray plus itself; the first that doesn't fit is deleted and its reason shown.
+    - `send` passes the tray and clears it; the core now owns the copies.
+    - Each send gets a `beginBackgroundTask`, ended once its row is no longer sending.
+    - DEBUG `RUSTOAT_DEV_ATTACH=<path>` attaches and sends once connected. DEBUG `RUSTOAT_DEV_TRAY=<path>,<path>` attaches without sending.
+  - `ios/RuSToat/Model/AccountModel.swift`:
+    - `trays` per channel, kept for the session like drafts;
+    - after any timeline change or `Ready`, it deletes whatever `releasedFiles()` hands back, whichever channel is open.
+  - `ios/RuSToat/RuSToatApp.swift`: clears `tmp/outgoing` at launch.
+  - `ios/RuSToat/Chat/MessageRowView.swift`: `.local` attachments use `LocalAttachmentView`.
+  - `ios/RuSToatTests/OutgoingFilesTests.swift` (new, 4 tests, serialized):
+    - safe names;
+    - copies keep their names in their own folders, and removing deletes the folder;
+    - files outside `outgoing` are never deleted;
+    - picked files are copied out and the user's own left alone.
+
+### Divergences
+- **Released files are deleted by `AccountModel` on any change**, not only by the open chat. Messages confirmed or discarded while another screen is up still have their copies removed.
+- **`check_attachments` takes `OutgoingFile`s, not bare paths**, so its "too big" text can use the file's own name.
+- **No Rust change is needed in chunk 6 for photo dimensions.** `OutgoingFile::draft` reads them from the file with `local_image_size`, so a re-encoded JPEG's pending row already has the sent one's shape. The plan's chunk 6 was updated to say so.
+- **Text is still trimmed at both ends.** Desktop's `check_send` keeps a first line's leading spaces, but the existing iOS test (and behaviour) trims them, so `send` trims before checking.
+- **Fixed in passing:** `fake_stoat`'s sent-message IDs, described above.
+- **Not done:** a background `URLSession` (out of scope, as planned).
+
+### Verification Performed
+- `cargo test -p stoat-ffi --test sending`: 12 passed. Full `stoat-ffi`: 90 passed.
+- Swift: 43 tests in 12 suites passed.
+- Desktop `cargo test`: 1499 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings` (desktop, after moving `upload_error_text`) and the `stoat-ffi` clippy run are both clean.
+- Simulator against `fake_stoat`, in #general:
+  - `RUSTOAT_DEV_ATTACH=…/portrait.jpg`: the pending "Captain Me" row with the tower photo at its final 2:3 shape, faded, with the ring's tick on its dark disc. After the fake's 2 s, it's confirmed at the bottom of the channel, drawn from the uploaded copy.
+  - `RUSTOAT_DEV_TRAY=landscape.jpg,README.md`: the tray with a sunset thumbnail chip and a document chip ("25 KB", "15 KB"), each with the spoiler eye and remove. The ＋ button is beside the field, and Send is enabled with no text.
+  - The ring's partial progress isn't visible over loopback, because the upload finishes at once. The throttling test covers progress.
+
+### Manual Validation
+Deferred to the end:
+- send a PDF from Files and open it on desktop;
+- send one over the size limit and read the reason;
+- send in Airplane mode, then retry.

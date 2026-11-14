@@ -194,7 +194,7 @@ This is milestone iOS 3 of the [iOS roadmap](ios-app.md#ios-roadmap), building o
     - Camera shots go through `UIImagePickerController` (`UIViewControllerRepresentable`; `.camera` source, with `.photoLibrary` as a fallback on the simulator).
   - `ios/RuSToat/Chat/Composer.swift`: the menu items.
   - `ios/project.yml`: `INFOPLIST_KEY_NSCameraUsageDescription` ("RuSToat uses the camera to take photos to send."). The photo picker runs out of process and needs no permission.
-- `ios/stoat-ffi/src/controller.rs`: `OutgoingFile` gains `dimensions: Option<(u32, u32)>`, so `DraftAttachment.dimensions` gives the pending image its final size (`attachment::local_image_size` already reads it for desktop's files, and is also used as the fallback).
+- ~~`ios/stoat-ffi/src/controller.rs`: `OutgoingFile` gains `dimensions`~~ Not needed (found in chunk 5): `OutgoingFile::draft` already sets `DraftAttachment.dimensions` from `attachment::local_image_size`, which reads the re-encoded JPEG's header, so the pending image has its final size. No Rust change in this chunk.
 
 **Depends on:** Chunk 5.
 **Risks:**
