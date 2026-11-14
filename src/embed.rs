@@ -70,6 +70,8 @@ pub enum Description {
 pub struct EmbedImage {
     /// Proxied.
     pub url: String,
+    /// The picture's own address (not proxied): what Copy link copies.
+    pub source: String,
     pub width: u32,
     pub height: u32,
     /// As reported by the server (zero if unknown), for the full-size viewer.
@@ -80,11 +82,13 @@ impl EmbedView {
     /// `None` for embeds with nothing to show. `key` identifies the embed
     /// within the timeline (message ID and position), for Markdown state.
     /// `revealed`: large images the user chose to load (by file ID).
+    /// `shown`: spoilers the user clicked to see (by file ID).
     pub fn new(
         embed: &Embed,
         media: &MediaUrls,
         names: &impl Names,
         revealed: &HashSet<String>,
+        shown: &HashSet<String>,
         key: &str,
     ) -> Option<Self> {
         match embed {
@@ -95,7 +99,7 @@ impl EmbedView {
             }
             Embed::Video(video) => gif_poster(video, media)
                 .or_else(|| link(&video.url).map(|url| EmbedView::Video { url })),
-            Embed::Text(text) => text_embed(text, media, names, revealed, key),
+            Embed::Text(text) => text_embed(text, media, names, revealed, shown, key),
             Embed::None => None,
         }
     }
@@ -111,6 +115,7 @@ impl EmbedImage {
             });
         Some(EmbedImage {
             url,
+            source: image.url.clone(),
             width,
             height,
             original: (image.width, image.height),
@@ -149,6 +154,33 @@ fn gif_poster(video: &Video, media: &MediaUrls) -> Option<EmbedView> {
 }
 
 fn website(site: &WebsiteMetadata, media: &MediaUrls) -> Option<EmbedView> {
+    // A Gifbox GIF (Stoat 0.16.4's own kind) shows as its poster, linking
+    // to its Gifbox page, like a Gifbox video embed.
+    if let Some(Special::Gifbox { poster_url }) = &site.special
+        && let Some(video) = &site.video
+    {
+        let page = site.url.clone().unwrap_or_else(|| video.url.clone());
+        let poster = poster_url.as_ref().and_then(|url| {
+            let poster = Image {
+                url: url.clone(),
+                width: video.width,
+                height: video.height,
+                size: ImageSize::Large,
+            };
+            EmbedImage::new(&poster, media, EMBED_IMAGE_WIDTH, EMBED_IMAGE_HEIGHT)
+        });
+        // Without one, the still Gifbox keeps for the page's GIF.
+        let page_video = Video {
+            url: page.clone(),
+            width: video.width,
+            height: video.height,
+        };
+        return match poster {
+            Some(image) => Some(EmbedView::GifPoster { image, link: page }),
+            None => gif_poster(&page_video, media)
+                .or_else(|| link(&video.url).map(|url| EmbedView::Video { url })),
+        };
+    }
     // A GIF link shows as the GIF alone (the image, else the video).
     if matches!(site.special, Some(Special::GIF)) {
         if let Some(image) = &site.image {
@@ -210,6 +242,7 @@ fn text_embed(
     media: &MediaUrls,
     names: &impl Names,
     revealed: &HashSet<String>,
+    shown: &HashSet<String>,
     key: &str,
 ) -> Option<EmbedView> {
     let description = non_empty(&text.description).map(|source| {
@@ -229,10 +262,10 @@ fn text_embed(
         thumbnail: None,
         image: None,
         playable: false,
-        media: text
-            .media
-            .as_ref()
-            .map(|file| AttachmentView::new(file, media, revealed.contains(&file.id))),
+        media: text.media.as_ref().map(|file| {
+            AttachmentView::new(file, media, revealed.contains(&file.id))
+                .uncovered(shown.contains(&file.id))
+        }),
     };
     has_content(&card).then(|| EmbedView::Card(Box::new(card)))
 }

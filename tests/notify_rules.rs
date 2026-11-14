@@ -319,10 +319,68 @@ fn muted_channels_hide_their_dot_but_keep_mentions() {
         .find(|s| s.id == "srv-alpha")
         .unwrap();
     assert!(!alpha.unread);
-    assert_eq!(alpha.mentions, 1);
-    // The account's switcher button counts the muted mention too.
+    // As the web client: a channel's own mute keeps its mentions off the
+    // server's badge, and so off the account's switcher button.
+    assert_eq!(alpha.mentions, 0);
     let (_, home_mentions) = store.home_summary();
+    assert_eq!(store.account_summary().1, home_mentions);
+    // Unmuted, the mention counts everywhere again.
+    let mut unmuted = store.notification_settings().clone();
+    unmuted.unmute_channel("ch-random");
+    store.set_notification_settings(2, unmuted);
+    let alpha = store
+        .servers()
+        .into_iter()
+        .find(|s| s.id == "srv-alpha")
+        .unwrap();
+    assert!(alpha.unread);
+    assert_eq!(alpha.mentions, 1);
     assert_eq!(store.account_summary().1, home_mentions + 1);
+}
+
+#[test]
+fn a_muted_server_hides_its_dot_but_keeps_its_mentions() {
+    // As the web client: mentions are aimed at the user, so a server's mute
+    // doesn't hide them (only a channel's own does).
+    let mut store = store(r#"{"server_mutes":{"srv-alpha":{}}}"#, None);
+    store.apply_ack("ch-general", "01JC0000000000000000000009");
+    store.apply_message(message("ch-random", "u-ada", mention()));
+    let alpha = store
+        .servers()
+        .into_iter()
+        .find(|s| s.id == "srv-alpha")
+        .unwrap();
+    assert!(!alpha.unread);
+    assert_eq!(alpha.mentions, 1);
+    // But nothing notifies.
+    assert_eq!(
+        notify(&store, &message("ch-random", "u-ada", mention()), AWAY),
+        None
+    );
+}
+
+#[test]
+fn a_muted_conversation_adds_nothing_to_home() {
+    let mut store = default_store();
+    store.apply_message(message("dm-bob", "u-bob", mention()));
+    let (_, with_bob) = store.home_summary();
+    let bobs = store.mention_count("dm-bob");
+    assert!(bobs > 0);
+    let mut muted = store.notification_settings().clone();
+    muted.mute_channel("dm-bob", None);
+    store.set_notification_settings(2, muted);
+    let (unread, without_bob) = store.home_summary();
+    assert_eq!(without_bob, with_bob - bobs);
+    // dm-bob shows no dot, and its mentions show only in the list.
+    let bob = store
+        .home_channels()
+        .into_iter()
+        .find(|c| c.id == "dm-bob")
+        .unwrap();
+    assert!(bob.muted && !bob.unread);
+    assert!(bob.mentions > 0);
+    // Other conversations (unread in the fixture) keep Home's dot.
+    assert!(unread);
 }
 
 #[test]

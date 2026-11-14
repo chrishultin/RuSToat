@@ -216,6 +216,7 @@ fn row(id: &str, body: &str) -> TimelineRow {
         render_key: stoat_gpui::store::render_key(id, Some(body)),
         author: "a".into(),
         author_id: Some("u-a".into()),
+        author_bot: false,
         avatar: None,
         time: String::new(),
         body: Some(body.into()),

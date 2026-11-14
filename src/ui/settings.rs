@@ -22,6 +22,7 @@ use crate::ui::AppRoot;
 use crate::ui::account_details::AccountDetailsView;
 use crate::ui::account_page::AccountSecurityView;
 use crate::ui::app_prefs::AppPrefs;
+use crate::ui::bots_page::BotsPage;
 use crate::ui::profile_editor::{ProfileEditor, render_server_identities};
 use crate::ui::sessions_page::SessionsView;
 
@@ -38,6 +39,8 @@ pub struct SettingsView {
     profile_editors: HashMap<String, Entity<ProfileEditor>>,
     /// The Sessions page for each account it has shown, by account ID.
     sessions_views: HashMap<String, Entity<SessionsView>>,
+    /// The My Bots section for each account it has shown, by account ID.
+    bots_views: HashMap<String, Entity<BotsPage>>,
     /// The Account page for each account it has shown, by account ID.
     account_views: HashMap<String, Entity<AccountSecurityView>>,
     /// The Account page's details for each account it has shown, by
@@ -73,6 +76,7 @@ impl SettingsView {
             pages,
             profile_editors: HashMap::new(),
             sessions_views: HashMap::new(),
+            bots_views: HashMap::new(),
             account_views: HashMap::new(),
             details_views: HashMap::new(),
             page_reset: 0,
@@ -123,6 +127,30 @@ impl SettingsView {
         }
         let view = cx.new(|cx| SessionsView::new(chat, session, window, cx));
         self.sessions_views.insert(id, view);
+    }
+
+    /// The My Bots section for the account on screen, made the first time
+    /// it's shown, and again when the account signs in afresh.
+    fn sync_bots_view(&mut self, cx: &mut Context<Self>) {
+        let Some((id, chat)) = self.root().and_then(|root| root.read(cx).shown_chat()) else {
+            return;
+        };
+        if self
+            .bots_views
+            .get(&id)
+            .is_some_and(|view| view.read(cx).is_for(&chat))
+        {
+            return;
+        }
+        let view = cx.new(|cx| BotsPage::new(&chat, cx));
+        self.bots_views.insert(id, view);
+    }
+
+    /// The My Bots section for the account on screen, if it's signed in.
+    fn shown_bots_view(&self, cx: &App) -> Option<Entity<BotsPage>> {
+        let (id, chat) = self.root()?.read(cx).shown_chat()?;
+        let view = self.bots_views.get(&id)?;
+        view.read(cx).is_for(&chat).then(|| view.clone())
     }
 
     /// The Account page for the account on screen, made the first time it's
@@ -198,6 +226,7 @@ impl SettingsView {
             profile_page,
             account_page,
             sessions_page,
+            bots_page,
             appearance_page,
             notifications_page,
             app_page,
@@ -216,6 +245,7 @@ impl Render for SettingsView {
         // Inputs need the window, which a page function doesn't have.
         self.sync_profile_editor(window, cx);
         self.sync_sessions_view(window, cx);
+        self.sync_bots_view(cx);
         self.sync_account_view(window, cx);
         self.sync_details_view(cx);
         let pages: Vec<SettingPage> = self.pages.iter().map(|page| page(self, cx)).collect();
@@ -322,6 +352,18 @@ fn sessions_page(view: &SettingsView, cx: &mut App) -> SettingPage {
     page.group(
         SettingGroup::new().item(item.keywords(["sessions", "devices", "log out", "sign out"])),
     )
+}
+
+/// My Bots: the account on screen's bots.
+fn bots_page(view: &SettingsView, cx: &mut App) -> SettingPage {
+    let page = SettingPage::new("My Bots")
+        .icon(IconName::Bot)
+        .resettable(false);
+    let item = match view.shown_bots_view(cx) {
+        Some(bots) => SettingItem::render(move |_, _, _| bots.clone()),
+        None => signed_out_item("Sign in to manage your bots."),
+    };
+    page.group(SettingGroup::new().item(item.keywords(["bots", "my bots", "bot token"])))
 }
 
 /// A page's only row when no account is signed in on screen.

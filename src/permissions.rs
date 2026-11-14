@@ -193,6 +193,18 @@ pub fn can_manage_channel(store: &ChatStore, user: &str, channel: &str) -> bool 
         )
 }
 
+/// Whether `user` may edit `channel`'s settings (name, description, icon,
+/// slowmode, mature): a server channel or a group, with Manage Channels on
+/// it, as Stoat checks. In a group that's its owner, or any member while
+/// the group's permissions allow it (they do by default).
+pub fn can_edit_channel(store: &ChatStore, user: &str, channel: &str) -> bool {
+    (in_server(store, channel) || in_group(store, channel))
+        && has(
+            channel_permissions(store, user, channel),
+            ChannelPermission::ManageChannel,
+        )
+}
+
 /// Whether `user` may create channels and edit the categories of `server`:
 /// Manage Channels across the server (no channel's overrides), as Stoat
 /// checks. Nothing until their membership is known.

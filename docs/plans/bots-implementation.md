@@ -1,0 +1,218 @@
+# Implementation Record: Bots (milestone 29)
+
+_Plan: [`bots.md`](bots.md)_
+_Started: 2026-11-11_
+
+Run in continuous mode. Manual checks are batched at the end, as the user asked. The plan and its roadmap link (uncommitted before chunk 1) were committed with chunk 1, as before.
+
+Rustfmt drift at the start (`Diff in` hunks): `src/ui/chat.rs` 17, `src/store.rs` 14, `src/api/client.rs` 3, `src/api/events.rs` 3. Every other touched file was clean.
+
+## Chunk 1: My Bots: list, create, delete
+
+### Changes Made
+- `src/bots.rs` (new, no GPUI):
+  - `BOT_USERNAME_MIN`/`MAX` (2, 32) and `DEFAULT_BOT_LIMIT` (5);
+  - `BotRow { id, username, display_name, avatar_url, public }` and `bot_rows(bots, users, media)`: users matched by ID, by display name (case-insensitive), then ID. A bot without its user shows its ID; a blank display name falls back to the username;
+  - `check_bot_username` → `Result<String, UsernameProblem>` (trimmed; 2–32 characters; letters in any script, digits, `_`, `.`, `-`; not `admin`, `revolt` or `stoat`). `UsernameProblem` displays its text;
+  - `bot_limit(root)`, `at_limit`, `count_line` ("{n} of {max} bots"), `delete_prompt`, and `bot_error_text(err, owned)` (Assumption 8).
+- `src/api/client.rs`: `AccountLimits.bots`; `fetch_owned_bots()` (`GET /bots/@me`), `create_bot(name)` (`POST /bots/create`, `{"name"}`), `delete_bot(id)` (`DELETE /bots/{id}`).
+- `src/store.rs`: `add_bot_user(user) -> bool`. Stoat sends a bot's user as it sees itself (`relationship: User`), so the store keeps the relationship it has (none for a new user), and says whether a known user's name or avatar changed.
+- `src/ui/chat.rs`: `bot_limit` from root config (`bot_limit()`), and `bot_users_loaded(users)`, which keeps them and re-syncs panes showing a changed one (and drops its cached profile).
+- `src/ui/bots_page.rs` (new):
+  - `BotsPage`: fetches once per account ("Loading…", or the reason and Try again), the count line with the `Bot` icon, Create bot… (disabled at the limit, with a note), and a row per bot (avatar, display name, `@username`, Public/Private, chevron). The bots, with their tokens, stay in the page; their users go to the store;
+  - `CreateBotDialog`: the username with its problem shown once something's typed, "You can give it a display name and avatar after.", Create (opens the new bot);
+  - `BotView` (minimal, grown in chunks 2–3): "‹ My Bots", the avatar, name and `@username#tag`, the ID with Copy ID, and Delete bot… (confirmed with an alert; success toasts "Bot deleted." and goes back to the list). It emits `BotEvent::{Back, Deleted}`.
+- `src/ui/settings.rs`: `bots_views`, `sync_bots_view` / `shown_bots_view`, and `bots_page` ("My Bots", icon `Bot`) after Sessions.
+- `src/assets.rs`: `Bot` bundled, and checked in the settings icons test.
+- `src/lib.rs`, `src/ui/mod.rs`: the modules, by hand.
+- Tests:
+  - `tests/bots.rs` (new, 5 tests): rows (matched by ID with users out of order, a missing user, a blank display name, public/private, order, avatar URL); the username check (valid, trimmed, other scripts, too short, too long, 32 multi-byte characters, spaces, punctuation, emoji, reserved); the limit; the store keeping its relationship with a bot and reporting changes; the texts;
+  - `tests/api_bots.rs` (new, 4 tests): `GET /bots/@me` parses bots (tokens, public, permissions, interactions URL) and users; `POST /bots/create` sends exactly `{"name"}`; `DELETE /bots/{id}`; `ReachedMaximumBots` and `InvalidUsername` read plainly.
+
+### Divergences
+- **The limit is the established accounts' (`default`), else `new_user`, else 5,** not the stricter of the two. On Stoat's official config the stricter is 2, which would show "3 of 2" and block established accounts that may have 5. Stoat refuses new accounts itself, and that refusal reads plainly. The plan's Assumption 1 is amended.
+- **`bot_error_text(err, owned)` takes how many bots the user has,** so `ReachedMaximumBots` says the true count ("You have 5 bots…", "1 bot"), rather than the limit from root config (which may not be the one that applies). The plan's Assumption 8 is amended.
+- **`ChatStore::add_bot_user`** was added (the plan's risk: "check `add_user` replaces sensibly, or merge"). `add_user` replaces outright, and a bot's user arrives with `relationship: User`.
+- **`bot_rows` takes the bots and users as slices**, not `&OwnedBotsResponse`, so the page can build rows from its list and the store's users after a create or a change.
+- **The username check also refuses `admin`, `revolt` and `stoat`** (Stoat's blocked names), and the Create dialog shows the problem as you type.
+
+Look-ahead: chunk 2 needs a `BotEvent::Saved` so the page's list follows a save (and a token reset), and the bot view's state grows. Chunks 3–5 are unaffected.
+
+### Verification Performed
+- `cargo test --test bots --test api_bots`: 5 and 4 passed (after fixing one expected order in the test).
+- Full suite: `cargo test` gave 1,411 passed, 0 failed. `cargo clippy --all-targets -- -D warnings` is clean.
+- Rustfmt: `src/ui/chat.rs` 17, `src/store.rs` 14 and `src/api/client.rs` 3 are unchanged. `src/ui/settings.rs` and `src/assets.rs` stay clean. The new files are clean.
+
+### Manual Validation
+Deferred to the end (batched): My Bots lists your bots like the web client; create one, copy its ID, delete it.
+
+## Chunk 2: A bot's settings and token
+
+### Changes Made
+- `src/bots.rs`:
+  - `INTERACTIONS_URL_MAX` (2048);
+  - `BotForm { public, interactions_url, default_permissions }` with `of`, `is_valid` (URL length) and `changes -> Option<DataEditBot>` (only what changed; the URL trimmed, and a blank one `remove: [InteractionsURL]`; `None` stored permissions read as 0);
+  - `username_change(typed, current)`, `rename_edit(name)`, `token_reset_edit()` (`remove: [Token]` only), `reset_prompt(name)` and `invite_url(app, id)` (`{app}/bot/{id}`).
+- `src/api/client.rs`: `edit_bot(id, &DataEditBot) -> BotWithUserResponse` (`PATCH /bots/{id}`, through `edit_body`).
+- `src/ui/bots_page.rs`:
+  - `BotView` now has the bar (‹ My Bots, Reset, Save), the header, **Settings** (the username with its own Save and its problem shown; Public as a switch; Interactions URL with a count; Requested permissions as the matrix in Values mode, server context, every option enabled), **Token** (`••••••`, Copy token, Reset token… confirmed), **Share** (the ID, Copy ID, and Copy invite URL when the instance's web client is known), and Delete bot…;
+  - every change goes through one `send(change, edit)`: the answer replaces the page's bot, its user goes to the store (`bot_users_loaded`), and `BotEvent::Saved` keeps the section's list current. Settings refill from the answer ("Saved."), a rename refills the username ("Renamed."), a token reset closes its alert ("Token reset."). A refusal toasts `bot_error_text` and keeps the edits;
+  - `open_confirm`, a shared alert for Reset token and Delete whose buttons wait for the answer.
+- Tests:
+  - `tests/bots.rs`: 2 new tests. `BotForm` (filled, nothing changed, public, URL trimmed/changed/blank → remove, too long, permissions, none stored); rename, token reset, the prompt, invite URLs;
+  - `tests/api_bots.rs`: 2 new tests. The exact `PATCH` bodies (`{"public":true}`, `{"remove":["Token"]}`, `{"default_permissions":24}`, `{"name"}`, `{"remove":["InteractionsURL"]}`) and the parsed answers (a new token, the user); `UsernameTaken` reads plainly.
+
+### Divergences
+- **`rename_edit`** was added (the rename's `PATCH`), beside `username_change`.
+- **Copy ID moved to Share**, with the ID shown there, as Assumption 3 lays out.
+- **A failed token reset keeps its alert open** (with a toast), as Delete does, rather than closing.
+
+The token is held only in `BotView.bot` and the section's list; it's copied, never drawn, and no log line formats a `Bot` (only IDs and `ApiError`s).
+
+Look-ahead: chunk 3 adds a Profile section to `BotView`; chunk 4 adds "Add to a server or group…" to Share. No amendments.
+
+### Verification Performed
+- `cargo test --test bots --test api_bots`: 7 and 6 passed.
+- Full suite: `cargo test` gave 1,415 passed, 0 failed. `cargo clippy --all-targets -- -D warnings` is clean.
+- Rustfmt: `src/api/client.rs` stays at 3; the new files are clean.
+
+### Manual Validation
+Deferred to the end (batched): make a bot public, set its interactions URL and requested permissions, reset its token (the old one stops working with a bot client), copy the new one, and rename the bot.
+
+## Chunk 3: A bot's profile
+
+### Changes Made
+- `src/ui/profile_editor.rs`:
+  - `ProfileEditor::new` still edits the account (unchanged behaviour); `ProfileEditor::for_bot(chat, bot)` edits a bot's user. Both go through `editing(chat, user, own)`;
+  - the `me` field is now `user`, plus `own`. Filling from the store, fetching the bio and banner (`fetch_profile(user)`, which Stoat allows for any bot), the avatar preview's default, and caching the profile all use `user`;
+  - Save sends `edit_user` (own) or `edit_bot_user(user)`, and hands the answer to `own_profile_saved` or the new `bot_profile_saved`;
+  - for a bot: no "Editing @…" line (its page names it), no "Your username can't be changed here yet." (it's in Settings), the bio's placeholder is "Tell people about the bot", and the failure texts say "the bot's". Log lines name the user rather than "own".
+- `src/api/client.rs`: `edit_bot_user(id, &DataEditUser) -> User` (`PATCH /users/{id}`, through `edit_body`).
+- `src/ui/chat.rs`: `bot_profile_saved(user, bio, banner_changed)`, as `own_profile_saved` does for the account: the user goes to the store (`add_bot_user`), the cached profile follows (or is dropped when the banner changed), and panes showing the bot are re-synced.
+- `src/ui/bots_page.rs`: `BotView` holds a `ProfileEditor::for_bot`, shown as a **Profile** section under the header. The settings' Reset and Save moved from the top bar to under the Settings section.
+- `tests/api_bots.rs`: 1 new test. `PATCH /users/b1` sends exactly what `ProfileForm::changes` gives (display name, avatar ID, bio) and parses the bot's `User`.
+
+### Divergences
+- **The settings' Reset and Save sit under the Settings section,** not in the top bar: the Profile section has its own Save, and two unrelated Saves at opposite ends of the page would mislead. The plan's Assumption 3 is amended.
+- **`ChatView::bot_profile_saved`** was added beside `own_profile_saved`, rather than applying the answer with `add_user`/`apply_user_update` directly, so the cached profile (bio, banner) follows too.
+
+Look-ahead: chunks 4–5 are unaffected.
+
+### Verification Performed
+- `cargo test --test profile` (unchanged): 38 passed. `cargo test --test api_bots`: 7 passed.
+- Full suite: `cargo test` gave 1,416 passed, 0 failed. `cargo clippy --all-targets -- -D warnings` is clean.
+- Rustfmt: `src/ui/chat.rs` 17 and `src/api/client.rs` 3 are unchanged; `src/ui/profile_editor.rs` stays clean; the new files are clean.
+
+### Manual Validation
+Deferred to the end (batched): give a bot an avatar, banner, display name and bio; its messages and profile card show them. Your own Profile page behaves as before.
+
+## Chunk 4: Add a bot to a server or group
+
+### Changes Made
+- `src/bots.rs`:
+  - `DestinationKind { Server, Group }`, `Destination { kind, id, name, icon }` with `invite()` (the `InviteBotDestination`);
+  - `destinations(store, bot)`: servers with Manage Server where the bot isn't a known member, then groups with Invite Others it isn't in, each by name (case-insensitive);
+  - `filter_destinations(places, filter)` and `DESTINATION_FILTER_FROM` (8);
+  - `requested(bits)`: the matrix's entries (server context) the bot asks for, in its order; unknown bits are left out;
+  - `grantable(store, server, bits)`: 0 without Manage Roles, else `bits & held`. That's Stoat's rule (`throw_permission_override(Override::default(), allow)` means every bit must be held);
+  - `ungrantable_reason(store, server, bit)`: "You need Manage Roles to give it permissions." or "You don't have this permission.";
+  - `invite_permissions(ticked, grantable)` (`ticked & grantable`, `None` when 0) and `added_text`.
+- `src/links.rs`: `bot_from_link(url, hosts)`. `/bot/{ULID}` on the instance's web client (its own host and port, or the Stoat/Revolt hosts on the official instance, not the short ones), with a trailing `/`, query or fragment ignored.
+- `src/api/client.rs`: `fetch_public_bot(id)` (`GET /bots/{id}/invite`) and `invite_bot(id, &InviteBotDestination, Option<u64>)` (`POST /bots/{id}/invite`, `?permissions=n` only when `Some`).
+- `src/ui/add_bot.rs` (new): `AddBotDialog`.
+  - It loads the public bot ("Loading…", or the reason and Close), then shows its avatar (its file, else the default), name, and "Description provided by the bot's owner" with the description.
+  - **Places:** "Add it to" lists servers then groups, each with its icon, name and "Server"/"Group", in a scrolling list. A filter field shows when there are more than 8. With nowhere to add it, the dialog says why and offers only Close.
+  - **Permissions:** for a server, the requested permissions are checkboxes with the matrix's titles. Each is ticked and enabled only if grantable, otherwise disabled with its reason as a tooltip. When the bot asks for none: "The bot will not be granted any permissions."
+  - **Add:** sends `invite_permissions(ticked, grantable)` (none for a group), toasts "Added {bot} to {place}." and closes. A refusal shows in the dialog.
+- `src/ui/chat.rs`: `open_add_bot(bot)` opens the dialog ("Add a bot", 440 px). `open_external` opens it for a bot link, after invite links and before channel links.
+- `src/ui/bots_page.rs`: Share has "Add to a server or group…". It opens the dialog in the main window and brings that window forward (deferred, as the Server identities rows do).
+- `src/ui/mod.rs`: the module.
+- Tests:
+  - `tests/bots.rs`: a new `adding` module (5 tests) with a store where the user owns, moderates without Manage Roles, administers with Manage Roles (holding Send Messages but not Kick Members), or has nothing, plus groups they own, may invite to, may not, or the bot's in. It covers destinations (order, exclusions, `invite()` bodies, the filter); `requested` order and unknown bits; `grantable` and its reasons; `invite_permissions` never exceeding what's grantable or ticked (exhaustive over 5 bits); the toast;
+  - `tests/links.rs`: `bot_links_lead_to_their_bot`. Official hosts, trailing `/`, query, no scheme; non-ULIDs, other paths, the short host and other hosts refused; another instance's own host only (port included);
+  - `tests/api_bots.rs`: 3 new tests. `PublicBot` parses; the invite sends `{"server"}` with `?permissions=24`, `{"group"}` without, and a server without; `BotIsPrivate`, `AlreadyInServer` and a fetch's `NotFound` read plainly.
+
+### Divergences
+- **`ungrantable_reason`, `filter_destinations` and `added_text`** were added to `src/bots.rs` so the dialog's rules and texts are tested.
+- **The bot's ID in the test links is a ULID constant** shared with the channel tests.
+- **The dialog has no explicit "already a member" note:** servers where the bot is a known member, and groups it's in, are simply not listed (as Assumption 5 says). Stoat's `AlreadyInServer` reads plainly for a server whose members weren't loaded.
+
+Look-ahead: chunk 5 (marks) is independent. No amendments.
+
+### Verification Performed
+- `cargo test --test bots --test api_bots --test links`: 12, 10 and the links suite passed.
+- Full suite: `cargo test` gave 1,425 passed, 0 failed. `cargo clippy --all-targets -- -D warnings` is clean.
+- Rustfmt: `src/ui/chat.rs` 17 and `src/api/client.rs` 3 are unchanged. `src/links.rs` and `tests/links.rs` stay clean; the new files are clean.
+
+### Manual Validation
+Deferred to the end (batched): from a bot's page, add it to a server with some requested permissions ticked (its managed role has exactly those); as a moderator without Manage Roles, nothing is ticked and the bot joins with no role; add it to a group; paste `{app}/bot/{id}` in a message and click it.
+
+## Chunk 5: Bot marks
+
+### Changes Made
+- `src/store.rs`: `MessageRow.author_bot` and `ChatStore::is_bot_author(message)`. True when the author is a known user with `bot` set, and the message isn't a system message, a webhook's or under a masquerade. It's part of the row's data, so rows re-synced after the user arrives (or changes) pick it up, and `diff_rows` sees the change.
+- `src/ui/chat.rs`:
+  - `bot_tag`: a small outlined "Bot" after the author's name in a message's header, when `author_bot`;
+  - the card's `on_user` opens another card at the same place (a bot's owner).
+- `src/profile.rs`: `CardOwner { id, name, known }`, `card_owner(store, owner)` (their display name if known, else the first 8 characters of the ID and "…"), and `ProfileCard.owner` for bots.
+- `src/ui/profile_card.rs`: "Owned by {name}" under the username. When the owner is known it's clickable (`OnUser`), with a hover underline. `render_profile_card` takes `on_user`.
+- Tests:
+  - `tests/bots.rs`: a new `marks` module. A bot's own message is marked; under a masquerade, a webhook's, and a person's aren't; a bot whose user arrives after its messages is marked once known;
+  - `tests/profile.rs`: `a_bots_card_names_its_owner` (a cached owner by display name, an unknown one by its ID's start, a person with none);
+  - `tests/store_live.rs`: its `MessageRow` literal gains `author_bot: false`.
+
+### Divergences
+- **`ProfileCard.owner` is a `CardOwner` struct** (with `known`), rather than `(id, name)`, so the view knows whether the line can open a card.
+- **The row test lives in `tests/bots.rs`** (`marks`), not a store test file.
+- **`tests/profile.rs` was formatted whole** (it was clean before), and `tests/store_live.rs` needed the new field.
+
+### Verification Performed
+- `cargo test --test bots --test profile`: 13 and 39 passed.
+- Full suite: `cargo test` gave 1,427 passed, 0 failed. `cargo clippy --all-targets -- -D warnings` is clean.
+- Rustfmt: `src/ui/chat.rs` 17 and `src/store.rs` 14 are unchanged. `src/profile.rs`, `src/ui/profile_card.rs`, `tests/profile.rs` and `tests/store_live.rs` are clean.
+
+### Manual Validation
+Deferred to the end (batched): a bot's message shows "Bot"; its card shows "Owned by …", which opens the owner's card.
+
+## Summary
+
+_Completed: 2026-11-11_
+
+**Commit signing:** chunk 4's first two commit attempts failed ("agent refused operation"). It was committed from the index once signing worked again, after chunk 5 was written in the working tree. The committed snapshot is the one that passed the chunk 4 suite (1,425 tests).
+
+### Chunks Completed
+1. My Bots: list, create, delete (`d5f7194`).
+2. A bot's settings and token (`18aafe4`).
+3. A bot's profile with the Profile editor (`84c1450`).
+4. Add a bot to a server or group, from its page or a `/bot/{id}` link (`9bcaf1d`).
+5. Bot marks: "Bot" in message headers, "Owned by …" on cards (this commit).
+
+### Divergences
+- **The bot limit** is the established accounts' (`default`), else `new_user`, else 5, not the stricter. Plan amended.
+- **`bot_error_text(err, owned)`** names the user's actual count for `ReachedMaximumBots`. Plan amended.
+- **`ChatStore::add_bot_user`** keeps the store's relationship (Stoat sends a bot's user as `relationship: User`) and reports name/avatar changes.
+- **The username check also refuses Stoat's blocked names** (`admin`, `revolt`, `stoat`).
+- **The settings' Reset/Save sit under the Settings section,** since the Profile section has its own Save. Plan amended.
+- **`ChatView::bot_profile_saved`** mirrors `own_profile_saved`.
+- **The Add bot dialog's rules and texts** (`ungrantable_reason`, `filter_destinations`, `added_text`) live in `src/bots.rs`. Places the bot is known to be in aren't listed.
+- **`ProfileCard.owner` is a `CardOwner`** with `known`.
+- Smaller ones are in each chunk's entry.
+
+### Definition of Done
+- [x] Settings has a My Bots section per account: list (with "{n} of {max} bots"), create (username checked as Stoat does), and delete (confirmed).
+- [x] A bot's page edits its username (own Save), public flag, interactions URL and requested permissions. It copies its ID, token and invite URL, and resets its token (confirmed). Tokens are only copied: never drawn, and never logged (log lines name bot IDs; the HTTP client logs only method, URL and error bodies).
+- [x] A bot's profile is edited with the Profile editor, saved with `PATCH /users/{bot_id}`. The Profile page's behaviour is unchanged (`tests/profile.rs` passed unchanged after chunk 3).
+- [x] The Add bot dialog adds a bot to a server (Manage Server) or a group (Invite Others), from its page or a `/bot/{id}` link. Requested permissions are offered; only `ticked & grantable` is ever sent (tested exhaustively), and nothing without Manage Roles.
+- [x] Bots' messages show "Bot", and their profile cards show their owner.
+- [x] Refusals read plainly (`bot_error_text`, tested for every Stoat error in Assumption 8).
+- [x] `cargo test` (1,427 passed) and `cargo clippy --all-targets -- -D warnings` pass. No touched file's rustfmt drift grew, and new files are clean.
+- [x] The roadmap links this plan (committed with chunk 1).
+
+### Remaining Manual Steps
+All manual checks were batched to the end, as asked. Run with the web client and a bot client (any library, to check the token), on a test server you own, plus a group:
+1. **My Bots:** matches the web client; create, copy ID, delete.
+2. **Settings and token:** public/private, interactions URL, requested permissions; reset the token (the old one stops working), copy the new one; rename.
+3. **Profile:** avatar, banner, display name, bio; they show on the bot's messages and card. Your own Profile page still works as before.
+4. **Add:** from the page to a server with some requested permissions ticked (the managed role has exactly those); as a moderator without Manage Roles (nothing ticked, no role); to a group; from a pasted `/bot/{id}` link.
+5. **Marks:** "Bot" on its messages, and "Owned by …" on its card, opening the owner's card.
+6. **Themes:** the section, the bot page and the dialog read well in light and dark.

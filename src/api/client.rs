@@ -3,13 +3,14 @@ use std::time::Duration;
 
 use reqwest::{Client, Method};
 use revolt_models::v0::{
-    AccountInfo, AllMemberResponse, BulkMessageResponse, Category, Channel,
+    AccountInfo, AllMemberResponse, BanListResult, BulkMessageResponse, Category, Channel,
     CreateServerLegacyResponse, CreateVoiceUserResponse, DataBanCreate, DataChangeEmail,
-    DataChangePassword, DataEditMessage, DataEditSession, DataEditUser, DataLogin, DataMemberEdit,
-    DataMessageSearch, DataMessageSend, DataSendFriendRequest, Emoji, FieldsUser, Invite,
-    InviteJoinResponse, InviteResponse, MFAResponse, MFATicket, Member, Message, MessageSort,
-    MultiFactorStatus, MutualResponse, OptionsQueryMessages, Presence, ReplyIntent, ResponseLogin,
-    ResponseTotpSecret, ServerBan, SessionInfo, User, UserProfile, UserStatus,
+    DataChangePassword, DataEditMessage, DataEditRole, DataEditServer, DataEditSession,
+    DataEditUser, DataLogin, DataMemberEdit, DataMessageSearch, DataMessageSend,
+    DataSendFriendRequest, Emoji, FieldsUser, Invite, InviteJoinResponse, InviteResponse,
+    MFAResponse, MFATicket, Member, Message, MessageSort, MultiFactorStatus, MutualResponse,
+    NewRoleResponse, OptionsQueryMessages, Presence, ReplyIntent, ResponseLogin,
+    ResponseTotpSecret, Role, Server, ServerBan, SessionInfo, User, UserProfile, UserStatus,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -103,6 +104,9 @@ pub struct GlobalLimits {
     /// default is 100).
     #[serde(default)]
     pub group_size: Option<u32>,
+    /// The most custom emoji a server may have (Stoat's default is 100).
+    #[serde(default)]
+    pub server_emoji: Option<u32>,
 }
 
 /// The limits this client uses, out of many.
@@ -111,6 +115,9 @@ pub struct AccountLimits {
     /// Most files one message can carry.
     #[serde(default)]
     pub message_attachments: Option<usize>,
+    /// The most bots one account may own.
+    #[serde(default)]
+    pub bots: Option<u32>,
     #[serde(default)]
     pub file_upload_size_limits: FileSizeLimits,
 }
@@ -126,6 +133,15 @@ pub struct FileSizeLimits {
     /// Largest profile banner.
     #[serde(default)]
     pub backgrounds: Option<u64>,
+    /// Largest server icon.
+    #[serde(default)]
+    pub icons: Option<u64>,
+    /// Largest server banner (Stoat 0.16.2 doesn't send it).
+    #[serde(default)]
+    pub banners: Option<u64>,
+    /// Largest custom emoji.
+    #[serde(default)]
+    pub emojis: Option<u64>,
 }
 
 /// Used when `GET /` doesn't say: Stoat's own defaults (20 MB, 5 files).
@@ -134,6 +150,11 @@ pub const DEFAULT_MAX_ATTACHMENTS: usize = 5;
 /// Stoat's defaults for avatars (4 MB) and profile banners (6 MB).
 pub const DEFAULT_AVATAR_SIZE_LIMIT: u64 = 4_000_000;
 pub const DEFAULT_BACKGROUND_SIZE_LIMIT: u64 = 6_000_000;
+/// Stoat's defaults for server icons (2.5 MB) and server banners (6 MB).
+pub const DEFAULT_ICON_SIZE_LIMIT: u64 = 2_500_000;
+pub const DEFAULT_BANNER_SIZE_LIMIT: u64 = 6_000_000;
+/// Stoat's default for custom emoji (500 KB).
+pub const DEFAULT_EMOJI_SIZE_LIMIT: u64 = 500_000;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServiceFeature {
@@ -172,6 +193,27 @@ impl RootConfig {
     pub fn background_size_limit(&self) -> u64 {
         self.stricter_size_limit(|l| l.backgrounds)
             .unwrap_or(DEFAULT_BACKGROUND_SIZE_LIMIT)
+    }
+
+    /// Largest server icon, in bytes, chosen the same way, else
+    /// [`DEFAULT_ICON_SIZE_LIMIT`].
+    pub fn icon_size_limit(&self) -> u64 {
+        self.stricter_size_limit(|l| l.icons)
+            .unwrap_or(DEFAULT_ICON_SIZE_LIMIT)
+    }
+
+    /// Largest server banner, in bytes, chosen the same way, else
+    /// [`DEFAULT_BANNER_SIZE_LIMIT`].
+    pub fn banner_size_limit(&self) -> u64 {
+        self.stricter_size_limit(|l| l.banners)
+            .unwrap_or(DEFAULT_BANNER_SIZE_LIMIT)
+    }
+
+    /// Largest custom emoji, in bytes, chosen the same way, else
+    /// [`DEFAULT_EMOJI_SIZE_LIMIT`].
+    pub fn emoji_size_limit(&self) -> u64 {
+        self.stricter_size_limit(|l| l.emojis)
+            .unwrap_or(DEFAULT_EMOJI_SIZE_LIMIT)
     }
 
     /// The stricter of the two account limits on one kind of file, if
@@ -528,6 +570,39 @@ impl StoatClient {
         parse::<Uploaded>(status, &body).map(|u| u.id)
     }
 
+    /// `GET url` on the file server or media proxy (both public, so no
+    /// session token): the file's bytes. With `max`, reading stops after
+    /// that many, and the rest is never fetched. Error statuses become
+    /// [`ApiError`] (a 404 is `Unexpected { status: 404 }`).
+    pub async fn download(&self, url: &str, max: Option<u64>) -> Result<Vec<u8>, ApiError> {
+        use futures::StreamExt as _;
+
+        log::debug!("GET {url} (download, max {max:?})");
+        let response = self
+            .http
+            .get(url)
+            .timeout(UPLOAD_TIMEOUT)
+            .send()
+            .await
+            .map_err(ApiError::Network)?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.bytes().await.map_err(ApiError::Network)?;
+            return Err(ApiError::from_response(status, &body));
+        }
+        let max = max.map_or(usize::MAX, |max| usize::try_from(max).unwrap_or(usize::MAX));
+        let mut bytes = Vec::new();
+        let mut body = response.bytes_stream();
+        while bytes.len() < max
+            && let Some(chunk) = body.next().await
+        {
+            let chunk = chunk.map_err(ApiError::Network)?;
+            let take = chunk.len().min(max - bytes.len());
+            bytes.extend_from_slice(&chunk[..take]);
+        }
+        Ok(bytes)
+    }
+
     /// `PATCH /channels/{channel}/messages/{message}`: replace the text of
     /// one of the user's messages. `content` must not be empty.
     pub async fn edit_message(
@@ -737,6 +812,15 @@ impl StoatClient {
         self.send(Method::PATCH, "/users/@me", Some(&body)).await
     }
 
+    /// `PATCH /users/{id}`: change one of the user's bots' profile, as
+    /// [`Self::edit_user`] does the user's own (Stoat lets a bot's owner).
+    /// Stoat answers with the bot's user.
+    pub async fn edit_bot_user(&self, id: &str, edit: &DataEditUser) -> Result<User, ApiError> {
+        let body = edit_body(serde_json::to_value(edit).expect("user edit serialises"));
+        self.send(Method::PATCH, &format!("/users/{id}"), Some(&body))
+            .await
+    }
+
     /// `PATCH /users/@me/username`: change the user's username, confirmed
     /// with their current `password` (never an MFA ticket). Stoat answers
     /// with the user as stored: the name may be cleaned up, and the `#tag`
@@ -790,6 +874,23 @@ impl StoatClient {
         let body = without_nulls(serde_json::to_value(ban).expect("ban serialises"));
         let path = format!("/servers/{server}/bans/{user}");
         self.send(Method::PUT, &path, Some(&body)).await
+    }
+
+    /// `GET /servers/{server}/bans`: everyone banned from the server, with
+    /// the reasons (Ban Members). Users and bans come as two lists, joined
+    /// on the user's ID.
+    pub async fn fetch_bans(&self, server: &str) -> Result<BanListResult, ApiError> {
+        self.send(Method::GET, &format!("/servers/{server}/bans"), None::<&()>)
+            .await
+    }
+
+    /// `DELETE /servers/{server}/bans/{user}`: lift a ban (Ban Members). A
+    /// ban that's already gone is `NotFound`. No event follows.
+    pub async fn unban(&self, server: &str, user: &str) -> Result<(), ApiError> {
+        let path = format!("/servers/{server}/bans/{user}");
+        self.send_raw(Method::DELETE, &path, None::<&()>)
+            .await
+            .map(|_| ())
     }
 
     /// Set the user's presence (Online, Idle, Focus, Busy or Invisible).
@@ -923,6 +1024,25 @@ impl StoatClient {
     pub async fn join_invite(&self, code: &str) -> Result<InviteJoinResponse, ApiError> {
         self.send(Method::POST, &format!("/invites/{code}"), None::<&()>)
             .await
+    }
+
+    /// `GET /servers/{server}/invites`: every invite to the server's
+    /// channels (Manage Server). They carry IDs only: no user or channel.
+    pub async fn fetch_server_invites(&self, server: &str) -> Result<Vec<Invite>, ApiError> {
+        self.send(
+            Method::GET,
+            &format!("/servers/{server}/invites"),
+            None::<&()>,
+        )
+        .await
+    }
+
+    /// `DELETE /invites/{code}`: revoke an invite (its creator, or Manage
+    /// Server). An unknown code is `NotFound`. No event follows.
+    pub async fn delete_invite(&self, code: &str) -> Result<(), ApiError> {
+        self.send_raw(Method::DELETE, &format!("/invites/{code}"), None::<&()>)
+            .await
+            .map(|_| ())
     }
 
     /// `POST /channels/{channel}/invites`: a new invite to `channel`, used
@@ -1135,6 +1255,275 @@ impl StoatClient {
         Ok(edited.categories)
     }
 
+    /// `PATCH /servers/{server}`: change the server's name, description,
+    /// icon, banner or system messages (Manage Server). Only what's set is
+    /// sent, as with [`Self::edit_user`]. Stoat answers with the whole
+    /// server, as changed; `ServerUpdate` brings the same to everyone.
+    pub async fn edit_server(
+        &self,
+        server: &str,
+        edit: &DataEditServer,
+    ) -> Result<Server, ApiError> {
+        let body = edit_body(serde_json::to_value(edit).expect("server edit serialises"));
+        self.send(Method::PATCH, &format!("/servers/{server}"), Some(&body))
+            .await
+    }
+
+    /// `PATCH /channels/{channel}`: change a server channel's or group's
+    /// name, description, icon, slowmode or mature flag (Manage Channels on
+    /// it). Only what's set is sent, as with [`Self::edit_server`]. Stoat
+    /// answers with the whole channel, as changed; `ChannelUpdate` brings
+    /// the same to everyone.
+    pub async fn edit_channel(
+        &self,
+        channel: &str,
+        edit: &revolt_models::v0::DataEditChannel,
+    ) -> Result<Channel, ApiError> {
+        let body = edit_body(serde_json::to_value(edit).expect("channel edit serialises"));
+        self.send(Method::PATCH, &format!("/channels/{channel}"), Some(&body))
+            .await
+    }
+
+    /// `PUT /channels/{channel}/permissions/default`: Everyone's override
+    /// in a server channel (Manage Permissions there). The user must hold
+    /// every permission it newly allows or no longer denies, compared with
+    /// the stored override (`CannotGiveMissingPermissions`). Stoat answers
+    /// with the channel; `ChannelUpdate` follows.
+    pub async fn set_channel_default_permissions(
+        &self,
+        channel: &str,
+        permissions: &revolt_permissions::Override,
+    ) -> Result<Channel, ApiError> {
+        self.send(
+            Method::PUT,
+            &format!("/channels/{channel}/permissions/default"),
+            Some(&revolt_models::v0::DataDefaultChannelPermissions::Field {
+                permissions: permissions.clone(),
+            }),
+        )
+        .await
+    }
+
+    /// `PUT /channels/{channel}/permissions/{role}`: a role's override in
+    /// a server channel (Manage Permissions there, and the role ranking
+    /// below the user's best one, else `NotElevated`). The user must hold
+    /// every permission it allows that the role's server-wide permissions
+    /// don't, and every one those deny that it doesn't
+    /// (`CannotGiveMissingPermissions`). Stoat answers with the channel;
+    /// `ChannelUpdate` follows, with every role's override.
+    pub async fn set_channel_role_permissions(
+        &self,
+        channel: &str,
+        role: &str,
+        permissions: &revolt_permissions::Override,
+    ) -> Result<Channel, ApiError> {
+        self.send(
+            Method::PUT,
+            &format!("/channels/{channel}/permissions/{role}"),
+            Some(&revolt_models::v0::DataSetRolePermissions {
+                permissions: permissions.clone(),
+            }),
+        )
+        .await
+    }
+
+    /// `PUT /channels/{group}/permissions/default` with a value: what a
+    /// group's members other than its owner may do (Manage Permissions in
+    /// it, the owner's unless members are given it). Stoat checks nothing
+    /// else. It answers with the group; `ChannelUpdate` follows.
+    pub async fn set_group_permissions(
+        &self,
+        group: &str,
+        permissions: u64,
+    ) -> Result<Channel, ApiError> {
+        self.send(
+            Method::PUT,
+            &format!("/channels/{group}/permissions/default"),
+            Some(&revolt_models::v0::DataDefaultChannelPermissions::Value { permissions }),
+        )
+        .await
+    }
+
+    /// `GET /channels/{channel}/webhooks`: a server channel's or group's
+    /// webhooks, with their tokens (Manage Webhooks there). A 404 means the
+    /// instance doesn't have webhooks.
+    pub async fn fetch_webhooks(
+        &self,
+        channel: &str,
+    ) -> Result<Vec<revolt_models::v0::Webhook>, ApiError> {
+        self.send(
+            Method::GET,
+            &format!("/channels/{channel}/webhooks"),
+            None::<&()>,
+        )
+        .await
+    }
+
+    /// `POST /channels/{channel}/webhooks`: a new webhook called `name`
+    /// (Manage Webhooks). Stoat answers with it, token and all;
+    /// `WebhookCreate` (without the token) follows.
+    pub async fn create_webhook(
+        &self,
+        channel: &str,
+        name: &str,
+    ) -> Result<revolt_models::v0::Webhook, ApiError> {
+        #[derive(Serialize)]
+        struct Create<'a> {
+            name: &'a str,
+        }
+        self.send(
+            Method::POST,
+            &format!("/channels/{channel}/webhooks"),
+            Some(&Create { name }),
+        )
+        .await
+    }
+
+    /// `PATCH /webhooks/{id}`: change a webhook's name or avatar (Manage
+    /// Webhooks in its channel). Only what's set is sent, as with
+    /// [`Self::edit_server`]. Stoat answers with the webhook;
+    /// `WebhookUpdate` (without the token) follows.
+    pub async fn edit_webhook(
+        &self,
+        id: &str,
+        edit: &revolt_models::v0::DataEditWebhook,
+    ) -> Result<revolt_models::v0::Webhook, ApiError> {
+        let body = edit_body(serde_json::to_value(edit).expect("webhook edit serialises"));
+        self.send(Method::PATCH, &format!("/webhooks/{id}"), Some(&body))
+            .await
+    }
+
+    /// `DELETE /webhooks/{id}` (Manage Webhooks in its channel). In a group,
+    /// Stoat 0.16 deletes it and then fails (a 500).
+    pub async fn delete_webhook(&self, id: &str) -> Result<(), ApiError> {
+        self.send_raw(Method::DELETE, &format!("/webhooks/{id}"), None::<&()>)
+            .await
+            .map(|_| ())
+    }
+
+    /// `GET /bots/@me`: the user's bots and their users, each list sorted
+    /// by ID. Every bot carries its token.
+    pub async fn fetch_owned_bots(&self) -> Result<revolt_models::v0::OwnedBotsResponse, ApiError> {
+        self.send(Method::GET, "/bots/@me", None::<&()>).await
+    }
+
+    /// `POST /bots/create`: a new bot with username `name`. At most the
+    /// account's limit (`ReachedMaximumBots`), and not by a bot (`IsBot`).
+    /// Stoat answers with the bot, token and all, and its user.
+    pub async fn create_bot(
+        &self,
+        name: &str,
+    ) -> Result<revolt_models::v0::BotWithUserResponse, ApiError> {
+        let body = revolt_models::v0::DataCreateBot {
+            name: name.to_string(),
+        };
+        self.send(Method::POST, "/bots/create", Some(&body)).await
+    }
+
+    /// `PATCH /bots/{id}` (its owner only): a rename (`name`), the public
+    /// flag, the interactions URL, the permissions it asks for, or a new
+    /// token (`remove: ["Token"]`). Only what's set is sent, as with
+    /// [`Self::edit_user`]. Stoat answers with the bot, token and all, and
+    /// its user.
+    pub async fn edit_bot(
+        &self,
+        id: &str,
+        edit: &revolt_models::v0::DataEditBot,
+    ) -> Result<revolt_models::v0::BotWithUserResponse, ApiError> {
+        let body = edit_body(serde_json::to_value(edit).expect("bot edit serialises"));
+        self.send(Method::PATCH, &format!("/bots/{id}"), Some(&body))
+            .await
+    }
+
+    /// `GET /bots/{id}/invite`: a bot's public face (name, avatar file ID,
+    /// description, the permissions it asks for), if it's public or the
+    /// user's own; otherwise `NotFound`.
+    pub async fn fetch_public_bot(
+        &self,
+        id: &str,
+    ) -> Result<revolt_models::v0::PublicBot, ApiError> {
+        self.send(Method::GET, &format!("/bots/{id}/invite"), None::<&()>)
+            .await
+    }
+
+    /// `POST /bots/{id}/invite`: add a bot to a server (Manage Server) or a
+    /// group (Invite Others). For a server, `permissions` gives it a
+    /// managed role with those, checked (Manage Roles, and holding each)
+    /// only after it has joined; groups ignore them. A private bot that
+    /// isn't the user's is `BotIsPrivate`.
+    pub async fn invite_bot(
+        &self,
+        id: &str,
+        destination: &revolt_models::v0::InviteBotDestination,
+        permissions: Option<u64>,
+    ) -> Result<(), ApiError> {
+        let path = match permissions {
+            Some(bits) => format!("/bots/{id}/invite?permissions={bits}"),
+            None => format!("/bots/{id}/invite"),
+        };
+        self.send_raw(Method::POST, &path, Some(destination))
+            .await
+            .map(|_| ())
+    }
+
+    /// `DELETE /bots/{id}` (its owner only). The bot leaves everything it's
+    /// in.
+    pub async fn delete_bot(&self, id: &str) -> Result<(), ApiError> {
+        self.send_raw(Method::DELETE, &format!("/bots/{id}"), None::<&()>)
+            .await
+            .map(|_| ())
+    }
+
+    /// `PUT /custom/emoji/{id}`: make the file `id`, already uploaded under
+    /// `emojis`, one of `server`'s emoji called `name` (Manage
+    /// Customisation; at most the instance's `server_emoji`, else
+    /// `TooManyEmoji`). Stoat answers with the emoji; `EmojiCreate`
+    /// follows.
+    pub async fn create_emoji(
+        &self,
+        id: &str,
+        server: &str,
+        name: &str,
+    ) -> Result<revolt_models::v0::Emoji, ApiError> {
+        self.send(
+            Method::PUT,
+            &format!("/custom/emoji/{id}"),
+            Some(&revolt_models::v0::DataCreateEmoji {
+                name: name.to_string(),
+                parent: revolt_models::v0::EmojiParent::Server {
+                    id: server.to_string(),
+                },
+                nsfw: false,
+            }),
+        )
+        .await
+    }
+
+    /// `PATCH /custom/emoji/{id}`: rename a server's emoji (Manage
+    /// Customisation). Stoat answers with the emoji; `EmojiUpdate` follows.
+    pub async fn rename_emoji(
+        &self,
+        id: &str,
+        name: &str,
+    ) -> Result<revolt_models::v0::Emoji, ApiError> {
+        self.send(
+            Method::PATCH,
+            &format!("/custom/emoji/{id}"),
+            Some(&revolt_models::v0::DataEditEmoji {
+                name: Some(name.to_string()),
+            }),
+        )
+        .await
+    }
+
+    /// `DELETE /custom/emoji/{id}`: delete a server's custom emoji (Manage
+    /// Customisation, unless the user created it). `EmojiDelete` follows.
+    pub async fn delete_emoji(&self, id: &str) -> Result<(), ApiError> {
+        self.send_raw(Method::DELETE, &format!("/custom/emoji/{id}"), None::<&()>)
+            .await
+            .map(|_| ())
+    }
+
     /// `DELETE /channels/{channel}`: delete a server channel (Manage
     /// Channels on it). Stoat takes it out of the server's channel list but
     /// not its categories, and sends `ChannelDelete` to whoever could see
@@ -1160,9 +1549,162 @@ impl StoatClient {
         .map(|_| ())
     }
 
+    /// `POST /servers/{server}/roles`: a new role called `name` (Manage
+    /// Role), at the bottom of the server's roles. Past the instance's
+    /// limit Stoat refuses with `TooManyRoles`. `ServerRoleUpdate` follows.
+    pub async fn create_role(&self, server: &str, name: &str) -> Result<NewRoleResponse, ApiError> {
+        // `DataCreateRole` would also send `"rank": null`, which Stoat
+        // ignores anyway.
+        #[derive(Serialize)]
+        struct CreateRole<'a> {
+            name: &'a str,
+        }
+        self.send(
+            Method::POST,
+            &format!("/servers/{server}/roles"),
+            Some(&CreateRole { name }),
+        )
+        .await
+    }
+
+    /// `PATCH /servers/{server}/roles/{role}`: change a role's name, colour,
+    /// hoisting or icon (Manage Role, and the role ranking below the
+    /// user's best; the owner may edit any). Unset fields are left out,
+    /// and `remove` too when it's empty. Stoat answers with the role;
+    /// `ServerRoleUpdate` follows.
+    pub async fn edit_role(
+        &self,
+        server: &str,
+        role: &str,
+        edit: &DataEditRole,
+    ) -> Result<Role, ApiError> {
+        let body = edit_body(serde_json::to_value(edit).expect("role edit serialises"));
+        self.send(
+            Method::PATCH,
+            &format!("/servers/{server}/roles/{role}"),
+            Some(&body),
+        )
+        .await
+    }
+
+    /// `DELETE /servers/{server}/roles/{role}`: delete a role (as
+    /// [`Self::edit_role`], and never a bot's). `ServerRoleDelete` follows.
+    pub async fn delete_role(&self, server: &str, role: &str) -> Result<(), ApiError> {
+        self.send_raw(
+            Method::DELETE,
+            &format!("/servers/{server}/roles/{role}"),
+            None::<&()>,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// `PATCH /servers/{server}/roles/ranks`: the server's roles in a new
+    /// order, highest first, every role exactly once (`InvalidOperation`
+    /// otherwise). Anyone but the owner may only move roles below their
+    /// own best one (`NotElevated`). Each role's rank becomes its index.
+    /// Stoat answers with the server; `ServerRoleRanksUpdate` follows.
+    pub async fn edit_role_ranks(
+        &self,
+        server: &str,
+        ranks: &[String],
+    ) -> Result<Server, ApiError> {
+        #[derive(Serialize)]
+        struct Ranks<'a> {
+            ranks: &'a [String],
+        }
+        self.send(
+            Method::PATCH,
+            &format!("/servers/{server}/roles/ranks"),
+            Some(&Ranks { ranks }),
+        )
+        .await
+    }
+
+    /// `PUT /servers/{server}/permissions/{role}`: a role's allow and deny
+    /// bits (Manage Permissions, and the role ranking below the user's best
+    /// one, else `NotElevated`). The user must hold every permission newly
+    /// allowed or no longer denied (`CannotGiveMissingPermissions`). Stoat
+    /// answers with the server; `ServerRoleUpdate` follows.
+    pub async fn set_role_permissions(
+        &self,
+        server: &str,
+        role: &str,
+        permissions: &revolt_permissions::Override,
+    ) -> Result<Server, ApiError> {
+        self.send(
+            Method::PUT,
+            &format!("/servers/{server}/permissions/{role}"),
+            Some(&revolt_models::v0::DataSetServerRolePermission {
+                permissions: permissions.clone(),
+            }),
+        )
+        .await
+    }
+
+    /// `PUT /servers/{server}/permissions/default`: the server's default
+    /// permissions, which every member has (Manage Permissions). The user
+    /// must hold every permission `permissions` allows, not just the ones
+    /// it adds (`CannotGiveMissingPermissions`). Stoat answers with the
+    /// server; `ServerUpdate` follows.
+    pub async fn set_default_permissions(
+        &self,
+        server: &str,
+        permissions: u64,
+    ) -> Result<Server, ApiError> {
+        self.send(
+            Method::PUT,
+            &format!("/servers/{server}/permissions/default"),
+            Some(&revolt_permissions::DataPermissionsValue { permissions }),
+        )
+        .await
+    }
+
+    /// `PATCH /servers/{server}` with `{"owner": owner}`: hand the server
+    /// to another member (its owner only, with a validated MFA `ticket`,
+    /// which is used up even if the transfer then fails). Bots can't own a
+    /// server (`InvalidOperation`), and someone who isn't a member is
+    /// `NotFound`. Stoat answers with the server; `ServerUpdate` follows.
+    pub async fn transfer_server(
+        &self,
+        ticket: &str,
+        server: &str,
+        owner: &str,
+    ) -> Result<Server, ApiError> {
+        #[derive(Serialize)]
+        struct Transfer<'a> {
+            owner: &'a str,
+        }
+        let path = format!("/servers/{server}");
+        let (status, bytes) = self
+            .send_with_ticket(Method::PATCH, &path, ticket, Some(&Transfer { owner }))
+            .await?;
+        parse(status, &bytes)
+    }
+
+    /// `DELETE /servers/{server}`: delete a server the user owns, for
+    /// everyone (`ServerDelete` follows). **For anyone else the same request
+    /// leaves the server** (see [`Self::leave_server`]), so only call this
+    /// for a server the user owns.
+    pub async fn delete_server(&self, server: &str) -> Result<(), ApiError> {
+        self.send_raw(Method::DELETE, &format!("/servers/{server}"), None::<&()>)
+            .await
+            .map(|_| ())
+    }
+
     /// `PUT /servers/{server}/ack`: mark every channel in `server` read.
     pub async fn ack_server(&self, server: &str) -> Result<(), ApiError> {
         self.send_raw(Method::PUT, &format!("/servers/{server}/ack"), None::<&()>)
+            .await
+            .map(|_| ())
+    }
+
+    /// `POST /safety/report`: report a message, a user or a server to the
+    /// instance's moderators. Unset fields (a user report's `message_id`)
+    /// are left out.
+    pub async fn report(&self, report: &crate::reports::DataReportContent) -> Result<(), ApiError> {
+        let body = without_nulls(serde_json::to_value(report).expect("report serialises"));
+        self.send_raw(Method::POST, "/safety/report", Some(&body))
             .await
             .map(|_| ())
     }

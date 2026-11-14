@@ -120,6 +120,27 @@ pub enum ServerEvent {
     EmojiDelete {
         id: String,
     },
+    /// A server emoji was renamed (`name`; `None` if this update didn't
+    /// change it).
+    EmojiUpdate {
+        id: String,
+        name: Option<String>,
+    },
+    /// A webhook was made in a channel the user can see (Stoat leaves its
+    /// token out).
+    WebhookCreate(Box<crate::api::models::Webhook>),
+    /// A webhook changed: what's in `data` (never its token), and `remove`.
+    WebhookUpdate {
+        id: String,
+        channel: String,
+        data: Box<crate::api::models::PartialWebhook>,
+        remove: Vec<crate::api::models::FieldsWebhook>,
+    },
+    /// A webhook was deleted.
+    WebhookDelete {
+        id: String,
+        channel: String,
+    },
     /// `user` started typing in `channel` (again: it's resent while they type).
     ChannelStartTyping {
         channel: String,
@@ -503,6 +524,53 @@ fn decode(mut value: Value, out: &mut Vec<ServerEvent>) {
             }
             out.push(decode_as(value, &kind, |d: Delete| {
                 ServerEvent::EmojiDelete { id: d.id }
+            }))
+        }
+        "EmojiUpdate" => {
+            #[derive(Deserialize)]
+            struct Update {
+                id: String,
+                data: crate::api::models::PartialEmoji,
+            }
+            out.push(decode_as(value, &kind, |u: Update| {
+                ServerEvent::EmojiUpdate {
+                    id: u.id,
+                    name: u.data.name,
+                }
+            }))
+        }
+        "WebhookCreate" => out.push(decode_as(value, &kind, |w: crate::api::models::Webhook| {
+            ServerEvent::WebhookCreate(Box::new(w))
+        })),
+        "WebhookUpdate" => {
+            #[derive(Deserialize)]
+            struct Update {
+                id: String,
+                channel_id: String,
+                data: crate::api::models::PartialWebhook,
+                #[serde(default)]
+                remove: Vec<crate::api::models::FieldsWebhook>,
+            }
+            out.push(decode_as(value, &kind, |u: Update| {
+                ServerEvent::WebhookUpdate {
+                    id: u.id,
+                    channel: u.channel_id,
+                    data: Box::new(u.data),
+                    remove: u.remove,
+                }
+            }))
+        }
+        "WebhookDelete" => {
+            #[derive(Deserialize)]
+            struct Delete {
+                id: String,
+                channel_id: String,
+            }
+            out.push(decode_as(value, &kind, |d: Delete| {
+                ServerEvent::WebhookDelete {
+                    id: d.id,
+                    channel: d.channel_id,
+                }
             }))
         }
         // `id` is the channel.
@@ -1241,6 +1309,10 @@ async fn session(
                         | ServerEvent::ChannelStartTyping { .. }
                         | ServerEvent::ChannelStopTyping { .. }
                         | ServerEvent::EmojiDelete { .. }
+                        | ServerEvent::EmojiUpdate { .. }
+                        | ServerEvent::WebhookCreate(_)
+                        | ServerEvent::WebhookUpdate { .. }
+                        | ServerEvent::WebhookDelete { .. }
                         | ServerEvent::ServerUpdate { .. }
                         | ServerEvent::ServerRoleUpdate { .. }
                         | ServerEvent::ServerRoleDelete { .. }
@@ -1308,9 +1380,9 @@ mod tests {
 
     #[test]
     fn unknown_event_types_are_kept_as_unknown() {
-        let events = parse_frame(r#"{"type":"WebhookCreate","id":"w"}"#);
+        let events = parse_frame(r#"{"type":"SomethingNew","id":"w"}"#);
         assert!(
-            matches!(events.as_slice(), [ServerEvent::Unknown(kind)] if kind == "WebhookCreate")
+            matches!(events.as_slice(), [ServerEvent::Unknown(kind)] if kind == "SomethingNew")
         );
     }
 

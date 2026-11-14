@@ -5465,6 +5465,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-av-foundation"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "478ae33fcac9df0a18db8302387c666b8ef08a3e2d62b510ca4fc278a384b6c0"
+dependencies = [
+ "bitflags 2.13.2",
+ "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-core-media",
+ "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
+]
+
+[[package]]
+name = "objc2-av-kit"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15b375b013b8a710c67770ca8b45993f0fc22ad7a4ff88e95101b1efbc0b7de4"
+dependencies = [
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-av-foundation",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
 name = "objc2-cloud-kit"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5473,6 +5500,28 @@ dependencies = [
  "bitflags 2.13.2",
  "objc2 0.6.5",
  "objc2-foundation 0.3.2",
+]
+
+[[package]]
+name = "objc2-core-audio"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1eebcea8b0dbff5f7c8504f3107c68fc061a3eb44932051c8cf8a68d969c3b2"
+dependencies = [
+ "dispatch2",
+ "objc2 0.6.5",
+ "objc2-core-audio-types",
+ "objc2-core-foundation",
+]
+
+[[package]]
+name = "objc2-core-audio-types"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a89f2ec274a0cf4a32642b2991e8b351a404d290da87bb6a9a9d8632490bd1c"
+dependencies = [
+ "bitflags 2.13.2",
+ "objc2 0.6.5",
 ]
 
 [[package]]
@@ -5554,6 +5603,21 @@ checksum = "ca347214e24bc973fc025fd0d36ebb179ff30536ed1f80252706db19ee452009"
 dependencies = [
  "objc2 0.6.5",
  "objc2-foundation 0.3.2",
+]
+
+[[package]]
+name = "objc2-core-media"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05ec576860167a15dd9fce7fbee7512beb4e31f532159d3482d1f9c6caedf31d"
+dependencies = [
+ "bitflags 2.13.2",
+ "dispatch2",
+ "objc2 0.6.5",
+ "objc2-core-audio",
+ "objc2-core-audio-types",
+ "objc2-core-foundation",
+ "objc2-core-video",
 ]
 
 [[package]]
@@ -7135,9 +7199,9 @@ dependencies = [
 
 [[package]]
 name = "revolt-config"
-version = "0.16.2"
+version = "0.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb8993585358da2391d7917639ed9d41e73d80180ff2798d01218734b6f2ebc5"
+checksum = "f49e81b86b92f04a2ccbcae86e28f0d72fd893ac98c79ebb106326b9cc161039"
 dependencies = [
  "cached",
  "config",
@@ -7150,9 +7214,9 @@ dependencies = [
 
 [[package]]
 name = "revolt-models"
-version = "0.16.2"
+version = "0.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a86bcd7e033434dac0ffb7b37ae766b06e46a5f3c8fc8094b4e434235d860f51"
+checksum = "29c93a7e1df45c6311b1519bfe3e827bedbd920627a5c9d23b31dbccdc63eb07"
 dependencies = [
  "indexmap",
  "iso8601-timestamp",
@@ -7170,12 +7234,13 @@ dependencies = [
 
 [[package]]
 name = "revolt-permissions"
-version = "0.16.2"
+version = "0.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf16f929a973f897889611b3223e02d7960d330251c1ceccb30a436eac556b54"
+checksum = "304d40bfbad95f605b2123b726c34c3543c57b4b6b1972e9136deab63f23c396"
 dependencies = [
  "async-trait",
  "auto_ops",
+ "num_enum",
  "once_cell",
  "revolt-result",
  "schemars 0.8.22",
@@ -7184,9 +7249,9 @@ dependencies = [
 
 [[package]]
 name = "revolt-result"
-version = "0.16.2"
+version = "0.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27c26dbf1a41a6fd2139f2be0b58d87605f12c339702c63ca7d1191b7b5ce68b"
+checksum = "e0f9ac194afac2c22d9c9110774d167f38d035ad5b91c80f49033035ebe1d640"
 dependencies = [
  "log",
  "sentry",
@@ -8280,11 +8345,16 @@ dependencies = [
  "mime_guess",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
+ "objc2-av-foundation",
+ "objc2-av-kit",
  "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-core-media",
  "objc2-core-text",
  "objc2-foundation 0.3.2",
  "objc2-service-management",
  "objc2-user-notifications",
+ "percent-encoding",
  "qrcodegen",
  "raw-window-handle",
  "reqwest 0.13.5",

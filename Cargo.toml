@@ -27,12 +27,12 @@ gpui-kit = { version = "=0.9.0", optional = true }
 # Wire types straight from the Stoat backend (MIT). Pinned to the live API
 # version; bump all revolt-* crates together. Default features pull in the
 # Rocket server integration, which a client doesn't need.
-revolt-models = { version = "=0.16.2", default-features = false, features = ["serde", "partials"] }
-revolt-result = { version = "=0.16.2", default-features = false, features = ["serde"] }
+revolt-models = { version = "=0.16.4", default-features = false, features = ["serde", "partials"] }
+revolt-result = { version = "=0.16.4", default-features = false, features = ["serde"] }
 # Stoat's own permission maths (owners, role and channel overrides, timeouts),
 # for what a user may see or do in a channel. Its `PermissionQuery` trait is
 # declared with `#[async_trait]`, so implementing it needs that crate too.
-revolt-permissions = { version = "=0.16.2", default-features = false }
+revolt-permissions = { version = "=0.16.4", default-features = false }
 async-trait = "0.1"
 # The `Timestamp` Stoat's wire types use (a member's timeout), as revolt-models
 # depends on it.
@@ -46,14 +46,19 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_urlencoded = "0.7"
 url = "2"
+# Decoding an embed picture's name from its address (src/file_actions.rs).
+# Already in the tree, through `url`.
+percent-encoding = "2"
 # Emoji character classes, for "only emoji" (jumbo) messages. Already in the tree.
 unicode-properties = "0.1"
 # CSS colour names for `$$\color{…}$$` (see src/math.rs). Already in the tree (via resvg).
 svgtypes = "0.16"
 # Blurred previews of uploads while they load (Stoat stores a ThumbHash with each image).
 thumbhash = "0.1"
-# Pixel buffers for those previews, as GPUI takes them. The version GPUI already uses.
-image = { version = "0.25", default-features = false }
+# Pixel buffers for those previews, as GPUI takes them, and pictures turned
+# into PNG for the clipboard (src/file_actions.rs). The version and decoders
+# GPUI already uses.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # Local-time formatting for message timestamps.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # An attachment's MIME type from its extension. Already in the tree.
@@ -101,11 +106,12 @@ tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 # Dock badge (AppKit's NSDockTile), checking whether banners can be posted
 # (bundle identifier, notification permission), hiding the main window
-# (NSWindow), and the notification sound (NSSound). The same versions GPUI
+# (NSWindow), the notification sound (NSSound), and the video player window
+# (src/video_window.rs: NSWindow, NSScreen, NSEvent). The same versions GPUI
 # already uses.
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSBundle", "NSError"] }
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile", "NSResponder", "NSSound", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSBundle", "NSDate", "NSError", "NSGeometry", "NSRunLoop", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile", "NSEvent", "NSGraphics", "NSResponder", "NSScreen", "NSSound", "NSView", "NSWindow"] }
 # Reaching a GPUI window's NSWindow, to hide it without closing it
 # (src/window_hide.rs). The version GPUI already uses.
 raw-window-handle = "0.6"
@@ -117,11 +123,28 @@ block2 = "0.6"
 # load Apple Color Emoji as a font itself. The versions GPUI already uses.
 objc2-core-text = { version = "0.3", default-features = false, features = ["std", "CTFont", "objc2-core-graphics"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFString", "CFCGTypes"] }
+# Playing audio and video attachments (src/media_player.rs) and their poster
+# frames: AVPlayer, AVAssetImageGenerator and CoreMedia's times. The posters
+# arrive as CGImages, drawn into a bitmap to read their pixels.
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media", "AVAsset", "AVAssetImageGenerator", "AVPlayer", "AVPlayerItem", "AVTime"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "objc2", "CMTime"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGImage"] }
+# The video player window's view, with AVKit's own controls.
+objc2-av-kit = { version = "0.3", default-features = false, features = ["std", "objc2-app-kit", "objc2-av-foundation", "AVPlayerView"] }
 
 [dev-dependencies]
 wiremock = "0.6"
+# Trying every bit as a `ChannelPermission` (tests/permission_matrix.rs), so
+# the permission list can't miss one. With resolver 2, the feature (and its
+# `num_enum`, already in the lock file) only reaches test builds.
+revolt-permissions = { version = "=0.16.4", default-features = false, features = ["try-from-primitive"] }
 # A scratch directory for the account list file tests. Already in the tree.
 tempfile = "3"
 # Rendering the app icon's SVG to PNGs (examples/render_icon.rs). The version
 # GPUI already uses; it re-exports tiny-skia for the pixel buffer.
 resvg = { version = "0.46", default-features = false }
+
+# Runs on the main thread, which AVFoundation's players need (see the file).
+[[test]]
+name = "media_player"
+harness = false

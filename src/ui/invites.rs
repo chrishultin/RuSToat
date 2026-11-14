@@ -413,6 +413,11 @@ pub struct CreateInviteDialog {
     error: Option<String>,
 }
 
+/// A [`CreateInviteDialog`] made an invite (for whoever lists them).
+pub struct InviteCreated;
+
+impl EventEmitter<InviteCreated> for CreateInviteDialog {}
+
 impl CreateInviteDialog {
     /// The dialog for `channel` in `chat`'s account. Its choices start at
     /// what Stoat's web client always makes: never expiring, no limit.
@@ -467,6 +472,7 @@ impl CreateInviteDialog {
                             code,
                             summary: invite_summary(expiry, max_uses),
                         });
+                        cx.emit(InviteCreated);
                     }
                     Ok(Err(err)) => {
                         log::warn!("couldn't create an invite to {}: {err:?}", this.channel);

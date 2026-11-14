@@ -17,7 +17,7 @@ GPUI is desktop-only and Liquid Glass belongs to SwiftUI/UIKit (iOS 26+), so the
 
 ## Assumptions
 1. **iPhone only, iOS 26 minimum, portrait-first.** iOS 26 is the first release with Liquid Glass; you confirmed iPhone only.
-2. **Installed from Xcode onto your own phone** with automatic signing under your team (`87ATGCDMGT`, the "Apple Development: Christopher Hultin" identity in your keychain). No TestFlight. If that team turns out to be a free personal team, builds expire after 7 days and need reinstalling.
+2. **Installed from Xcode onto your own phone** with automatic signing under your team (`G55L4BQ44C`, a paid individual team; the "Apple Development: Christopher Hultin (87ATGCDMGT)" identity in your keychain belongs to it, and 87ATGCDMGT is a personal identifier, not the team). No TestFlight.
 3. **Bundle ID `com.chrishultin.rustoat.ios`.** It's separate from the Mac app's `com.chrishultin.rustoat`, so the two never share Keychain items or notification registrations.
 4. **One account in milestone 1.** Sessions are stored under the same `{API URL}#{user ID}` key as desktop (`accounts::keychain_name`), so adding multiple accounts later needs no migration.
 5. **Tokens are stored by Swift through the iOS Keychain**, implementing `session::TokenStore` via a UniFFI callback interface. The trait is synchronous and small (`load`/`save`/`clear`), so this is trivial, and it avoids depending on whether the `keyring` crate's Apple store works on iOS.

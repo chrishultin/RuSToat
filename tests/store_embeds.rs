@@ -35,7 +35,8 @@ fn view(value: Value) -> Option<EmbedView> {
 
 fn view_with(value: Value, media: &MediaUrls) -> Option<EmbedView> {
     let store = ChatStore::new("u-me");
-    EmbedView::new(&embed(value), media, &store, &HashSet::new(), "m:embed0")
+    let none = HashSet::new();
+    EmbedView::new(&embed(value), media, &store, &none, &none, "m:embed0")
 }
 
 fn card(value: Value) -> EmbedCard {
@@ -113,6 +114,7 @@ fn website_previews_become_cards_with_proxied_pictures() {
             // 1200×630 into 400×300: 400×210.
             image: Some(EmbedImage {
                 url: proxied("https://news.example/hero.jpg"),
+                source: "https://news.example/hero.jpg".into(),
                 width: 400,
                 height: 210,
                 original: (1200, 630),
@@ -174,6 +176,7 @@ fn gifs_and_image_links_show_just_the_picture() {
         gif,
         Some(EmbedView::Image(EmbedImage {
             url: proxied("https://gifs.example/cat.gif"),
+            source: "https://gifs.example/cat.gif".into(),
             width: 200,
             height: 100,
             original: (200, 100),
@@ -241,6 +244,7 @@ fn a_video_only_gifbox_gif_shows_its_still_badged() {
         Some(EmbedView::GifPoster {
             image: EmbedImage {
                 url: proxied("https://media.gifbox.me/media/post/smGy30kWfDtNbJyWRnq8a/poster"),
+                source: "https://media.gifbox.me/media/post/smGy30kWfDtNbJyWRnq8a/poster".into(),
                 // Capped like other embed images.
                 width: 400,
                 height: 225,
@@ -281,6 +285,7 @@ fn other_videos_and_gifbox_images_are_unchanged() {
         view(json!({ "type": "Image", "url": page, "width": 498, "height": 280, "size": "Large" })),
         Some(EmbedView::Image(EmbedImage {
             url: proxied(page),
+            source: page.into(),
             width: 400,
             height: 225,
             original: (498, 280),
@@ -468,4 +473,67 @@ fn embeds_already_on_a_message_show_in_order() {
         })
         .collect();
     assert_eq!(titles, vec![Some("first".into()), Some("second".into())]);
+}
+
+/// A Gifbox GIF as Stoat 0.16.4's embed service describes it.
+fn gifbox_embed(poster: Option<&str>) -> Value {
+    json!({
+        "type": "Website",
+        "url": "https://gifbox.me/view/smGy30kWfDtNbJyWRnq8a",
+        "original_url": "https://gifbox.me/view/smGy30kWfDtNbJyWRnq8a",
+        "special": { "type": "Gifbox", "poster_url": poster },
+        "title": "Stoat",
+        "video": {
+            "url": "https://media.gifbox.me/media/post/smGy30kWfDtNbJyWRnq8a/video.mp4",
+            "width": 640, "height": 360
+        },
+        "site_name": "Gifbox"
+    })
+}
+
+#[test]
+fn a_page_of_messages_with_a_gifbox_embed_parses() {
+    // Before 0.16.4's models, this failed the whole page ("data did not
+    // match any variant of untagged enum BulkMessageResponse").
+    let page: BulkMessageResponse = serde_json::from_value(json!([{
+        "_id": MSG, "channel": "ch", "author": "u-ada",
+        "content": "https://gifbox.me/view/smGy30kWfDtNbJyWRnq8a",
+        "embeds": [gifbox_embed(Some("https://media.gifbox.me/poster.jpg"))]
+    }]))
+    .unwrap();
+    let BulkMessageResponse::JustMessages(messages) = page else {
+        panic!("just messages");
+    };
+    assert_eq!(messages[0].embeds.as_ref().map(Vec::len), Some(1));
+}
+
+#[test]
+fn a_gifbox_gif_shows_its_poster_linking_to_the_gif() {
+    assert_eq!(
+        view(gifbox_embed(Some("https://media.gifbox.me/poster.jpg"))),
+        Some(EmbedView::GifPoster {
+            image: EmbedImage {
+                url: proxied("https://media.gifbox.me/poster.jpg"),
+                source: "https://media.gifbox.me/poster.jpg".into(),
+                width: 400,
+                height: 225,
+                original: (640, 360),
+            },
+            link: "https://gifbox.me/view/smGy30kWfDtNbJyWRnq8a".into(),
+        })
+    );
+    // Without a poster, the still Gifbox keeps for the video.
+    assert_eq!(
+        view(gifbox_embed(None)),
+        Some(EmbedView::GifPoster {
+            image: EmbedImage {
+                url: proxied("https://media.gifbox.me/media/post/smGy30kWfDtNbJyWRnq8a/poster"),
+                source: "https://media.gifbox.me/media/post/smGy30kWfDtNbJyWRnq8a/poster".into(),
+                width: 400,
+                height: 225,
+                original: (640, 360),
+            },
+            link: "https://gifbox.me/view/smGy30kWfDtNbJyWRnq8a".into(),
+        })
+    );
 }

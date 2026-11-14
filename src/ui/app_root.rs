@@ -259,6 +259,24 @@ impl AppRoot {
         }
     }
 
+    /// The main window was closed (hidden, with Keep running on): audio
+    /// stops in every account.
+    pub fn window_hidden(&mut self, cx: &mut Context<Self>) {
+        let views: Vec<Entity<ChatView>> = self
+            .states
+            .values()
+            .filter_map(|state| match state {
+                AccountState::Chat { view, .. } => Some(view.clone()),
+                _ => None,
+            })
+            .collect();
+        for view in views {
+            view.update(cx, |view, cx| {
+                view.stop_playback(crate::playback::Change::HideWindow, cx)
+            });
+        }
+    }
+
     /// A client for an account's instance, without a token.
     fn client_for(&self, id: &str) -> StoatClient {
         match self.accounts.get(id) {

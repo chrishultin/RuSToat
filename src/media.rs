@@ -10,6 +10,16 @@ use crate::api::RootConfig;
 use crate::api::file_url;
 use crate::api::models::File;
 
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
+
+/// Everything but RFC 3986's unreserved characters is encoded in a file's
+/// name in its address.
+const PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MediaUrls {
     /// API base, e.g. `https://api.stoat.chat`.
@@ -54,6 +64,16 @@ impl MediaUrls {
     /// An uploaded file (`{files}/{tag}/{id}`). `None` without a file server.
     pub fn file(&self, file: &File) -> Option<String> {
         Some(file_url(self.files.as_deref()?, file))
+    }
+
+    /// An uploaded file's original, by its own name
+    /// (`{files}/{tag}/{id}/{filename}`), for playing audio and video. The
+    /// address [`Self::file`] gives is the file server's preview route,
+    /// which for those answers with a redirect here (its name not
+    /// encoded); this skips it. `None` without a file server.
+    pub fn original(&self, file: &File) -> Option<String> {
+        let name = utf8_percent_encode(&file.filename, PATH_SEGMENT);
+        Some(format!("{}/{name}", self.file(file)?))
     }
 
     /// An uploaded file known only by ID and tag, e.g. a webhook avatar.

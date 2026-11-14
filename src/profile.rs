@@ -23,6 +23,8 @@ pub struct ProfileCard {
     /// The server's pronouns first, else their own.
     pub pronouns: Option<String>,
     pub bot: bool,
+    /// Who owns them, if they're a bot.
+    pub owner: Option<CardOwner>,
     /// Their roles in the channel's server, highest first. Empty outside
     /// server channels.
     pub roles: Vec<CardRole>,
@@ -38,6 +40,30 @@ pub struct ProfileCard {
     pub friend_buttons: Vec<RelationshipAction>,
     /// The card is the user's own.
     pub is_me: bool,
+}
+
+/// A bot's owner, as its card names them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CardOwner {
+    pub id: String,
+    /// Their display name, else the start of their ID.
+    pub name: String,
+    /// The store knows them, so their card can open.
+    pub known: bool,
+}
+
+/// How a bot's owner is named: their display name if the store knows
+/// them, else the start of their ID.
+pub fn card_owner(store: &ChatStore, owner: &str) -> CardOwner {
+    let known = store.user(owner);
+    CardOwner {
+        id: owner.to_string(),
+        name: match known {
+            Some(user) => display_name(user).to_string(),
+            None => format!("{}…", owner.chars().take(8).collect::<String>()),
+        },
+        known: known.is_some(),
+    }
 }
 
 /// One of a member's roles.
@@ -117,6 +143,10 @@ pub fn profile_card(store: &ChatStore, user: &str, channel: Option<&str>) -> Opt
         status,
         pronouns,
         bot: person.bot.is_some(),
+        owner: person
+            .bot
+            .as_ref()
+            .map(|bot| card_owner(store, &bot.owner_id)),
         roles,
         joined_server,
         timed_out_until,
@@ -294,6 +324,8 @@ pub enum UserMenuItem {
     Ban,
     /// Change how the user relates to them (friend requests, blocks).
     Relationship(RelationshipAction),
+    /// Report them to Stoat's moderators (a dialog asks why).
+    Report,
     Separator,
     /// Copy `username#discriminator`.
     CopyUsername,
@@ -391,7 +423,8 @@ fn standing_actions(store: &ChatStore, user: &str) -> Vec<RelationshipAction> {
 /// Mention; Edit identity and Edit roles; Server mute, Server deafen, Move
 /// to and Disconnect (while they're in one of the server's calls); Remove
 /// from group and Make group owner; Time out (or End timeout), Kick and Ban; the friend requests;
-/// Remove friend and Block or Unblock; then the copy items. Message
+/// Remove friend, Block or Unblock, and Report (anyone but the user); then
+/// the copy items. Message
 /// follows [`can_message`]; Mention is only for others, in server channels
 /// and groups (where the message box can mention them). Remove from group
 /// and Make group owner are for the owner of the group `channel`, on its
@@ -474,10 +507,13 @@ pub fn user_menu(store: &ChatStore, user: &str, channel: Option<&str>) -> Vec<Us
         .into_iter()
         .map(Relationship)
         .collect();
-    let standing = standing_actions(store, user)
+    let mut standing: Vec<UserMenuItem> = standing_actions(store, user)
         .into_iter()
         .map(Relationship)
         .collect();
+    if !me {
+        standing.push(Report);
+    }
     let groups = [
         people,
         server_items,

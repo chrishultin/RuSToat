@@ -124,52 +124,61 @@ Some milestones lay foundations that later ones reuse. When the earlier one's pl
 ### Milestone 22: Member moderation (M)
 - From the member menu: kick; ban (with a reason, and optionally deleting recent messages); time out or end a timeout
 - Edit a member's nickname or avatar, and their roles
-- Report a message, user or server (`POST /safety/report`)
+- Report a message, user or server (`POST /safety/report`). Deferred from milestone 22; done as milestone 23's last chunk.
 
-### Milestone 23: Server settings: overview, invites, bans (M)
-- A server settings window, reusing milestone 13's window
+### Milestone 23: Server settings: overview, invites, bans (M). Plan: [`server-settings.md`](server-settings.md)
+- A server settings window: its own window, one at a time, built on the same gpui-component `Settings` as milestone 13's
+- Also finishes milestone 22's Reports
 - Overview: name, description, icon, banner, and the channels for system messages
 - Invites: list and revoke
 - Bans: list and unban
 - Transfer server ownership
 - Delete the server (owner only), confirmed by typing its name. Moved here from milestone 19.
 
-### Milestone 24: Roles editor, part 1 (M)
+### Milestone 24: Roles editor, part 1 (M). Plan: [`roles-editor.md`](roles-editor.md)
 - List roles, and create, delete or rename one
 - Colour, hoisting and icon
 - Reorder roles by rank
 - This needs `ServerRoleRanksUpdate` events, as live role edits (milestone 7) already handle
+- A Roles page in milestone 23's Server Settings window: the list, and a role's editor in the same page; drag to reorder
 
-### Milestone 25: Roles editor, part 2: permissions (M)
+### Milestone 25: Roles editor, part 2: permissions (M). Plan: [`role-permissions.md`](role-permissions.md)
 - A permission matrix for a role, and for the server's default permissions, built from `revolt-permissions`' list of permissions
 - Greys out what you can't grant
+- Exactly Stoat's grant rule: an unheld permission can only be made stricter on a role, and must be off for Everyone. The Roles page also shows for Manage Permissions. One Save for a role's fields and permissions. The matrix is reusable for milestone 27
 
-### Milestone 26: Channel settings and order (M)
-- Channel overview: name, description, icon, slowmode, mature flag
-- Reorder channels and categories, and move channels between categories. Creating, renaming and deleting categories came in milestone 19.
+### Milestone 26: Channel settings and order (M). Plan: [`channel-settings-and-order.md`](channel-settings-and-order.md)
+- A Channel Settings window (one at a time, like Server Settings); milestones 27 and 28 add its Permissions and Webhooks pages
+- Channel overview: name, description, icon, slowmode, mature flag. Groups get the same page, without slowmode.
+- Reorder channels and categories, and move channels between categories, by dragging in the sidebar or with a "Move to ›" submenu. Creating, renaming and deleting categories came in milestone 19.
+- The web client's `"default"` category is drawn as the top, headerless section, as the web client does
 
-### Milestone 27: Channel permission overrides (M)
-- Allow or deny, per role and for the default permissions, reusing milestone 25's matrix
+### Milestone 27: Channel permission overrides (M). Plan: [`channel-permissions.md`](channel-permissions.md)
+- Allow or deny, per role and for the default permissions, reusing milestone 25's matrix, on a Permissions page in milestone 26's Channel Settings window
+- Exactly Stoat's grant rule, which for a role's override compares with the role's server-wide permissions
+- Only the permissions that apply in a channel (23) or group (12)
+- A group's member permissions, on or off, for its owner
 
-### Milestone 28: Emoji and webhooks (M)
-- Server emoji: upload, rename, delete
-- Webhooks: create, view (copy the URL), delete
+### Milestone 28: Emoji and webhooks (M). Plan: [`emoji-and-webhooks.md`](emoji-and-webhooks.md)
+- Server emoji: upload, rename, delete, on an Emojis page in Server Settings
+- Webhooks: create, view (copy the URL), rename and change the avatar, delete, on a Webhooks page in Channel Settings, for server channels and groups
 
 ## E. Bots
 
-### Milestone 29: Bots (M)
-- Your bots: list, create, edit (name, avatar, public or private, interactions URL), reset and copy the token, delete
-- Add a bot to a server or group, from its invite
-- Profile cards show bot badges and the bot's owner
+### Milestone 29: Bots (M). Plan: [`bots.md`](bots.md)
+- Your bots, in a My Bots section of Settings: list, create, edit (name, public or private, interactions URL, requested permissions), reset and copy the token, delete
+- A bot's profile (avatar, banner, display name, bio) with the Profile editor
+- Add a bot to a server or group, from its page or a `/bot/{id}` link, granting the requested permissions you may give
+- Bots' messages show a "Bot" tag; profile cards show the bot's owner
 
 ## F. Media
 
-### Milestone 30: Attachments and images (M)
+### Milestone 30: Attachments and images (M). Plan: [`attachments-and-images.md`](attachments-and-images.md)
 - Image and file actions: Save, Copy image, Copy link, Open in browser, also in the image viewer's right-click menu
 - Mark an upload as a spoiler (new in 0.16); spoiler attachments stay blurred until clicked
 - Inline previews of text-file attachments
 
-### Milestone 31: Inline audio and video (M)
+### Milestone 31: Inline audio and video (M). Plan: [`inline-audio-and-video.md`](inline-audio-and-video.md)
 - An audio player in the message, through AVFoundation (`AVPlayer` via `objc2`), with play/pause and seeking drawn in GPUI
 - Videos show a poster frame with a play button that opens a native player window. Playing video inside the message would be L, and is left out unless the player window turns out not to be enough.
 - **Risk:** the first use of AVFoundation here. Start with a small spike.

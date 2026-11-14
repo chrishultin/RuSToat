@@ -725,6 +725,17 @@ fn settle(ordering: &mut Ordering, folders: &mut ServerFolders, mut sidebar: Vec
 /// client allows (a CSS name, `rgb()`) isn't drawn.
 #[cfg(feature = "desktop")]
 pub fn parse_colour(colour: &str) -> Option<Rgba> {
+    hex_value(colour).map(rgb)
+}
+
+/// `#rgb` or `#rrggbb` as lower-case `#rrggbb`, or `None` for anything
+/// else (as [`parse_colour`] reads it, without GPUI's colour type).
+pub fn hex_colour(colour: &str) -> Option<String> {
+    hex_value(colour).map(|value| format!("#{value:06x}"))
+}
+
+/// The 24-bit value of `#rgb` or `#rrggbb`.
+fn hex_value(colour: &str) -> Option<u32> {
     let digits = colour.trim().strip_prefix('#')?;
     if !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
@@ -734,7 +745,7 @@ pub fn parse_colour(colour: &str) -> Option<Rgba> {
         6 => digits.to_string(),
         _ => return None,
     };
-    u32::from_str_radix(&digits, 16).ok().map(rgb)
+    u32::from_str_radix(&digits, 16).ok()
 }
 
 /// A list of IDs as the web client cleans one: the strings, with a
@@ -1553,6 +1564,16 @@ mod tests {
                     assert_eq!(drawn, known, "{dragged} {target:?}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn hex_colours_are_normalised() {
+        assert_eq!(hex_colour("#ABC").as_deref(), Some("#aabbcc"));
+        assert_eq!(hex_colour(" #30A46C ").as_deref(), Some("#30a46c"));
+        assert_eq!(hex_colour("#000").as_deref(), Some("#000000"));
+        for colour in ["red", "", "#", "#abcd", "#ggg", "rgb(1, 2, 3)"] {
+            assert_eq!(hex_colour(colour), None, "{colour}");
         }
     }
 

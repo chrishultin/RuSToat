@@ -109,6 +109,9 @@ pub struct DraftAttachment {
     /// RuSToat made the file (a pasted image), so it's deleted once it's no
     /// longer needed (see [`remove_temporary`]). The user's own files never are.
     pub temporary: bool,
+    /// Sent as a spoiler (see [`Self::upload_name`]). A file already named
+    /// `spoiler_…` starts marked.
+    pub spoiler: bool,
 }
 
 impl DraftAttachment {
@@ -124,6 +127,7 @@ impl DraftAttachment {
             .first_or_octet_stream()
             .essence_str()
             .to_string();
+        let spoiler = crate::file_actions::is_spoiler(&name);
         Self {
             local_id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             kind: crate::attachment::file_kind(&crate::api::models::Metadata::File, &content_type),
@@ -131,8 +135,21 @@ impl DraftAttachment {
             size,
             content_type,
             dimensions: None,
+            spoiler,
             path,
             temporary: false,
+        }
+    }
+
+    /// The name it's uploaded under. Stoat has no spoiler field: a spoiler
+    /// is a file named `SPOILER_…` (in any case), so a marked file gets the
+    /// prefix once, and an unmarked one loses it.
+    pub fn upload_name(&self) -> String {
+        use crate::file_actions::{display_name, is_spoiler};
+        match (self.spoiler, is_spoiler(&self.name)) {
+            (true, false) => format!("SPOILER_{}", self.name),
+            (false, true) => display_name(&self.name).to_string(),
+            _ => self.name.clone(),
         }
     }
 
@@ -344,6 +361,13 @@ impl Draft {
         self.attachments.retain(|a| a.local_id != local_id);
     }
 
+    /// Mark a file in the tray as a spoiler, or unmark it.
+    pub fn toggle_spoiler(&mut self, local_id: u64) {
+        if let Some(file) = self.attachments.iter_mut().find(|a| a.local_id == local_id) {
+            file.spoiler = !file.spoiler;
+        }
+    }
+
     /// Reply to `target` as well. Replying to the same message twice
     /// changes nothing; past [`MAX_REPLIES`] it's refused.
     pub fn add_reply(&mut self, target: ReplyTarget) -> Result<(), TooManyReplies> {
@@ -486,6 +510,55 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn attachment(name: &str) -> DraftAttachment {
+        DraftAttachment::from_path(PathBuf::from("/tmp").join(name), 1)
+    }
+
+    #[test]
+    fn a_marked_file_uploads_with_the_spoiler_prefix_once() {
+        let mut photo = attachment("photo.png");
+        assert!(!photo.spoiler);
+        assert_eq!(photo.upload_name(), "photo.png");
+        photo.spoiler = true;
+        assert_eq!(photo.upload_name(), "SPOILER_photo.png");
+
+        // Already named as one, in any case: marked from the start, and not
+        // prefixed twice.
+        for name in [
+            "spoiler_photo.png",
+            "SPOILER_photo.png",
+            "Spoiler_photo.png",
+        ] {
+            let file = attachment(name);
+            assert!(file.spoiler, "{name}");
+            assert_eq!(file.upload_name(), name);
+        }
+        // Unmarked, it loses the prefix, so it isn't a spoiler after all.
+        let mut named = attachment("Spoiler_photo.png");
+        named.spoiler = false;
+        assert_eq!(named.upload_name(), "photo.png");
+    }
+
+    #[test]
+    fn files_in_the_tray_are_marked_and_unmarked_by_id() {
+        let mut draft = Draft::default();
+        let limits = AttachmentLimits::default();
+        let (a, b) = (attachment("a.png"), attachment("b.png"));
+        let (a_id, b_id) = (a.local_id, b.local_id);
+        draft.add_attachment(a, &limits).unwrap();
+        draft.add_attachment(b, &limits).unwrap();
+        draft.toggle_spoiler(a_id);
+        let marked: Vec<bool> = draft.attachments.iter().map(|f| f.spoiler).collect();
+        assert_eq!(marked, [true, false]);
+        draft.toggle_spoiler(a_id);
+        draft.toggle_spoiler(b_id);
+        let marked: Vec<bool> = draft.attachments.iter().map(|f| f.spoiler).collect();
+        assert_eq!(marked, [false, true]);
+        // An unknown ID changes nothing.
+        draft.toggle_spoiler(u64::MAX);
+        assert!(draft.attachments[1].spoiler);
     }
 
     #[test]

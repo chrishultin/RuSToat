@@ -73,6 +73,19 @@ pub fn channel_from_link(link: &str, hosts: &InviteHosts) -> Option<ChannelLink>
     })
 }
 
+/// The bot `link` adds, if it's a bot invite link on this instance's web
+/// client (see [`InviteHosts::is_web_client`]): `/bot/{id}`, as the bot's
+/// owner copies it. A trailing `/`, query or fragment is ignored.
+pub fn bot_from_link(link: &str, hosts: &InviteHosts) -> Option<String> {
+    let url = web_url(link)?;
+    if !hosts.is_web_client(&url) {
+        return None;
+    }
+    let path = url.path().trim_end_matches('/');
+    let id = path.strip_prefix("/bot/")?;
+    is_id(id).then(|| id.to_string())
+}
+
 /// Whether `text` has the shape of a Stoat ID: a 26-character ULID.
 fn is_id(text: &str) -> bool {
     text.len() == 26 && text.bytes().all(|b| b.is_ascii_alphanumeric())

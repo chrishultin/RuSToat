@@ -138,6 +138,9 @@ pub struct MessageRow {
     /// author, even under a masquerade. `None` for system messages and
     /// webhooks, which aren't people.
     pub author_id: Option<String>,
+    /// The author is a bot, as far as the store knows: its header says so.
+    /// Not for webhooks or masquerades, which show their own names.
+    pub author_bot: bool,
     /// Author avatar URL. `None` for system messages, or when there's no
     /// image to show (the UI draws the author's initial instead).
     pub avatar: Option<String>,
@@ -319,6 +322,7 @@ impl PendingAttachment {
             kind: file.kind,
             image,
             progress: self.progress(),
+            spoiler: file.spoiler,
         }
     }
 }
@@ -575,8 +579,15 @@ pub struct ChatStore {
     /// Custom emoji of other servers, fetched by ID when a reaction or
     /// message uses one, so they can be named. Not offered for use.
     other_emojis: HashMap<String, Emoji>,
+    /// Webhooks of the channels whose list was fetched (Channel Settings'
+    /// Webhooks page), by channel. Others' webhook events are ignored.
+    webhooks: HashMap<String, Vec<crate::api::models::Webhook>>,
     /// Large images the user chose to load ("Show image"), by file ID.
     revealed_images: HashSet<String>,
+    /// Spoiler attachments the user clicked to see, by file ID.
+    revealed_attachments: HashSet<String>,
+    /// Text files' previews, by file ID, for the session.
+    text_previews: HashMap<String, crate::attachment::TextLoad>,
     /// Spoilers the user clicked to see, as (message ID, spoiler index).
     revealed_spoilers: HashSet<(String, usize)>,
     /// Messages from blocked users the user clicked to see, by ID.
@@ -628,6 +639,8 @@ impl ChatStore {
     /// reconnect would forget every mute and level, and the next change
     /// would write that empty copy over the user's settings.
     pub fn apply_ready(&mut self, ready: Ready) {
+        // Events may have been missed: a Webhooks page fetches its list again.
+        self.webhooks.clear();
         let ready_order: Vec<String> = ready.servers.iter().map(|s| s.id.clone()).collect();
         self.users = ready.users.into_iter().map(|u| (u.id.clone(), u)).collect();
         self.servers = ready
@@ -1783,20 +1796,23 @@ impl ChatStore {
         }
     }
 
-    /// Unread state for the Home button: open DMs and groups. Each friend
-    /// request waiting for the user counts as a mention (with no unread dot).
+    /// Unread state for the Home button: open DMs and groups, but not muted
+    /// ones (which show their mentions only in the list, as server channels
+    /// do). Each friend request waiting for the user counts as a mention
+    /// (with no unread dot).
     pub fn home_summary(&self) -> (bool, usize) {
         let requests = crate::friends::incoming_count(self);
         self.home_channels()
             .iter()
+            .filter(|c| !c.muted)
             .fold((false, requests), |(unread, mentions), c| {
                 (unread || c.unread, mentions + c.mentions)
             })
     }
 
     /// The whole account, for its switcher button: whether anything shows an
-    /// unread dot (Home or any server), and all unread mentions. Muted
-    /// channels add mentions but no dot, as on the rail.
+    /// unread dot (Home or any server), and all unread mentions, as Home and
+    /// the rail count them (so a muted channel adds neither).
     pub fn account_summary(&self) -> (bool, usize) {
         self.servers()
             .iter()
@@ -2197,6 +2213,103 @@ impl ChatStore {
         }
     }
 
+    /// Stoat answered the user's own `PATCH /channels/{id}` with `saved`:
+    /// show its name, description, icon, mature flag and slowmode now,
+    /// without waiting for its `ChannelUpdate` (which carries the same).
+    /// Nothing else is taken from it (a group keeps its owner, members and
+    /// permissions as the store has them). Returns false for an unknown
+    /// channel, or one with no settings.
+    pub fn apply_channel_edit(&mut self, saved: &Channel) -> bool {
+        let (id, name, description, icon, nsfw, slowmode) = match saved {
+            Channel::TextChannel {
+                id,
+                name,
+                description,
+                icon,
+                nsfw,
+                slowmode,
+                ..
+            } => (id, name, description, icon, nsfw, *slowmode),
+            Channel::Group {
+                id,
+                name,
+                description,
+                icon,
+                nsfw,
+                ..
+            } => (id, name, description, icon, nsfw, None),
+            _ => return false,
+        };
+        if !self.channels.contains_key(id) {
+            return false;
+        }
+        let mut clear = Vec::new();
+        if description.is_none() {
+            clear.push(FieldsChannel::Description);
+        }
+        if icon.is_none() {
+            clear.push(FieldsChannel::Icon);
+        }
+        if slowmode.is_none() && matches!(saved, Channel::TextChannel { .. }) {
+            clear.push(FieldsChannel::Slowmode);
+        }
+        let data = PartialChannel {
+            name: Some(name.clone()),
+            description: description.clone(),
+            icon: icon.clone(),
+            nsfw: Some(*nsfw),
+            slowmode,
+            ..Default::default()
+        };
+        self.apply_channel_update(id, data, &clear);
+        true
+    }
+
+    /// Stoat answered the user's own change to a channel's permissions
+    /// (`PUT /channels/{id}/permissions/…`) with `saved`: show a server
+    /// channel's overrides, or a group's member permissions, now, without
+    /// waiting for its `ChannelUpdate` (which carries the same). Nothing else
+    /// is taken from it. Returns false for an unknown channel, or one with
+    /// no permissions.
+    pub fn apply_channel_permissions(&mut self, saved: &Channel) -> bool {
+        let (id, data, clear) = match saved {
+            Channel::TextChannel {
+                id,
+                role_permissions,
+                default_permissions,
+                ..
+            } => {
+                let clear = match default_permissions {
+                    Some(_) => Vec::new(),
+                    None => vec![FieldsChannel::DefaultPermissions],
+                };
+                let data = PartialChannel {
+                    role_permissions: Some(role_permissions.clone()),
+                    default_permissions: *default_permissions,
+                    ..Default::default()
+                };
+                (id, data, clear)
+            }
+            Channel::Group {
+                id,
+                permissions: Some(permissions),
+                ..
+            } => {
+                let data = PartialChannel {
+                    permissions: Some(*permissions),
+                    ..Default::default()
+                };
+                (id, data, Vec::new())
+            }
+            _ => return false,
+        };
+        if !self.channels.contains_key(id) {
+            return false;
+        }
+        self.apply_channel_update(id, data, &clear);
+        true
+    }
+
     /// A server emoji was added (`EmojiCreate`).
     pub fn add_emoji(&mut self, emoji: Emoji) {
         self.emojis.insert(emoji.id.clone(), emoji);
@@ -2206,6 +2319,97 @@ impl ChatStore {
     pub fn remove_emoji(&mut self, id: &str) {
         self.emojis.remove(id);
         self.other_emojis.remove(id);
+    }
+
+    /// A server emoji was renamed (`EmojiUpdate`, or the answer to the
+    /// user's own rename). Returns false for an unknown emoji.
+    pub fn rename_emoji(&mut self, id: &str, name: &str) -> bool {
+        match self.emojis.get_mut(id) {
+            Some(emoji) => {
+                name.clone_into(&mut emoji.name);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `server`'s custom emoji, by name.
+    pub fn server_emojis(&self, server: &str) -> Vec<&Emoji> {
+        let mut emojis: Vec<&Emoji> = self
+            .emojis
+            .values()
+            .filter(|emoji| matches!(&emoji.parent, EmojiParent::Server { id } if id == server))
+            .collect();
+        emojis.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+        emojis
+    }
+
+    /// `channel`'s webhooks, if its list has been fetched.
+    pub fn webhooks(&self, channel: &str) -> Option<&[crate::api::models::Webhook]> {
+        self.webhooks.get(channel).map(Vec::as_slice)
+    }
+
+    /// `channel`'s webhooks as Stoat listed them (with their tokens).
+    pub fn set_webhooks(&mut self, channel: &str, webhooks: Vec<crate::api::models::Webhook>) {
+        self.webhooks.insert(channel.to_string(), webhooks);
+    }
+
+    /// A webhook was made (`WebhookCreate`, or the answer to the user's own
+    /// create), or saved: added to, or replaced in, its channel's list, if
+    /// that's been fetched. A token already known is kept when `webhook`
+    /// has none (events never carry it).
+    pub fn add_webhook(&mut self, mut webhook: crate::api::models::Webhook) {
+        let Some(list) = self.webhooks.get_mut(&webhook.channel_id) else {
+            return;
+        };
+        match list.iter_mut().find(|known| known.id == webhook.id) {
+            Some(known) => {
+                if webhook.token.is_none() {
+                    webhook.token = known.token.take();
+                }
+                *known = webhook;
+            }
+            None => list.push(webhook),
+        }
+    }
+
+    /// A webhook changed (`WebhookUpdate`): merge `data`, then clear
+    /// `remove`. Its token is never changed here.
+    pub fn apply_webhook_update(
+        &mut self,
+        channel: &str,
+        id: &str,
+        data: crate::api::models::PartialWebhook,
+        remove: &[crate::api::models::FieldsWebhook],
+    ) {
+        let Some(webhook) = self
+            .webhooks
+            .get_mut(channel)
+            .and_then(|list| list.iter_mut().find(|known| known.id == id))
+        else {
+            return;
+        };
+        if let Some(name) = data.name {
+            webhook.name = name;
+        }
+        if let Some(avatar) = data.avatar {
+            webhook.avatar = Some(avatar);
+        }
+        if let Some(permissions) = data.permissions {
+            webhook.permissions = permissions;
+        }
+        for field in remove {
+            match field {
+                crate::api::models::FieldsWebhook::Avatar => webhook.avatar = None,
+            }
+        }
+    }
+
+    /// A webhook was deleted (`WebhookDelete`, or by the user).
+    pub fn remove_webhook(&mut self, channel: &str, id: &str) {
+        if let Some(list) = self.webhooks.get_mut(channel) {
+            list.retain(|known| known.id != id);
+        }
     }
 
     /// Another server's emoji, fetched by ID (see [`ChatStore::missing_emojis`]).
@@ -2258,6 +2462,47 @@ impl ChatStore {
     /// changes from a card to the image.
     pub fn reveal_image(&mut self, file_id: &str) {
         self.revealed_images.insert(file_id.to_string());
+    }
+
+    /// Show a spoiler attachment (by file ID) for the rest of the session.
+    /// Its row's image changes from covered to the picture, at the same size.
+    pub fn reveal_attachment(&mut self, file_id: &str) {
+        self.revealed_attachments.insert(file_id.to_string());
+    }
+
+    /// How fetching text file `file_id`'s preview went. Its row changes
+    /// (and is remeasured) on the next sync.
+    pub fn set_text_preview(&mut self, file_id: &str, load: crate::attachment::TextLoad) {
+        self.text_previews.insert(file_id.to_string(), load);
+    }
+
+    /// Text files in `channel`'s loaded messages whose previews should be
+    /// fetched now, as (file ID, URL): small enough to load at once, not a
+    /// hidden spoiler, and not asked for yet. Mark each
+    /// [`TextLoad::Loading`](crate::attachment::TextLoad) before fetching,
+    /// so a sync meanwhile doesn't ask again.
+    pub fn text_previews_wanted(&self, channel: &str) -> Vec<(String, String)> {
+        let Some(history) = self.histories.get(channel) else {
+            return Vec::new();
+        };
+        history
+            .messages
+            .iter()
+            .flat_map(|message| message.attachments.iter().flatten())
+            .filter(|file| {
+                crate::attachment::loads_at_once(file)
+                    && !self.text_previews.contains_key(&file.id)
+                    && matches!(
+                        crate::attachment::text_preview(
+                            file,
+                            self.revealed_attachments.contains(&file.id),
+                            None,
+                        ),
+                        Some(crate::attachment::TextPreview::Loading)
+                    )
+            })
+            .filter_map(|file| Some((file.id.clone(), self.media.file(file)?)))
+            .collect()
     }
 
     /// Show spoiler `index` (counting from 0) of `message` for the rest of
@@ -2480,6 +2725,17 @@ impl ChatStore {
         rows
     }
 
+    /// Whether `message` is a bot's own (not under a masquerade, and not a
+    /// webhook's or Stoat's), by what the store knows of its author.
+    pub fn is_bot_author(&self, message: &Message) -> bool {
+        person_id(message).is_some()
+            && message.masquerade.is_none()
+            && self
+                .users
+                .get(&message.author)
+                .is_some_and(|user| user.bot.is_some())
+    }
+
     /// A message's row, by `author` (its [`Self::author_name`]).
     /// `group_end` is fixed up once the next row is known.
     fn message_row(&self, message: &Message, author: String, continuation: bool) -> MessageRow {
@@ -2510,6 +2766,7 @@ impl ChatStore {
             render_key: render_key(&message.id, body.as_deref()),
             avatar: self.avatar_url(message),
             author_id: person_id(message),
+            author_bot: self.is_bot_author(message),
             author,
             time: crate::time::message_time_label(&message.id),
             body,
@@ -2519,7 +2776,15 @@ impl ChatStore {
                 .flatten()
                 .map(|file| {
                     let revealed = self.revealed_images.contains(&file.id);
+                    let shown = self.revealed_attachments.contains(&file.id);
+                    // Only once there's somewhere to fetch it from.
+                    let preview = self.media.file(file).and_then(|_| {
+                        let load = self.text_previews.get(&file.id);
+                        crate::attachment::text_preview(file, shown, load)
+                    });
                     AttachmentView::new(file, &self.media, revealed)
+                        .uncovered(shown)
+                        .with_preview(preview)
                 })
                 .collect(),
             embeds: message
@@ -2533,7 +2798,14 @@ impl ChatStore {
                 })
                 .filter_map(|(ix, embed)| {
                     let key = format!("{}:embed{ix}", message.id);
-                    EmbedView::new(embed, &self.media, self, &self.revealed_images, &key)
+                    EmbedView::new(
+                        embed,
+                        &self.media,
+                        self,
+                        &self.revealed_images,
+                        &self.revealed_attachments,
+                        &key,
+                    )
                 })
                 .collect(),
             invites,
@@ -2692,6 +2964,12 @@ impl ChatStore {
     /// [`crate::permissions::can_manage_channel`]).
     pub fn can_manage_channel(&self, channel: &str) -> bool {
         crate::permissions::can_manage_channel(self, &self.me, channel)
+    }
+
+    /// Whether the user may edit `channel`'s settings (see
+    /// [`crate::permissions::can_edit_channel`]).
+    pub fn can_edit_channel(&self, channel: &str) -> bool {
+        crate::permissions::can_edit_channel(self, &self.me, channel)
     }
 
     /// Whether the user may create channels and categories in `server` (see
@@ -3054,6 +3332,36 @@ impl ChatStore {
         true
     }
 
+    /// Stoat answered the user's own `PATCH /servers/{id}` with `saved`:
+    /// show its name, description, icon, banner, system messages and owner
+    /// now, without waiting for its `ServerUpdate` (which carries the same).
+    /// Returns false for an unknown server.
+    pub fn apply_server_edit(&mut self, saved: &Server) -> bool {
+        let mut clear = Vec::new();
+        if saved.description.is_none() {
+            clear.push(FieldsServer::Description);
+        }
+        if saved.icon.is_none() {
+            clear.push(FieldsServer::Icon);
+        }
+        if saved.banner.is_none() {
+            clear.push(FieldsServer::Banner);
+        }
+        if saved.system_messages.is_none() {
+            clear.push(FieldsServer::SystemMessages);
+        }
+        let data = PartialServer {
+            name: Some(saved.name.clone()),
+            owner: Some(saved.owner.clone()),
+            description: saved.description.clone(),
+            icon: saved.icon.clone(),
+            banner: saved.banner.clone(),
+            system_messages: saved.system_messages.clone(),
+            ..Default::default()
+        };
+        self.apply_server_update(&saved.id, data, &clear)
+    }
+
     /// `server`'s categories are now `categories`: Stoat's answer to the
     /// user's own edit, applied before its `ServerUpdate` (which carries the
     /// same list). Unknown servers are ignored.
@@ -3175,6 +3483,28 @@ impl ChatStore {
     /// Cache a user fetched on their own (someone who just joined a server).
     pub fn add_user(&mut self, user: User) {
         self.users.insert(user.id.clone(), user);
+    }
+
+    /// One of the user's bots, as `GET /bots/@me` or a change to it sends
+    /// it: the bot as it sees itself (`relationship: User`), so the
+    /// relationship the store has is kept (none for a new one). Returns
+    /// whether a known user's name or avatar changed, so rows showing them
+    /// are drawn again.
+    pub fn add_bot_user(&mut self, mut user: User) -> bool {
+        let shown = |u: &User| {
+            (
+                u.username.clone(),
+                u.display_name.clone(),
+                u.avatar.as_ref().map(|f| f.id.clone()),
+            )
+        };
+        let known = self.users.get(&user.id);
+        let changed = known.is_some_and(|known| shown(known) != shown(&user));
+        user.relationship = known.map_or(crate::api::models::RelationshipStatus::None, |known| {
+            known.relationship.clone()
+        });
+        self.users.insert(user.id.clone(), user);
+        changed
     }
 
     pub fn knows_user(&self, id: &str) -> bool {
@@ -3616,9 +3946,16 @@ impl ChatStore {
             matches!(self.channels.get(*id), Some(Channel::TextChannel { .. }))
                 && self.shows_channel(id)
         });
+        // As the web client: a mute (the server's or the channel's) hides
+        // the dot, and a channel's own mute keeps its mentions off the
+        // badge. The server's mute doesn't: mentions are aimed at the user.
         let (unread, mentions) = visible.fold((false, 0), |(unread, mentions), id| {
             let shows_dot = self.is_unread(id) && !self.is_muted(id);
-            (unread || shows_dot, mentions + self.mention_count(id))
+            let counted = match self.channel_mute_until(id) {
+                Some(_) => 0,
+                None => self.mention_count(id),
+            };
+            (unread || shows_dot, mentions + counted)
         });
         Some(ServerEntry {
             id: s.id.clone(),
@@ -3647,37 +3984,34 @@ impl ChatStore {
         }
     }
 
-    /// A server's text channels: uncategorized ones first (in the server's
-    /// order), then each category in order. Channels we can't see (missing
-    /// from `Ready`, or hidden since: see [`Self::shows_channel`]) are left
-    /// out, and so is a category of only such channels. A category with no
-    /// channels on the server (new, or its channels deleted) shows empty.
+    /// A server's text channels: the top section first (the web client's
+    /// `"default"` category, then uncategorized channels in the server's
+    /// order: see [`crate::channel_order`]), then each other category in
+    /// order. Channels we can't see (missing from `Ready`, or hidden since:
+    /// see [`Self::shows_channel`]) are left out, and so is a category of
+    /// only such channels. A category with no channels on the server (new,
+    /// or its channels deleted) shows empty.
     pub fn server_channels(&self, server_id: &str) -> Vec<ChannelSection> {
         let Some(server) = self.servers.get(server_id) else {
             return Vec::new();
         };
-        let categories = server.categories.as_deref().unwrap_or_default();
-        let categorized: HashSet<&str> = categories
-            .iter()
-            .flat_map(|c| c.channels.iter().map(String::as_str))
-            .collect();
+        let layout = crate::channel_order::layout(server);
 
         let mut sections = Vec::new();
-        let uncategorized: Vec<ChannelEntry> = server
-            .channels
+        let top: Vec<ChannelEntry> = layout
+            .top
             .iter()
-            .filter(|id| !categorized.contains(id.as_str()))
             .filter(|id| self.shows_channel(id))
             .filter_map(|id| self.channel_entry(id))
             .collect();
-        if !uncategorized.is_empty() {
+        if !top.is_empty() {
             sections.push(ChannelSection {
                 title: None,
                 id: None,
-                channels: uncategorized,
+                channels: top,
             });
         }
-        for category in categories {
+        for category in &layout.categories {
             let channels: Vec<ChannelEntry> = category
                 .channels
                 .iter()
@@ -3702,7 +4036,9 @@ impl ChatStore {
         sections
     }
 
-    /// The category of `server` that lists `channel`, if any.
+    /// The category of `server` that lists `channel`, if any. The web
+    /// client's `"default"` category is the top section, so a channel in
+    /// it has none.
     pub fn category_of(&self, server: &str, channel: &str) -> Option<String> {
         self.servers
             .get(server)?
@@ -3711,6 +4047,7 @@ impl ChatStore {
             .flatten()
             .find(|category| category.channels.iter().any(|id| id == channel))
             .map(|category| category.id.clone())
+            .filter(|id| id != crate::channel_order::DEFAULT_CATEGORY)
     }
 
     /// Whether any server has a category with this ID.

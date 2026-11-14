@@ -1,6 +1,6 @@
 //! Server members against a mock Stoat API: the user's own identity
-//! (`PATCH /servers/{server}/members/{user}`), and moderation (kicks and
-//! bans).
+//! (`PATCH /servers/{server}/members/{user}`), moderation (kicks and
+//! bans), and Server Settings' ban list and unban.
 
 use revolt_result::ErrorType;
 use serde_json::json;
@@ -424,5 +424,59 @@ async fn moving_someone_who_left_the_call_says_so() {
     assert_eq!(
         moderation_error_text(&err, "x"),
         "They're no longer in a call."
+    );
+}
+
+#[tokio::test]
+async fn the_ban_list_parses_users_and_bans() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/servers/srv/bans"))
+        .and(header("x-session-token", "tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "users": [{ "_id": "u-ada", "username": "ada", "discriminator": "0001" }],
+            "bans": [
+                { "_id": { "server": "srv", "user": "u-ada" }, "reason": "Spam" },
+                { "_id": { "server": "srv", "user": "u-gone" } }
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let list = client(&server).fetch_bans("srv").await.unwrap();
+    assert_eq!(list.users.len(), 1);
+    assert_eq!(list.bans[0].reason.as_deref(), Some("Spam"));
+    assert_eq!(list.bans[1].id.user, "u-gone");
+    assert_eq!(list.bans[1].reason, None);
+}
+
+#[tokio::test]
+async fn unbanning_sends_one_delete() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/servers/srv/bans/u-ada"))
+        .and(header("x-session-token", "tok"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client(&server).unban("srv", "u-ada").await.unwrap();
+}
+
+#[tokio::test]
+async fn unbanning_someone_no_longer_banned_says_so() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/servers/srv/bans/u-ada"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({ "type": "NotFound" })))
+        .mount(&server)
+        .await;
+
+    let err = client(&server).unban("srv", "u-ada").await.unwrap_err();
+    assert_eq!(
+        stoat_gpui::server_settings::unban_error_text(&err),
+        "They aren't banned any more."
     );
 }

@@ -12,6 +12,7 @@ gpui_kit::assets::icon_assets!(
     [
         AtSign,
         Bookmark,
+        Bot,
         Clock,
         CornerUpRight,
         Crown,
@@ -32,6 +33,7 @@ gpui_kit::assets::icon_assets!(
         KeyRound,
         Keyboard,
         Link,
+        Lock,
         LogOut,
         Mail,
         MessageCircle,
@@ -47,6 +49,7 @@ gpui_kit::assets::icon_assets!(
         RefreshCw,
         Reply,
         SendHorizontal,
+        Shield,
         ShieldCheck,
         Smartphone,
         TextQuote,
@@ -58,6 +61,7 @@ gpui_kit::assets::icon_assets!(
         UserX,
         Users,
         Volume2,
+        Webhook,
         WifiOff
     ]
 );
@@ -169,6 +173,21 @@ mod tests {
         }
     }
 
+    /// The file actions (menus and the image viewer's bar) and spoilers.
+    #[test]
+    fn file_icons_load() {
+        for icon in [
+            IconName::Download,
+            IconName::Copy,
+            IconName::Link,
+            IconName::ExternalLink,
+            IconName::EyeOff,
+        ] {
+            let path = icon.path();
+            assert!(AppAssets.load(&path).unwrap().is_some(), "{path} missing");
+        }
+    }
+
     /// The slowmode badge by the message box.
     #[test]
     fn slowmode_icon_loads() {
@@ -217,6 +236,39 @@ mod tests {
             IconName::Palette,
             IconName::Play,
             IconName::Settings,
+            // My Bots.
+            IconName::Bot,
+        ] {
+            let path = icon.path();
+            assert!(AppAssets.load(&path).unwrap().is_some(), "{path} missing");
+        }
+    }
+
+    /// The Server Settings window's sidebar icons.
+    #[test]
+    fn server_settings_icons_load() {
+        for icon in [
+            IconName::Settings,
+            IconName::Shield,
+            IconName::Link,
+            IconName::Ban,
+            IconName::Crown,
+            IconName::Lock,
+            IconName::Plus,
+            IconName::Users,
+            // Server Settings' Emojis page.
+            IconName::FaceSlightlySmiling,
+            // Channel Settings' Webhooks page, and its Copy URL.
+            IconName::Webhook,
+            IconName::Copy,
+            // Channel Settings' Permissions page, and its rows.
+            IconName::ShieldCheck,
+            IconName::ChevronRight,
+            IconName::ChevronLeft,
+            // The permission matrix's Deny / Neutral / Allow.
+            IconName::Close,
+            IconName::Minus,
+            IconName::Check,
         ] {
             let path = icon.path();
             assert!(AppAssets.load(&path).unwrap().is_some(), "{path} missing");

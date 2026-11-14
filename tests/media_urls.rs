@@ -47,6 +47,28 @@ fn file_emoji_and_default_avatar_urls() {
 }
 
 #[test]
+fn originals_are_addressed_by_their_encoded_name() {
+    let mut song: stoat_gpui::api::models::File =
+        serde_json::from_value(file("attachments", "file-2")).unwrap();
+    song.filename = "SPOILER_my song #1 (live).mp3".into();
+    // The name is the original's own, spoiler prefix and all, encoded so
+    // the file server's route matches it.
+    assert_eq!(
+        media().original(&song).as_deref(),
+        Some(
+            "https://cdn.stoatusercontent.com/attachments/file-2/\
+             SPOILER_my%20song%20%231%20%28live%29.mp3"
+        )
+    );
+    song.filename = "naïve/../x.m4a".into();
+    assert_eq!(
+        media().original(&song).as_deref(),
+        Some("https://cdn.stoatusercontent.com/attachments/file-2/na%C3%AFve%2F..%2Fx.m4a")
+    );
+    assert_eq!(MediaUrls::new(API, None, None).original(&song), None);
+}
+
+#[test]
 fn external_images_are_proxied_and_encoded() {
     let media = media();
     assert_eq!(

@@ -11,7 +11,7 @@ settings:
   base:
     SWIFT_VERSION: "6.0"
     # Signing for your own iPhone: automatic, under your team.
-    DEVELOPMENT_TEAM: 87ATGCDMGT
+    DEVELOPMENT_TEAM: G55L4BQ44C
     CODE_SIGN_STYLE: Automatic
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"

@@ -359,3 +359,22 @@ _Completed: 2026-11-13 (code). Manual checks and the signed device install are p
 8. Background the app for 5+ minutes and return: it reconnects, and the open channel reloads.
 9. Check light and dark mode, and that the tab bar shrinks while scrolling.
 10. Use it for a day on cellular, locking and unlocking and switching apps.
+
+## Merging main, and signing for the device
+
+_2026-11-13, after the summary above._
+
+`main` had moved 47 commits ahead (milestones 22–31: webhooks, roles, channel settings, custom emoji, reports, audio and video). Merging it into this branch needed:
+- **Conflicts:** `src/lib.rs` (new modules next to the `desktop` gates) and `tests/permissions.rs` (import lists from both sides).
+- **`src/roles.rs` was GPUI-free except for colours.** `ColourChoice::of` now uses a new `rail::hex_colour` (lower-case `#rrggbb` from `#rgb`/`#rrggbb`), sharing `rail::hex_value` with `parse_colour`. `hex_of`, `rgba_hex` and the `gpui_kit` import are behind `desktop`. A new unit test covers `hex_colour`.
+- **`src/live.rs`** handles `main`'s new events as desktop does: `EmojiUpdate` (`rename_emoji`), and `WebhookCreate`/`Update`/`Delete` (`add_webhook`, `apply_webhook_update`, `remove_webhook`).
+- **`src/media_player.rs`:** `END_SLACK` and `at_end` are allowed as dead code off macOS. Only the macOS player uses them, and the iOS build's `-D warnings` caught it.
+- **`ios/stoat-ffi/src/timeline.rs`:** `main`'s new `AttachmentView::Audio` and `Video` show as file cards that open in Safari. Inline media is iOS milestone 3.
+
+Signing: the plan's team ID was wrong. `87ATGCDMGT` is in the certificate's name, but its `OU`, and the team Xcode lists (a paid individual team, not a free one), is **`G55L4BQ44C`**. `ios/project.yml`, the README and the plan's assumption 2 now say so.
+
+Verification after the merge:
+- `cargo test`: 1499 passed, 0 failed, 5 ignored (91 binaries). `cargo clippy --all-targets -- -D warnings`: clean.
+- `cargo clippy --lib --no-default-features -- -D warnings`, on the host and for `aarch64-apple-ios`: clean. No `gpui-kit`, `livekit` or `keyring` for iOS.
+- `scripts/ios/test.sh`: exit 0.
+- `xcodebuild … -destination 'generic/platform=iOS' -allowProvisioningUpdates build`: **BUILD SUCCEEDED**, signed by "Apple Development: Christopher Hultin (87ATGCDMGT)", TeamIdentifier G55L4BQ44C. The Definition of Done's "installs from Xcode" now waits only on you pressing Run with the phone selected.

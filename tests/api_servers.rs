@@ -1,12 +1,15 @@
 //! Servers and channels against a mock Stoat API: `POST /servers/create`
 //! (create a server), `POST /servers/{id}/channels` (create a channel),
 //! `PATCH /servers/{id}` (its categories), `DELETE /channels/{id}`
-//! (delete a channel) and `DELETE /servers/{id}` (leave a server).
+//! (delete a channel), `DELETE /servers/{id}` (leave a server), and from
+//! Server Settings: `PATCH /servers/{id}` (its name and description, or a
+//! new owner) and `DELETE /servers/{id}` (delete it).
 
 use revolt_result::ErrorType;
 use serde_json::json;
 use stoat_gpui::api::models::{Category, Channel};
 use stoat_gpui::api::{ApiError, StoatClient};
+use stoat_gpui::server_settings::{OverviewForm, save_error_text};
 use wiremock::matchers::{body_json, body_string, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -285,4 +288,162 @@ async fn leaving_a_server_already_left_is_not_found() {
         matches!(err.error_type(), Some(ErrorType::NotFound)),
         "{err:?}"
     );
+}
+
+fn lounge() -> serde_json::Value {
+    json!({
+        "_id": "srv", "owner": "u-me", "name": "Lounge", "channels": [],
+        "default_permissions": 0, "approximate_member_count": 1
+    })
+}
+
+#[tokio::test]
+async fn editing_a_server_sends_only_what_changed() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/servers/srv"))
+        .and(header("x-session-token", "tok"))
+        .and(body_json(
+            json!({ "name": "Lounge", "remove": ["Description"] }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(lounge()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let before: stoat_gpui::api::models::Server = serde_json::from_value(json!({
+        "_id": "srv", "owner": "u-me", "name": "Test", "description": "About us",
+        "channels": [], "default_permissions": 0, "approximate_member_count": 1
+    }))
+    .unwrap();
+    let form = OverviewForm {
+        name: "Lounge".into(),
+        ..OverviewForm::of(&before)
+    };
+    assert_eq!(form.description, "About us");
+    let form = OverviewForm {
+        description: String::new(),
+        ..form
+    };
+    let edit = form.changes(&before).unwrap();
+    let saved = client(&server).edit_server("srv", &edit).await.unwrap();
+    assert_eq!(saved.name, "Lounge");
+    assert_eq!(saved.description, None);
+}
+
+#[tokio::test]
+async fn editing_a_server_without_permission_says_so() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/servers/srv"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "type": "MissingPermission", "permission": "ManageServer"
+        })))
+        .mount(&server)
+        .await;
+
+    let edit = stoat_gpui::api::models::DataEditServer {
+        name: Some("Lounge".into()),
+        ..stoat_gpui::server_settings::empty_server_edit()
+    };
+    let err = client(&server).edit_server("srv", &edit).await.unwrap_err();
+    assert_eq!(
+        save_error_text(&err),
+        "You don't have permission to change this server."
+    );
+}
+
+#[tokio::test]
+async fn transferring_a_server_sends_the_owner_with_a_ticket() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/servers/srv"))
+        .and(header("x-session-token", "tok"))
+        .and(header("x-mfa-ticket", "ticket-1"))
+        .and(body_json(json!({ "owner": "u-ada" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "_id": "srv", "owner": "u-ada", "name": "Lounge", "channels": [],
+            "default_permissions": 0, "approximate_member_count": 2
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let saved = client(&server)
+        .transfer_server("ticket-1", "srv", "u-ada")
+        .await
+        .unwrap();
+    assert_eq!(saved.owner, "u-ada");
+}
+
+#[tokio::test]
+async fn transferring_to_a_bot_is_refused_in_words() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/servers/srv"))
+        .respond_with(
+            ResponseTemplate::new(400).set_body_json(json!({ "type": "InvalidOperation" })),
+        )
+        .mount(&server)
+        .await;
+
+    let err = client(&server)
+        .transfer_server("ticket-1", "srv", "u-bot")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        stoat_gpui::server_settings::transfer_refusal(&err).as_deref(),
+        Some("Bots can't own servers.")
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_server_sends_one_delete() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/servers/srv"))
+        .and(header("x-session-token", "tok"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client(&server).delete_server("srv").await.unwrap();
+}
+
+#[tokio::test]
+async fn a_move_out_of_a_category_sends_default_first() {
+    let server = MockServer::start().await;
+    let body = json!({
+        "categories": [
+            { "id": "default", "title": "Default", "channels": ["c1", "c3", "c2"] },
+            { "id": "k1", "title": "Chat", "channels": [] }
+        ]
+    });
+    Mock::given(method("PATCH"))
+        .and(path("/servers/s1"))
+        .and(body_json(body.clone()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "_id": "s1", "owner": "u-me", "name": "Lounge", "channels": ["c1", "c2", "c3"],
+            "categories": body["categories"],
+            "default_permissions": 0, "approximate_member_count": 1
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // `c2` is in Chat; moved to the end of the top section, after `c3`,
+    // which isn't the server's own order.
+    let lounge: stoat_gpui::api::models::Server = serde_json::from_value(json!({
+        "_id": "s1", "owner": "u-me", "name": "Lounge", "channels": ["c1", "c2", "c3"],
+        "categories": [{ "id": "k1", "title": "Chat", "channels": ["c2"] }],
+        "default_permissions": 0, "approximate_member_count": 1
+    }))
+    .unwrap();
+    let edited = stoat_gpui::channel_order::move_to_end(&lounge, "c2", None).unwrap();
+    let kept = client(&server)
+        .edit_categories("s1", &edited)
+        .await
+        .unwrap();
+    assert_eq!(kept, edited);
 }

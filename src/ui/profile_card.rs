@@ -78,6 +78,10 @@ impl MutualList {
 /// What clicking a row of mutuals does: open its list.
 pub type OnMutuals = Rc<dyn Fn(MutualList, &mut Window, &mut App)>;
 
+/// What clicking someone named on the card does (a bot's owner): open
+/// their card.
+pub type OnUser = Rc<dyn Fn(String, &mut Window, &mut App)>;
+
 /// Something chosen from a list of mutuals.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MutualPick {
@@ -92,12 +96,14 @@ pub type OnMutualPick = Rc<dyn Fn(MutualPick, &mut Window, &mut App)>;
 
 /// The card itself. `actions` go in a row under the names (chunks of the
 /// card that act on the person: Message, friend requests, the menu).
-/// Clicking a row of mutuals calls `on_mutuals`.
+/// Clicking a row of mutuals calls `on_mutuals`; clicking a bot's owner
+/// calls `on_user`.
 pub fn render_profile_card(
     content: &CardContent,
     actions: Vec<AnyElement>,
     on_link: OnLink,
     on_mutuals: OnMutuals,
+    on_user: OnUser,
     cx: &App,
 ) -> Div {
     let theme = cx.theme();
@@ -167,7 +173,22 @@ pub fn render_profile_card(
                     cx.write_to_clipboard(ClipboardItem::new_string(tag.clone()));
                 })
                 .child(card.username_tag.clone()),
-        );
+        )
+        .children(card.owner.as_ref().map(|owner| {
+            let line = div()
+                .id("profile-card-owner")
+                .truncate()
+                .text_xs()
+                .text_color(muted)
+                .child(format!("Owned by {}", owner.name));
+            if !owner.known {
+                return line;
+            }
+            let id = owner.id.clone();
+            line.cursor_pointer()
+                .hover(|el| el.text_color(theme.foreground).underline())
+                .on_click(move |_, window, cx| on_user(id.clone(), window, cx))
+        }));
 
     let header = h_flex()
         .px_4()

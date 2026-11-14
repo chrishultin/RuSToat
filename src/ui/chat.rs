@@ -1,6 +1,6 @@
 //! The signed-in UI: server rail, channel list, and the selected channel.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -39,21 +39,29 @@ use crate::api::models::{
     FieldsMember, FieldsMessage, InviteJoinResponse, MessageSort, MutualResponse, Presence,
     ReplyIntent, Server, SystemMessage, UserProfile,
 };
-use crate::attachment::{AttachmentView, fit_into};
+use crate::attachment::{AttachmentView, TextPreview, fit_into};
+use crate::channel_order::{
+    CategoryDrop, ChannelDrop, ChannelHover, category_target, channel_target, move_category,
+    move_channel,
+};
 use crate::complete::{Query, QueryKind, Suggestion, TokenRef, rank, rank_mentions};
 use crate::draft::{AttachmentLimits, DraftAttachment, ReplyTarget};
 use crate::embed::{Description, EmbedCard, EmbedImage, EmbedView};
+use crate::file_actions::{self as files, FileAction, FileTarget};
 use crate::friends::{AddFriendState, FRIENDS, FriendsTab};
 use crate::invites::{InviteHosts, InvitePreview};
 use crate::markdown::{
     InternalLink, JUMBO_TEXT_PX, has_relative_time, is_external_link, parse_internal_link,
 };
 use crate::media::MediaUrls;
+use crate::media_player::{Player, PlayerSnapshot, PlayerStatus};
 use crate::notify::{self, Delivery, Level, MuteFor, Notice, NotificationSettings, Viewing};
 use crate::places::{Place, Places, PlacesFile};
+use crate::playback::{self, Change, MediaKind, NowPlaying};
 use crate::profile::{RelationshipAction, UserMenuItem};
 use crate::profile_edit::ImageLimits;
 use crate::rail::{self, DropTarget, Folder, Ordering, RailEntry, ServerFolders};
+use crate::reports::ReportTarget;
 use crate::runtime::{IoTask, spawn_io};
 use crate::safety::{LinkCheck, SafetyFile, SafetySettings, classify, is_own_instance, origin};
 use crate::search::{
@@ -73,6 +81,7 @@ use crate::time::{format_countdown, format_duration_short, ulid_millis};
 use crate::typing::{OutgoingTyping, TypingSignal, TypingState, typing_label};
 use crate::ui::actions::OpenProfileSettings;
 use crate::ui::app_prefs::AppPrefs;
+use crate::ui::channel_settings::ChannelSettingsWindow;
 use crate::ui::composer::{Composer, ComposerEvent, file_icon};
 use crate::ui::emoji_picker::emoji_grid;
 use crate::ui::friends::{RowButtons, render_add_friend, render_friends_page};
@@ -93,14 +102,17 @@ use crate::ui::moderation_dialogs::{
 };
 use crate::ui::profile_card::{
     CardBio, CardContent, MUTUALS_DIALOG_WIDTH, MutualList, MutualPick, OnLink, OnMutualPick,
-    OnMutuals, render_mutuals_list, render_profile_card,
+    OnMutuals, OnUser, render_mutuals_list, render_profile_card,
 };
+use crate::ui::report_dialog::open_report_dialog;
 use crate::ui::server_dialogs::{
     CREATE_CHANNEL_DIALOG_WIDTH, CREATE_SERVER_DIALOG_WIDTH, CreateChannelDialog,
     CreateServerDialog, EditFolderDialog, INFO_DIALOG_WIDTH, InfoContent, InfoPlaceholder,
-    NAME_DIALOG_WIDTH, NameDialog, render_info,
+    NAME_DIALOG_WIDTH, NameDialog, OnSettings, render_info,
 };
+use crate::ui::server_settings::ServerSettingsWindow;
 use crate::ui::voice_global::ActiveVoice;
+use crate::video_window::VideoWindow;
 use crate::voice::{EndReason, MuteState, VoiceCall, VoiceError, VoiceEvent, VoiceEvents};
 
 actions!(
@@ -307,6 +319,9 @@ pub struct ChatView {
     /// The channel whose "Delete {name}?" confirmation is waiting for Stoat
     /// to answer: its buttons are disabled until then.
     deleting_channel: Option<String>,
+    /// A new order of a server's channels and categories, shown already,
+    /// while Stoat hasn't answered: another waits until then.
+    categories_saving: Option<Task<()>>,
     /// The group and member whose "Remove {name}?" confirmation is waiting
     /// for Stoat to answer, likewise.
     removing_member: Option<(String, String)>,
@@ -395,6 +410,17 @@ pub struct ChatView {
     invite_queue: VecDeque<String>,
     /// A lookup is on its way.
     invite_loading: bool,
+    /// Text previews' scroll positions, by file ID, so a preview keeps its
+    /// place and knows whether it overflows.
+    text_scrolls: TextScrolls,
+    /// The file playing or paused, with its player (see
+    /// [`crate::playback`]).
+    playing: Option<Playing>,
+    /// The player is being polled (only while it plays).
+    playback_polling: bool,
+    /// Files whose player failed, by ID, for the session: they say they
+    /// can't be played here.
+    unplayable: Rc<HashSet<String>>,
     /// Invites being joined from their card.
     invite_joins: HashSet<String>,
     /// Servers whose own membership is being fetched, so a server added
@@ -405,6 +431,12 @@ pub struct ChatView {
     invite_max_days: Option<u32>,
     /// The most members a group may have on this instance, when it says.
     group_size: Option<u32>,
+    /// The most custom emoji a server may have, when the instance says.
+    server_emoji_limit: Option<u32>,
+    /// The most bots an account may own, when the instance says.
+    bot_limit: Option<u32>,
+    /// How big a custom emoji's file may be.
+    emoji_size_limit: u64,
     /// The instance's voice servers (see
     /// [`crate::api::RootConfig::voice_nodes`]); none without voice. Calls
     /// are joined on the first; a moderator's move names its own.
@@ -439,7 +471,11 @@ pub struct ChatView {
     /// A server or folder being dragged in the rail. Only while gpui has a
     /// drag going (see [`Self::rail_dragging`]).
     rail_drag: Option<RailDragState>,
-    /// Esc cancels a drag in the rail, which gpui doesn't do itself.
+    /// A category or channel being dragged in the channel list. Only while
+    /// gpui has a drag going (see [`Self::channel_dragging`]).
+    channel_drag: Option<ChannelDragState>,
+    /// Esc cancels a drag in the rail or the channel list, which gpui
+    /// doesn't do itself.
     _drag_escape: Subscription,
     /// The message whose reaction picker is open.
     picker_for: Option<String>,
@@ -522,6 +558,9 @@ pub struct ChatView {
 
 /// How often relative timestamps ("in 3 hours") are worked out again.
 const RELATIVE_TIME_TICK: Duration = Duration::from_secs(60);
+
+/// How often a playing file's player is read (for its time and seek bar).
+const PLAYBACK_POLL: Duration = Duration::from_millis(250);
 
 /// The voice call an account is in, or joining.
 struct ActiveCall {
@@ -611,7 +650,9 @@ impl ChatView {
                 return;
             }
             if view
-                .update(cx, |this, cx| this.end_rail_drag(cx))
+                .update(cx, |this, cx| {
+                    this.end_rail_drag(cx) | this.end_channel_drag(cx)
+                })
                 .unwrap_or(false)
             {
                 cx.stop_active_drag(window);
@@ -643,12 +684,15 @@ impl ChatView {
                     );
                     this.update(cx, |this, cx| {
                         this.voice_nodes = root.voice_nodes().to_vec();
+                        this.emoji_size_limit = root.emoji_size_limit();
+                        this.bot_limit = crate::bots::bot_limit(&root);
                         this.web_app = root.app;
                         this.image_limits = image_limits;
                         // Before `set_media`, whose re-sync adds the cards.
                         this.store.set_invite_hosts(this.invite_hosts());
                         this.invite_max_days = root.features.limits.global.max_invite_duration_days;
                         this.group_size = root.features.limits.global.group_size;
+                        this.server_emoji_limit = root.features.limits.global.server_emoji;
                         this.set_media(media, cx);
                         this.composer
                             .update(cx, |composer, _| composer.set_limits(limits));
@@ -853,6 +897,7 @@ impl ChatView {
             safety,
             link_prompt: None,
             deleting_channel: None,
+            categories_saving: None,
             removing_member: None,
             transferring_group: None,
             closing_dm: None,
@@ -887,10 +932,17 @@ impl ChatView {
             invites: HashMap::new(),
             invite_queue: VecDeque::new(),
             invite_loading: false,
+            text_scrolls: TextScrolls::default(),
+            playing: None,
+            playback_polling: false,
+            unplayable: Rc::default(),
             invite_joins: HashSet::new(),
             own_member_fetches: HashSet::new(),
             invite_max_days: None,
             group_size: None,
+            server_emoji_limit: None,
+            bot_limit: None,
+            emoji_size_limit: crate::api::DEFAULT_EMOJI_SIZE_LIMIT,
             voice_nodes: Vec::new(),
             voice: None,
             voice_user_fetches: HashSet::new(),
@@ -908,6 +960,7 @@ impl ChatView {
             notifications_write: 0,
             rail_write: 0,
             rail_drag: None,
+            channel_drag: None,
             _drag_escape: drag_escape,
             picker_for: None,
             reacting: HashSet::new(),
@@ -1134,21 +1187,7 @@ impl ChatView {
             ConnectionEvent::Event(ServerEvent::ChannelUpdate { id, data, clear }) => {
                 log::debug!("live: channel {id} updated");
                 self.store.apply_channel_update(&id, *data, &clear);
-                // Permission overrides decide who sees the channel, and who
-                // may pin in it.
-                self.forget_member_lists();
-                self.sync_pane(&id, cx);
-                // A hidden channel, or a DM closed elsewhere, can't stay open.
-                let selected = self.selected.len();
-                self.drop_stale_selection();
-                let open = self.current_channel().is_some_and(|c| c.id == id);
-                if self.selected.len() != selected {
-                    self.remember_places();
-                    self.ensure_current_loaded(cx);
-                } else if open {
-                    // It may no longer be marked mature, so not gated.
-                    self.ensure_current_loaded(cx);
-                }
+                self.channel_changed(&id, cx);
             }
             ConnectionEvent::Event(ServerEvent::ChannelDelete { id }) => {
                 log::debug!("live: channel {id} deleted");
@@ -1179,13 +1218,34 @@ impl ChatView {
                     return;
                 }
             }
+            // Redrawn, for an open Emojis page.
             ConnectionEvent::Event(ServerEvent::EmojiCreate(emoji)) => {
                 self.store.add_emoji(*emoji);
-                return;
             }
             ConnectionEvent::Event(ServerEvent::EmojiDelete { id }) => {
                 self.store.remove_emoji(&id);
-                return;
+            }
+            // Redrawn, for an open Webhooks page.
+            ConnectionEvent::Event(ServerEvent::WebhookCreate(webhook)) => {
+                self.store.add_webhook(*webhook);
+            }
+            ConnectionEvent::Event(ServerEvent::WebhookUpdate {
+                id,
+                channel,
+                data,
+                remove,
+            }) => {
+                self.store
+                    .apply_webhook_update(&channel, &id, *data, &remove);
+            }
+            ConnectionEvent::Event(ServerEvent::WebhookDelete { id, channel }) => {
+                self.store.remove_webhook(&channel, &id);
+            }
+            ConnectionEvent::Event(ServerEvent::EmojiUpdate { id, name }) => {
+                log::debug!("live: emoji {id} updated");
+                if let Some(name) = name {
+                    self.store.rename_emoji(&id, &name);
+                }
             }
             ConnectionEvent::Event(ServerEvent::ServerMemberJoin { server, member }) => {
                 let user = member.id.user.clone();
@@ -1624,10 +1684,30 @@ impl ChatView {
                 self.store.reveal_image(&file_id);
                 self.sync_pane(channel, cx);
             }
+            RowAction::RevealAttachment(file_id) => {
+                self.store.reveal_attachment(&file_id);
+                self.sync_pane(channel, cx);
+            }
+            RowAction::LoadText { id, url } => {
+                self.load_text(channel, id, url, cx);
+                self.sync_pane(channel, cx);
+            }
             RowAction::ViewImage(image) => {
                 self.viewer = Some(image);
                 window.focus(&self.viewer_focus, cx);
             }
+            RowAction::PlayAudio { file_id, url } => {
+                self.play_audio(channel, file_id, &url, window, cx)
+            }
+            RowAction::PlayVideo {
+                file_id,
+                url,
+                name,
+                original,
+            } => self.play_video(channel, file_id, url, &name, original, window, cx),
+            RowAction::PauseAudio => self.pause_playback(cx),
+            RowAction::SeekAudio(fraction) => self.seek_playback(fraction, cx),
+            RowAction::File(action, target) => self.file_action(action, target, window, cx),
             RowAction::ToggleReaction { message, emoji } => {
                 self.picker_for = None;
                 self.toggle_reaction(channel.to_string(), message, emoji, window, cx);
@@ -1648,9 +1728,10 @@ impl ChatView {
                 }
             }
             RowAction::Edit(id) => self.start_edit(channel, id, window, cx),
-            RowAction::Delete { id, confirmed: true } => {
-                self.delete_message(channel.to_string(), id, window, cx)
-            }
+            RowAction::Delete {
+                id,
+                confirmed: true,
+            } => self.delete_message(channel.to_string(), id, window, cx),
             RowAction::Delete {
                 id,
                 confirmed: false,
@@ -1687,6 +1768,9 @@ impl ChatView {
                 }
             }
             RowAction::CopyId(id) => cx.write_to_clipboard(ClipboardItem::new_string(id)),
+            RowAction::Report { id, author } => {
+                self.open_report(ReportTarget::Message { id, author }, window, cx)
+            }
             RowAction::JoinInvite(code) => self.join_invite_card(&code, window, cx),
             RowAction::RetryInvite(code) => self.retry_invite(&code, cx),
             RowAction::MarkUnread(id) => self.mark_unread(channel, &id, cx),
@@ -1698,6 +1782,130 @@ impl ChatView {
             RowAction::OpenLink(url) => self.open_external(url, None, window, cx),
         }
         cx.notify();
+    }
+
+    /// Save, copy or open a file or picture.
+    fn file_action(
+        &mut self,
+        action: FileAction,
+        target: FileTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            FileAction::Save => self.save_file(target, window, cx),
+            FileAction::CopyImage => self.copy_image(target, window, cx),
+            FileAction::CopyLink => {
+                cx.write_to_clipboard(ClipboardItem::new_string(target.link));
+                window.push_notification(Notification::success(files::LINK_COPIED_TEXT), cx);
+            }
+            FileAction::OpenInBrowser => {
+                let url = target.page.unwrap_or(target.link);
+                self.open_external(url, None, window, cx)
+            }
+        }
+    }
+
+    /// Save…: ask where with the save panel (in Downloads, with the name
+    /// filled in), then download the file there. The whole file is held in
+    /// memory on the way (attachments are at most tens of MB).
+    fn save_file(&mut self, target: FileTarget, window: &mut Window, cx: &mut Context<Self>) {
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let directory = files::save_directory(home.as_deref());
+        let chosen =
+            cx.prompt_for_new_path(&directory, Some(&files::suggested_save_name(&target.name)));
+        let client = self.client.clone();
+        let name = target.name.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            let path = match chosen.await {
+                Ok(Ok(Some(path))) => path,
+                Ok(Ok(None)) | Err(_) => return,
+                Ok(Err(err)) => {
+                    log::warn!("couldn't open the save panel: {err:?}");
+                    return;
+                }
+            };
+            let saving = spawn_io({
+                let (url, path) = (target.url.clone(), path.clone());
+                async move {
+                    let bytes = client
+                        .download(&url, None)
+                        .await
+                        .map_err(|err| files::download_failure(&err))?;
+                    tokio::fs::write(&path, bytes)
+                        .await
+                        .map_err(|err| format!("couldn't write the file ({err})"))
+                }
+            });
+            let result = match saving.await {
+                Ok(result) => result,
+                Err(err) => Err(format!("{err}")),
+            };
+            cx.update(|window, cx| {
+                let toast = match result {
+                    Ok(()) => {
+                        Notification::success(files::saved_text(&name)).action(move |_, _, _| {
+                            let path = path.clone();
+                            Button::new("show-in-finder")
+                                .small()
+                                .label(files::SHOW_IN_FINDER_TEXT)
+                                .on_click(move |_, _, cx| cx.reveal_path(&path))
+                        })
+                    }
+                    Err(reason) => {
+                        log::warn!("couldn't save {name}: {reason}");
+                        Notification::error(files::save_failed_text(&name, &reason))
+                    }
+                };
+                window.push_notification(toast, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Copy image: download the picture and put it on the clipboard (as PNG
+    /// unless it's PNG or JPEG already).
+    fn copy_image(&mut self, target: FileTarget, window: &mut Window, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let copying = spawn_io(async move {
+            // One byte over the limit tells a picture that's too big.
+            let bytes = client
+                .download(&target.url, Some(files::COPY_IMAGE_MAX_BYTES + 1))
+                .await
+                .map_err(|err| files::download_failure(&err))?;
+            if bytes.len() as u64 > files::COPY_IMAGE_MAX_BYTES {
+                return Err("it's too big".to_string());
+            }
+            files::clipboard_image(bytes)
+        });
+        cx.spawn_in(window, async move |_, cx| {
+            let result = match copying.await {
+                Ok(result) => result,
+                Err(err) => Err(format!("{err}")),
+            };
+            cx.update(|window, cx| {
+                let toast = match result {
+                    Ok((format, bytes)) => {
+                        let format = match format {
+                            files::ClipboardFormat::Png => ImageFormat::Png,
+                            files::ClipboardFormat::Jpeg => ImageFormat::Jpeg,
+                        };
+                        cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
+                            format, bytes,
+                        )));
+                        Notification::success(files::IMAGE_COPIED_TEXT)
+                    }
+                    Err(reason) => {
+                        log::warn!("couldn't copy an image: {reason}");
+                        Notification::error(files::copy_failed_text(&reason))
+                    }
+                };
+                window.push_notification(toast, cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Scroll to message `id` in `channel` and highlight it. If it isn't
@@ -2803,6 +3011,10 @@ impl ChatView {
     ) {
         if let Some(code) = crate::invites::code_from_link(&url, &self.invite_hosts()) {
             self.open_join_dialog(Some(code), window, cx);
+            return;
+        }
+        if let Some(bot) = crate::links::bot_from_link(&url, &self.invite_hosts()) {
+            self.open_add_bot(bot, window, cx);
             return;
         }
         if let Some(link) = crate::links::channel_from_link(&url, &self.invite_hosts())
@@ -4093,6 +4305,184 @@ impl ChatView {
         ))
     }
 
+    /// The drag in the channel list, while gpui has one going.
+    fn channel_dragging(&self, cx: &App) -> Option<&ChannelDragState> {
+        self.channel_drag.as_ref().filter(|_| cx.has_active_drag())
+    }
+
+    /// A category or channel has started being dragged in the list.
+    fn start_channel_drag(&mut self, dragged: ChannelDrag, cx: &mut Context<Self>) {
+        self.channel_drag = Some(ChannelDragState {
+            dragged,
+            target: None,
+        });
+        cx.notify();
+    }
+
+    /// Forget the drag in the channel list: dropped, cancelled, or ended
+    /// off the list. Whether there was one.
+    fn end_channel_drag(&mut self, cx: &mut Context<Self>) -> bool {
+        let ended = self.channel_drag.take().is_some();
+        if ended {
+            cx.notify();
+        }
+        ended
+    }
+
+    /// Show where the drag in the channel list would land, if that's
+    /// changed.
+    fn set_channel_target(&mut self, target: Option<ListDrop>, cx: &mut Context<Self>) {
+        if let Some(drag) = &mut self.channel_drag
+            && drag.target != target
+        {
+            drag.target = target;
+            cx.notify();
+        }
+    }
+
+    /// The drag moved, as the whole list sees it: off the list, a drop
+    /// does nothing. (The list's own listener runs before its sections'.)
+    fn channel_list_drag_moved(
+        &mut self,
+        event: &DragMoveEvent<ChannelDrag>,
+        cx: &mut Context<Self>,
+    ) {
+        if !event.bounds.contains(&event.event.position) {
+            self.set_channel_target(None, cx);
+        }
+    }
+
+    /// The drag moved, as the section of category `hovered` (`None` is the
+    /// top section) sees it: a category lands before or after it, as
+    /// [`category_target`] says. Between sections, it stays where it was.
+    /// (A channel goes by the rows and headings instead.)
+    fn section_drag_over(
+        &mut self,
+        hovered: Option<&str>,
+        event: &DragMoveEvent<ChannelDrag>,
+        cx: &mut Context<Self>,
+    ) {
+        let position = event.event.position;
+        if self.channel_drag.is_none() || !event.bounds.contains(&position) {
+            return;
+        }
+        let Some(dragged) = event.drag(cx).category() else {
+            return;
+        };
+        let fraction = (position.y - event.bounds.origin.y) / event.bounds.size.height;
+        let shown: Vec<String> = self
+            .sections()
+            .into_iter()
+            .filter_map(|section| section.id)
+            .collect();
+        let target = category_target(&shown, dragged, hovered, fraction);
+        self.set_channel_target(target.map(ListDrop::Category), cx);
+    }
+
+    /// The drag moved, as a channel's row or a category's heading sees it:
+    /// a channel lands as [`channel_target`] says, if that changes
+    /// anything. Between them, it stays where it was.
+    fn channel_drag_over(
+        &mut self,
+        hovered: ChannelHover,
+        event: &DragMoveEvent<ChannelDrag>,
+        cx: &mut Context<Self>,
+    ) {
+        let position = event.event.position;
+        if self.channel_drag.is_none() || !event.bounds.contains(&position) {
+            return;
+        }
+        let (Some(dragged), Place::Server(server)) = (event.drag(cx).channel(), &self.place) else {
+            return;
+        };
+        let fraction = (position.y - event.bounds.origin.y) / event.bounds.size.height;
+        let target = channel_target(hovered, fraction);
+        let changes = self
+            .store
+            .server(server)
+            .and_then(|s| move_channel(s, dragged, &target))
+            .is_some();
+        self.set_channel_target(changes.then_some(ListDrop::Channel(target)), cx);
+    }
+
+    /// A drag dropped on the channel list lands where it was shown to, if
+    /// anywhere, and is saved at once.
+    fn drop_on_channel_list(
+        &mut self,
+        drag: &ChannelDrag,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = self.channel_drag.take().and_then(|d| d.target);
+        cx.notify();
+        let (Some(target), Place::Server(server)) = (target, self.place.clone()) else {
+            return;
+        };
+        let edited = self
+            .store
+            .server(&server)
+            .and_then(|s| match (drag, &target) {
+                (ChannelDrag::Category(dragged), ListDrop::Category(target)) => {
+                    move_category(s, dragged, target)
+                }
+                (ChannelDrag::Channel(dragged), ListDrop::Channel(target)) => {
+                    move_channel(s, dragged, target)
+                }
+                _ => None,
+            });
+        if let Some(edited) = edited {
+            self.save_categories(server, edited, window, cx);
+        }
+    }
+
+    /// Where the drag in the channel list would land beside category
+    /// `id`'s section.
+    fn section_mark(&self, id: Option<&str>, cx: &App) -> Option<DropMark> {
+        let ListDrop::Category(target) = self.channel_dragging(cx)?.target.as_ref()? else {
+            return None;
+        };
+        match target {
+            CategoryDrop::Before(target) if Some(target.as_str()) == id => Some(DropMark::Above),
+            CategoryDrop::After(target) if Some(target.as_str()) == id => Some(DropMark::Below),
+            _ => None,
+        }
+    }
+
+    /// Where the drag in the channel list would land beside channel `id`'s
+    /// row.
+    fn row_mark(&self, id: &str, cx: &App) -> Option<DropMark> {
+        let ListDrop::Channel(target) = self.channel_dragging(cx)?.target.as_ref()? else {
+            return None;
+        };
+        match target {
+            ChannelDrop::Before(target) if target == id => Some(DropMark::Above),
+            ChannelDrop::After(target) if target == id => Some(DropMark::Below),
+            _ => None,
+        }
+    }
+
+    /// Where the drag in the channel list would land beside category
+    /// `category`'s heading, with the section `above` shown before it: the
+    /// end of that section is just above the heading, and the start of the
+    /// category just below.
+    fn heading_mark(&self, category: &str, above: Option<&str>, cx: &App) -> Option<DropMark> {
+        let ListDrop::Channel(target) = self.channel_dragging(cx)?.target.as_ref()? else {
+            return None;
+        };
+        match target {
+            ChannelDrop::EndOf(section) if section.as_deref() == above => Some(DropMark::Above),
+            ChannelDrop::StartOf(target) if target == category => Some(DropMark::Below),
+            _ => None,
+        }
+    }
+
+    /// Whether categories and channels may be dragged in the list now: in a
+    /// server, with Manage Channels across it, and no order still saving.
+    fn may_drag_channels(&self) -> bool {
+        self.categories_saving.is_none()
+            && matches!(&self.place, Place::Server(id) if self.store.can_manage_channels(id))
+    }
+
     /// Save the Edit folder dialog: the folder's name and colour.
     pub(crate) fn edit_folder(
         &mut self,
@@ -4201,6 +4591,8 @@ impl ChatView {
             };
             let store = &this.read(cx).store;
             let invitable = store.can_invite(&channel_id);
+            // Its settings show with Manage Channels or Manage Permissions.
+            let editable = crate::channel_settings::access(store, &channel_id).any();
             let deletable = in_server && store.can_manage_channel(&channel_id);
             let group = matches!(store.channel(&channel_id), Some(Channel::Group { .. }));
             let dm = matches!(
@@ -4215,6 +4607,23 @@ impl ChatView {
                 }
                 _ => None,
             };
+            // "Move to ›" also takes Manage Channels across the server, and
+            // only shows with somewhere to move to.
+            let move_to = create_in.as_ref().and_then(|(server, _)| {
+                let categories: Vec<(String, String)> =
+                    crate::channel_order::layout(store.server(server)?)
+                        .categories
+                        .into_iter()
+                        .map(|category| (category.id, category.title))
+                        .collect();
+                (!categories.is_empty()).then(|| {
+                    (
+                        server.clone(),
+                        store.category_of(server, &channel_id),
+                        categories,
+                    )
+                })
+            });
             let mute = store.channel_mute_until(&channel_id);
             let current = store.notification_settings().channel_override(&channel_id);
             let inherited = store.level_source(&channel_id).label();
@@ -4273,6 +4682,59 @@ impl ChatView {
                     .item(create_channel_item(&view, server.clone(), category))
                     .item(create_category_item(&view, server)),
                 None => menu,
+            };
+            let menu = match move_to {
+                Some((server, now, categories)) => {
+                    let (view, channel) = (view.clone(), channel_id.clone());
+                    menu.submenu("Move to", window, cx, move |menu, _, _| {
+                        let sections = std::iter::once((None, "No category".to_string())).chain(
+                            categories
+                                .iter()
+                                .map(|(id, title)| (Some(id.clone()), title.clone())),
+                        );
+                        sections.fold(menu, |menu, (section, title)| {
+                            let here = section == now;
+                            let (view, server, channel) =
+                                (view.clone(), server.clone(), channel.clone());
+                            menu.item(PopupMenuItem::new(title).checked(here).on_click(
+                                move |_, window, cx| {
+                                    if here {
+                                        return;
+                                    }
+                                    view.update(cx, |this, cx| {
+                                        this.move_channel_to(
+                                            server.clone(),
+                                            channel.clone(),
+                                            section.clone(),
+                                            window,
+                                            cx,
+                                        )
+                                    })
+                                    .ok();
+                                },
+                            ))
+                        })
+                    })
+                }
+                None => menu,
+            };
+            let menu = if editable {
+                let (view, channel) = (view.clone(), channel_id.clone());
+                let label = if group {
+                    "Group settings…"
+                } else {
+                    "Channel settings…"
+                };
+                menu.item(PopupMenuItem::new(label).icon(IconName::Settings).on_click(
+                    move |_, _, cx| {
+                        view.update(cx, |this, cx| {
+                            this.open_channel_settings(channel.clone(), cx)
+                        })
+                        .ok();
+                    },
+                ))
+            } else {
+                menu
             };
             let menu = if deletable {
                 let (view, channel) = (view.clone(), channel_id.clone());
@@ -4863,6 +5325,21 @@ impl ChatView {
                 ),
                 None => menu,
             };
+            let menu = if crate::server_settings::access(store, &server).any() {
+                let (view, server) = (view.clone(), server.clone());
+                menu.item(
+                    PopupMenuItem::new("Server settings…")
+                        .icon(IconName::Settings)
+                        .on_click(move |_, _, cx| {
+                            view.update(cx, |this, cx| {
+                                this.open_server_settings(server.clone(), cx)
+                            })
+                            .ok();
+                        }),
+                )
+            } else {
+                menu
+            };
             let menu = folder_items(menu, &view, &server, in_folder, other_folders, window, cx);
             let menu = match mute {
                 None => {
@@ -4915,6 +5392,26 @@ impl ChatView {
                         })
                         .ok();
                     }),
+                )
+            } else {
+                menu
+            };
+            let reportable = crate::reports::can_report(
+                &this.read(cx).store,
+                &ReportTarget::Server { id: server.clone() },
+            );
+            let menu = if reportable {
+                let (view, server) = (view.clone(), server.clone());
+                menu.item(
+                    PopupMenuItem::new("Report server…")
+                        .icon(IconName::TriangleAlert)
+                        .on_click(move |_, window, cx| {
+                            view.update(cx, |this, cx| {
+                                let target = ReportTarget::Server { id: server.clone() };
+                                this.open_report(target, window, cx)
+                            })
+                            .ok();
+                        }),
                 )
             } else {
                 menu
@@ -5649,6 +6146,7 @@ impl ChatView {
             view: cx.entity().downgrade(),
             channel,
             hosts: self.invite_hosts(),
+            message: None,
         }
     }
 
@@ -5770,6 +6268,14 @@ impl ChatView {
                 }
             }
             UserMenuItem::CopyUserId => cx.write_to_clipboard(ClipboardItem::new_string(user)),
+            UserMenuItem::Report => {
+                self.close_card(false, window, cx);
+                let target = ReportTarget::User {
+                    id: user,
+                    message: None,
+                };
+                self.open_report(target, window, cx);
+            }
             UserMenuItem::Separator => {}
         }
     }
@@ -6058,7 +6564,14 @@ impl ChatView {
                 .ok();
             })
         };
-        let element = render_profile_card(&content, actions, on_link, on_mutuals, cx)
+        let on_user: OnUser = {
+            let (view, position) = (cx.entity().downgrade(), open.position);
+            Rc::new(move |user, window, cx| {
+                view.update(cx, |this, cx| this.open_card(user, position, window, cx))
+                    .ok();
+            })
+        };
+        let element = render_profile_card(&content, actions, on_link, on_mutuals, on_user, cx)
             .id("profile-card")
             .track_focus(&self.card_focus)
             .occlude()
@@ -6106,7 +6619,23 @@ impl ChatView {
         // Unknown dimensions: the whole space, letterboxed.
         let (w, h) =
             fit_into(image.original.0, image.original.1, max_w, max_h).unwrap_or((max_w, max_h));
-        let open = image.url.clone();
+        // The bar's buttons and the picture's menu run the file actions here.
+        let run: RunFileAction = {
+            let view = cx.entity().downgrade();
+            Rc::new(move |action, target, window, cx| {
+                view.update(cx, |this, cx| this.file_action(action, target, window, cx))
+                    .ok();
+            })
+        };
+        let buttons = files::actions(&image.target).into_iter().map(|action| {
+            let (run, target) = (run.clone(), image.target.clone());
+            Button::new(SharedString::from(format!("viewer-{action:?}")))
+                .ghost()
+                .small()
+                .icon(file_action_icon(action))
+                .label(action.label())
+                .on_click(move |_, window, cx| run(action, target.clone(), window, cx))
+        });
         let bar = h_flex()
             .h(px(VIEWER_BAR))
             .flex_none()
@@ -6127,14 +6656,7 @@ impl ChatView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(image.name.clone()),
             )
-            .child(
-                Button::new("viewer-open")
-                    .ghost()
-                    .small()
-                    .icon(IconName::ExternalLink)
-                    .label("Open in browser")
-                    .on_click(move |_, _, cx| cx.open_url(&open)),
-            )
+            .children(buttons)
             .child(
                 Button::new("viewer-close")
                     .ghost()
@@ -6173,6 +6695,7 @@ impl ChatView {
                     .justify_center()
                     .child(
                         div()
+                            .id("image-viewer-picture")
                             .w(px(w as f32))
                             .h(px(h as f32))
                             // Clicking the picture itself doesn't close it.
@@ -6183,7 +6706,11 @@ impl ChatView {
                                     .size_full()
                                     .object_fit(ObjectFit::Contain)
                                     .with_loading(move || image_loading(muted, 0.)),
-                            ),
+                            )
+                            .context_menu({
+                                let target = image.target.clone();
+                                move |menu, _, _| file_menu_items(menu, &target, &run)
+                            }),
                     ),
             )
     }
@@ -6666,13 +7193,19 @@ impl ChatView {
 
     /// The first channel of `server`, in sidebar order, the user may create
     /// invites to ("Invite people…" in its menu).
-    fn first_invitable_channel(&self, server: &str) -> Option<String> {
+    pub fn first_invitable_channel(&self, server: &str) -> Option<String> {
         self.store
             .server_channels(server)
             .into_iter()
             .flat_map(|section| section.channels)
             .map(|entry| entry.id)
             .find(|channel| self.store.can_invite(channel))
+    }
+
+    /// The longest an invite may last on this instance, in days, if it
+    /// says.
+    pub fn invite_max_days(&self) -> Option<u32> {
+        self.invite_max_days
     }
 
     /// Which links are invites on this account's instance.
@@ -6700,6 +7233,20 @@ impl ChatView {
             modal
                 .title("Join a server")
                 .w(px(JOIN_DIALOG_WIDTH))
+                .child(dialog.clone())
+        });
+    }
+
+    /// The Add bot dialog for `bot`: from its page in My Bots, or a
+    /// `/bot/{id}` link.
+    pub fn open_add_bot(&mut self, bot: String, window: &mut Window, cx: &mut Context<Self>) {
+        let weak = cx.entity().downgrade();
+        let dialog =
+            cx.new(|cx| crate::ui::add_bot::AddBotDialog::new(self, weak, bot, window, cx));
+        window.open_dialog(cx, move |modal, _, _| {
+            modal
+                .title("Add a bot")
+                .w(px(crate::ui::add_bot::ADD_BOT_DIALOG_WIDTH))
                 .child(dialog.clone())
         });
     }
@@ -7232,6 +7779,73 @@ impl ChatView {
         .detach();
     }
 
+    /// "Move to ›": put `channel` at the end of `section` (`None` is the top
+    /// section), saved at once.
+    fn move_channel_to(
+        &mut self,
+        server: String,
+        channel: String,
+        section: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(edited) = self
+            .store
+            .server(&server)
+            .and_then(|s| crate::channel_order::move_to_end(s, &channel, section.as_deref()))
+        else {
+            return;
+        };
+        self.save_categories(server, edited, window, cx);
+    }
+
+    /// A new order of `server`'s channels and categories: show it now, then
+    /// send it. If Stoat refuses, the old order comes back (unless the
+    /// order changed again meanwhile, from elsewhere) and a toast says why.
+    /// While one is saving, another is ignored.
+    fn save_categories(
+        &mut self,
+        server: String,
+        edited: Vec<Category>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.categories_saving.is_some() {
+            return;
+        }
+        let Some(old) = self.store.server(&server).map(|s| s.categories.clone()) else {
+            return;
+        };
+        self.categories_changed(&server, edited.clone(), cx);
+        let request = spawn_io({
+            let (client, server, edited) = (self.client.clone(), server.clone(), edited.clone());
+            async move { client.edit_categories(&server, &edited).await }
+        });
+        self.categories_saving = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.categories_saving = None;
+                match result {
+                    Ok(Ok(categories)) => this.categories_changed(&server, categories, cx),
+                    failed => {
+                        log::warn!("couldn't reorder the channels of {server}: {failed:?}");
+                        let shown = this.store.server(&server).map(|s| s.categories.clone());
+                        if shown == Some(Some(edited)) {
+                            this.categories_changed(&server, old.unwrap_or_default(), cx);
+                        }
+                        let text = match failed {
+                            Ok(Err(err)) => crate::server_edit::categories_error_text(&err),
+                            _ => "Couldn't change the order of the channels.".into(),
+                        };
+                        window.push_notification(Notification::error(text), cx);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     /// "Create a new category" in `server`, appended after the others.
     pub fn open_create_category(
         &mut self,
@@ -7274,6 +7888,258 @@ impl ChatView {
         self.store.set_categories(server, categories);
         self.drop_stale_selection();
         self.remember_places();
+        cx.notify();
+    }
+
+    /// "Tell us what's wrong with this …": report `target` to Stoat's
+    /// moderators, if the user may.
+    fn open_report(&mut self, target: ReportTarget, window: &mut Window, cx: &mut Context<Self>) {
+        if !crate::reports::can_report(&self.store, &target) {
+            return;
+        }
+        let name = |user: &str| {
+            self.store
+                .user(user)
+                .map(|person| display_name(person).to_string())
+                .unwrap_or_else(|| "Unknown user".into())
+        };
+        let subject = match &target {
+            ReportTarget::Message { author, .. } => format!("A message from {}", name(author)),
+            ReportTarget::User { id, .. } => name(id),
+            ReportTarget::Server { id } => match self.store.server(id) {
+                Some(server) => server.name.clone(),
+                None => return,
+            },
+        };
+        open_report_dialog(self.client.clone(), target, subject.into(), window, cx);
+    }
+
+    /// Open `server`'s settings in their own window (or bring them
+    /// forward), if the user may see any of them.
+    pub fn open_server_settings(&mut self, server: String, cx: &mut Context<Self>) {
+        if !crate::server_settings::access(&self.store, &server).any() {
+            return;
+        }
+        log::debug!("opening settings for server {server}");
+        ServerSettingsWindow::open(cx.entity(), server, cx);
+    }
+
+    /// Open `channel`'s settings in their own window (or bring them
+    /// forward), if the user may see any of them.
+    pub fn open_channel_settings(&mut self, channel: String, cx: &mut Context<Self>) {
+        if !crate::channel_settings::access(&self.store, &channel).any() {
+            return;
+        }
+        log::debug!("opening settings for channel {channel}");
+        ChannelSettingsWindow::open(cx.entity(), channel, cx);
+    }
+
+    /// Stoat answered the user's own change to a channel or group with
+    /// `saved`: show it now, without waiting for its `ChannelUpdate`. An
+    /// open channel just marked mature is gated at once.
+    pub fn channel_edited(&mut self, saved: &Channel, cx: &mut Context<Self>) {
+        if !self.store.apply_channel_edit(saved) {
+            return;
+        }
+        let id = crate::store::channel_id(saved).to_string();
+        self.sync_pane(&id, cx);
+        if self.current_channel().is_some_and(|c| c.id == id) {
+            self.ensure_current_loaded(cx);
+        }
+        cx.notify();
+    }
+
+    /// The user deleted emoji `id` (from Server Settings): drop it now,
+    /// without waiting for its `EmojiDelete`.
+    pub fn emoji_deleted(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.store.remove_emoji(id);
+        cx.notify();
+    }
+
+    /// Stoat answered the user's own new or renamed emoji with `saved`:
+    /// show it now, without waiting for its event.
+    pub fn emoji_saved(&mut self, saved: crate::api::models::Emoji, cx: &mut Context<Self>) {
+        self.store.add_emoji(saved);
+        cx.notify();
+    }
+
+    /// `channel`'s webhooks as Stoat listed them, fetched for Channel
+    /// Settings.
+    pub fn webhooks_fetched(
+        &mut self,
+        channel: &str,
+        webhooks: Vec<crate::api::models::Webhook>,
+        cx: &mut Context<Self>,
+    ) {
+        self.store.set_webhooks(channel, webhooks);
+        cx.notify();
+    }
+
+    /// The user's own new or saved webhook: show it now.
+    pub fn webhook_saved(&mut self, webhook: crate::api::models::Webhook, cx: &mut Context<Self>) {
+        self.store.add_webhook(webhook);
+        cx.notify();
+    }
+
+    /// The user deleted webhook `id` of `channel`.
+    pub fn webhook_deleted(&mut self, channel: &str, id: &str, cx: &mut Context<Self>) {
+        self.store.remove_webhook(channel, id);
+        cx.notify();
+    }
+
+    /// How big a custom emoji's file may be.
+    pub fn emoji_size_limit(&self) -> u64 {
+        self.emoji_size_limit
+    }
+
+    /// The most bots an account may own on this instance, when it says.
+    pub fn bot_limit(&self) -> Option<u32> {
+        self.bot_limit
+    }
+
+    /// The users of the user's bots, fetched or changed in My Bots: keep
+    /// them, and redraw what shows them if their name or avatar changed.
+    pub fn bot_users_loaded(
+        &mut self,
+        users: Vec<crate::api::models::User>,
+        cx: &mut Context<Self>,
+    ) {
+        for user in users {
+            let id = user.id.clone();
+            if self.store.add_bot_user(user) {
+                self.profiles.remove(&id);
+                for channel in self.store.channels_showing(&id) {
+                    self.sync_pane(&channel, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// The most custom emoji a server may have on this instance.
+    pub fn emoji_limit(&self) -> u32 {
+        self.server_emoji_limit
+            .unwrap_or(crate::custom_emoji::DEFAULT_SERVER_EMOJI)
+    }
+
+    /// Stoat answered the user's own change to a channel's permissions with
+    /// `saved`: show it now (who sees it, who may pin or send), without
+    /// waiting for its `ChannelUpdate`.
+    pub fn channel_permissions_saved(&mut self, saved: &Channel, cx: &mut Context<Self>) {
+        if self.store.apply_channel_permissions(saved) {
+            let id = crate::store::channel_id(saved).to_string();
+            self.channel_changed(&id, cx);
+            cx.notify();
+        }
+    }
+
+    /// Channel `id` changed in the store (a `ChannelUpdate`, or the answer
+    /// to the user's own change): follow it everywhere it shows.
+    fn channel_changed(&mut self, id: &str, cx: &mut Context<Self>) {
+        // Permission overrides decide who sees the channel, and who may pin
+        // in it.
+        self.forget_member_lists();
+        self.sync_pane(id, cx);
+        // A hidden channel, or a DM closed elsewhere, can't stay open.
+        let selected = self.selected.len();
+        self.drop_stale_selection();
+        let open = self.current_channel().is_some_and(|c| c.id == id);
+        if self.selected.len() != selected {
+            self.remember_places();
+            self.ensure_current_loaded(cx);
+        } else if open {
+            // It may no longer be marked mature, so not gated.
+            self.ensure_current_loaded(cx);
+        }
+    }
+
+    /// The user deleted `server` (from Server Settings): drop it now,
+    /// without waiting for its `ServerDelete`, and say so in this window.
+    /// Deferred: the delete is answered in the settings window.
+    pub fn server_deleted(&mut self, server: &str, cx: &mut Context<Self>) {
+        let Some(name) = self.store.server(server).map(|s| s.name.clone()) else {
+            return;
+        };
+        self.leave_server(server, cx);
+        cx.notify();
+        let handle = self.window;
+        cx.defer(move |cx| {
+            handle
+                .update(cx, |_, window, cx| {
+                    let text = format!("Deleted {name}.");
+                    window.push_notification(Notification::success(text), cx);
+                })
+                .ok();
+        });
+    }
+
+    /// Stoat answered the user's own change to a server with `saved`: show
+    /// it now, without waiting for its `ServerUpdate`.
+    pub fn server_edited(&mut self, saved: &Server, cx: &mut Context<Self>) {
+        if !self.store.apply_server_edit(saved) {
+            return;
+        }
+        self.server_permissions_changed(&saved.id, cx);
+        cx.notify();
+    }
+
+    /// Stoat answered the user's own new or edited role with `role`: show
+    /// it now (member list sections, name colours, permissions), without
+    /// waiting for its `ServerRoleUpdate`, which then changes nothing.
+    pub fn role_saved(
+        &mut self,
+        server: &str,
+        role: &crate::api::models::Role,
+        cx: &mut Context<Self>,
+    ) {
+        let (data, clear) = crate::roles::role_update(role);
+        if !self.store.apply_role_update(server, &role.id, data, &clear) {
+            return;
+        }
+        self.server_permissions_changed(server, cx);
+        cx.notify();
+    }
+
+    /// Stoat took the user's own new default `permissions` for `server`:
+    /// apply them now (channel visibility, what members may do), without
+    /// waiting for its `ServerUpdate`, which then changes nothing.
+    pub fn default_permissions_saved(
+        &mut self,
+        server: &str,
+        permissions: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let data = crate::api::models::PartialServer {
+            default_permissions: Some(permissions as i64),
+            ..Default::default()
+        };
+        if !self.store.apply_server_update(server, data, &[]) {
+            return;
+        }
+        self.server_permissions_changed(server, cx);
+        cx.notify();
+    }
+
+    /// The user deleted `role` on `server` (from Server Settings): take it
+    /// off the server, its members and channel overrides now, without
+    /// waiting for its `ServerRoleDelete`.
+    pub fn role_deleted(&mut self, server: &str, role: &str, cx: &mut Context<Self>) {
+        if !self.store.apply_role_delete(server, role) {
+            return;
+        }
+        self.server_permissions_changed(server, cx);
+        cx.notify();
+    }
+
+    /// The user reordered `server`'s roles to `ranks` (highest first, from
+    /// Server Settings), or a refused order is being put back: show it now
+    /// (member list sections, name colours, permissions), without waiting
+    /// for its `ServerRoleRanksUpdate`.
+    pub fn roles_reordered(&mut self, server: &str, ranks: &[String], cx: &mut Context<Self>) {
+        if !self.store.apply_role_ranks(server, ranks) {
+            return;
+        }
+        self.server_permissions_changed(server, cx);
         cx.notify();
     }
 
@@ -7415,6 +8281,31 @@ impl ChatView {
         cx.notify();
     }
 
+    /// The user saved one of their bots' profile: show it now, as
+    /// [`Self::own_profile_saved`] does theirs.
+    pub fn bot_profile_saved(
+        &mut self,
+        user: crate::api::models::User,
+        bio: Option<Option<String>>,
+        banner_changed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let id = user.id.clone();
+        self.store.add_bot_user(user);
+        if banner_changed {
+            self.profiles.remove(&id);
+        } else if let Some(bio) = bio
+            && let Some(Some(profile)) = self.profiles.get_mut(&id)
+        {
+            profile.content = bio;
+        }
+        self.forget_member_lists();
+        for channel in self.store.channels_showing(&id) {
+            self.sync_pane(&channel, cx);
+        }
+        cx.notify();
+    }
+
     /// Log what makes up [`Self::sync_outside`]'s count.
     pub fn log_attention(&self) {
         for (channel, count) in self.store.attention_breakdown() {
@@ -7433,12 +8324,256 @@ impl ChatView {
     /// Show or hide this account. Only the account on screen marks things
     /// read, and its open channel doesn't count as being looked at while
     /// hidden.
+    /// What audio players show, for the rows.
+    fn playback_rows(&self) -> PlaybackRows {
+        PlaybackRows {
+            current: self
+                .playing
+                .as_ref()
+                .map(|playing| (playing.now.file_id.clone(), playing.snapshot.clone())),
+            unplayable: self.unplayable.clone(),
+        }
+    }
+
+    /// Play `file_id` (audio in `channel`) from `url`: carry on if it's the
+    /// one paused, else stop what's playing and start it. No player is made
+    /// until now, so a channel full of audio costs nothing.
+    fn play_audio(
+        &mut self,
+        channel: &str,
+        file_id: String,
+        url: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let next = NowPlaying {
+            channel: channel.to_string(),
+            file_id,
+            kind: MediaKind::Audio,
+        };
+        self.stop_playback(Change::Play(&next), cx);
+        // Still here: it's this file, paused.
+        if let Some(Playing {
+            output: Output::Audio(player),
+            snapshot,
+            ..
+        }) = &mut self.playing
+        {
+            player.play();
+            snapshot.playing = true;
+        } else {
+            match Player::open(url) {
+                Ok(player) => {
+                    player.play();
+                    let snapshot = PlayerSnapshot {
+                        playing: true,
+                        ..PlayerSnapshot::LOADING
+                    };
+                    self.playing = Some(Playing {
+                        now: next,
+                        output: Output::Audio(player),
+                        snapshot,
+                    });
+                }
+                Err(err) => {
+                    log::warn!("can't play {url}: {err}");
+                    Rc::make_mut(&mut self.unplayable).insert(next.file_id);
+                }
+            }
+        }
+        self.poll_playback(window, cx);
+    }
+
+    /// Play `file_id` (a video in `channel`) from `url` in the player
+    /// window. With the window open on another video, it switches to this
+    /// one; with this one, it comes forward. Anything else playing stops.
+    #[allow(clippy::too_many_arguments)]
+    fn play_video(
+        &mut self,
+        channel: &str,
+        file_id: String,
+        url: String,
+        name: &str,
+        original: (usize, usize),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let next = NowPlaying {
+            channel: channel.to_string(),
+            file_id,
+            kind: MediaKind::Video,
+        };
+        if let Some(playing) = &mut self.playing
+            && let Output::Video {
+                window: video,
+                url: shown,
+            } = &mut playing.output
+        {
+            if playing.now == next {
+                video.bring_forward();
+                return;
+            }
+            match video.replace(&url, name, original) {
+                Ok(()) => {
+                    playing.now = next;
+                    playing.snapshot = PlayerSnapshot::LOADING;
+                    *shown = url;
+                }
+                Err(err) => {
+                    log::warn!("can't play video {url}: {err}");
+                    window.push_notification(cant_play_video(url), cx);
+                }
+            }
+            self.poll_playback(window, cx);
+            return;
+        }
+        self.stop_playback(Change::Play(&next), cx);
+        match VideoWindow::open(&url, name, original) {
+            Ok(video) => {
+                self.playing = Some(Playing {
+                    now: next,
+                    output: Output::Video { window: video, url },
+                    snapshot: PlayerSnapshot::LOADING,
+                });
+            }
+            Err(err) => {
+                log::warn!("can't play video {url}: {err}");
+                window.push_notification(cant_play_video(url), cx);
+            }
+        }
+        self.poll_playback(window, cx);
+    }
+
+    fn pause_playback(&mut self, cx: &mut Context<Self>) {
+        if let Some(Playing {
+            output: Output::Audio(player),
+            snapshot,
+            ..
+        }) = &mut self.playing
+        {
+            player.pause();
+            snapshot.playing = false;
+            cx.notify();
+        }
+    }
+
+    /// Move what's playing `fraction` of the way through (once its length
+    /// is known).
+    fn seek_playback(&mut self, fraction: f64, cx: &mut Context<Self>) {
+        let Some(Playing {
+            output: Output::Audio(player),
+            snapshot,
+            ..
+        }) = &mut self.playing
+        else {
+            return;
+        };
+        let Some(duration) = snapshot.duration else {
+            return;
+        };
+        let to = playback::seek_target(fraction, duration);
+        player.seek(to);
+        snapshot.position = to;
+        snapshot.ended = false;
+        cx.notify();
+    }
+
+    /// Stop what's playing if `change` stops it (see [`playback::stops`]).
+    pub fn stop_playback(&mut self, change: Change<'_>, cx: &mut Context<Self>) {
+        if self
+            .playing
+            .as_ref()
+            .is_some_and(|playing| playback::stops(&playing.now, change))
+        {
+            // Dropping the player stops it, and closes a video's window.
+            self.playing = None;
+            cx.notify();
+        }
+    }
+
+    /// Read the player now, and every [`PLAYBACK_POLL`] while audio plays
+    /// (or is loading) or the video window is open.
+    fn poll_playback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.read_player(window, cx) || self.playback_polling {
+            return;
+        }
+        self.playback_polling = true;
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(PLAYBACK_POLL).await;
+                let more = this.update_in(cx, |this, window, cx| {
+                    let more = this.read_player(window, cx);
+                    if !more {
+                        this.playback_polling = false;
+                    }
+                    more
+                });
+                if !matches!(more, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Take a snapshot of the player; whether it's worth polling again.
+    ///
+    /// - Audio that fails is marked unplayable for the session; audio that
+    ///   reaches its end goes back to the start, paused.
+    /// - A video window the user closed stops playback. A video that fails
+    ///   closes its window, with a toast offering the browser.
+    fn read_player(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(playing) = &mut self.playing else {
+            return false;
+        };
+        let player = match &playing.output {
+            Output::Audio(player) => player,
+            Output::Video { window: video, url } => {
+                if !video.is_open() {
+                    self.playing = None;
+                    return false;
+                }
+                let PlayerStatus::Failed(err) = video.snapshot().status else {
+                    return true;
+                };
+                log::warn!("can't play video {}: {err}", playing.now.file_id);
+                let url = url.clone();
+                self.playing = None;
+                window.push_notification(cant_play_video(url), cx);
+                return false;
+            }
+        };
+        let mut snapshot = player.snapshot();
+        if let PlayerStatus::Failed(err) = &snapshot.status {
+            log::warn!("can't play {}: {err}", playing.now.file_id);
+            let file_id = playing.now.file_id.clone();
+            Rc::make_mut(&mut self.unplayable).insert(file_id);
+            self.playing = None;
+            cx.notify();
+            return false;
+        }
+        if snapshot.ended {
+            player.pause();
+            player.seek(0.0);
+            snapshot.position = 0.0;
+            snapshot.ended = false;
+            snapshot.playing = false;
+        }
+        let more = snapshot.playing;
+        if playing.snapshot != snapshot {
+            playing.snapshot = snapshot;
+            cx.notify();
+        }
+        more
+    }
+
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
         if self.active == active {
             return;
         }
         self.active = active;
         if !active {
+            self.stop_playback(Change::SwitchAccount, cx);
             self.pending_ack = None;
             // Coming back counts as opening the channel again.
             self.held_unread = None;
@@ -7692,8 +8827,9 @@ impl ChatView {
                 }
             });
             self.fetch_reply_sources(channel, cx);
-        self.fetch_missing_emojis(channel, cx);
+            self.fetch_missing_emojis(channel, cx);
             self.fetch_invites(channel, cx);
+            self.fetch_text_previews(channel, cx);
             return;
         }
 
@@ -7715,6 +8851,46 @@ impl ChatView {
         self.fetch_reply_sources(channel, cx);
         self.fetch_missing_emojis(channel, cx);
         self.fetch_invites(channel, cx);
+        self.fetch_text_previews(channel, cx);
+    }
+
+    /// Fetch the previews of `channel`'s small text files not asked for yet.
+    fn fetch_text_previews(&mut self, channel: &str, cx: &mut Context<Self>) {
+        for (file_id, url) in self.store.text_previews_wanted(channel) {
+            self.load_text(channel, file_id, url, cx);
+        }
+    }
+
+    /// Fetch text file `file_id`'s preview (its first
+    /// [`TEXT_AUTO_LOAD`](crate::attachment::TEXT_AUTO_LOAD) bytes), then
+    /// redraw `channel`.
+    fn load_text(&mut self, channel: &str, file_id: String, url: String, cx: &mut Context<Self>) {
+        use crate::attachment::{TEXT_AUTO_LOAD, TextLoad};
+
+        self.store.set_text_preview(&file_id, TextLoad::Loading);
+        let client = self.client.clone();
+        let request = spawn_io(async move { client.download(&url, Some(TEXT_AUTO_LOAD)).await });
+        let channel = channel.to_string();
+        cx.spawn(async move |this, cx| {
+            let load = match request.await {
+                Ok(Ok(bytes)) => TextLoad::Loaded(crate::attachment::preview_text(bytes)),
+                Ok(Err(err)) => {
+                    log::warn!("couldn't load text file {file_id}: {err:?}");
+                    TextLoad::Failed
+                }
+                Err(err) => {
+                    log::warn!("text file task for {file_id} failed: {err:?}");
+                    TextLoad::Failed
+                }
+            };
+            this.update(cx, |this, cx| {
+                this.store.set_text_preview(&file_id, load);
+                this.sync_pane(&channel, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Queue the invites in `channel`'s rows that haven't been looked up,
@@ -8832,11 +10008,24 @@ impl ChatView {
             .map(|id| self.channel_list_menu(id, cx));
         let theme = cx.theme();
         let (muted, hover_fg) = (theme.muted_foreground, theme.sidebar_foreground);
+        let may_drag = self.may_drag_channels();
+        let (dragged_category, dragged_channel) = match self.channel_dragging(cx) {
+            Some(drag) => (
+                drag.dragged.category().map(str::to_string),
+                drag.dragged.channel().map(str::to_string),
+            ),
+            None => (None, None),
+        };
 
+        // The section shown before each one, for a channel dropped at its
+        // end from the heading below it.
+        let mut above: Option<String> = None;
         let rows: Vec<_> = self
             .visible_sections()
             .into_iter()
             .map(|section| {
+                let section_id = section.id.clone();
+                let above = std::mem::replace(&mut above, section_id.clone());
                 let header = section.title.map(|title| {
                     let id = section.id.clone().unwrap_or_default();
                     let folded = self.collapsed.contains(&id);
@@ -8850,7 +10039,7 @@ impl ChatView {
                         cx.listener(move |this, _, _, cx| this.toggle_category(id.clone(), cx))
                     };
                     let menu = self.category_menu(server.as_deref().unwrap_or_default(), &id, cx);
-                    h_flex()
+                    let header = h_flex()
                         .id(SharedString::from(format!("category-{id}")))
                         .gap_1()
                         .px_1()
@@ -8864,15 +10053,59 @@ impl ChatView {
                         .on_click(toggle)
                         .child(Icon::new(chevron).xsmall())
                         .child(div().truncate().child(title.to_uppercase()))
-                        .context_menu(move |popup, window, cx| menu(popup, window, cx))
+                        // Dragging starts after a few pixels, and then
+                        // doesn't fold it.
+                        .when(may_drag, |header| {
+                            let view = cx.entity().downgrade();
+                            let face = list_drag_face(IconName::Folder, title.clone());
+                            header.on_drag(
+                                ChannelDrag::Category(id.clone()),
+                                move |drag, _, _, cx| {
+                                    let drag = drag.clone();
+                                    view.update(cx, |this, cx| this.start_channel_drag(drag, cx))
+                                        .ok();
+                                    DragPreview::new(face.clone(), cx)
+                                },
+                            )
+                        })
+                        .context_menu(move |popup, window, cx| menu(popup, window, cx));
+                    let mark = self.heading_mark(&id, above.as_deref(), cx);
+                    with_drop_line(div().relative().child(header), mark, 2., 4., cx).on_drag_move(
+                        cx.listener(move |this, event: &DragMoveEvent<ChannelDrag>, _, cx| {
+                            let hovered = ChannelHover::Heading {
+                                category: &id,
+                                above: above.as_deref(),
+                            };
+                            this.channel_drag_over(hovered, event, cx)
+                        }),
+                    )
                 });
-                v_flex()
+                let mark = self.section_mark(section_id.as_deref(), cx);
+                let dragged = section_id.is_some() && section_id == dragged_category;
+                let body = v_flex()
+                    .relative()
                     .gap_0p5()
+                    .when(dragged, |body| body.opacity(DRAGGED_OPACITY))
                     .children(header)
                     .children(section.channels.into_iter().map(|channel| {
                         let selected = current.as_deref() == Some(channel.id.as_str());
-                        self.render_channel_row(channel, selected, cx)
-                    }))
+                        let id = channel.id.clone();
+                        let mark = self.row_mark(&id, cx);
+                        let dragged = dragged_channel.as_deref() == Some(id.as_str());
+                        let row = self.render_channel_row(channel, selected, cx);
+                        with_drop_line(div().relative().child(row), mark, 2., 4., cx)
+                            .when(dragged, |row| row.opacity(DRAGGED_OPACITY))
+                            .on_drag_move(cx.listener(
+                                move |this, event: &DragMoveEvent<ChannelDrag>, _, cx| {
+                                    this.channel_drag_over(ChannelHover::Channel(&id), event, cx)
+                                },
+                            ))
+                    }));
+                with_drop_line(body, mark, 2., 4., cx).on_drag_move(cx.listener(
+                    move |this, event: &DragMoveEvent<ChannelDrag>, _, cx| {
+                        this.section_drag_over(section_id.as_deref(), event, cx)
+                    },
+                ))
             })
             .collect();
 
@@ -8898,7 +10131,21 @@ impl ChatView {
                         .child("Nothing here yet."),
                 )
             })
-            .children(rows);
+            .children(rows)
+            .on_drag_move(
+                cx.listener(|this, event: &DragMoveEvent<ChannelDrag>, _, cx| {
+                    this.channel_list_drag_moved(event, cx)
+                }),
+            )
+            .on_drop(cx.listener(|this, drag: &ChannelDrag, window, cx| {
+                this.drop_on_channel_list(drag, window, cx)
+            }))
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.end_channel_drag(cx);
+                }),
+            );
         // Right-click on the empty space below (and between) the rows: rows
         // and headers open their own menus first.
         let list = match list_menu {
@@ -9107,6 +10354,10 @@ impl ChatView {
         let unread_fg = theme.sidebar_foreground;
         let id = channel.id.clone();
         let (unread, mentions, muted) = (channel.unread, channel.mentions, channel.muted);
+        let draggable =
+            matches!(channel.kind, ChannelKind::Text { .. }) && self.may_drag_channels();
+        let drag_id = channel.id.clone();
+        let face = list_drag_face(channel_icon(channel.kind), channel.name.clone());
         let in_call = matches!(self.voice_state(&channel.id), Some(CallState::Connected(_)));
         let accent = theme.primary;
         let menu = self.channel_menu(&channel, cx);
@@ -9168,6 +10419,16 @@ impl ChatView {
             )
             .child(div().flex_1().min_w_0().truncate().child(channel.name))
             .when(mentions > 0, |el| el.child(mention_badge(mentions, cx)))
+            // A server channel drags to another place in the list.
+            .when(draggable, |row| {
+                let view = cx.entity().downgrade();
+                row.on_drag(ChannelDrag::Channel(drag_id), move |drag, _, _, cx| {
+                    let drag = drag.clone();
+                    view.update(cx, |this, cx| this.start_channel_drag(drag, cx))
+                        .ok();
+                    DragPreview::new(face.clone(), cx)
+                })
+            })
             .context_menu(move |popup, window, cx| menu(popup, window, cx));
         if participants.is_empty() {
             return row.into_any_element();
@@ -9582,6 +10843,8 @@ impl ChatView {
                             open_for: self.picker_for.clone(),
                             can_link: self.web_app.is_some(),
                             invites: Rc::new(self.invite_cards()),
+                            text_scrolls: self.text_scrolls.clone(),
+                            playback: self.playback_rows(),
                         });
                         let view = cx.entity().downgrade();
                         let channel_id = channel.id.clone();
@@ -10121,6 +11384,8 @@ impl ChatView {
             open_for: None,
             can_link: false,
             invites: Rc::default(),
+            text_scrolls: TextScrolls::default(),
+            playback: PlaybackRows::default(),
         };
         let people = self.people(Some(channel.id.clone()), cx);
         v_flex()
@@ -10377,6 +11642,46 @@ struct RailDragState {
     /// The pointer is over the rail. Items scrolled out of sight still
     /// see it, so they only take it while it is.
     over_rail: bool,
+}
+
+/// What a category or channel carries while it's dragged in the channel
+/// list.
+#[derive(Clone)]
+enum ChannelDrag {
+    Category(String),
+    Channel(String),
+}
+
+impl ChannelDrag {
+    /// The category dragged, if it's one.
+    fn category(&self) -> Option<&str> {
+        match self {
+            ChannelDrag::Category(id) => Some(id),
+            ChannelDrag::Channel(_) => None,
+        }
+    }
+
+    /// The channel dragged, if it's one.
+    fn channel(&self) -> Option<&str> {
+        match self {
+            ChannelDrag::Channel(id) => Some(id),
+            ChannelDrag::Category(_) => None,
+        }
+    }
+}
+
+/// Where a drag in the channel list would land.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ListDrop {
+    Category(CategoryDrop),
+    Channel(ChannelDrop),
+}
+
+/// A drag in the channel list: what's dragged and where it would land.
+struct ChannelDragState {
+    dragged: ChannelDrag,
+    /// `None` off the list, or where dropping would change nothing.
+    target: Option<ListDrop>,
 }
 
 /// A change to the user's own status.
@@ -10784,8 +12089,29 @@ struct GroupLeave {
 enum RowAction {
     /// "Show image": load a large image after all (by file ID).
     RevealImage(String),
+    /// Show a spoiler attachment (by file ID).
+    RevealAttachment(String),
+    /// Load a text file's preview: "Load file", or Try again after a failure.
+    LoadText { id: String, url: String },
     /// Open an inline image in the full-size viewer.
     ViewImage(ViewedImage),
+    /// Play an audio file in its message (by file ID, from its address),
+    /// or carry on with it if it's the one paused.
+    PlayAudio { file_id: String, url: String },
+    /// Pause what's playing.
+    PauseAudio,
+    /// Play a video in the player window (by file ID, from its address,
+    /// titled with its name, sized for its metadata's size).
+    PlayVideo {
+        file_id: String,
+        url: String,
+        name: String,
+        original: (usize, usize),
+    },
+    /// Move what's playing this fraction of the way through.
+    SeekAudio(f64),
+    /// Save, copy or open a file or picture (from its right-click menu).
+    File(FileAction, FileTarget),
     /// Add the user's `emoji` reaction to `message`, or take it back if
     /// they've already reacted with it.
     ToggleReaction { message: String, emoji: String },
@@ -10824,6 +12150,8 @@ enum RowAction {
     /// Delete one of the user's messages, after asking (unless Shift was
     /// held: `confirmed`).
     Delete { id: String, confirmed: bool },
+    /// Report someone else's message (by ID, with its author's).
+    Report { id: String, author: String },
     /// Pin (`pin`) or unpin a message, after asking (unless Shift was held:
     /// `confirmed`).
     TogglePin {
@@ -10855,6 +12183,8 @@ struct ViewedImage {
     name: String,
     /// From the upload's metadata; zero if unknown.
     original: (usize, usize),
+    /// What the bar's and the picture's menu actions act on.
+    target: FileTarget,
 }
 
 /// Space around the image in the full-size viewer.
@@ -10923,6 +12253,38 @@ struct Pickers {
     can_link: bool,
     /// The invite cards' states, by code (see [`MessageRow::invites`]).
     invites: Rc<HashMap<String, InviteCard>>,
+    /// Text previews' scroll positions.
+    text_scrolls: TextScrolls,
+    /// What audio players show.
+    playback: PlaybackRows,
+}
+
+/// A file playing (or paused) and its player.
+struct Playing {
+    now: NowPlaying,
+    output: Output,
+    /// As last polled.
+    snapshot: PlayerSnapshot,
+}
+
+/// Where a file plays. Dropping it stops it (and closes the window).
+enum Output {
+    /// Audio, in its message.
+    Audio(Player),
+    /// A video, in the player window; `url`, for Open in browser if it
+    /// can't play.
+    Video { window: VideoWindow, url: String },
+}
+
+/// What the rows need to draw audio players: they change while a row is
+/// on screen without changing its height, so they come through
+/// [`Pickers`], not the row's data.
+#[derive(Default)]
+struct PlaybackRows {
+    /// The file playing or paused (by ID), as last polled.
+    current: Option<(String, PlayerSnapshot)>,
+    /// Files whose player failed.
+    unplayable: Rc<HashSet<String>>,
 }
 
 fn render_row(
@@ -11086,9 +12448,20 @@ pub(crate) struct People {
     channel: Option<String>,
     /// Which links lead to channels and messages here.
     hosts: InviteHosts,
+    /// The message they're shown as the author of, which a report of
+    /// them carries as context.
+    message: Option<String>,
 }
 
 impl People {
+    /// The same, for the author of `message`.
+    fn about_message(&self, message: &str) -> People {
+        People {
+            message: Some(message.to_string()),
+            ..self.clone()
+        }
+    }
+
     /// Channel mentions and links as pills, opening the channel when
     /// clicked if `clickable`.
     fn channel_pills(&self, clickable: bool) -> ChannelPills {
@@ -11282,6 +12655,21 @@ impl People {
                     } else {
                         PopupMenuItem::new(label).icon(icon)
                     };
+                    if item == UserMenuItem::Report {
+                        // With the message they were reported from, if any.
+                        let message = people.message.clone();
+                        return menu.item(entry.on_click(move |_, window, cx| {
+                            view.update(cx, |this, cx| {
+                                this.close_card(false, window, cx);
+                                let target = ReportTarget::User {
+                                    id: user.clone(),
+                                    message: message.clone(),
+                                };
+                                this.open_report(target, window, cx)
+                            })
+                            .ok();
+                        }));
+                    }
                     menu.item(entry.on_click(move |event: &ClickEvent, window, cx| {
                         let shift = event.modifiers().shift;
                         view.update(cx, |this, cx| {
@@ -11351,6 +12739,7 @@ fn user_menu_label(item: UserMenuItem) -> Option<(&'static str, IconName)> {
         UserMenuItem::Ban => ("Ban…", IconName::Ban),
         UserMenuItem::CopyUsername => ("Copy username", IconName::Copy),
         UserMenuItem::CopyUserId => ("Copy user ID", IconName::IdCard),
+        UserMenuItem::Report => ("Report user…", IconName::TriangleAlert),
         UserMenuItem::Relationship(action) => relationship_label(action),
         UserMenuItem::Separator => return None,
     })
@@ -11403,6 +12792,10 @@ fn render_message_row(
     } else {
         on_action.clone()
     };
+    // Search results and messages still sending have no right-click menu,
+    // nor do the files in them.
+    let message_menu = (!preview && message.pending.is_none())
+        .then(|| Rc::new(MessageMenu::new(message, on_action, pickers)));
     // Previews are all on one side, whoever wrote them.
     let right = message.mine && !preview;
     let alignment = if right {
@@ -11429,89 +12822,100 @@ fn render_message_row(
             .rounded_tl(top)
             .rounded_bl(bottom)
     };
-    let surface =
-        surface
-            .when_some(message.body.clone(), |el, body| {
-                el.child(
-                    // Keyed by `render_key`, so an edit (or a renamed mention)
-                    // gets a fresh parse instead of the cached one.
-                    TextView::markdown(SharedString::from(message.render_key.clone()), body)
-                        // `$$…$$` formatting (colour, size), drawn natively.
-                        .plugin(MathPlugin)
-                        // Timestamps, and spoilers revealed by a click
-                        // (not in search results, where a click jumps).
-                        .plugin(
-                            if preview {
-                                MarkupPlugin::default()
-                            } else {
-                                MarkupPlugin::revealing(people.spoiler_revealer(&message.id))
-                            }
-                            // Channel pills, which open the channel (but in
-                            // search results the row's click jumps).
-                            .with_channels(people.channel_pills(!preview)),
-                        )
-                        // A copy button (and the language) on each code block.
-                        .code_block_actions(code_block_actions)
-                        // Emoji-only messages are drawn big (custom ones are sized
-                        // in the Markdown itself).
-                        .map(|text| {
-                            if message.jumbo {
-                                text.text_size(px(JUMBO_TEXT_PX))
-                            } else {
-                                text.text_sm()
-                            }
-                        })
-                        // A click on a result jumps; it doesn't select.
-                        .selectable(!preview)
-                        .on_link_click({
-                            let on_link = people.link_handler();
-                            move |url, _, window, cx| on_link(url, window, cx)
-                        }),
-                )
-            })
-            .when(!message.attachments.is_empty(), |el| {
-                el.child(
-                    v_flex()
-                        .gap_1()
-                        .when(message.body.is_some(), |el| el.mt_1())
-                        .children(message.attachments.iter().enumerate().map(
-                            |(ix, attachment)| {
+    let surface = surface
+        .when_some(message.body.clone(), |el, body| {
+            el.child(
+                // Keyed by `render_key`, so an edit (or a renamed mention)
+                // gets a fresh parse instead of the cached one.
+                TextView::markdown(SharedString::from(message.render_key.clone()), body)
+                    // `$$…$$` formatting (colour, size), drawn natively.
+                    .plugin(MathPlugin)
+                    // Timestamps, and spoilers revealed by a click
+                    // (not in search results, where a click jumps).
+                    .plugin(
+                        if preview {
+                            MarkupPlugin::default()
+                        } else {
+                            MarkupPlugin::revealing(people.spoiler_revealer(&message.id))
+                        }
+                        // Channel pills, which open the channel (but in
+                        // search results the row's click jumps).
+                        .with_channels(people.channel_pills(!preview)),
+                    )
+                    // A copy button (and the language) on each code block.
+                    .code_block_actions(code_block_actions)
+                    // Emoji-only messages are drawn big (custom ones are sized
+                    // in the Markdown itself).
+                    .map(|text| {
+                        if message.jumbo {
+                            text.text_size(px(JUMBO_TEXT_PX))
+                        } else {
+                            text.text_sm()
+                        }
+                    })
+                    // A click on a result jumps; it doesn't select.
+                    .selectable(!preview)
+                    .on_link_click({
+                        let on_link = people.link_handler();
+                        move |url, _, window, cx| on_link(url, window, cx)
+                    }),
+            )
+        })
+        .when(!message.attachments.is_empty(), |el| {
+            el.child(
+                v_flex()
+                    .gap_1()
+                    .when(message.body.is_some(), |el| el.mt_1())
+                    .children(
+                        message
+                            .attachments
+                            .iter()
+                            .enumerate()
+                            .map(|(ix, attachment)| {
                                 let id =
                                     SharedString::from(format!("attachment-{}-{ix}", message.id));
-                                render_attachment(id, attachment, colors, &attachment_action)
-                            },
-                        )),
-                )
-            })
-            .when(!preview && !message.embeds.is_empty(), |el| {
-                el.child(
-                    v_flex()
-                        .gap_1()
-                        .when(
-                            message.body.is_some() || !message.attachments.is_empty(),
-                            |el| el.mt_1(),
-                        )
-                        .children(message.embeds.iter().enumerate().map(|(ix, embed)| {
-                            let id = SharedString::from(format!("embed-{}-{ix}", message.id));
-                            render_embed(id, embed, colors, on_action, people)
-                        })),
-                )
-            })
-            .when(!preview && !message.invites.is_empty(), |el| {
-                el.child(
-                    v_flex()
-                        .gap_1()
-                        .mt_1()
-                        .children(message.invites.iter().map(|code| {
-                            let id = SharedString::from(format!("invite-{}-{code}", message.id));
-                            let card = pickers.invites.get(code);
-                            render_invite_card(id, code, card, colors, on_action)
-                        })),
-                )
-            })
-            .when(message.edited, |el| {
-                el.child(div().text_xs().text_color(colors.muted).child("(edited)"))
-            });
+                                render_attachment(
+                                    id,
+                                    attachment,
+                                    colors,
+                                    &attachment_action,
+                                    message_menu.as_ref(),
+                                    // Not in search results.
+                                    (!preview).then_some(pickers),
+                                )
+                            }),
+                    ),
+            )
+        })
+        .when(!preview && !message.embeds.is_empty(), |el| {
+            el.child(
+                v_flex()
+                    .gap_1()
+                    .when(
+                        message.body.is_some() || !message.attachments.is_empty(),
+                        |el| el.mt_1(),
+                    )
+                    .children(message.embeds.iter().enumerate().map(|(ix, embed)| {
+                        let id = SharedString::from(format!("embed-{}-{ix}", message.id));
+                        render_embed(id, embed, colors, on_action, people, message_menu.as_ref())
+                    })),
+            )
+        })
+        .when(!preview && !message.invites.is_empty(), |el| {
+            el.child(
+                v_flex()
+                    .gap_1()
+                    .mt_1()
+                    .children(message.invites.iter().map(|code| {
+                        let id = SharedString::from(format!("invite-{}-{code}", message.id));
+                        let card = pickers.invites.get(code);
+                        render_invite_card(id, code, card, colors, on_action)
+                    })),
+            )
+        })
+        .when(message.edited, |el| {
+            el.child(div().text_xs().text_color(colors.muted).child("(edited)"))
+        });
 
     // Big emoji and bare attachments stand on their own: same bubble (so it
     // keeps its width and side), with the surface made invisible. Not
@@ -11541,7 +12945,7 @@ fn render_message_row(
         MessageAvatar::new().child(person_target(
             format!("avatar-target-{}", message.id).into(),
             author_id,
-            people,
+            &people.about_message(&message.id),
             avatar(
                 format!("avatar-{}", message.id),
                 message.avatar.clone(),
@@ -11565,12 +12969,13 @@ fn render_message_row(
             .child(person_target(
                 format!("author-{}", message.id).into(),
                 author_id,
-                people,
+                &people.about_message(&message.id),
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
                     .when(author_id.is_some(), |el| el.hover(|el| el.underline()))
                     .child(name),
             ))
+            .when(message.author_bot, |el| el.child(bot_tag(colors)))
             .child(div().text_color(colors.muted).child(message.time.clone()))
     });
 
@@ -11629,15 +13034,52 @@ fn render_message_row(
         return row.into_any_element();
     }
     // Right-click anywhere on the row (text, padding, avatar).
-    let (on_action, id, mine) = (on_action.clone(), message.id.clone(), message.mine);
-    let (can_pin, pinned) = (message.can_pin, message.pinned);
-    let can_link = pickers.can_link;
-    // Only messages with text can be quoted.
-    let has_text = message.body.is_some();
-    let reply = reply_target(message);
-    row.context_menu(move |menu, _, _| {
+    match message_menu {
+        Some(items) => row
+            .context_menu(move |menu, _, _| items.items(menu))
+            .into_any_element(),
+        None => row.into_any_element(),
+    }
+}
+
+/// A message's own right-click items (Reply, Quote, …). The row's menu is
+/// these; the files and pictures in it end theirs with them.
+struct MessageMenu {
+    on_action: OnRowAction,
+    id: String,
+    mine: bool,
+    /// Someone else's message (not Stoat's own) can be reported.
+    report_author: Option<String>,
+    can_pin: bool,
+    pinned: bool,
+    can_link: bool,
+    /// Only messages with text can be quoted.
+    has_text: bool,
+    reply: ReplyTarget,
+}
+
+impl MessageMenu {
+    fn new(message: &MessageRow, on_action: &OnRowAction, pickers: &Pickers) -> Self {
+        let mine = message.mine;
+        MessageMenu {
+            on_action: on_action.clone(),
+            id: message.id.clone(),
+            mine,
+            report_author: message
+                .author_id
+                .clone()
+                .filter(|_| !mine && !message.system),
+            can_pin: message.can_pin,
+            pinned: message.pinned,
+            can_link: pickers.can_link,
+            has_text: message.body.is_some(),
+            reply: reply_target(message),
+        }
+    }
+
+    fn items(&self, menu: PopupMenu) -> PopupMenu {
         let act = |action: RowAction| {
-            let on_action = on_action.clone();
+            let on_action = self.on_action.clone();
             move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                 on_action(action.clone(), window, cx)
             }
@@ -11645,40 +13087,41 @@ fn render_message_row(
         menu.item(
             PopupMenuItem::new("Reply")
                 .icon(IconName::Reply)
-                .on_click(act(RowAction::Reply(reply.clone()))),
+                .on_click(act(RowAction::Reply(self.reply.clone()))),
         )
-        .when(has_text, |menu| {
+        .when(self.has_text, |menu| {
             menu.item(
                 PopupMenuItem::new("Quote")
                     .icon(IconName::TextQuote)
-                    .on_click(act(RowAction::Quote(id.clone()))),
+                    .on_click(act(RowAction::Quote(self.id.clone()))),
             )
         })
         .item(
             PopupMenuItem::new("Mark as unread")
                 .icon(IconName::Mail)
-                .on_click(act(RowAction::MarkUnread(id.clone()))),
+                .on_click(act(RowAction::MarkUnread(self.id.clone()))),
         )
         .item(
             PopupMenuItem::new("Copy text")
                 .icon(IconName::Copy)
-                .on_click(act(RowAction::CopyText(id.clone()))),
+                .on_click(act(RowAction::CopyText(self.id.clone()))),
         )
-        .when(can_link, |menu| {
+        .when(self.can_link, |menu| {
             menu.item(
                 PopupMenuItem::new("Copy message link")
                     .icon(IconName::Link)
-                    .on_click(act(RowAction::CopyLink(id.clone()))),
+                    .on_click(act(RowAction::CopyLink(self.id.clone()))),
             )
         })
         .item(
             PopupMenuItem::new("Copy message ID")
                 .icon(IconName::IdCard)
-                .on_click(act(RowAction::CopyId(id.clone()))),
+                .on_click(act(RowAction::CopyId(self.id.clone()))),
         )
-        .when(can_pin, |menu| {
+        .when(self.can_pin, |menu| {
             let toggle = {
-                let (on_action, id) = (on_action.clone(), id.clone());
+                let (on_action, id, pinned) =
+                    (self.on_action.clone(), self.id.clone(), self.pinned);
                 move |event: &ClickEvent, window: &mut Window, cx: &mut App| {
                     let confirmed = event.modifiers().shift;
                     let action = RowAction::TogglePin {
@@ -11689,16 +13132,16 @@ fn render_message_row(
                     on_action(action, window, cx)
                 }
             };
-            let (label, icon) = if pinned {
+            let (label, icon) = if self.pinned {
                 ("Unpin message", IconName::PinOff)
             } else {
                 ("Pin message", IconName::Pin)
             };
             menu.item(PopupMenuItem::new(label).icon(icon).on_click(toggle))
         })
-        .when(mine, |menu| {
+        .when(self.mine, |menu| {
             let delete = {
-                let (on_action, id) = (on_action.clone(), id.clone());
+                let (on_action, id) = (self.on_action.clone(), self.id.clone());
                 move |event: &ClickEvent, window: &mut Window, cx: &mut App| {
                     let confirmed = event.modifiers().shift;
                     on_action(RowAction::Delete { id: id.clone(), confirmed }, window, cx)
@@ -11708,7 +13151,7 @@ fn render_message_row(
                 .item(
                     PopupMenuItem::new("Edit")
                         .icon(IconName::Pencil)
-                        .on_click(act(RowAction::Edit(id.clone()))),
+                        .on_click(act(RowAction::Edit(self.id.clone()))),
                 )
                 .item(
                     PopupMenuItem::element(|_, cx| {
@@ -11722,8 +13165,17 @@ fn render_message_row(
                     .on_click(delete),
                 )
         })
-    })
-    .into_any_element()
+        .when_some(self.report_author.clone(), |menu, author| {
+            menu.separator().item(
+                PopupMenuItem::new("Report message…")
+                    .icon(IconName::TriangleAlert)
+                    .on_click(act(RowAction::Report {
+                        id: self.id.clone(),
+                        author,
+                    })),
+            )
+        })
+    }
 }
 
 /// Replying to `message`: pinging its author by default, unless it's ours.
@@ -11752,6 +13204,20 @@ const REPLY_LINE_HEIGHT: f32 = 18.;
 const REPLY_GAP: f32 = 2.;
 /// The original author's avatar in a reply preview.
 const REPLY_AVATAR_SIZE: f32 = 14.;
+
+/// "Bot" after a bot's name in its messages' headers.
+fn bot_tag(colors: RowColors) -> Div {
+    div()
+        .flex_none()
+        .px_1()
+        .rounded_sm()
+        .border_1()
+        .border_color(colors.muted)
+        .text_color(colors.muted)
+        .text_xs()
+        .font_weight(FontWeight::SEMIBOLD)
+        .child("Bot")
+}
 
 /// "↱ Name: snippet" above a reply. Clicking an original that's been fetched
 /// scrolls to it, loading the messages around it if it's not in the list.
@@ -12004,7 +13470,7 @@ async fn upload_file(
         async move {
             // Read from disk as it's sent (see `upload_attachment`).
             client
-                .upload_attachment(&file_server, &file.name, &file.content_type, &file.path, move |sent, total| {
+                .upload_attachment(&file_server, &file.upload_name(), &file.content_type, &file.path, move |sent, total| {
                     tx.unbounded_send((sent, total)).ok();
                 })
                 .await
@@ -12259,27 +13725,124 @@ const FILE_CARD_WIDTH: f32 = 320.;
 
 /// An inline image at its precomputed size (so the row never changes height
 /// when it loads), or a file card. `id` is unique within the list.
+/// Right-clicking a sent one gives what can be done with the file, then
+/// `message`'s own items (none without them: a search result, or a message
+/// still sending).
+/// A text file's preview, and an audio file's player, go under its card in
+/// the timeline, where there are `pickers` (not in search results or
+/// embeds).
 fn render_attachment(
     id: SharedString,
     attachment: &AttachmentView,
     colors: RowColors,
     on_action: &OnRowAction,
+    message: Option<&Rc<MessageMenu>>,
+    pickers: Option<&Pickers>,
 ) -> AnyElement {
+    let element = attachment_element(id, attachment, colors, on_action, pickers);
+    match attachment.file_target() {
+        Some(target) => with_file_menu(element, target, message, on_action),
+        None => element.into_any_element(),
+    }
+}
+
+/// `element` (a file or picture) with a right-click menu of what can be
+/// done with `target`, then `message`'s own items. Its menu wins over the
+/// row's. Without `message` (a search result, or a message still sending),
+/// there's no menu.
+fn with_file_menu(
+    element: Stateful<Div>,
+    target: FileTarget,
+    message: Option<&Rc<MessageMenu>>,
+    on_action: &OnRowAction,
+) -> AnyElement {
+    let Some(message) = message.cloned() else {
+        return element.into_any_element();
+    };
+    let run: RunFileAction = {
+        let on_action = on_action.clone();
+        Rc::new(move |action, target, window, cx| {
+            on_action(RowAction::File(action, target), window, cx)
+        })
+    };
+    element
+        .context_menu(move |menu, _, _| {
+            message.items(file_menu_items(menu, &target, &run).separator())
+        })
+        .into_any_element()
+}
+
+/// Runs a file action on a target, wherever it was asked for.
+type RunFileAction = Rc<dyn Fn(FileAction, FileTarget, &mut Window, &mut App)>;
+
+/// The items for what can be done with `target`: Save…, Copy image
+/// (pictures), Copy link and Open in browser.
+fn file_menu_items(menu: PopupMenu, target: &FileTarget, run: &RunFileAction) -> PopupMenu {
+    files::actions(target)
+        .into_iter()
+        .fold(menu, |menu, action| {
+            let (run, target) = (run.clone(), target.clone());
+            menu.item(
+                PopupMenuItem::new(action.label())
+                    .icon(file_action_icon(action))
+                    .on_click(move |_, window, cx| run(action, target.clone(), window, cx)),
+            )
+        })
+}
+
+fn file_action_icon(action: FileAction) -> IconName {
+    match action {
+        FileAction::Save => IconName::Download,
+        FileAction::CopyImage => IconName::Copy,
+        FileAction::CopyLink => IconName::Link,
+        FileAction::OpenInBrowser => IconName::ExternalLink,
+    }
+}
+
+fn attachment_element(
+    id: SharedString,
+    attachment: &AttachmentView,
+    colors: RowColors,
+    on_action: &OnRowAction,
+    pickers: Option<&Pickers>,
+) -> Stateful<Div> {
+    let scrolls = pickers.map(|pickers| &pickers.text_scrolls);
     match attachment {
+        // A spoiler: covered until it's clicked.
+        AttachmentView::Image {
+            id: file_id,
+            width,
+            height,
+            thumbhash,
+            too_big: false,
+            spoiler: true,
+            ..
+        } => {
+            let (on_action, file_id) = (on_action.clone(), file_id.clone());
+            covered_image(id, (*width, *height), thumbhash.clone(), colors)
+                .cursor_pointer()
+                .on_click(move |_, window, cx| {
+                    on_action(RowAction::RevealAttachment(file_id.clone()), window, cx)
+                })
+        }
         AttachmentView::Image {
             url,
-            name,
             width,
             height,
             original,
             thumbhash,
             too_big: false,
+            spoiler: false,
             ..
         } => {
+            let target = attachment
+                .file_target()
+                .expect("an image has a file target");
             let viewed = ViewedImage {
                 url: url.clone(),
-                name: name.clone(),
+                name: target.name.clone(),
                 original: *original,
+                target,
             };
             let on_action = on_action.clone();
             inline_image(id, url, (*width, *height), thumbhash.clone(), colors)
@@ -12287,18 +13850,19 @@ fn render_attachment(
                 .on_click(move |_, window, cx| {
                     on_action(RowAction::ViewImage(viewed.clone()), window, cx)
                 })
-                .into_any_element()
         }
         AttachmentView::Image {
             id: file_id,
             name,
             size_label,
             too_big: true,
+            spoiler,
             ..
         } => {
             let on_action = on_action.clone();
             let file_id = file_id.clone();
             file_card(id.clone(), IconName::FileImage, name, size_label, colors)
+                .when(*spoiler, |card| card.child(spoiler_tag(colors)))
                 .child(
                     Button::new(SharedString::from(format!("{id}-show")))
                         .xsmall()
@@ -12307,21 +13871,118 @@ fn render_attachment(
                             on_action(RowAction::RevealImage(file_id.clone()), window, cx)
                         }),
                 )
-                .into_any_element()
         }
         AttachmentView::File {
+            id: file_id,
             name,
             size_label,
             url,
             kind,
+            spoiler,
+            preview,
         } => {
-            file_card(id, file_icon(*kind), name, size_label, colors)
+            let card = file_card(id.clone(), file_icon(*kind), name, size_label, colors)
+                .when(*spoiler, |card| card.child(spoiler_tag(colors)))
                 .when_some(url.clone(), |card, url| {
                     card.cursor_pointer()
                         .on_click(move |_, _, cx| cx.open_url(&url))
                         .child(Icon::new(IconName::Download).text_color(colors.muted))
+                });
+            match (preview, url, scrolls) {
+                (Some(preview), Some(url), Some(scrolls)) => {
+                    let text = TextBlock {
+                        file_id,
+                        url,
+                        size_label,
+                        scrolls,
+                    };
+                    v_flex()
+                        .id(SharedString::from(format!("{id}-file")))
+                        .w(px(TEXT_PREVIEW_WIDTH))
+                        .max_w_full()
+                        .gap_1()
+                        .child(card.w_full())
+                        .child(text_preview_block(&id, preview, text, colors, on_action))
+                }
+                _ => card,
+            }
+        }
+        // A spoiler: covered until it's clicked, with no poster made yet.
+        AttachmentView::Video {
+            id: file_id,
+            width,
+            height,
+            spoiler: true,
+            ..
+        } => {
+            let (on_action, file_id) = (on_action.clone(), file_id.clone());
+            covered_image(id, (*width, *height), None, colors)
+                .cursor_pointer()
+                .on_click(move |_, window, cx| {
+                    on_action(RowAction::RevealAttachment(file_id.clone()), window, cx)
                 })
-                .into_any_element()
+        }
+        AttachmentView::Video {
+            id: file_id,
+            url,
+            name,
+            width,
+            height,
+            original,
+            ..
+        } => {
+            let play = RowAction::PlayVideo {
+                file_id: file_id.clone(),
+                url: url.clone(),
+                name: name.clone(),
+                original: *original,
+            };
+            let on_action = on_action.clone();
+            video_poster(id, url, (*width, *height), colors)
+                .cursor_pointer()
+                .on_click(move |_, window, cx| on_action(play.clone(), window, cx))
+        }
+        AttachmentView::Audio {
+            id: file_id,
+            url,
+            name,
+            size_label,
+            spoiler,
+        } => {
+            let card = file_card(
+                format!("{id}-card").into(),
+                IconName::FileMusic,
+                name,
+                size_label,
+                colors,
+            )
+            .when(*spoiler, |card| card.child(spoiler_tag(colors)));
+            // Without a timeline (an embed, a search result), just the card.
+            let Some(pickers) = pickers else {
+                let url = url.clone();
+                return card
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| cx.open_url(&url))
+                    .child(Icon::new(IconName::Download).text_color(colors.muted));
+            };
+            let playback = &pickers.playback;
+            let controls = if playback.unplayable.contains(file_id) {
+                cant_play_line(&id, url, colors)
+            } else {
+                let state = playback
+                    .current
+                    .as_ref()
+                    .filter(|(playing, _)| playing == file_id)
+                    .map(|(_, snapshot)| snapshot);
+                audio_controls(&id, file_id, url, state, colors, on_action)
+            };
+            v_flex()
+                .id(id)
+                .w(px(AUDIO_WIDTH))
+                .max_w_full()
+                .gap_1()
+                .child(card.w_full())
+                .child(controls)
         }
         // Still uploading: the local copy, with a progress bar along its
         // bottom edge (over it, so the row's height doesn't change).
@@ -12331,7 +13992,17 @@ fn render_attachment(
             kind,
             image,
             progress,
+            spoiler,
         } => match image {
+            // Marked as a spoiler: covered, as the sent one will be.
+            Some((_, width, height)) if *spoiler => {
+                covered_image(id, (*width, *height), None, colors).child(
+                    upload_bar(*progress, colors)
+                        .bottom(px(6.))
+                        .left(px(6.))
+                        .right(px(6.)),
+                )
+            }
             Some((path, width, height)) => div()
                 .id(id.clone())
                 .relative()
@@ -12352,14 +14023,408 @@ fn render_attachment(
                                 .into_any_element()
                         }),
                 )
-                .child(upload_bar(*progress, colors).bottom(px(6.)).left(px(6.)).right(px(6.)))
-                .into_any_element(),
+                .child(
+                    upload_bar(*progress, colors)
+                        .bottom(px(6.))
+                        .left(px(6.))
+                        .right(px(6.)),
+                ),
             None => file_card(id, file_icon(*kind), name, size_label, colors)
                 .relative()
-                .child(upload_bar(*progress, colors).bottom(px(3.)).left(px(8.)).right(px(8.)))
-                .into_any_element(),
+                .when(*spoiler, |card| card.child(spoiler_tag(colors)))
+                .child(
+                    upload_bar(*progress, colors)
+                        .bottom(px(3.))
+                        .left(px(8.))
+                        .right(px(8.)),
+                ),
         },
     }
+}
+
+/// An audio player's width, as the web client's.
+const AUDIO_WIDTH: f32 = 420.;
+/// The height of the line under an audio file's card, whatever it shows.
+const AUDIO_LINE_HEIGHT: f32 = 24.;
+/// The seek bar's track, and the taller strip that takes clicks on it.
+const SEEK_TRACK_HEIGHT: f32 = 4.;
+const SEEK_HIT_HEIGHT: f32 = 16.;
+
+/// An audio file's controls: play/pause, the seek bar and the time.
+/// `state`: how it's playing, if it's the file playing or paused.
+fn audio_controls(
+    id: &SharedString,
+    file_id: &str,
+    url: &str,
+    state: Option<&PlayerSnapshot>,
+    colors: RowColors,
+    on_action: &OnRowAction,
+) -> Div {
+    let playing = state.is_some_and(|state| state.playing);
+    let (position, duration) = state.map_or((0.0, None), |state| (state.position, state.duration));
+    let action = if playing {
+        RowAction::PauseAudio
+    } else {
+        RowAction::PlayAudio {
+            file_id: file_id.to_string(),
+            url: url.to_string(),
+        }
+    };
+    let button = Button::new(SharedString::from(format!("{id}-play")))
+        .ghost()
+        .xsmall()
+        .icon(if playing {
+            IconName::Pause
+        } else {
+            IconName::Play
+        })
+        .tooltip(if playing { "Pause" } else { "Play" })
+        .on_click({
+            let on_action = on_action.clone();
+            move |_, window, cx| on_action(action.clone(), window, cx)
+        });
+    // Only the file playing or paused can be moved through.
+    let seekable = state.is_some_and(|state| state.duration.is_some());
+    h_flex()
+        .h(px(AUDIO_LINE_HEIGHT))
+        .gap_2()
+        .items_center()
+        .child(button)
+        .child(seek_bar(
+            id,
+            file_id,
+            playback::progress(position, duration),
+            seekable,
+            colors,
+            on_action,
+        ))
+        .child(
+            div()
+                .flex_none()
+                .text_xs()
+                .text_color(colors.muted)
+                .child(playback::time_label(position, duration)),
+        )
+}
+
+/// Dragging along an audio file's seek bar (by file ID).
+#[derive(Clone)]
+struct SeekDrag {
+    file_id: String,
+}
+
+/// A thin track filled `fill` of the way. When `seekable`, a click or
+/// drag on it (or a little above or below) moves the file there.
+fn seek_bar(
+    id: &SharedString,
+    file_id: &str,
+    fill: f32,
+    seekable: bool,
+    colors: RowColors,
+    on_action: &OnRowAction,
+) -> Stateful<Div> {
+    let track = div()
+        .w_full()
+        .h(px(SEEK_TRACK_HEIGHT))
+        .rounded_full()
+        .bg(colors.border)
+        .child(
+            div()
+                .h_full()
+                .w(relative(fill))
+                .rounded_full()
+                .bg(colors.mine),
+        );
+    let bar = div()
+        .id(SharedString::from(format!("{id}-seek")))
+        .relative()
+        .flex_1()
+        .min_w_0()
+        .h(px(SEEK_HIT_HEIGHT))
+        .flex()
+        .items_center()
+        .child(track);
+    if !seekable {
+        return bar;
+    }
+    // Where the bar was laid out, for a click (a drag is told).
+    let laid_out = Rc::new(Cell::new(None::<Bounds<Pixels>>));
+    bar.cursor_pointer()
+        .child(
+            canvas(
+                {
+                    let laid_out = laid_out.clone();
+                    move |bounds, _, _| laid_out.set(Some(bounds))
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        )
+        .on_mouse_down(MouseButton::Left, {
+            let on_action = on_action.clone();
+            move |event, window, cx| {
+                // Not a selection, nor a click on the row.
+                cx.stop_propagation();
+                if let Some(bounds) = laid_out.get() {
+                    seek_to(&on_action, event.position.x, bounds, window, cx);
+                }
+            }
+        })
+        .on_drag(
+            SeekDrag {
+                file_id: file_id.to_string(),
+            },
+            |_, _, _, cx| DragPreview::new(Rc::new(|_| div().into_any_element()), cx),
+        )
+        .on_drag_move({
+            let (on_action, file_id) = (on_action.clone(), file_id.to_string());
+            move |event: &DragMoveEvent<SeekDrag>, window, cx| {
+                if event.drag(cx).file_id == file_id {
+                    seek_to(&on_action, event.event.position.x, event.bounds, window, cx);
+                }
+            }
+        })
+}
+
+/// Seek to where `x` is along a seek bar laid out at `bounds`.
+fn seek_to(
+    on_action: &OnRowAction,
+    x: Pixels,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let fraction = playback::fraction_along(
+        f32::from(x),
+        f32::from(bounds.origin.x),
+        f32::from(bounds.size.width),
+    );
+    on_action(RowAction::SeekAudio(fraction), window, cx)
+}
+
+/// The toast for a video that won't play in the player window.
+const CANT_PLAY_VIDEO_TEXT: &str = "Can't play this video here.";
+
+/// "Can't play this video here.", with Open in browser.
+fn cant_play_video(url: String) -> Notification {
+    Notification::error(CANT_PLAY_VIDEO_TEXT).action(move |_, _, _| {
+        let url = url.clone();
+        Button::new("open-video-in-browser")
+            .small()
+            .label("Open in browser")
+            .on_click(move |_, _, cx| cx.open_url(&url))
+    })
+}
+
+/// What an audio file that won't play shows in place of its controls, at
+/// the same height.
+fn cant_play_line(id: &SharedString, url: &str, colors: RowColors) -> Div {
+    let url = url.to_string();
+    h_flex()
+        .h(px(AUDIO_LINE_HEIGHT))
+        .gap_2()
+        .items_center()
+        .child(
+            div()
+                .text_xs()
+                .text_color(colors.muted)
+                .child("Can't play this format here"),
+        )
+        .child(
+            Button::new(SharedString::from(format!("{id}-open")))
+                .ghost()
+                .xsmall()
+                .label("Open in browser")
+                .on_click(move |_, _, cx| cx.open_url(&url)),
+        )
+}
+
+/// A spoiler picture before it's shown, at its display size (so the row
+/// keeps its height when it is): its ThumbHash darkened, or a dark box
+/// without one, with a "Spoiler" pill in the middle. Callers add the click.
+fn covered_image(
+    id: SharedString,
+    (width, height): (u32, u32),
+    thumbhash: Option<Arc<[u8]>>,
+    colors: RowColors,
+) -> Stateful<Div> {
+    div()
+        .id(id.clone())
+        .relative()
+        .w(px(width as f32))
+        .h(px(height as f32))
+        .flex_none()
+        .rounded(px(ATTACHMENT_RADIUS))
+        .overflow_hidden()
+        .bg(colors.image_bg)
+        .when_some(thumbhash, |el, hash| {
+            el.child(
+                crate::ui::thumbhash::preview(hash)
+                    .id(SharedString::from(format!("{id}-hash")))
+                    .absolute()
+                    .inset_0()
+                    .size_full()
+                    .object_fit(ObjectFit::Fill),
+            )
+        })
+        .child(div().absolute().inset_0().bg(black().opacity(0.6)))
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_full()
+                        .bg(black().opacity(0.6))
+                        .text_color(white())
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(Icon::new(IconName::EyeOff).xsmall())
+                        .child("Spoiler"),
+                ),
+        )
+}
+
+/// Text previews (and their file cards) are this wide, within the bubble.
+const TEXT_PREVIEW_WIDTH: f32 = 432.;
+/// A preview taller than this scrolls inside.
+const TEXT_PREVIEW_MAX_HEIGHT: f32 = 120.;
+
+/// Text previews' scroll positions, by file ID (see [`ChatView::text_scrolls`]).
+#[derive(Clone, Default)]
+struct TextScrolls(Rc<RefCell<HashMap<String, ScrollHandle>>>);
+
+impl TextScrolls {
+    fn handle(&self, file_id: &str) -> ScrollHandle {
+        self.0
+            .borrow_mut()
+            .entry(file_id.to_string())
+            .or_default()
+            .clone()
+    }
+}
+
+/// The file a text preview belongs to.
+struct TextBlock<'a> {
+    file_id: &'a str,
+    url: &'a str,
+    size_label: &'a str,
+    scrolls: &'a TextScrolls,
+}
+
+/// What goes under a text file's card: its contents in a monospace block
+/// (wrapped, scrolling inside past [`TEXT_PREVIEW_MAX_HEIGHT`]), or "Load
+/// file", "Loading…", the failure with Try again, or a hidden spoiler.
+fn text_preview_block(
+    id: &SharedString,
+    preview: &TextPreview,
+    file: TextBlock,
+    colors: RowColors,
+    on_action: &OnRowAction,
+) -> AnyElement {
+    let frame = div()
+        .w_full()
+        .rounded(px(ATTACHMENT_RADIUS))
+        .border_1()
+        .border_color(colors.border)
+        .bg(colors.card_bg)
+        .px_2()
+        .py_1p5()
+        .text_xs();
+    let act = |action: RowAction| {
+        let on_action = on_action.clone();
+        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+            on_action(action.clone(), window, cx)
+        }
+    };
+    let load = RowAction::LoadText {
+        id: file.file_id.to_string(),
+        url: file.url.to_string(),
+    };
+    match preview {
+        TextPreview::Hidden => frame
+            .id(SharedString::from(format!("{id}-spoiler")))
+            .cursor_pointer()
+            .text_color(colors.muted)
+            .hover(|style| style.bg(colors.highlight))
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(Icon::new(IconName::EyeOff).xsmall())
+                    .child("Spoiler: click to show"),
+            )
+            .on_click(act(RowAction::RevealAttachment(file.file_id.to_string())))
+            .into_any_element(),
+        TextPreview::NotLoaded => frame
+            .child(
+                Button::new(SharedString::from(format!("{id}-load")))
+                    .xsmall()
+                    .label(format!("Load file ({})", file.size_label))
+                    .on_click(act(load)),
+            )
+            .into_any_element(),
+        TextPreview::Loading => frame
+            .text_color(colors.muted)
+            .child("Loading…")
+            .into_any_element(),
+        TextPreview::Failed => frame
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_color(colors.muted)
+                            .child("Couldn't load the file."),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("{id}-retry")))
+                            .xsmall()
+                            .label("Try again")
+                            .on_click(act(load)),
+                    ),
+            )
+            .into_any_element(),
+        TextPreview::Loaded(text) => {
+            let scroll = file.scrolls.handle(file.file_id);
+            let overflows = scroll.clone();
+            frame
+                .id(SharedString::from(format!("{id}-text")))
+                .max_h(px(TEXT_PREVIEW_MAX_HEIGHT))
+                .overflow_y_scroll()
+                .track_scroll(&scroll)
+                // The timeline scrolls past a preview that fits; one that
+                // scrolls itself keeps the wheel while over it.
+                .on_scroll(move |_, _, cx| {
+                    if overflows.max_offset().y > px(0.) {
+                        cx.stop_propagation();
+                    }
+                })
+                .font_family("Menlo")
+                .child(SharedString::from(text.clone()))
+                .into_any_element()
+        }
+    }
+}
+
+/// "Spoiler" on a spoiler file's card.
+fn spoiler_tag(colors: RowColors) -> Div {
+    div()
+        .flex_none()
+        .px_1()
+        .rounded_sm()
+        .border_1()
+        .border_color(colors.border)
+        .text_xs()
+        .text_color(colors.muted)
+        .child("Spoiler")
 }
 
 /// How much of a file has uploaded (`progress` in thousandths): a thin
@@ -12432,6 +14497,69 @@ fn inline_image(
         )
 }
 
+/// A video's poster at its display size, letterboxed on black, with a
+/// play button over it: pulsing while the poster's made, and a dark box
+/// saying "Video" if it can't be. Callers add the click.
+fn video_poster(
+    id: SharedString,
+    url: &str,
+    (width, height): (u32, u32),
+    colors: RowColors,
+) -> Stateful<Div> {
+    // Sharp on a Retina screen.
+    let max = (width * 2, height * 2);
+    div()
+        .id(id.clone())
+        .relative()
+        .w(px(width as f32))
+        .h(px(height as f32))
+        .flex_none()
+        .rounded(px(ATTACHMENT_RADIUS))
+        .overflow_hidden()
+        .bg(black())
+        .child(
+            crate::ui::video_poster::poster(url.to_string(), max)
+                // Keeps its loading state between frames (see `inline_image`).
+                .id(SharedString::from(format!("{id}-poster")))
+                .size_full()
+                .object_fit(ObjectFit::Contain)
+                .with_loading(move || image_loading(colors.muted, ATTACHMENT_RADIUS))
+                .with_fallback(|| {
+                    div()
+                        .size_full()
+                        .flex()
+                        .items_end()
+                        .p_2()
+                        .text_xs()
+                        .text_color(white().opacity(0.7))
+                        .child("Video")
+                        .into_any_element()
+                }),
+        )
+        .child(play_badge())
+}
+
+/// A round play button over the middle of a picture.
+fn play_badge() -> Div {
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .size(px(48.))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(black().opacity(0.6))
+                .text_color(white())
+                .child(Icon::new(IconName::Play).large()),
+        )
+}
+
 /// A small pulsing square (or circle) standing in for an icon or emoji
 /// while it downloads.
 fn icon_loading(size: f32, round: bool) -> AnyElement {
@@ -12477,23 +14605,29 @@ fn image_loading(icon_color: Hsla, radius: f32) -> AnyElement {
         .into_any_element()
 }
 
-/// An embed picture that opens in the full-size viewer.
+/// An embed picture that opens in the full-size viewer (under `title`, else
+/// its name), with the file actions on right-click.
 fn viewable_embed_image(
     id: SharedString,
     image: &EmbedImage,
+    title: Option<String>,
     colors: RowColors,
     on_action: &OnRowAction,
-) -> Stateful<Div> {
+    message: Option<&Rc<MessageMenu>>,
+) -> AnyElement {
+    let target = files::embed_target(image, None);
     let viewed = ViewedImage {
         url: image.url.clone(),
-        name: "Image".into(),
+        name: title.unwrap_or_else(|| target.name.clone()),
         original: image.original,
+        target: target.clone(),
     };
-    let on_action = on_action.clone();
+    let open = on_action.clone();
     // Remote images have no ThumbHash: they get the pulsing box.
-    inline_image(id, &image.url, (image.width, image.height), None, colors)
+    let picture = inline_image(id, &image.url, (image.width, image.height), None, colors)
         .cursor_pointer()
-        .on_click(move |_, window, cx| on_action(RowAction::ViewImage(viewed.clone()), window, cx))
+        .on_click(move |_, window, cx| open(RowAction::ViewImage(viewed.clone()), window, cx));
+    with_file_menu(picture, target, message, on_action)
 }
 
 /// Widest the age gate's card gets.
@@ -12512,10 +14646,11 @@ fn render_embed(
     colors: RowColors,
     on_action: &OnRowAction,
     people: &People,
+    message: Option<&Rc<MessageMenu>>,
 ) -> AnyElement {
     match embed {
         EmbedView::Image(image) => {
-            viewable_embed_image(id, image, colors, on_action).into_any_element()
+            viewable_embed_image(id, image, None, colors, on_action, message)
         }
         EmbedView::Video { url } => {
             let open = url.clone();
@@ -12532,11 +14667,14 @@ fn render_embed(
                 .into_any_element()
         }
         EmbedView::GifPoster { image, link } => {
-            let (open, on_action) = (link.clone(), on_action.clone());
-            inline_image(id, &image.url, (image.width, image.height), None, colors)
+            // Copy link gives the still's own address; Open in browser, the
+            // GIF's page, like a click.
+            let target = files::embed_target(image, Some(link));
+            let (open, on_click) = (link.clone(), on_action.clone());
+            let poster = inline_image(id, &image.url, (image.width, image.height), None, colors)
                 .cursor_pointer()
                 .on_click(move |_, window, cx| {
-                    on_action(RowAction::OpenLink(open.clone()), window, cx)
+                    on_click(RowAction::OpenLink(open.clone()), window, cx)
                 })
                 .child(
                     div()
@@ -12550,10 +14688,10 @@ fn render_embed(
                         .text_xs()
                         .font_weight(FontWeight::BOLD)
                         .child("GIF"),
-                )
-                .into_any_element()
+                );
+            with_file_menu(poster, target, message, on_action)
         }
-        EmbedView::Card(card) => render_embed_card(id, card, colors, on_action, people),
+        EmbedView::Card(card) => render_embed_card(id, card, colors, on_action, people, message),
     }
 }
 
@@ -12690,6 +14828,7 @@ fn render_embed_card(
     colors: RowColors,
     on_action: &OnRowAction,
     people: &People,
+    message: Option<&Rc<MessageMenu>>,
 ) -> AnyElement {
     let bar = card
         .colour
@@ -12778,26 +14917,28 @@ fn render_embed_card(
                     .into_any_element()
             }
         });
-    let thumbnail = card
-        .thumbnail
+    let thumbnail = card.thumbnail.as_ref().map(|image| {
+        let id = format!("{id}-thumb").into();
+        viewable_embed_image(id, image, None, colors, on_action, message)
+    });
+    let image = card
+        .image
         .as_ref()
-        .map(|image| viewable_embed_image(format!("{id}-thumb").into(), image, colors, on_action));
-    let image = card.image.as_ref().map(|image| {
-        let picture = inline_image(
-            format!("{id}-image").into(),
-            &image.url,
-            (image.width, image.height),
-            None,
-            colors,
-        )
-        .cursor_pointer();
-        match (card.playable, card.link.clone()) {
-            // A video's picture: a play badge, and a click opens the video.
-            (true, Some(link)) => picture
-                .on_click({
-                    let on_action = on_action.clone();
-                    move |_, window, cx| on_action(RowAction::OpenLink(link.clone()), window, cx)
-                })
+        .map(|image| match (card.playable, card.link.clone()) {
+            // A video's picture: a play badge, and a click (or Open in browser)
+            // opens the video.
+            (true, Some(link)) => {
+                let target = files::embed_target(image, Some(&link));
+                let open = on_action.clone();
+                let picture = inline_image(
+                    format!("{id}-image").into(),
+                    &image.url,
+                    (image.width, image.height),
+                    None,
+                    colors,
+                )
+                .cursor_pointer()
+                .on_click(move |_, window, cx| open(RowAction::OpenLink(link.clone()), window, cx))
                 .child(
                     div()
                         .absolute()
@@ -12816,27 +14957,28 @@ fn render_embed_card(
                                 .text_color(white())
                                 .child(Icon::new(IconName::Play).large()),
                         ),
-                )
-                .into_any_element(),
-            _ => {
-                let viewed = ViewedImage {
-                    url: image.url.clone(),
-                    name: card.title.clone().unwrap_or_else(|| "Image".into()),
-                    original: image.original,
-                };
-                let on_action = on_action.clone();
-                picture
-                    .on_click(move |_, window, cx| {
-                        on_action(RowAction::ViewImage(viewed.clone()), window, cx)
-                    })
-                    .into_any_element()
+                );
+                with_file_menu(picture, target, message, on_action)
             }
-        }
+            _ => viewable_embed_image(
+                format!("{id}-image").into(),
+                image,
+                card.title.clone(),
+                colors,
+                on_action,
+                message,
+            ),
+        });
+    let media = card.media.as_ref().map(|media| {
+        render_attachment(
+            format!("{id}-media").into(),
+            media,
+            colors,
+            on_action,
+            message,
+            None,
+        )
     });
-    let media = card
-        .media
-        .as_ref()
-        .map(|media| render_attachment(format!("{id}-media").into(), media, colors, on_action));
 
     div()
         .flex()
@@ -13060,8 +15202,40 @@ fn open_info_dialog(view: WeakEntity<ChatView>, info: Info, window: &mut Window,
                 Info::Server(_) => None,
             },
             hosts,
+            message: None,
         };
-        modal.child(render_info(&content, people.link_handler(), cx))
+        let settings = match &info {
+            Info::Server(server)
+                if view.upgrade().is_some_and(|chat| {
+                    crate::server_settings::access(chat.read(cx).store(), server).any()
+                }) =>
+            {
+                let (view, server) = (view.clone(), server.clone());
+                let open: OnSettings = Rc::new(move |window, cx| {
+                    window.close_dialog(cx);
+                    view.update(cx, |this, cx| this.open_server_settings(server.clone(), cx))
+                        .ok();
+                });
+                Some(("Server settings…", open))
+            }
+            Info::Channel(channel)
+                if view.upgrade().is_some_and(|chat| {
+                    crate::channel_settings::access(chat.read(cx).store(), channel).any()
+                }) =>
+            {
+                let (view, channel) = (view.clone(), channel.clone());
+                let open: OnSettings = Rc::new(move |window, cx| {
+                    window.close_dialog(cx);
+                    view.update(cx, |this, cx| {
+                        this.open_channel_settings(channel.clone(), cx)
+                    })
+                    .ok();
+                });
+                Some(("Channel settings…", open))
+            }
+            _ => None,
+        };
+        modal.child(render_info(&content, people.link_handler(), settings, cx))
     });
 }
 
@@ -13403,21 +15577,9 @@ const DROP_LINE: f32 = 3.;
 /// [`rail_slot`]'s rows are).
 pub(crate) fn with_drop_mark(item: Div, mark: Option<DropMark>, cx: &App) -> Div {
     let accent = cx.theme().primary;
-    // Centred in the gap.
-    let line = || {
-        div()
-            .absolute()
-            .left(px(12.))
-            .right(px(12.))
-            .h(px(DROP_LINE))
-            .rounded_full()
-            .bg(accent)
-    };
-    let gap = px(-(4. + DROP_LINE / 2.));
     let mark = match mark {
         None => return item,
-        Some(DropMark::Above) => line().top(gap),
-        Some(DropMark::Below) => line().bottom(gap),
+        Some(DropMark::Above | DropMark::Below) => return with_drop_line(item, mark, 8., 12., cx),
         Some(DropMark::Onto) => div()
             .absolute()
             .top(px(-4.))
@@ -13435,6 +15597,53 @@ pub(crate) fn with_drop_mark(item: Div, mark: Option<DropMark>, cx: &App) -> Div
             ),
     };
     item.child(mark)
+}
+
+/// `item` showing `mark` as a line centred in the `gap` (in pixels) above
+/// or below it, `inset` pixels in from each side. `item` is `relative`.
+/// [`DropMark::Onto`] draws nothing here.
+pub(crate) fn with_drop_line(
+    item: Div,
+    mark: Option<DropMark>,
+    gap: f32,
+    inset: f32,
+    cx: &App,
+) -> Div {
+    let line = div()
+        .absolute()
+        .left(px(inset))
+        .right(px(inset))
+        .h(px(DROP_LINE))
+        .rounded_full()
+        .bg(cx.theme().primary);
+    let offset = px(-(gap / 2. + DROP_LINE / 2.));
+    match mark {
+        Some(DropMark::Above) => item.child(line.top(offset)),
+        Some(DropMark::Below) => item.child(line.bottom(offset)),
+        Some(DropMark::Onto) | None => item,
+    }
+}
+
+/// What follows the pointer while a category or channel is dragged in the
+/// channel list: a pill with `icon` and `label`.
+fn list_drag_face(icon: IconName, label: String) -> Rc<dyn Fn(&App) -> AnyElement> {
+    Rc::new(move |cx: &App| {
+        let theme = cx.theme();
+        h_flex()
+            .gap_1p5()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(theme.secondary)
+            .border_1()
+            .border_color(theme.border)
+            .text_sm()
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(theme.secondary_foreground)
+            .child(Icon::new(icon).small())
+            .child(label.clone())
+            .into_any_element()
+    })
 }
 
 /// A rail button's face as it follows the pointer while dragged: `content`
@@ -13562,6 +15771,9 @@ pub(crate) fn mention_badge(count: usize, cx: &App) -> Div {
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_unread_marker(cx);
+        // However the open channel changed, audio from another one stops.
+        let open = self.current_channel().map(|c| c.id);
+        self.stop_playback(Change::OpenChannel(open.as_deref()), cx);
         // After layout, check whether the open channel is scrolled to its top
         // (or too short to scroll) and has more history to load.
         if let Some(channel) = self.current_channel().map(|c| c.id) {

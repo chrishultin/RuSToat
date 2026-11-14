@@ -141,6 +141,26 @@ fn attachment(view: &AttachmentView) -> AttachmentItem {
             width: 0,
             height: 0,
         },
+        // Played in Safari for now: inline media is iOS milestone 3.
+        AttachmentView::Audio {
+            url,
+            name,
+            size_label,
+            ..
+        }
+        | AttachmentView::Video {
+            url,
+            name,
+            size_label,
+            ..
+        } => AttachmentItem {
+            name: name.clone(),
+            size_label: size_label.clone(),
+            url: Some(url.clone()),
+            is_image: false,
+            width: 0,
+            height: 0,
+        },
         AttachmentView::Local {
             name,
             size_label,

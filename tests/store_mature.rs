@@ -45,3 +45,22 @@ fn a_channel_update_can_make_it_mature_or_not() {
     store.apply_channel_update("ch-adult", nsfw(false), &[]);
     assert!(!store.is_mature("ch-adult"));
 }
+
+#[test]
+fn a_saved_mature_flag_shows_at_once() {
+    let mut store = store();
+    let saved = channel(json!({
+        "channel_type": "TextChannel", "_id": "ch-plain", "server": "srv", "name": "plain",
+        "nsfw": true
+    }));
+    assert!(store.apply_channel_edit(&saved));
+    assert!(store.is_mature("ch-plain"));
+
+    // And back, for a group (whose answer leaves `nsfw` out when false).
+    let saved = channel(json!({
+        "channel_type": "Group", "_id": "ch-group", "name": "group", "owner": "u-me",
+        "recipients": ["u-me", "u-ada"]
+    }));
+    assert!(store.apply_channel_edit(&saved));
+    assert!(!store.is_mature("ch-group"));
+}

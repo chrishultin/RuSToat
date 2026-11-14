@@ -181,6 +181,29 @@ pub fn apply_event(store: &mut ChatStore, event: ServerEvent, now_ms: u64) -> Ch
             store.remove_emoji(&id);
             Changed::default()
         }
+        ServerEvent::EmojiUpdate { id, name } => {
+            if let Some(name) = name {
+                store.rename_emoji(&id, &name);
+            }
+            Changed::default()
+        }
+        ServerEvent::WebhookCreate(webhook) => {
+            store.add_webhook(*webhook);
+            Changed::default()
+        }
+        ServerEvent::WebhookUpdate {
+            id,
+            channel,
+            data,
+            remove,
+        } => {
+            store.apply_webhook_update(&channel, &id, *data, &remove);
+            Changed::default()
+        }
+        ServerEvent::WebhookDelete { id, channel } => {
+            store.remove_webhook(&channel, &id);
+            Changed::default()
+        }
         ServerEvent::ServerMemberJoin { member, .. } => {
             store.apply_member_join(*member);
             Changed::lists()

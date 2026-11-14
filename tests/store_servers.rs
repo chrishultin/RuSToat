@@ -287,6 +287,39 @@ fn ownership_follows_a_server_update() {
     assert!(!store.is_owner("srv-beta"));
 }
 
+#[test]
+fn a_saved_edit_shows_at_once_and_its_server_update_changes_nothing() {
+    let mut store = store();
+    let saved: stoat_gpui::api::models::Server = serde_json::from_value(json!({
+        "_id": "srv-alpha", "owner": "u-ada", "name": "Alpha Lounge",
+        "description": "Hello", "channels": ["ch-welcome"],
+        "default_permissions": 0, "approximate_member_count": 1
+    }))
+    .unwrap();
+    assert!(store.apply_server_edit(&saved));
+    let after_edit = store.server("srv-alpha").unwrap().clone();
+    assert_eq!(after_edit.name, "Alpha Lounge");
+    assert_eq!(after_edit.description.as_deref(), Some("Hello"));
+    // Stoat's answer has no icon, so the fixture's is gone.
+    assert!(after_edit.icon.is_none());
+    // Only what the Overview edits is taken from the answer.
+    assert_eq!(after_edit.channels.len(), 5);
+    // The same change, arriving as an event.
+    update(
+        &mut store,
+        json!({
+            "type": "ServerUpdate", "id": "srv-alpha",
+            "data": { "name": "Alpha Lounge", "description": "Hello" },
+            "clear": ["Icon"]
+        }),
+    );
+    assert_eq!(store.server("srv-alpha").unwrap(), &after_edit);
+    // An unknown server is left alone.
+    let mut gone = saved.clone();
+    gone.id = "srv-unknown".into();
+    assert!(!store.apply_server_edit(&gone));
+}
+
 /// The fixture's `ordering` was written at this time.
 const READY_ORDERING: i64 = 1730000000000;
 

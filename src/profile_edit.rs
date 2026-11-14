@@ -132,12 +132,14 @@ pub fn check_image(path: &Path, size: u64, limit: u64) -> Result<&'static str, I
     Ok(content_type)
 }
 
-/// How big an avatar and a profile banner may be (from `GET /`, see
-/// [`RootConfig::avatar_size_limit`]).
+/// How big an avatar, a profile banner, a server icon and a server banner
+/// may be (from `GET /`, see [`RootConfig::avatar_size_limit`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImageLimits {
     pub avatar: u64,
     pub background: u64,
+    pub server_icon: u64,
+    pub server_banner: u64,
 }
 
 impl Default for ImageLimits {
@@ -145,6 +147,8 @@ impl Default for ImageLimits {
         Self {
             avatar: crate::api::DEFAULT_AVATAR_SIZE_LIMIT,
             background: crate::api::DEFAULT_BACKGROUND_SIZE_LIMIT,
+            server_icon: crate::api::DEFAULT_ICON_SIZE_LIMIT,
+            server_banner: crate::api::DEFAULT_BANNER_SIZE_LIMIT,
         }
     }
 }
@@ -154,6 +158,8 @@ impl ImageLimits {
         Self {
             avatar: root.avatar_size_limit(),
             background: root.background_size_limit(),
+            server_icon: root.icon_size_limit(),
+            server_banner: root.banner_size_limit(),
         }
     }
 }

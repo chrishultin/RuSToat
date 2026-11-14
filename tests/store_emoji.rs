@@ -86,3 +86,48 @@ fn emoji_only_messages_are_flagged_jumbo() {
     // (jumbo, 96px image): only the emoji-only message is both.
     assert_eq!(flags, vec![(true, true), (false, false)]);
 }
+
+#[test]
+fn an_emoji_update_renames_it() {
+    let mut store = store();
+    let frame = serde_json::json!({
+        "type": "EmojiUpdate", "id": STOAT, "data": { "name": "weasel" }
+    });
+    let Some(ServerEvent::EmojiUpdate { id, name }) = parse_frame(&frame.to_string()).pop() else {
+        panic!("EmojiUpdate");
+    };
+    assert_eq!((id.as_str(), name.as_deref()), (STOAT, Some("weasel")));
+    assert!(store.rename_emoji(&id, "weasel"));
+    assert_eq!(store.emoji_name(STOAT).as_deref(), Some("weasel"));
+    // An unknown emoji is left alone, and an update without a name decodes.
+    assert!(!store.rename_emoji(NEW, "x"));
+    let frame = serde_json::json!({ "type": "EmojiUpdate", "id": STOAT, "data": {} });
+    assert!(matches!(
+        parse_frame(&frame.to_string()).pop(),
+        Some(ServerEvent::EmojiUpdate { name: None, .. })
+    ));
+}
+
+#[test]
+fn a_servers_emoji_are_listed_by_name() {
+    let mut store = store();
+    for (id, name, server) in [
+        (NEW, "otter", "srv-alpha"),
+        ("01CX5ZZKBKACTAV9WEVGEMMVRZ", "badger", "srv-alpha"),
+        ("01DX5ZZKBKACTAV9WEVGEMMVRZ", "elsewhere", "srv-beta"),
+    ] {
+        let emoji = serde_json::from_value(serde_json::json!({
+            "_id": id, "parent": { "type": "Server", "id": server },
+            "creator_id": "u-ada", "name": name
+        }))
+        .unwrap();
+        store.add_emoji(emoji);
+    }
+    let names: Vec<&str> = store
+        .server_emojis("srv-alpha")
+        .iter()
+        .map(|emoji| emoji.name.as_str())
+        .collect();
+    assert_eq!(names, ["badger", "otter", "stoat"]);
+    assert_eq!(store.server_emojis("srv-beta").len(), 1);
+}

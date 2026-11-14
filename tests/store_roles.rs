@@ -2,10 +2,10 @@
 //! `ServerRoleDelete`, `ServerRoleRanksUpdate`): the member list, role
 //! colours, permissions and the channel list follow them.
 
-use revolt_permissions::{ChannelPermission, DEFAULT_PERMISSION_SERVER};
+use revolt_permissions::{ChannelPermission, DEFAULT_PERMISSION_SERVER, OverrideField};
 use serde_json::{Value, json};
 use stoat_gpui::api::events::{ServerEvent, parse_frame};
-use stoat_gpui::api::models::Channel;
+use stoat_gpui::api::models::{Channel, PartialServer, Role};
 use stoat_gpui::permissions::{can_pin, can_view};
 use stoat_gpui::store::{ChatStore, MemberListRow, channel_id};
 
@@ -400,6 +400,36 @@ fn a_role_permission_change_flips_pinning_and_viewing() {
 }
 
 #[test]
+fn saved_role_permissions_then_their_event_are_consistent_and_pinning_follows() {
+    let mut store = store();
+    assert!(!can_pin(&store, "u-me", "ch-open"));
+    // Stoat's answer to `PUT /servers/{id}/permissions/{role}` carries the
+    // whole role, applied as `ChatView::role_saved` does.
+    let saved = Role {
+        permissions: OverrideField {
+            a: MANAGE as i64,
+            d: 0,
+        },
+        ..store.server("srv").unwrap().roles["plain"].clone()
+    };
+    let (data, clear) = stoat_gpui::roles::role_update(&saved);
+    assert!(store.apply_role_update("srv", "plain", data, &clear));
+    assert!(can_pin(&store, "u-me", "ch-open"));
+    // Then its event, carrying only the permissions.
+    apply(
+        &mut store,
+        role_update(
+            "plain",
+            json!({ "permissions": { "a": MANAGE, "d": 0 } }),
+            &[],
+        ),
+    );
+    assert_eq!(store.server("srv").unwrap().roles["plain"], saved);
+    assert!(can_pin(&store, "u-me", "ch-open"));
+    assert!(store.can_pin("ch-open"));
+}
+
+#[test]
 fn default_permissions_from_a_server_update_flip_viewing() {
     let mut store = store();
     assert!(can_view(&store, "u-me", "ch-open"));
@@ -414,6 +444,30 @@ fn default_permissions_from_a_server_update_flip_viewing() {
     assert!(can_view(&store, "u-owner", "ch-open"));
     // Nobody but the owner is left in the list.
     assert_eq!(lines(&store), ["# Online (1)", "owner"]);
+}
+
+#[test]
+fn saved_default_permissions_then_their_server_update_are_one_value() {
+    let mut store = store();
+    let without_view = *DEFAULT_PERMISSION_SERVER & !VIEW;
+    // What `ChatView::default_permissions_saved` applies from Stoat's answer.
+    let saved = PartialServer {
+        default_permissions: Some(without_view as i64),
+        ..Default::default()
+    };
+    assert!(store.apply_server_update("srv", saved, &[]));
+    assert!(!can_view(&store, "u-me", "ch-open"));
+    assert!(apply(
+        &mut store,
+        json!({
+            "type": "ServerUpdate", "id": "srv",
+            "data": { "default_permissions": without_view }
+        })
+    ));
+    let server = store.server("srv").unwrap();
+    assert_eq!(server.default_permissions, without_view as i64);
+    assert!(!can_view(&store, "u-me", "ch-open"));
+    assert!(can_view(&store, "u-owner", "ch-open"));
 }
 
 #[test]

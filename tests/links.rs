@@ -1,6 +1,6 @@
 use stoat_gpui::api::RootConfig;
 use stoat_gpui::invites::InviteHosts;
-use stoat_gpui::links::{ChannelLink, channel_from_link, invite_link, message_link};
+use stoat_gpui::links::{ChannelLink, bot_from_link, channel_from_link, invite_link, message_link};
 
 const SERVER: &str = "01FD4WDPDDRW4B003G94V1Y73X";
 const CHANNEL: &str = "01M4Y2PA27KZK3V5G28MZKGH9N";
@@ -185,4 +185,42 @@ fn self_hosted_instances_only_know_their_own_links() {
     // An instance that doesn't say where its web client is has none.
     let unknown = InviteHosts::new(None);
     assert_eq!(channel_from_link(&own, &unknown), None);
+}
+
+#[test]
+fn bot_links_lead_to_their_bot() {
+    let hosts = official();
+    for link in [
+        format!("https://stoat.chat/bot/{CHANNEL}"),
+        format!("https://stoat.chat/bot/{CHANNEL}/"),
+        format!("stoat.chat/bot/{CHANNEL}?x=1#top"),
+        format!("https://app.revolt.chat/bot/{CHANNEL}"),
+    ] {
+        assert_eq!(
+            bot_from_link(&link, &hosts).as_deref(),
+            Some(CHANNEL),
+            "{link}"
+        );
+    }
+    for link in [
+        // Not a ULID, or another path.
+        "https://stoat.chat/bot/helper".to_string(),
+        format!("https://stoat.chat/bot/{CHANNEL}/extra"),
+        format!("https://stoat.chat/bots/{CHANNEL}"),
+        format!("https://stoat.chat/invite/{CHANNEL}"),
+        // The short hosts only carry invites; other hosts aren't Stoat.
+        format!("https://stt.gg/bot/{CHANNEL}"),
+        format!("https://example.com/bot/{CHANNEL}"),
+    ] {
+        assert_eq!(bot_from_link(&link, &hosts), None, "{link}");
+    }
+
+    // Another instance: its own web client only, not the official hosts.
+    let own = InviteHosts::new(Some("https://chat.example.org:8443"));
+    let link = format!("https://chat.example.org:8443/bot/{CHANNEL}");
+    assert_eq!(bot_from_link(&link, &own).as_deref(), Some(CHANNEL));
+    let link = format!("https://stoat.chat/bot/{CHANNEL}");
+    assert_eq!(bot_from_link(&link, &own), None);
+    let link = format!("https://chat.example.org/bot/{CHANNEL}");
+    assert_eq!(bot_from_link(&link, &own), None);
 }

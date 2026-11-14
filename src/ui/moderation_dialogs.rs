@@ -33,6 +33,10 @@ pub const MODERATION_DIALOG_WIDTH: f32 = 420.;
 /// A request to Stoat about a member, ready to send.
 pub type MemberRequest = BoxFuture<'static, Result<(), ApiError>>;
 
+/// What runs once a confirmed request has its answer and the dialog has
+/// closed, in place of the usual refusal toast.
+pub type AfterAction = Box<dyn FnOnce(Result<(), ApiError>, &mut Window, &mut App)>;
+
 /// What a confirmed member action says about itself.
 pub struct MemberActionRequest {
     /// The dialog's title: "Kick Ada?"
@@ -55,10 +59,34 @@ pub fn confirm_member_action(
     window: &mut Window,
     cx: &mut App,
 ) {
+    open_confirmation(request, action, None, window, cx);
+}
+
+/// As [`confirm_member_action`], but Stoat's answer goes to `after` (once
+/// the dialog has closed), which says what happened itself: removing a
+/// row from a list, say, or treating "already gone" as done.
+pub fn confirm_member_action_then(
+    request: MemberActionRequest,
+    action: MemberRequest,
+    after: AfterAction,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    open_confirmation(request, action, Some(after), window, cx);
+}
+
+fn open_confirmation(
+    request: MemberActionRequest,
+    action: MemberRequest,
+    after: Option<AfterAction>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let title = request.title.clone();
     let dialog = cx.new(|_| ConfirmMemberAction {
         request,
         action: Some(action),
+        after,
         busy: false,
     });
     window.open_dialog(cx, move |modal, _, _| {
@@ -112,6 +140,7 @@ fn refusal_text(
 pub struct ConfirmMemberAction {
     request: MemberActionRequest,
     action: Option<MemberRequest>,
+    after: Option<AfterAction>,
     busy: bool,
 }
 
@@ -128,8 +157,13 @@ impl ConfirmMemberAction {
             this.update_in(cx, |this, window, cx| {
                 this.busy = false;
                 window.close_dialog(cx);
-                if let Some(text) = refusal_text(result, &this.request.failed_text) {
-                    window.push_notification(Notification::error(text), cx);
+                match (this.after.take(), result) {
+                    (Some(after), Ok(answer)) => after(answer, window, cx),
+                    (_, result) => {
+                        if let Some(text) = refusal_text(result, &this.request.failed_text) {
+                            window.push_notification(Notification::error(text), cx);
+                        }
+                    }
                 }
             })
             .ok();
