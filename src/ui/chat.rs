@@ -2882,7 +2882,7 @@ impl ChatView {
                     }
                     Ok(Err(err)) => {
                         log::warn!("couldn't pin={pin} {id} in {channel}: {err:?}");
-                        pin_error_text(pin, &err)
+                        SharedString::from(err.pin_failure_text(pin))
                     }
                     Err(err) => {
                         log::warn!("pin task failed: {err:?}");
@@ -13570,27 +13570,6 @@ fn pins_error_text(err: &ApiError) -> SharedString {
             }
             Some(ErrorType::IsBot) => "Bots can't list pinned messages.".into(),
             _ => format!("Couldn't load pins: {err}").into(),
-        },
-    }
-}
-
-/// What a refused pin's (`pin`) or unpin's toast says.
-fn pin_error_text(pin: bool, err: &ApiError) -> SharedString {
-    use revolt_result::ErrorType;
-    let (done, doing) = if pin {
-        ("pin", "pinning")
-    } else {
-        ("unpin", "unpinning")
-    };
-    match err {
-        ApiError::RateLimited { .. } => {
-            format!("Too many requests while {doing}. Wait a moment, then try again.").into()
-        }
-        _ => match err.error_type() {
-            Some(ErrorType::MissingPermission { .. }) => {
-                format!("You can't {done} messages here.").into()
-            }
-            _ => format!("Couldn't {done} the message: {err}").into(),
         },
     }
 }

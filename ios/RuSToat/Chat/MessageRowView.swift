@@ -10,6 +10,13 @@ struct MessageActions {
     let revealSpoiler: (String, UInt32) -> Void
     /// A link whose text isn't its address: ask before opening `url`.
     let openGuarded: (URL, String) -> Void
+    /// The message's text as typed, for Copy Text.
+    let rawText: (String) -> String?
+    /// A link to the message on the web client, if the instance has one.
+    let link: (String) -> String?
+    /// The user may pin and unpin here.
+    let canPin: Bool
+    let setPinned: (String, Bool) -> Void
 }
 
 /// What tapping a `stoat:` link in a message does.
@@ -82,9 +89,22 @@ struct MessageRowView: View {
         if message.pending == nil {
             Button("Reply", systemImage: "arrowshape.turn.up.left") { actions.reply(message) }
         }
-        if let body = message.body {
+        if message.body != nil {
             Button("Copy Text", systemImage: "doc.on.doc") {
-                UIPasteboard.general.string = String(MessageText.attributed(body).characters)
+                // As typed; a pending message's is its own text.
+                UIPasteboard.general.string = actions.rawText(message.id) ?? message.body
+            }
+        }
+        if message.pending == nil, let link = actions.link(message.id) {
+            Button("Copy Link", systemImage: "link") {
+                UIPasteboard.general.string = link
+            }
+        }
+        if message.pending == nil, actions.canPin {
+            if message.pinned {
+                Button("Unpin", systemImage: "pin.slash") { actions.setPinned(message.id, false) }
+            } else {
+                Button("Pin", systemImage: "pin") { actions.setPinned(message.id, true) }
             }
         }
         if case .failed = message.pending {
@@ -167,6 +187,12 @@ struct MessageRowView: View {
                 Text("(edited)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+            if message.pinned {
+                Image(systemName: "pin.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .accessibilityLabel("Pinned")
             }
         }
     }

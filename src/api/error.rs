@@ -119,6 +119,26 @@ impl ApiError {
         }
     }
 
+    /// What a failed pin (`pin`) or unpin says.
+    pub fn pin_failure_text(&self, pin: bool) -> String {
+        let (done, doing) = if pin {
+            ("pin", "pinning")
+        } else {
+            ("unpin", "unpinning")
+        };
+        match self {
+            ApiError::RateLimited { .. } => {
+                format!("Too many requests while {doing}. Wait a moment, then try again.")
+            }
+            _ => match self.error_type() {
+                Some(ErrorType::MissingPermission { .. }) => {
+                    format!("You can't {done} messages here.")
+                }
+                _ => format!("Couldn't {done} the message: {self}"),
+            },
+        }
+    }
+
     /// The Stoat error type, if the server sent one.
     pub fn error_type(&self) -> Option<&ErrorType> {
         match self {

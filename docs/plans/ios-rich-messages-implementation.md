@@ -125,3 +125,44 @@ Deferred to the end: tap a spoiler on a real message; tap a disguised link and s
 
 ### Manual Validation
 Deferred to the end: custom emoji on a real server, inline and jumbo.
+
+## Chunk 4: The message menu and pins
+
+### Changes Made
+- `src/api/error.rs`: `ApiError::pin_failure_text(pin)`, moved from the private `pin_error_text` in `src/ui/chat.rs` (desktop now calls the method; same text).
+- `ios/stoat-ffi/src/actions.rs` (new, a second exported `impl AccountController`), each following desktop's handling:
+  - `raw_text(channel, id)`: `ChatStore::raw_content`.
+  - `message_link(channel, id)`: `links::message_link` with the web app from `GET /`, and the channel's server, or none for DMs and groups.
+  - `can_pin(channel)`.
+  - `async set_pinned(channel, id, pinned) -> Result`, as desktop's `toggle_pin`. `POST`/`DELETE …/pin`, and the row changes when Stoat's `MessageUpdate` arrives. `AlreadyPinned`/`NotPinned` call `set_pinned` locally and report a timeline change. Other errors return `pin_failure_text`.
+- `ios/stoat-ffi/src/controller.rs`: `Shared.web_app` (filled from `root.app` in `fetch_media`); `timeline_changed` is now `pub(crate)`.
+- `ios/stoat-ffi/src/timeline.rs`: `MessageItem.pinned`.
+- `ios/stoat-ffi/tests/actions.rs` (new, 5 tests): Copy Text is the source Markdown; message links for a server channel and a DM; a pin shown once Stoat's update arrives (with `expect(1)`); already pinned catches up; a refused unpin says "You can't unpin messages here.".
+- Swift:
+  - `ios/RuSToat/Chat/MessageRowView.swift`:
+    - `MessageActions` gains `rawText`, `link`, `canPin` and `setPinned`.
+    - The menu offers Reply, Copy Text (as typed), Copy Link (when there's a web app), Pin/Unpin (when `canPin`), and Retry/Discard.
+    - Pinned messages get an orange pin in their header.
+  - `ios/RuSToat/Chat/ChatView.swift`: `run(_:)` runs an async action and shows its error for 4 s under the conversation (reusing the send-error line), via `show(_:)`.
+- **Build fix,** found while verifying this chunk:
+  - `ios/project.yml` no longer lists the XCFramework as a linked dependency, because Xcode copies linked XCFrameworks before any script phase runs. After a change to the core's API, the first build compiled the new bindings against the old headers ("cannot find 'uniffi_…' in scope"); `test.sh` had hidden this by building the core first.
+  - Instead, the project-level `SWIFT_INCLUDE_PATHS` and the app's `LIBRARY_SEARCH_PATHS` point at the XCFramework's slices per SDK, with `-lstoat_ffi`. The "Build Rust core" phase declares `Generated/StoatCore.swift` as its output. Declaring the XCFramework itself made a dependency cycle.
+  - `Generated/StoatCore.swift` is listed in `project.yml` as an optional source, so a project generated before the first build still compiles it.
+  - `README.md`: building is now `xcodegen generate`, then Run; `build-core.sh` is optional, with the reason noted.
+
+### Divergences
+- **Pinning isn't optimistic.** The plan said to flip the row at once and roll back on failure, but desktop waits for Stoat's update and catches up on `AlreadyPinned`. iOS does the same, which avoids a flicker when Stoat refuses. The plan's chunk 4 text was amended.
+- **The fixture's server gives no Manage Messages,** so `can_pin` is false there. The tests cover the request paths directly.
+- **The build-system fix** above wasn't planned, but it's needed for you to build straight from Xcode after pulling core changes.
+
+### Verification Performed
+- `cargo test -p stoat-ffi`: 64 passed (actions 5).
+- Build-system checks, all from `xcodebuild` alone:
+  - adding an exported Rust function, building, removing it, building: both builds succeeded first time (before the fix, the first failed);
+  - a simulated fresh clone (no `ios/build`, no `Generated`, project regenerated) built;
+  - the signed device build (`generic/platform=iOS`, `-allowProvisioningUpdates`) succeeded.
+- Swift: 18 tests passed.
+- Desktop: `cargo test`: 1499 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings`: clean.
+
+### Manual Validation
+Deferred to the end: pin on the phone and see it on desktop (needs a server where you have Manage Messages); Copy Link and open it.

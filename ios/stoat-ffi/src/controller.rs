@@ -212,6 +212,8 @@ pub(crate) struct Shared {
     reply_fetches: Mutex<HashSet<String>>,
     /// Messages' text, parsed, by render key.
     pub(crate) rich: RichCache,
+    /// The instance's web client (`app` from `GET /`), for message links.
+    pub(crate) web_app: Mutex<Option<String>>,
 }
 
 fn now_ms() -> u64 {
@@ -240,7 +242,7 @@ impl Shared {
         (changed, reconnect)
     }
 
-    fn timeline_changed(&self, channel: &str) {
+    pub(crate) fn timeline_changed(&self, channel: &str) {
         self.changed(Changed {
             timelines: vec![channel.to_string()],
             ..Changed::default()
@@ -418,6 +420,7 @@ impl Shared {
         match self.client.root_config().await {
             Ok(root) => {
                 let media = MediaUrls::from_root(self.client.base_url(), &root);
+                *self.web_app.lock().unwrap() = root.app.clone();
                 self.store.lock().unwrap().set_media(media);
                 self.changed(Changed {
                     lists: true,
@@ -531,6 +534,7 @@ impl AccountController {
                 dividers: Mutex::new(HashMap::new()),
                 reply_fetches: Mutex::new(HashSet::new()),
                 rich: RichCache::default(),
+                web_app: Mutex::new(None),
             }),
             running: Mutex::new(None),
             typing: Mutex::new(OutgoingTyping::default()),

@@ -140,7 +140,7 @@ Make messages on the iPhone look and act as they do on desktop. That means full 
   - `raw_text(channel, id)`.
   - `message_link(channel, id) -> Option<String>`, using `links::message_link` and the web app from root.
   - `can_pin(channel)`.
-  - `set_pinned(channel, id, pinned)`, optimistic with rollback, reporting a timeline change.
+  - `set_pinned(channel, id, pinned)`, as desktop: the row changes when Stoat's update arrives, and `AlreadyPinned`/`NotPinned` catch up locally (amended in chunk 4; the plan first said optimistic with rollback).
 - `ios/stoat-ffi/src/controller.rs`: keep `root.app` from `fetch_media`.
 - `ios/stoat-ffi/src/timeline.rs`: `MessageItem.pinned`.
 - Swift: `ios/RuSToat/Chat/MessageRowView.swift` (the menu, a pin badge) and `ChatView.swift`.
@@ -149,7 +149,7 @@ Make messages on the iPhone look and act as they do on desktop. That means full 
 **Depends on:** None, but it lands after chunk 1 so the menu's Copy Text matches what's drawn.
 **Risks:** A live `MessageUpdate` with `pinned` from another client can race the optimistic flip. The store's `set_pinned` is idempotent, and the server's echo wins, which matches desktop.
 **How to verify:**
-- `cargo test -p stoat-ffi --test actions`: pin calls `PUT /channels/{c}/messages/{m}/pin` and flips `pinned`; a 403 flips it back and returns the error text; `message_link` uses root's `app`; `raw_text` is the source Markdown.
+- `cargo test -p stoat-ffi --test actions`: pin calls `POST /channels/{c}/messages/{m}/pin` and the row shows it once Stoat's update arrives; `AlreadyPinned` catches up; a 403 returns desktop's text; `message_link` uses root's `app`; `raw_text` is the source Markdown.
 
 **Manual check:** Pin a message on the phone and see it pinned on desktop; Copy Link and paste it on desktop.
 **Shippable when:** The menu works and pins sync both ways.

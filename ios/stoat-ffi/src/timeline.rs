@@ -58,6 +58,8 @@ pub struct MessageItem {
     pub render_key: String,
     pub system: bool,
     pub edited: bool,
+    /// Pinned to the channel.
+    pub pinned: bool,
     /// Same author as the row above, soon after: no name or avatar.
     pub continuation: bool,
     pub mine: bool,
@@ -278,6 +280,7 @@ pub fn message(row: MessageRow, cache: &RichCache) -> MessageItem {
         render_key: row.render_key,
         system: row.system,
         edited: row.edited,
+        pinned: row.pinned,
         continuation: row.continuation,
         mine: row.mine,
         jumbo: row.jumbo,

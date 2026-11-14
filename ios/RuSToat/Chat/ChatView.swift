@@ -149,8 +149,36 @@ struct ChatView: View {
             revealSpoiler: { message, index in
                 model.core.revealSpoiler(channelId: route.id, messageId: message, index: index)
             },
-            openGuarded: { url, text in guarded = (url, text) }
+            openGuarded: { url, text in guarded = (url, text) },
+            rawText: { id in model.core.rawText(channelId: route.id, messageId: id) },
+            link: { id in model.core.messageLink(channelId: route.id, messageId: id) },
+            canPin: model.core.canPin(channelId: route.id),
+            setPinned: { id, pinned in
+                run { try await model.core.setPinned(channelId: route.id, messageId: id, pinned: pinned) }
+            }
         )
+    }
+
+    /// Run a message action, showing what went wrong if it fails.
+    private func run(_ action: @escaping () async throws -> Void) {
+        Task {
+            do {
+                try await action()
+            } catch let CoreError.Failed(message) {
+                show(message)
+            } catch {
+                show("Something went wrong.")
+            }
+        }
+    }
+
+    /// A message under the conversation for a few seconds.
+    private func show(_ message: String) {
+        sendError = message
+        Task {
+            try? await Task.sleep(for: .seconds(4))
+            if sendError == message { sendError = nil }
+        }
     }
 
     private func send() {

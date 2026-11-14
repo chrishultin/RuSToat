@@ -103,14 +103,13 @@ Requirements: Xcode 26 or later with an iOS simulator, rustup (it adds the iOS t
 
 ```bash
 brew install xcodegen
-scripts/ios/build-core.sh          # Rust core → ios/build/StoatCore.xcframework + Swift bindings
 (cd ios && xcodegen generate)      # ios/project.yml → ios/RuSToat.xcodeproj
 open ios/RuSToat.xcodeproj
 ```
 
-Then pick an iPhone simulator and press Run. The first `build-core.sh` compiles the core in release mode for the device and the simulator, which takes a few minutes.
+Then pick an iPhone simulator (or your iPhone) and press Run. The first build compiles the Rust core in release mode, which takes a few minutes. `scripts/ios/build-core.sh` does the same from a terminal (`ios/build/StoatCore.xcframework` plus the Swift bindings), for both the device and the simulator.
 
-- **Xcode rebuilds the core itself** before each build (a script phase in `project.yml`), for only the slice it needs. Cargo's change tracking keeps this to under a second when no Rust changed.
+- **Xcode rebuilds the core itself** before each build (a script phase in `project.yml`), for only the slice it needs. Cargo's change tracking keeps this to under a second when no Rust changed. The app reads the core from the XCFramework's slices through search paths rather than as a linked framework, because Xcode copies linked frameworks before any script runs, so a change to the core's API would need a second build.
 - **`RuSToat.xcodeproj`, `ios/build/` and `ios/RuSToat/Generated/` aren't committed.** After pulling changes to `project.yml` or adding Swift files, run `xcodegen generate` again.
 - **Trying it without a real account:** `cargo run -p stoat-ffi --example fake_stoat` serves the test fixtures (REST and the events websocket) on localhost and prints the address. Log in there with any email and password, or have a Debug build log in at launch: `SIMCTL_CHILD_RUSTOAT_DEV_LOGIN=http://127.0.0.1:PORT xcrun simctl launch booted com.chrishultin.rustoat.ios`. Add `SIMCTL_CHILD_RUSTOAT_DEV_OPEN=ch-general` to open a channel straight away.
 - **Bindings always match the library.** They're generated from the built library by a `uniffi-bindgen` binary in `stoat-ffi` itself, from the same pinned UniFFI version.
