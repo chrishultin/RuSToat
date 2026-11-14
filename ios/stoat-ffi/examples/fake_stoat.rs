@@ -33,6 +33,14 @@ async fn main() {
         .respond_with(ResponseTemplate::new(200).set_body_json(me))
         .mount(&api)
         .await;
+    // #random has a message with every kind of block, to see them drawn.
+    Mock::given(method("GET"))
+        .and(path("/channels/ch-random/messages"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(support::fixture("messages_rich.json")),
+        )
+        .mount(&api)
+        .await;
     Mock::given(method("GET"))
         .and(path_regex(r"^/channels/[^/]+/messages$"))
         .respond_with(

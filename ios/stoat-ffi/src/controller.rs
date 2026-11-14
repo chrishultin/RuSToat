@@ -31,6 +31,7 @@ use stoat_gpui::typing::{IDLE_AFTER, OutgoingTyping, TypingSignal};
 
 use crate::CoreError;
 use crate::session::Core;
+use crate::rich_text::RichCache;
 use crate::timeline::{self, TimelineItem};
 
 /// How long to gather a burst of events (a `Ready`, a busy channel) before
@@ -209,6 +210,8 @@ pub(crate) struct Shared {
     dividers: Mutex<HashMap<String, Option<String>>>,
     /// Reply originals being fetched, by message ID.
     reply_fetches: Mutex<HashSet<String>>,
+    /// Messages' text, parsed, by render key.
+    pub(crate) rich: RichCache,
 }
 
 fn now_ms() -> u64 {
@@ -527,6 +530,7 @@ impl AccountController {
                 viewing: Mutex::new(None),
                 dividers: Mutex::new(HashMap::new()),
                 reply_fetches: Mutex::new(HashSet::new()),
+                rich: RichCache::default(),
             }),
             running: Mutex::new(None),
             typing: Mutex::new(OutgoingTyping::default()),
@@ -719,7 +723,9 @@ impl AccountController {
             Some(after) => with_unread_divider(rows, &after),
             None => rows,
         };
-        rows.into_iter().map(timeline::item).collect()
+        rows.into_iter()
+            .map(|row| timeline::item(row, &self.shared.rich))
+            .collect()
     }
 
     /// Mark `channel_id` read up to its newest message, if it's the channel

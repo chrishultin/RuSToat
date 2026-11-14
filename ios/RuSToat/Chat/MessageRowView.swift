@@ -76,8 +76,8 @@ struct MessageRowView: View {
                     ForEach(message.replies, id: \.id) { reply in
                         ReplyPreviewView(reply: reply)
                     }
-                    if let body = message.body {
-                        MessageText(markdown: body, jumbo: message.jumbo)
+                    if !message.rich.isEmpty {
+                        RichTextView(blocks: message.rich, jumbo: message.jumbo)
                             .id(message.renderKey)
                     }
                     ForEach(Array(message.attachments.enumerated()), id: \.offset) { _, attachment in
@@ -206,7 +206,12 @@ struct EmbedCard: View {
                     if let title = embed.title {
                         Text(title).font(.subheadline.weight(.semibold)).lineLimit(2)
                     }
-                    if let description = embed.description {
+                    if !embed.richDescription.isEmpty {
+                        RichTextView(blocks: embed.richDescription)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(6)
+                    } else if let description = embed.description {
                         Text(description).font(.caption).foregroundStyle(.secondary).lineLimit(3)
                     }
                 }

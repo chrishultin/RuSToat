@@ -7,6 +7,8 @@ use stoat_gpui::attachment::{AttachmentView, FileKind};
 use stoat_gpui::embed::{Description, EmbedView};
 use stoat_gpui::store::{MessageRow, PendingState, ReplyPreview, ReplyState, TimelineRow};
 
+use crate::rich_text::{RichBlock, RichCache};
+
 /// One row of a channel.
 // Nearly every row is a message, as with the store's `TimelineRow`.
 #[allow(clippy::large_enum_variant)]
@@ -48,6 +50,8 @@ pub struct MessageItem {
     pub time: String,
     /// Markdown.
     pub body: Option<String>,
+    /// `body` as blocks to draw (empty without a body).
+    pub rich: Vec<RichBlock>,
     /// Changes whenever what's drawn for `body` changes.
     pub render_key: String,
     pub system: bool,
@@ -105,7 +109,11 @@ pub struct AttachmentItem {
 pub struct EmbedItem {
     pub site_name: Option<String>,
     pub title: Option<String>,
+    /// As plain text.
     pub description: Option<String>,
+    /// A bot embed's Markdown description as blocks (empty for a website's
+    /// plain one).
+    pub rich_description: Vec<RichBlock>,
     /// Where it opens.
     pub link: Option<String>,
     pub image_url: Option<String>,
@@ -177,7 +185,7 @@ fn attachment(view: &AttachmentView) -> AttachmentItem {
     }
 }
 
-fn embed(view: &EmbedView) -> EmbedItem {
+fn embed(view: &EmbedView, cache: &RichCache) -> EmbedItem {
     match view {
         EmbedView::Card(card) => EmbedItem {
             site_name: card.site_name.clone(),
@@ -186,6 +194,12 @@ fn embed(view: &EmbedView) -> EmbedItem {
                 Description::Plain(text) => text.clone(),
                 Description::Markdown { source, .. } => source.clone(),
             }),
+            rich_description: match &card.description {
+                Some(Description::Markdown { source, render_key }) => {
+                    cache.get(render_key, source).as_ref().clone()
+                }
+                _ => Vec::new(),
+            },
             link: card.link.clone(),
             image_url: card
                 .image
@@ -197,6 +211,7 @@ fn embed(view: &EmbedView) -> EmbedItem {
             site_name: None,
             title: None,
             description: None,
+            rich_description: Vec::new(),
             link: Some(image.url.clone()),
             image_url: Some(image.url.clone()),
         },
@@ -204,6 +219,7 @@ fn embed(view: &EmbedView) -> EmbedItem {
             site_name: None,
             title: Some("Video".into()),
             description: None,
+            rich_description: Vec::new(),
             link: Some(url.clone()),
             image_url: None,
         },
@@ -211,6 +227,7 @@ fn embed(view: &EmbedView) -> EmbedItem {
             site_name: Some("GIF".into()),
             title: None,
             description: None,
+            rich_description: Vec::new(),
             link: Some(link.clone()),
             image_url: Some(image.url.clone()),
         },
@@ -231,11 +248,16 @@ fn reply(preview: &ReplyPreview) -> ReplyItem {
     }
 }
 
-pub fn message(row: MessageRow) -> MessageItem {
+pub fn message(row: MessageRow, cache: &RichCache) -> MessageItem {
     MessageItem {
+        rich: row
+            .body
+            .as_deref()
+            .map(|body| cache.get(&row.render_key, body).as_ref().clone())
+            .unwrap_or_default(),
         replies: row.replies.iter().map(reply).collect(),
         attachments: row.attachments.iter().map(attachment).collect(),
-        embeds: row.embeds.iter().map(embed).collect(),
+        embeds: row.embeds.iter().map(|e| embed(e, cache)).collect(),
         pending: row.pending.map(|state| match state {
             PendingState::Sending => PendingItem::Sending,
             PendingState::Failed(reason) => PendingItem::Failed { reason },
@@ -256,12 +278,12 @@ pub fn message(row: MessageRow) -> MessageItem {
     }
 }
 
-pub fn item(row: TimelineRow) -> TimelineItem {
+pub fn item(row: TimelineRow, cache: &RichCache) -> TimelineItem {
     match row {
         TimelineRow::StartOfChannel { name } => TimelineItem::StartOfChannel { name },
         TimelineRow::NewMessages => TimelineItem::NewMessages,
         TimelineRow::Message(row) => TimelineItem::Message {
-            message: message(row),
+            message: message(row, cache),
         },
         TimelineRow::Blocked { ids } => TimelineItem::Blocked { ids },
     }

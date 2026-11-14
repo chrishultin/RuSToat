@@ -1,0 +1,17 @@
+{
+  "messages": [
+    {
+      "_id": "01JE0000000000000000000R02",
+      "channel": "ch-random",
+      "author": "u-bob",
+      "content": "Short one after, with a table above."
+    },
+    {
+      "_id": "01JE0000000000000000000R01",
+      "channel": "ch-random",
+      "author": "u-ada",
+      "content": "# Release notes\nHere's **bold**, *italic*, ~~struck~~, `inline code` and a [link](https://stoat.chat).\n\n> Quoted text\n> - with a list inside\n\n```rust\nfn main() {\n    println!(\"hi <there>\");\n}\n```\n\n1. First\n2. Second\n   - nested bullet\n- [x] done\n- [ ] to do\n\n---\n\n$$\ne^{i\\pi} + 1 = 0\n$$\n\n| Name | Status |\n|------|--------|\n| Ada  | **online** |\n| Bob  | away |"
+    }
+  ],
+  "users": []
+}

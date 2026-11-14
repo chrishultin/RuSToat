@@ -8314,6 +8314,7 @@ dependencies = [
  "env_logger 0.11.11",
  "futures",
  "log",
+ "markdown",
  "serde_json",
  "stoat-gpui",
  "tempfile",
