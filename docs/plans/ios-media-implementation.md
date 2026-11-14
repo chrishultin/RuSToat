@@ -414,3 +414,58 @@ Deferred to the end:
 - send a photo from the library and a camera shot from your iPhone;
 - check they're upright on desktop;
 - check (by downloading one) that location isn't included.
+
+## Summary
+
+_Completed: 2026-11-14_
+
+### Chunks Completed
+1. Images inline, with ThumbHash previews (`dc5d471`).
+2. The full-screen image viewer (`5dc9929`).
+3. Video and audio (`deb8836`).
+4. Link embeds and GIFs (`ad5409d`).
+5. Sending files, with progress (`3dea8ab`).
+6. Photos and the camera (`ab2785d`).
+
+### Divergences
+- Attachment and embed enum cases hold one record each (`Image { image: ImageAttachment }`), with the plan's fields.
+- `ImageLoader` is awaited, not observed. `EmojiImages` stays observable over it.
+- `messages_media.json` and the fixture media were made in chunk 1 and extended in chunks 3 and 4.
+- DEBUG launch variables were added for screenshots, since `simctl` can't tap or scroll:
+  - `RUSTOAT_DEV_SCROLL`
+  - `RUSTOAT_DEV_VIEW`
+  - `RUSTOAT_DEV_PLAY`
+  - `RUSTOAT_DEV_ATTACH`
+  - `RUSTOAT_DEV_TRAY`
+  - `RUSTOAT_DEV_PHOTO`
+- The viewer's drag-to-close is a UIKit pan that the pager's pan waits on. Its top bar is an overlay. Image embeds open in the viewer too.
+- Full-screen video presents `AVPlayerViewController` modally. Videos have no ThumbHash (Stoat stores none).
+- GIFs have a 48 MB decoded budget on top of the 200-frame cap. They're detected by their bytes when downloaded.
+- A card's large image opens the page, as its title does.
+- Released files are deleted by `AccountModel` on any change. `check_attachments` takes `OutgoingFile`s.
+- Photo dimensions come from the JPEG's header in the core, so `OutgoingFile.dimensions` wasn't needed and chunk 6 had no Rust change.
+- Transparent PNGs are flattened onto white.
+- Fixed along the way:
+  - card images overflowed the card's padding (chunk 1);
+  - `fake_stoat`'s sent messages sorted above the history (chunk 5).
+- Pre-existing, not addressed: 18 `#ActorIsolatedCall` warnings in `RichTextTests` on a clean build (milestone 2's test code).
+
+### Definition of Done
+- [x] `cargo test && cargo clippy --all-targets -- -D warnings && scripts/ios/test.sh` passes: 1499 desktop, 90 `stoat-ffi` and 49 Swift tests.
+- [x] Image attachments and embeds render inline at the store's display size from the first frame, with a ThumbHash preview, the "Show image" card over 8 MB, and spoiler covers. Shown on the simulator; the scroll check on real data is still to do.
+- [x] Images load through one cached, de-duplicated, downsampling loader (`ImageLoaderTests`), and rows scrolled back draw from memory (`cached`). Confirming there's no visible reload on a device is part of the manual check.
+- [x] The full-screen viewer zooms, pages between a message's images, closes when dragged down, and shares the original file. The parts that need gestures are **pending your check on a device**.
+- [x] Video attachments show a poster and play inline and full screen, audio plays inline, and only one item plays at a time (`PlaybackTests`, simulator). Full screen and large real videos are **pending a device check**.
+- [x] Link embeds render as desktop's cards (colour, site, title, description, thumbnail or image, play badge), and GIFs animate inline, capped at 200 frames.
+- [x] Files can be attached with a spoiler toggle, uploaded with visible progress through the core's `upload_attachment`, and sent. Failed uploads retry without re-uploading finished files, and the instance's limits are enforced with desktop's texts (sending tests). Library photos, videos and camera shots go through the same path; the pickers themselves are **pending a device check**.
+- [x] Re-encoded photos are JPEG, at most 4096 px, upright and without GPS (`PhotoEncodingTests`, and the fake server's copy). Temporary files are deleted after sending or discarding (`released_files` tests, `OutgoingFilesTests`).
+- [x] `NSCameraUsageDescription` is set, and no Photos-library permission is asked for (checked in the built Info.plist).
+
+### Remaining Manual Steps
+On your iPhone, against a real Stoat account (the plan's Manual Tests):
+1. Scroll a busy media channel. Expect blurred previews, no jumps, and no reloading when you scroll back.
+2. Open a photo full screen, then pinch and double-tap to zoom, swipe to the next, share one to Messages, and drag down to close.
+3. Play a video inline and full screen, play a voice note, and start a second item while one plays. Check that a large video streams.
+4. Compare link cards with desktop: a news article, a YouTube link and a bot embed. Send a GIF from desktop's GIF picker and watch it play.
+5. Send a PDF from Files, a few photos and a video from the library, and a camera shot. Check on desktop that they arrive upright, at a sensible size, and (download one) without location.
+6. Send something over the size limit and read the reason. Then send in Airplane mode, turn it off, and retry.
