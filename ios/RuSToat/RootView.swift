@@ -11,40 +11,49 @@ struct RootView: View {
         case .offline(let account, let message):
             OfflineView(account: account, message: message, model: model)
         case .signedOut:
-            LoginView(core: model.core) { model.loggedIn($0) }
+            LoginView(core: model.core, notice: model.loginNotice) { model.loggedIn($0) }
         case .signedIn(let account):
             SignedInTabs(account: account, model: model)
         }
     }
 }
 
-/// The app's tabs. Home and Servers are placeholders until their chunks land.
+/// The app's tabs, with the connection banner over them.
 private struct SignedInTabs: View {
     let account: Account
     let model: AppModel
 
     var body: some View {
-        TabView {
-            Tab("Home", systemImage: "bubble.left.and.bubble.right") {
-                PlaceholderList(title: "Home")
-            }
-            Tab("Servers", systemImage: "square.stack.3d.up") {
-                PlaceholderList(title: "Servers")
-            }
-            Tab("You", systemImage: "person.crop.circle") {
-                NavigationStack {
-                    List {
-                        LabeledContent("Signed in as", value: account.name)
-                        LabeledContent("Server", value: account.instance)
-                        Button("Log Out", role: .destructive) {
-                            Task { await model.logOut() }
+        if let accountModel = model.accountModel {
+            TabView {
+                Tab("Home", systemImage: "bubble.left.and.bubble.right") {
+                    HomeView(model: accountModel)
+                }
+                .badge(Int(accountModel.summary.homeMentions))
+                Tab("Servers", systemImage: "square.stack.3d.up") {
+                    ServerListView(model: accountModel)
+                }
+                .badge(Int(accountModel.summary.serversMentions))
+                Tab("You", systemImage: "person.crop.circle") {
+                    NavigationStack {
+                        List {
+                            LabeledContent("Signed in as", value: account.name)
+                            LabeledContent("Server", value: account.instance)
+                            Button("Log Out", role: .destructive) {
+                                Task { await model.logOut() }
+                            }
                         }
+                        .navigationTitle("You")
                     }
-                    .navigationTitle("You")
                 }
             }
+            .tabBarMinimizeBehavior(.onScrollDown)
+            .overlay(alignment: .top) {
+                ConnectionBanner(status: accountModel.status)
+                    .padding(.top, 4)
+                    .animation(.default, value: accountModel.status)
+            }
         }
-        .tabBarMinimizeBehavior(.onScrollDown)
     }
 }
 
@@ -64,27 +73,6 @@ private struct OfflineView: View {
                 .buttonStyle(.glassProminent)
             Button("Log in again") { model.showLogin() }
                 .buttonStyle(.glass)
-        }
-    }
-}
-
-/// A scrolling list, so the tab bar's minimise-on-scroll can be seen.
-private struct PlaceholderList: View {
-    let title: String
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    LabeledContent("Core", value: coreVersion())
-                }
-                Section {
-                    ForEach(1...40, id: \.self) { row in
-                        Text("Row \(row)")
-                    }
-                }
-            }
-            .navigationTitle(title)
         }
     }
 }

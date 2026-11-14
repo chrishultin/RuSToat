@@ -136,3 +136,59 @@ Deferred to the end of the milestone: watch the tab bar shrink while scrolling i
 
 ### Manual Validation
 Deferred to the end: log in with your real account and 2FA, relaunch and land signed in, then log out and check the session is gone from Stoat's Settings → Sessions.
+
+## Chunk 4: Connect, and browse servers, channels and DMs
+
+### Changes Made
+- `src/live.rs` (new, in core, GPUI-free): `Changed { ready, lists, timelines }` with `merge`/`is_empty`, and `apply_event(&mut ChatStore, ServerEvent, now_ms) -> Changed`.
+  - It covers every `ServerEvent` desktop's `on_connection_event` applies to the store: Ready, Message and its update/delete/append/bulk-delete/reactions, ChannelAck (own only), channel create/update/delete, group join/leave (leaving yourself removes the channel), emoji, member join/leave/update (your own leave removes the server), UserUpdate, server update/role/ranks/create/delete, UserRelationship, UserSettingsUpdate, slowmodes and voice states.
+  - Typing and the other non-store events report nothing.
+- `src/lib.rs`: `pub mod live`.
+- `src/ui/chat.rs`: a comment on `on_connection_event` pointing at `live::apply_event`, and the reverse in `live.rs`, as the drift mitigation.
+- `tests/live_dispatch.rs` (new, 14 tests): Ready fills lists, a message in an unviewed channel marks it unread, mentions increment, loaded timelines report changes for message/update/delete, others' acks are ignored, your own ack clears unread, ChannelDelete (and repeating it is a no-op), ServerUpdate renames, ServerDelete, leaving a server, UserUpdate renames a DM, leaving a group elsewhere, typing, and `Changed::merge`.
+- `ios/stoat-ffi/src/controller.rs` (new):
+  - `ControllerListener` callback interface (`changed(Change)`, `status(ConnectionStatus)`).
+  - Records `Change`, `ServerItem`, `ChannelItem`, `ChannelSectionItem` and `Summary`; enums `ChannelKindItem` and `ConnectionStatus` (Connecting, Connected, Disconnected, SessionRejected, Paused).
+  - `AccountController`:
+    - Construction: `new(core, listener)`, or `for_client` in tests.
+    - `connect()` spawns `events::connect` plus a drain task, and on first connect fetches `GET /` for `MediaUrls`. `disconnect()` drops both and reports `Paused`.
+    - Snapshots: `servers`, `server`, `server_channels`, `home_channels`, `channel` and `summary`, with server icon URLs from `store.media()`.
+    - The drain applies events under the store mutex (never held across an await or a Swift call) and coalesces bursts into one `changed` per 50 ms.
+    - After each Ready it fetches the notification, ordering and folder settings, as desktop does. A second Ready (a reconnect) calls `clear_histories()`.
+- `ios/stoat-ffi/src/session.rs`: `Core::forget_session()` for a rejected session, which clears the token without contacting Stoat.
+- `ios/stoat-ffi/tests/support/mod.rs` (new): a fake Stoat. A local tokio-tungstenite events server sends Authenticated, then the fixture Ready, then pushed frames, and can drop every connection. A wiremock API's `GET /` points at that server. Also a `Recorder` listener and a `connected()` helper.
+- `ios/stoat-ffi/tests/controller.rs` (new, 7 tests): connecting reports status and lists servers, channels and Home; server icons use the root's file server; a live message marks a channel unread; 20 messages give at most 2 change calls; disconnect/connect; a dropped connection reconnects; Logout reports SessionRejected.
+- `ios/stoat-ffi/examples/fake_stoat.rs` (new): serves the fixtures on localhost for trying the app without an account, and posts a message in #random every 20 s.
+- `ios/stoat-ffi/Cargo.toml`: added `futures` and `tokio` (time); dev-dependencies `tokio-tungstenite` and tokio `net`.
+- Swift:
+  - `Model/AccountModel.swift`: an `@Observable` model holding `status`, `servers`, `home`, `summary`, `listsVersion`, `timelineVersions` and `readyCount`. A listener bridge hops to the main actor.
+  - `Home/HomeView.swift`, `Servers/ServerListView.swift`, `Servers/ServerChannelsView.swift` (sections by category).
+  - `Shared/AvatarView.swift` (`AsyncImage` with an initials fallback, plus `UnreadBadge`), `Shared/ChannelRow.swift` (with `ChannelRoute`), `Shared/ConnectionBanner.swift` (a glass capsule).
+  - `Chat/ChatView.swift`: a placeholder, replaced in chunk 5.
+  - `AppModel.swift`:
+    - Owns the `AccountModel`; a rejected session forgets the token and returns to login with a notice.
+    - `setActive` connects or disconnects.
+    - DEBUG-only `devLogin()` from `RUSTOAT_DEV_LOGIN`.
+  - `RootView.swift`: tabs with mention badges and the banner overlay.
+  - `RuSToatApp.swift`: the `scenePhase` `.active` phase connects and `.background` disconnects (`.inactive` keeps the connection).
+  - `LoginView.swift`: shows a `notice`.
+- `README.md`: a note on `fake_stoat` and the dev login.
+
+### Divergences
+- **`Changed` is a struct, not an enum,** so one event can report a list change and a timeline change together (a new message in a loaded channel does both).
+- **The controller also fetches settings and `GET /`,** as desktop's `ChatView` does. Without the settings, mutes and server order would be missing; without `GET /`, icons would be missing.
+- **`Core::forget_session` was added,** so the app can handle `SessionRejected`.
+- **Tab badges and a `summary()` snapshot were added.** Small, but not in the plan.
+- **The fake Stoat example and the DEBUG dev login were added** so the app can be checked in the simulator without your credentials. Neither ships in a Release build.
+- **Settings ordering:** settings fetched after `Ready` can land after the first list change. They send their own change, so the lists correct themselves within moments.
+
+### Verification Performed
+- `cargo test --test live_dispatch`: 14 passed.
+- `cargo test -p stoat-ffi`: 2 + 7 (controller) + 11 (login) passed. The controller tests ran 5 more times, all passing (~1.2 s each).
+- `cargo clippy -p stoat-ffi --all-targets -- -D warnings`: clean.
+- Desktop: `cargo test`: 1142 passed (1128 + 14), 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings`: clean.
+- `scripts/ios/test.sh`: exit 0, Swift build with no warnings.
+- Simulator, against `fake_stoat` with the dev login: logged in, connected and received Ready (log: "2 servers, 11 channels…"). Home showed Saved Notes, bob, Weekend plans, Ada L. and Unknown user, with unread dots, and the glass tab bar.
+
+### Manual Validation
+Deferred to the end: compare servers and DMs with desktop, a live DM from desktop showing an unread dot, and background then return to see the reconnect banner.

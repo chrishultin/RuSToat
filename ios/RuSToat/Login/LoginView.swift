@@ -4,6 +4,8 @@ import SwiftUI
 /// account needs one. The steps follow desktop's login screen.
 struct LoginView: View {
     let core: Core
+    /// Why the user is here, if not by choice (shown until they try).
+    var notice: String?
     /// Called once logged in.
     let onLoggedIn: (Account) -> Void
 
@@ -76,6 +78,12 @@ struct LoginView: View {
             case .credentials: credentialFields
             case .mfa(_, _, let allowsTotp, let allowsRecovery):
                 mfaFields(allowsTotp: allowsTotp, allowsRecovery: allowsRecovery)
+            }
+
+            if let notice, error == nil, !busy, step == .credentials {
+                Label(notice, systemImage: "info.circle.fill")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
 
             if let error {

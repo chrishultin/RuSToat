@@ -6,6 +6,7 @@
 
 uniffi::setup_scaffolding!();
 
+pub mod controller;
 pub mod session;
 
 /// An error Swift can show as it is: `message` is user-facing text.

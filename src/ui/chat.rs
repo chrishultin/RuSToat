@@ -947,6 +947,8 @@ impl ChatView {
         }
     }
 
+    // The store half of this is shared, GPUI-free, in `crate::live::apply_event`
+    // (used by the iPhone app). When a store call here changes, check that too.
     fn on_connection_event(
         &mut self,
         event: ConnectionEvent,

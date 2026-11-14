@@ -355,6 +355,20 @@ impl Core {
         }
     }
 
+    /// Stoat ended the session (the events service rejected it): forget
+    /// its token without contacting Stoat. The account stays in the list,
+    /// so logging in again updates it.
+    pub async fn forget_session(&self) {
+        let Some(session) = self.session.lock().unwrap().take() else {
+            return;
+        };
+        match spawn_io(session::forget(self.tokens.clone(), session.account.id)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => log::warn!("couldn't forget the ended session: {err:#}"),
+            Err(err) => log::warn!("forget task failed: {err:#}"),
+        }
+    }
+
     /// Log out: forget the token here (always), end the session on Stoat
     /// (if it can be reached), and remove the account from the list.
     pub async fn log_out(&self) {

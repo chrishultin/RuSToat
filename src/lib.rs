@@ -28,6 +28,7 @@ pub mod groups;
 pub mod http;
 pub mod invites;
 pub mod links;
+pub mod live;
 #[cfg(feature = "desktop")]
 pub mod login_item;
 pub mod markdown;
