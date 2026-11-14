@@ -9,7 +9,7 @@ use stoat_gpui::api::events::{ServerEvent, parse_frame};
 use stoat_gpui::permissions::{
     RoleLock, assignable_roles, can_add_to_group, can_bypass_slowmode, can_change_avatar,
     can_change_nickname, can_connect, can_invite, can_listen, can_manage_channel,
-    can_manage_channels, can_mention_everyone, can_mention_roles, can_pin, can_send_embeds,
+    can_manage_channels, can_mention_everyone, can_mention_roles, can_pin, can_send, can_send_embeds,
     can_speak, can_view, channel_permissions, has, member_rank, moderation, server_permissions,
 };
 use stoat_gpui::store::ChatStore;
@@ -487,6 +487,36 @@ fn nobody_bypasses_slowmode_outside_a_server() {
     for channel in ["dm-friend", "grp-mine", "ch-saved"] {
         assert!(!can_bypass_slowmode(&store, "u-me", channel), "{channel}");
     }
+}
+
+#[test]
+fn sending_messages_follows_its_permission() {
+    let channels = json!([
+        { "channel_type": "TextChannel", "_id": "ch-open", "server": "srv", "name": "open" },
+        {
+            "channel_type": "TextChannel", "_id": "ch-announcements", "server": "srv", "name": "announcements",
+            "default_permissions": { "a": 0, "d": SEND }
+        }
+    ]);
+    let store = store_with(
+        channels,
+        vec![user("u-owner", json!({}))],
+        vec![
+            member("u-me", &[], json!({})),
+            member("u-owner", &[], json!({})),
+        ],
+    );
+    assert!(can_send(&store, "u-me", "ch-open"));
+    assert!(store.can_send("ch-open"));
+    assert!(!store.can_send("ch-announcements"));
+    assert!(can_send(&store, "u-owner", "ch-announcements"));
+    // A friend's DM and saved notes, but not a blocked user's DM or a
+    // group that only lets people look.
+    let store = conversations();
+    assert!(can_send(&store, "u-me", "dm-friend"));
+    assert!(can_send(&store, "u-me", "ch-saved"));
+    assert!(!can_send(&store, "u-me", "dm-blocked"));
+    assert!(!can_send(&store, "u-me", "grp-quiet"));
 }
 
 const EMBEDS: u64 = ChannelPermission::SendEmbeds as u64;

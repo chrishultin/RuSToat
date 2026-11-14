@@ -100,6 +100,25 @@ impl ApiError {
         }
     }
 
+    /// Stoat already has a message with this send's idempotency key: an
+    /// earlier attempt got through, though its answer was lost.
+    pub fn is_duplicate_nonce(&self) -> bool {
+        matches!(self.error_type(), Some(ErrorType::DuplicateNonce))
+    }
+
+    /// What a message that failed to send says under it.
+    pub fn send_failure_text(&self) -> String {
+        match self {
+            ApiError::Network(_) => "Couldn't reach Stoat.".into(),
+            ApiError::RateLimited { .. } => "Sending too fast. Wait a moment, then retry.".into(),
+            _ => match self.error_type() {
+                Some(ErrorType::MissingPermission { .. }) => "You can't send messages here.".into(),
+                Some(ErrorType::PayloadTooLarge) => "This message is too long.".into(),
+                _ => self.to_string(),
+            },
+        }
+    }
+
     /// The Stoat error type, if the server sent one.
     pub fn error_type(&self) -> Option<&ErrorType> {
         match self {

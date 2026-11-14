@@ -3138,7 +3138,7 @@ impl ChatView {
                     // This key got through before (an earlier attempt lost
                     // its answer): the message exists. It shows once its
                     // echo or the next history load brings it.
-                    Ok(Err(err)) if is_duplicate(&err) => {
+                    Ok(Err(err)) if err.is_duplicate_nonce() => {
                         log::info!("{key} in {channel} was already sent");
                         if this.store.discard_pending(&channel, &key).is_some() {
                             this.sync_pane(&channel, cx);
@@ -3155,7 +3155,7 @@ impl ChatView {
                             this.schedule_slowmode_tick(cx);
                         }
                         let answered = !matches!(err, ApiError::Network(_));
-                        (send_error_text(&err), answered)
+                        (err.send_failure_text(), answered)
                     }
                     // The request may or may not have reached Stoat.
                     Err(err) => {
@@ -12155,27 +12155,9 @@ fn edit_error_text(err: &ApiError) -> SharedString {
 }
 
 /// Stoat has seen this send's idempotency key before.
-fn is_duplicate(err: &ApiError) -> bool {
-    matches!(err.error_type(), Some(revolt_result::ErrorType::DuplicateNonce))
-}
-
 /// Milliseconds since the Unix epoch, now (for slowmode cooldowns).
 fn now_ms() -> u64 {
     notify::now_ms().max(0) as u64
-}
-
-/// What a failed message says under it.
-fn send_error_text(err: &ApiError) -> String {
-    use revolt_result::ErrorType;
-    match err {
-        ApiError::Network(_) => "Couldn't reach Stoat.".into(),
-        ApiError::RateLimited { .. } => "Sending too fast. Wait a moment, then retry.".into(),
-        _ => match err.error_type() {
-            Some(ErrorType::MissingPermission { .. }) => "You can't send messages here.".into(),
-            Some(ErrorType::PayloadTooLarge) => "This message is too long.".into(),
-            _ => err.to_string(),
-        },
-    }
 }
 
 /// Space between a bubble and its reactions.

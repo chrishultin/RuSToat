@@ -2736,6 +2736,11 @@ impl ChatStore {
     }
 
     /// Whether the user may send embeds (a GIF) in `channel`.
+    /// Whether the user may send messages in `channel`.
+    pub fn can_send(&self, channel: &str) -> bool {
+        crate::permissions::can_send(self, &self.me, channel)
+    }
+
     pub fn can_send_embeds(&self, channel: &str) -> bool {
         crate::permissions::can_send_embeds(self, &self.me, channel)
     }

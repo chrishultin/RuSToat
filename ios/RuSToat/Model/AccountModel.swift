@@ -19,6 +19,8 @@ final class AccountModel {
     private(set) var timelineVersions: [String: Int] = [:]
     /// A `Ready` replaced everything (on a reconnect, loaded messages too).
     private(set) var readyCount = 0
+    /// Unsent text per channel, kept while the app runs.
+    var drafts: [String: String] = [:]
 
     @ObservationIgnored private var controller: AccountController?
     /// Called when Stoat ends the session.

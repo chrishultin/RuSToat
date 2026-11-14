@@ -21,9 +21,13 @@ use stoat_gpui::media::MediaUrls;
 use stoat_gpui::notify::{self, NotificationSettings};
 use stoat_gpui::rail::{self, Ordering, ServerFolders};
 use stoat_gpui::runtime::{runtime, spawn_io};
+use stoat_gpui::api::models::ReplyIntent;
+use stoat_gpui::draft::new_nonce;
 use stoat_gpui::store::{
-    ChannelEntry, ChannelKind, ChannelSection, ChatStore, ServerEntry, with_unread_divider,
+    ChannelEntry, ChannelKind, ChannelSection, ChatStore, PendingMessage, PendingState,
+    ServerEntry, with_unread_divider,
 };
+use stoat_gpui::typing::{IDLE_AFTER, OutgoingTyping, TypingSignal};
 
 use crate::CoreError;
 use crate::session::Core;
@@ -192,6 +196,10 @@ pub(crate) struct Shared {
     reply_fetches: Mutex<HashSet<String>>,
 }
 
+fn now_ms() -> u64 {
+    notify::now_ms().max(0) as u64
+}
+
 impl Shared {
     fn changed(&self, changed: Changed) {
         if !changed.is_empty() {
@@ -205,7 +213,7 @@ impl Shared {
     fn apply(&self, event: events::ServerEvent) -> (Changed, bool) {
         let ready = matches!(event, events::ServerEvent::Ready(_));
         let mut store = self.store.lock().unwrap();
-        let changed = live::apply_event(&mut store, event, notify::now_ms().max(0) as u64);
+        let changed = live::apply_event(&mut store, event, now_ms());
         let reconnect = ready && self.has_ready.swap(true, AtomicOrdering::SeqCst);
         if reconnect {
             log::info!("reconnected: dropping loaded history");
@@ -262,6 +270,60 @@ impl Shared {
         self.timeline_changed(&channel);
         runtime().spawn(self.clone().fetch_replies(channel));
         Ok(more)
+    }
+
+    /// `POST` a pending message (as desktop's `post_pending`, without
+    /// attachments). Success confirms it, unless its live echo already
+    /// has; failure marks it failed with the reason.
+    async fn post(self: Arc<Self>, pending: PendingMessage) {
+        let PendingMessage {
+            key,
+            channel,
+            content,
+            replies,
+            nonce,
+            ..
+        } = pending;
+        let result = self
+            .client
+            .send_message(&channel, &content, &[], &replies, &nonce)
+            .await;
+        match result {
+            Ok(message) => {
+                let id = message.id.clone();
+                log::debug!("sent {id} in {channel}");
+                self.store.lock().unwrap().apply_message(message);
+                self.changed(Changed {
+                    lists: true,
+                    timelines: vec![channel.clone()],
+                    ..Changed::default()
+                });
+                // Stoat doesn't mark the user's own message read for them.
+                if let Err(err) = self.client.ack_message(&channel, &id).await {
+                    log::warn!("couldn't mark {channel} read after sending: {err}");
+                }
+            }
+            // An earlier attempt with this key got through: the message
+            // exists, and shows once its echo or the next load brings it.
+            Err(err) if err.is_duplicate_nonce() => {
+                log::info!("{key} in {channel} was already sent");
+                self.store.lock().unwrap().discard_pending(&channel, &key);
+                self.timeline_changed(&channel);
+            }
+            Err(err) => {
+                log::warn!("couldn't send in {channel}: {err:?}");
+                let answered = !matches!(err, ApiError::Network(_));
+                let failed = self.store.lock().unwrap().fail_pending(
+                    &channel,
+                    &key,
+                    err.send_failure_text(),
+                    answered,
+                );
+                if failed {
+                    self.timeline_changed(&channel);
+                }
+            }
+        }
     }
 
     /// Fetch the originals of replies that aren't loaded (as desktop's
@@ -411,7 +473,7 @@ impl Shared {
 
 /// A live connection: dropping it closes the socket and stops the drain.
 struct Running {
-    _connection: Connection,
+    connection: Connection,
     drain: tokio::task::AbortHandle,
 }
 
@@ -426,6 +488,8 @@ impl Drop for Running {
 pub struct AccountController {
     pub(crate) shared: Arc<Shared>,
     running: Mutex<Option<Running>>,
+    /// When to tell Stoat the user is typing.
+    typing: Mutex<OutgoingTyping>,
 }
 
 impl AccountController {
@@ -450,6 +514,7 @@ impl AccountController {
                 reply_fetches: Mutex::new(HashSet::new()),
             }),
             running: Mutex::new(None),
+            typing: Mutex::new(OutgoingTyping::default()),
         })
     }
 }
@@ -482,7 +547,7 @@ impl AccountController {
         let (connection, events) = events::connect(self.shared.client.clone());
         let drain = runtime().spawn(self.shared.clone().drain(events));
         *running = Some(Running {
-            _connection: connection,
+            connection,
             drain: drain.abort_handle(),
         });
     }
@@ -663,5 +728,125 @@ impl AccountController {
             }
         });
         true
+    }
+}
+
+impl AccountController {
+    fn send_typing(&self, signal: Option<TypingSignal>) {
+        let running = self.running.lock().unwrap();
+        let Some(running) = running.as_ref() else {
+            return;
+        };
+        match signal {
+            Some(TypingSignal::Begin(channel)) => running.connection.begin_typing(&channel),
+            Some(TypingSignal::End(channel)) => running.connection.end_typing(&channel),
+            None => {}
+        }
+    }
+}
+
+/// Sending.
+#[uniffi::export]
+impl AccountController {
+    /// Whether the user may send messages in `channel_id`.
+    pub fn can_send(&self, channel_id: String) -> bool {
+        self.shared.store.lock().unwrap().can_send(&channel_id)
+    }
+
+    /// Send `text` to `channel_id`, replying to `reply_to` if given. It
+    /// shows at once as pending, then sent (or failed, to retry). Returns
+    /// its key: the row's ID until and after Stoat confirms it.
+    pub fn send(
+        &self,
+        channel_id: String,
+        text: String,
+        reply_to: Option<String>,
+    ) -> Result<String, CoreError> {
+        let content = text.trim().to_string();
+        if content.is_empty() {
+            return Err(CoreError::failed("Type a message first."));
+        }
+        // Sending ends typing.
+        let stopped = self.typing.lock().unwrap().stop();
+        self.send_typing(stopped);
+        let sent_ms = now_ms();
+        let nonce = new_nonce(sent_ms);
+        let pending = PendingMessage {
+            key: nonce.clone(),
+            nonce,
+            channel: channel_id.clone(),
+            content,
+            replies: reply_to
+                .into_iter()
+                .map(|id| ReplyIntent {
+                    id,
+                    mention: false,
+                    fail_if_not_exists: None,
+                })
+                .collect(),
+            attachments: Vec::new(),
+            state: PendingState::Sending,
+            sent_ms,
+            nonce_used: false,
+        };
+        let key = pending.key.clone();
+        self.shared.store.lock().unwrap().add_pending(pending.clone());
+        // The user has replied, so a divider above their reply says nothing.
+        if let Some(divider) = self.shared.dividers.lock().unwrap().get_mut(&channel_id) {
+            *divider = None;
+        }
+        self.shared.timeline_changed(&channel_id);
+        runtime().spawn(self.shared.clone().post(pending));
+        Ok(key)
+    }
+
+    /// Send a failed message again, with the same idempotency key unless
+    /// Stoat has already seen that one.
+    pub fn retry(&self, channel_id: String, key: String) {
+        let pending = self
+            .shared
+            .store
+            .lock()
+            .unwrap()
+            .retry_pending(&channel_id, &key, || new_nonce(now_ms()));
+        if let Some(pending) = pending {
+            self.shared.timeline_changed(&channel_id);
+            runtime().spawn(self.shared.clone().post(pending));
+        }
+    }
+
+    /// Give up on an unsent message.
+    pub fn discard(&self, channel_id: String, key: String) {
+        let discarded = self
+            .shared
+            .store
+            .lock()
+            .unwrap()
+            .discard_pending(&channel_id, &key);
+        if discarded.is_some() {
+            self.shared.timeline_changed(&channel_id);
+        }
+    }
+
+    /// The message box in `channel_id` changed (`empty`: nothing in it
+    /// now). Tells Stoat the user is typing, at most every few seconds, and
+    /// that they've stopped once it's empty or idle for a while.
+    pub fn typing(self: Arc<Self>, channel_id: String, empty: bool) {
+        let signals = self
+            .typing
+            .lock()
+            .unwrap()
+            .on_input(&channel_id, empty, std::time::Instant::now());
+        for signal in signals {
+            self.send_typing(Some(signal));
+        }
+        if !empty {
+            let this = self.clone();
+            runtime().spawn(async move {
+                tokio::time::sleep(IDLE_AFTER).await;
+                let idle = this.typing.lock().unwrap().on_tick(std::time::Instant::now());
+                this.send_typing(idle);
+            });
+        }
     }
 }

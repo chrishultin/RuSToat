@@ -11,7 +11,7 @@ mod support;
 
 use serde_json::json;
 use wiremock::matchers::{method, path, path_regex};
-use wiremock::{Mock, ResponseTemplate};
+use wiremock::{Mock, Request, ResponseTemplate};
 
 #[tokio::main]
 async fn main() {
@@ -38,6 +38,38 @@ async fn main() {
         .respond_with(
             ResponseTemplate::new(200).set_body_json(support::fixture("messages_page.json")),
         )
+        .mount(&api)
+        .await;
+    // Sending: Stoat creates the message with the send's idempotency key as
+    // its nonce, and echoes it on the events socket.
+    let sent = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let echo = events.sender();
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/channels/[^/]+/messages$"))
+        .respond_with(move |request: &Request| {
+            let n = sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
+            let channel = request.url.path().split('/').nth(2).unwrap_or_default();
+            let nonce = request
+                .headers
+                .get("Idempotency-Key")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            let message = json!({
+                "_id": format!("01JE00000000000000000S{n:04}"), "channel": channel,
+                "author": support::ME, "content": body["content"], "nonce": nonce,
+                "replies": body["replies"].as_array().map(|r| r.iter().map(|r| r["id"].clone()).collect::<Vec<_>>()),
+            });
+            let mut frame = message.clone();
+            frame["type"] = json!("Message");
+            echo(frame);
+            ResponseTemplate::new(200).set_body_json(message)
+        })
+        .mount(&api)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path_regex(r"^/channels/[^/]+/ack/.+$"))
+        .respond_with(ResponseTemplate::new(204))
         .mount(&api)
         .await;
     Mock::given(method("POST"))

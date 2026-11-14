@@ -1,14 +1,68 @@
 import SwiftUI
 
+/// What can be done to a message from its row.
+struct MessageActions {
+    let reply: (MessageItem) -> Void
+    /// By the pending message's key.
+    let retry: (String) -> Void
+    let discard: (String) -> Void
+}
+
 /// A message: avatar, name and time on the first of a group, then its
-/// replies, text, attachments and embeds.
+/// replies, text, attachments and embeds. Long-press for its menu, or swipe
+/// right to reply.
 struct MessageRowView: View {
     let message: MessageItem
+    let actions: MessageActions
+    @State private var swipe: CGFloat = 0
 
     var body: some View {
         if message.system {
             systemRow
         } else {
+            row
+                .offset(x: swipe)
+                .contentShape(.rect)
+                .contextMenu { menu }
+                .simultaneousGesture(swipeToReply)
+        }
+    }
+
+    @ViewBuilder private var menu: some View {
+        if message.pending == nil {
+            Button("Reply", systemImage: "arrowshape.turn.up.left") { actions.reply(message) }
+        }
+        if let body = message.body {
+            Button("Copy Text", systemImage: "doc.on.doc") {
+                UIPasteboard.general.string = String(MessageText.attributed(body).characters)
+            }
+        }
+        if case .failed = message.pending {
+            Button("Retry", systemImage: "arrow.clockwise") { actions.retry(message.key) }
+            Button("Discard", systemImage: "trash", role: .destructive) { actions.discard(message.key) }
+        }
+    }
+
+    /// A short swipe right replies, as in Messages.
+    private var swipeToReply: some Gesture {
+        DragGesture(minimumDistance: 20)
+            .onChanged { value in
+                guard message.pending == nil,
+                      value.translation.width > 0,
+                      abs(value.translation.height) < abs(value.translation.width) else { return }
+                swipe = min(value.translation.width, 70) * 0.6
+            }
+            .onEnded { value in
+                if message.pending == nil, value.translation.width > 60,
+                   abs(value.translation.height) < 40 {
+                    actions.reply(message)
+                }
+                withAnimation(.spring) { swipe = 0 }
+            }
+    }
+
+    private var row: some View {
+        Group {
             HStack(alignment: .top, spacing: 12) {
                 if message.continuation {
                     Color.clear.frame(width: 36, height: 1)
@@ -33,9 +87,14 @@ struct MessageRowView: View {
                         EmbedCard(embed: embed)
                     }
                     if case .failed(let reason) = message.pending {
-                        Label(reason, systemImage: "exclamationmark.circle.fill")
-                            .font(.caption)
-                            .foregroundStyle(.red)
+                        Button {
+                            actions.retry(message.key)
+                        } label: {
+                            Label("\(reason) Tap to retry.", systemImage: "exclamationmark.arrow.circlepath")
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
                 Spacer(minLength: 0)

@@ -204,6 +204,14 @@ pub fn can_manage_channels(store: &ChatStore, user: &str, server: &str) -> bool 
         )
 }
 
+/// Whether `user` may send messages in `channel`.
+pub fn can_send(store: &ChatStore, user: &str, channel: &str) -> bool {
+    has(
+        channel_permissions(store, user, channel),
+        ChannelPermission::SendMessage,
+    )
+}
+
 /// Whether `user` may send embeds in `channel` (which a GIF is).
 pub fn can_send_embeds(store: &ChatStore, user: &str, channel: &str) -> bool {
     has(

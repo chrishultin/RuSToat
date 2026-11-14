@@ -99,6 +99,15 @@ impl Events {
         let _ = self.frames.send(frame.to_string());
     }
 
+    /// A function that sends a frame to every open connection, for use
+    /// from mock responders.
+    pub fn sender(&self) -> impl Fn(Value) + Send + Sync + 'static {
+        let frames = self.frames.clone();
+        move |frame| {
+            let _ = frames.send(frame.to_string());
+        }
+    }
+
     /// Close every open connection, as a dropped network would.
     pub fn drop_connections(&self) {
         let _ = self.drop_all.send(());

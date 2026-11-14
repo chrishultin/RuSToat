@@ -240,3 +240,44 @@ Deferred to the end: compare servers and DMs with desktop, a live DM from deskto
 
 ### Manual Validation
 Deferred to the end: scroll back several pages in a busy channel with no jumps or duplicates; edit and delete from desktop; check the unread dot clears on desktop after reading on the phone.
+
+## Chunk 6: Sending messages
+
+### Changes Made
+- `src/api/error.rs`: added `ApiError::is_duplicate_nonce()` and `ApiError::send_failure_text()`, moved from private functions in `src/ui/chat.rs` (`is_duplicate`, `send_error_text`) so both apps share them. `chat.rs` now calls the methods. Desktop behaviour is unchanged.
+- `src/permissions.rs`: added `can_send(store, user, channel)` (SendMessage). `src/store.rs`: added `ChatStore::can_send(channel)`. `tests/permissions.rs`: added `sending_messages_follows_its_permission` (server channel with SendMessage denied, owner, friend DM, saved notes, blocked DM, a view-only group).
+- `ios/stoat-ffi/src/controller.rs`:
+  - `Shared::post`, as desktop's `post_pending` without attachments. Success applies the message (merging with the pending row by nonce) and acks it, as desktop's `ack_sent`. `DuplicateNonce` discards the pending message. Other errors call `fail_pending` with `send_failure_text`; `answered` is false only for `Network`.
+  - Exported: `can_send`, `send(channel, text, reply_to)` (adds the pending message, clears the divider, spawns the post, returns the key), `retry`, `discard`, and `typing(channel, empty)` (desktop's `OutgoingTyping` throttle over the connection's `begin_typing`/`end_typing`, with an idle timer).
+  - `Running` keeps the `Connection` for sending typing frames.
+- `ios/stoat-ffi/tests/sending.rs` (new, 7 tests):
+  - A send is pending immediately, keyed by its first idempotency key. Then the live echo arrives before a delayed POST answer, leaving exactly one row with the same key and nothing pending.
+  - A 500 fails the row with its reason, and retry sends with a fresh key (Stoat answered, so the old key is spent).
+  - A dropped connection (a raw TCP API that closes without answering), then retry, sends the same key again.
+  - Replies are sent and shown in the pending row; discard; empty text is refused; `can_send`.
+- `ios/stoat-ffi/tests/support/mod.rs`: `Events::sender()` for pushing frames from mock responders.
+- `ios/stoat-ffi/examples/fake_stoat.rs`: answers sends (with the nonce) and echoes them on the socket, and accepts acks.
+- Swift:
+  - `Chat/Composer.swift`: a `GlassEffectContainer` holding a vertical `TextField` (1–6 lines, `.glassEffect(.regular.interactive())`), a circular `.glassProminent` send button, and a glass "Replying to …" chip. `CantSendBar` shows instead of the composer where sending isn't allowed.
+  - `Chat/ChatView.swift`:
+    - `.safeAreaBar(edge: .bottom)` with the composer, and `.scrollPosition` so a send scrolls to the bottom.
+    - Drafts per channel in `AccountModel.drafts` (in memory), typing reported on each change, and the placeholder "Message #name", "Message Name" or "Save a note".
+    - `.toolbar(.hidden, for: .tabBar)` in conversations.
+  - `Chat/MessageRowView.swift`: `MessageActions`; a context menu with Reply, Copy Text, and Retry/Discard on failed rows; swipe right to reply; a failed row's red "… Tap to retry." button. Pending rows stay dimmed, as in chunk 5.
+
+### Divergences
+- **Retry after an answered failure uses a fresh idempotency key.** The plan said retry re-POSTs with the same key. That's only safe when Stoat may not have seen the request (a network failure), and the tests cover both cases. This is `ChatStore::retry_pending`'s existing behaviour, shared with desktop.
+- **Send-error text and the duplicate check moved onto `ApiError`,** a small desktop refactor, so iOS shows the same text without copying it.
+- **`can_send` is new in core.** Desktop had no such check; it relied on Stoat refusing the send.
+- **Slowmode cooldowns aren't started or shown on iOS yet.** A send during slowmode fails with Stoat's message and can be retried.
+- **The tab bar is hidden in conversations.**
+
+### Verification Performed
+- `cargo test -p stoat-ffi --test sending`: 7 passed, three runs in a row. The full `stoat-ffi` suite: 2 + 7 + 11 + 8 + 7.
+- `cargo test --test permissions`: 50 passed, including the new test.
+- Desktop: `cargo test`: 1143 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings`: clean.
+- `scripts/ios/test.sh`: exit 0, Swift 10/10, no warnings.
+- Simulator against `fake_stoat`, opening Ada's DM: the floating glass composer with "Message Ada L." and the send button, over the message list.
+
+### Manual Validation
+Deferred to the end: send messages and replies from the phone and see them on desktop; in Airplane mode, send, see the row fail, then retry once back online.
