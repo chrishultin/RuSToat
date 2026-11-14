@@ -4,6 +4,9 @@ import SwiftUI
 struct HomeView: View {
     let model: AccountModel
     @State private var path: [ChannelRoute] = []
+    /// The open conversation's ID, to reopen at the next launch.
+    @SceneStorage("homeChannel") private var savedChannel = ""
+    @State private var restored = false
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -23,15 +26,20 @@ struct HomeView: View {
                 ChatView(model: model, route: route)
             }
         }
-        #if DEBUG
-        // Open a conversation at launch, for screenshots:
-        // SIMCTL_CHILD_RUSTOAT_DEV_OPEN=<channel ID> xcrun simctl launch …
+        .onChange(of: path) { savedChannel = path.last?.id ?? "" }
+        // Once the lists are in, go back to where the user was.
         .onChange(of: model.readyCount, initial: true) {
-            if path.isEmpty, let id = ProcessInfo.processInfo.environment["RUSTOAT_DEV_OPEN"],
-               let channel = model.channel(id) {
+            guard !restored, model.readyCount > 0 else { return }
+            restored = true
+            var id = savedChannel
+            #if DEBUG
+            // Or open one at launch, for screenshots:
+            // SIMCTL_CHILD_RUSTOAT_DEV_OPEN=<channel ID> xcrun simctl launch …
+            id = ProcessInfo.processInfo.environment["RUSTOAT_DEV_OPEN"] ?? id
+            #endif
+            if path.isEmpty, !id.isEmpty, let channel = model.channel(id) {
                 path = [ChannelRoute(id: channel.id, name: channel.name)]
             }
         }
-        #endif
     }
 }

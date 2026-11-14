@@ -11,6 +11,7 @@ final class AccountModel {
     private(set) var status: ConnectionStatus = .connecting(attempt: 1)
     private(set) var servers: [ServerItem] = []
     private(set) var home: [ChannelItem] = []
+    private(set) var me: MeItem?
     private(set) var summary = Summary(homeUnread: false, homeMentions: 0, serversUnread: false, serversMentions: 0)
     /// Bumped when the lists change, so views that read the controller
     /// directly (one server's channels) are drawn again.
@@ -88,6 +89,7 @@ final class AccountModel {
         guard let controller else { return }
         servers = controller.servers()
         home = controller.homeChannels()
+        me = controller.me()
         summary = controller.summary()
         listsVersion += 1
     }

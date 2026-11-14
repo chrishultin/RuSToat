@@ -115,6 +115,21 @@ Then pick an iPhone simulator and press Run. The first `build-core.sh` compiles 
 - **Trying it without a real account:** `cargo run -p stoat-ffi --example fake_stoat` serves the test fixtures (REST and the events websocket) on localhost and prints the address. Log in there with any email and password, or have a Debug build log in at launch: `SIMCTL_CHILD_RUSTOAT_DEV_LOGIN=http://127.0.0.1:PORT xcrun simctl launch booted com.chrishultin.rustoat.ios`. Add `SIMCTL_CHILD_RUSTOAT_DEV_OPEN=ch-general` to open a channel straight away.
 - **Bindings always match the library.** They're generated from the built library by a `uniffi-bindgen` binary in `stoat-ffi` itself, from the same pinned UniFFI version.
 
+### Running on your iPhone
+
+The app installs from Xcode onto your own iPhone (iOS 26 or later), signed by Xcode for your team (`87ATGCDMGT`, set in `ios/project.yml`). There's no TestFlight.
+
+1. **Sign in to Xcode with your Apple ID:** Xcode → Settings → Accounts → **+**. Your team should appear under it. Signing only works once it does.
+2. **Turn on Developer Mode on the phone:** connect it by cable (or have it on the same Wi-Fi after pairing once), then on the phone go to Settings → Privacy & Security → Developer Mode. Turn it on and restart when asked. The option only appears after the phone has been connected to Xcode once.
+3. **Build and run:** in `ios/RuSToat.xcodeproj`, pick your iPhone as the run destination and press Run. The first device build compiles the core for `aarch64-apple-ios`, which takes a few minutes.
+4. **Trust the developer the first time:** if the phone says "Untrusted Developer", go to Settings → General → VPN & Device Management, choose your Apple Development certificate, and trust it.
+
+From the command line, `xcodebuild -project ios/RuSToat.xcodeproj -scheme RuSToat -destination 'generic/platform=iOS' -allowProvisioningUpdates build` builds and signs the same thing, once Xcode has your account.
+
+- **If your team is a free personal team,** builds expire after 7 days: run it from Xcode again to reinstall.
+- **The app icon** is `assets/icon/rustoat.svg`, squared off for iOS. Regenerate it after editing the SVG with `scripts/ios/make-icon.sh`.
+- **iOS sessions are named "RuSToat (iPhone)"** in Stoat's Settings → Sessions, and the token is kept in the iPhone's Keychain.
+
 ## Releasing
 
 ```bash

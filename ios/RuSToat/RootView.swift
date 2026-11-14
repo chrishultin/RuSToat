@@ -18,32 +18,27 @@ struct RootView: View {
     }
 }
 
-/// The app's tabs, with the connection banner over them.
+/// The app's tabs, with the connection banner over them. The tab (and
+/// each tab's open channel) is remembered across launches.
 private struct SignedInTabs: View {
     let account: Account
     let model: AppModel
+    @SceneStorage("tab") private var tab = "home"
 
     var body: some View {
         if let accountModel = model.accountModel {
-            TabView {
-                Tab("Home", systemImage: "bubble.left.and.bubble.right") {
+            TabView(selection: $tab) {
+                Tab("Home", systemImage: "bubble.left.and.bubble.right", value: "home") {
                     HomeView(model: accountModel)
                 }
                 .badge(Int(accountModel.summary.homeMentions))
-                Tab("Servers", systemImage: "square.stack.3d.up") {
+                Tab("Servers", systemImage: "square.stack.3d.up", value: "servers") {
                     ServerListView(model: accountModel)
                 }
                 .badge(Int(accountModel.summary.serversMentions))
-                Tab("You", systemImage: "person.crop.circle") {
-                    NavigationStack {
-                        List {
-                            LabeledContent("Signed in as", value: account.name)
-                            LabeledContent("Server", value: account.instance)
-                            Button("Log Out", role: .destructive) {
-                                Task { await model.logOut() }
-                            }
-                        }
-                        .navigationTitle("You")
+                Tab("You", systemImage: "person.crop.circle", value: "you") {
+                    YouView(account: account, accountModel: accountModel) {
+                        await model.logOut()
                     }
                 }
             }

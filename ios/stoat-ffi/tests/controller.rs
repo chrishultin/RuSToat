@@ -167,3 +167,14 @@ async fn a_rejected_session_is_reported() {
     events.send(json!({ "type": "Logout" }));
     recorder.wait_for_status(ConnectionStatus::SessionRejected).await;
 }
+
+#[tokio::test]
+async fn me_is_the_signed_in_user() {
+    let events = Events::start().await;
+    let api = api(&events).await;
+    let (controller, _) = connected(&api).await;
+    let me = controller.me().unwrap();
+    assert_eq!(me.user_id, "u-me");
+    assert!(me.username.starts_with("me#"), "{}", me.username);
+    assert!(me.avatar_url.starts_with(&api.uri()), "a default avatar: {}", me.avatar_url);
+}

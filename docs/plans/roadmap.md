@@ -7,6 +7,8 @@ Sizes: **S** is a chunk or two. **M** is a whole milestone. Anything larger has 
 
 Each milestone gets its own detailed plan (`docs/plans/<name>.md`) when it's next up, not before. Plans written now would rest on code that will have changed by the time they're used. Only milestone 9 is planned in detail so far: [`reading-flow.md`](reading-flow.md).
 
+**iPhone:** there's also an iPhone app on the same Rust core. Its own milestones (rich messages, media, several accounts, notifications, push, voice) are in [`ios-app.md`'s iOS roadmap](ios-app.md#ios-roadmap).
+
 ## Where the list came from
 On 2026-11-06 we compared RuSToat with three sources:
 - Stoat's web client, `stoatchat/for-web` v0.16.3

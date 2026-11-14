@@ -129,6 +129,21 @@ pub struct ChannelSectionItem {
     pub channels: Vec<ChannelItem>,
 }
 
+/// The signed-in user, for the You tab.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct MeItem {
+    pub user_id: String,
+    /// Display name, or username.
+    pub name: String,
+    /// `username#1234`.
+    pub username: String,
+    pub avatar_url: String,
+    /// Online, Idle, Focus, Busy or Invisible.
+    pub presence: String,
+    /// Custom status text, if any.
+    pub status: Option<String>,
+}
+
 /// Unread totals for the tab bar's badges.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
 pub struct Summary {
@@ -602,6 +617,21 @@ impl AccountController {
     pub fn channel(&self, channel_id: String) -> Option<ChannelItem> {
         let store = self.shared.store.lock().unwrap();
         store.channel_entry(&channel_id).map(channel_item)
+    }
+
+    /// The signed-in user, once `Ready` has brought them.
+    pub fn me(&self) -> Option<MeItem> {
+        let store = self.shared.store.lock().unwrap();
+        let user = store.user(store.me())?;
+        let (presence, status) = store.my_status();
+        Some(MeItem {
+            user_id: user.id.clone(),
+            name: stoat_gpui::store::display_name(user).to_string(),
+            username: format!("{}#{}", user.username, user.discriminator),
+            avatar_url: store.user_avatar_url(&user.id),
+            presence: format!("{presence:?}"),
+            status,
+        })
     }
 
     /// Unread totals for the tabs.

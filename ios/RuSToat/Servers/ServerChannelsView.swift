@@ -11,7 +11,7 @@ struct ServerChannelsView: View {
             ForEach(model.channels(of: serverId), id: \.id) { section in
                 Section {
                     ForEach(section.channels, id: \.id) { channel in
-                        NavigationLink(value: ChannelRoute(id: channel.id, name: channel.name)) {
+                        NavigationLink(value: ServersRoute.channel(ChannelRoute(id: channel.id, name: channel.name))) {
                             ChannelRow(channel: channel)
                         }
                     }

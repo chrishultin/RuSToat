@@ -281,3 +281,81 @@ Deferred to the end: scroll back several pages in a busy channel with no jumps o
 
 ### Manual Validation
 Deferred to the end: send messages and replies from the phone and see them on desktop; in Airplane mode, send, see the row fail, then retry once back online.
+
+## Chunk 7: On your phone
+
+### Changes Made
+- `examples/render_icon.rs`: a `--ios <icon.svg> <AppIcon.png>` mode that renders the tile alone at 1024 px, square and edge to edge (`ios_tile` sets `rx` to 0 and the viewBox to the tile). It fails loudly if the SVG's tile or viewBox changes.
+- `scripts/ios/make-icon.sh` (new): regenerates `ios/RuSToat/Assets.xcassets/AppIcon.appiconset/AppIcon.png`, which is committed with its `Contents.json` (a single 1024 universal iOS icon).
+- `ios/stoat-ffi/src/controller.rs`: a `MeItem` record and `AccountController::me()` (name, `username#1234`, avatar URL, presence, status text). `tests/controller.rs`: `me_is_the_signed_in_user`.
+- `ios/project.yml`: `DEVELOPMENT_TEAM: 87ATGCDMGT`, `CODE_SIGN_STYLE: Automatic`, portrait only (`INFOPLIST_KEY_UISupportedInterfaceOrientations`), `ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon`. The launch screen came in chunk 2.
+- Swift:
+  - `You/YouView.swift` (new): avatar, name, username and status, the server address and connection state, Log Out with a confirmation dialog, and the app and core versions.
+  - `Model/AccountModel.swift`: adds `me`.
+  - `RootView.swift`: the tab is remembered with `@SceneStorage("tab")`, and the You tab uses `YouView`.
+  - `Home/HomeView.swift`: `@SceneStorage("homeChannel")` reopens the last conversation after the first Ready. The DEBUG `RUSTOAT_DEV_OPEN` overrides it.
+  - `Servers/ServerListView.swift`: a typed `ServersRoute` path (server, then channel), remembered as `serverPlace` (`serverID/channelID`) and restored after the first Ready. `ServerChannelsView` links push `ServersRoute.channel`.
+- `README.md`: a "Running on your iPhone" section (the Xcode account, Developer Mode, Run, trusting the certificate, the command line, the 7-day free-team note, the icon, the session name).
+- `docs/plans/roadmap.md`: a pointer to this plan's iOS roadmap.
+
+### Divergences
+- **The signed device build couldn't run here.** `xcodebuild … -destination 'generic/platform=iOS' -allowProvisioningUpdates build` failed with "No Account for Team 87ATGCDMGT". Xcode needs your Apple ID under Settings → Accounts, which only you can add. With `CODE_SIGNING_ALLOWED=NO` the device build compiles and links: `BUILD SUCCEEDED`, a 35 MB Debug app, and both XCFramework slices carry the current symbols.
+- **The icon needed a new `--ios` render mode.** The macOS SVG draws Apple's rounded tile with transparent margins, but iOS wants a full-bleed square. The PNG keeps an alpha channel (fully opaque); that's fine for development installs, but App Store validation would reject it.
+- **Restoring places uses `@SceneStorage`, not `places.rs`.** It's per device, and enough for one account.
+
+### Verification Performed
+- `scripts/ios/make-icon.sh`: a 1024×1024 full-bleed render, checked visually.
+- `cargo test -p stoat-ffi`: 2 + 8 (controller) + 11 + 8 + 7 passed. Clippy clean.
+- Device build without signing: succeeded, with the "Build Rust core" phase building the `aarch64-apple-ios` slice. Signed build: blocked on your Xcode account (above).
+- `scripts/ios/test.sh`: exit 0, Swift 10/10, no warnings.
+- Desktop: `cargo test`: 1143 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings`: clean.
+
+### Manual Validation
+Pending. You batched every manual check to the end; they're listed under Remaining Manual Steps below.
+
+## Summary
+
+_Completed: 2026-11-13 (code). Manual checks and the signed device install are pending._
+
+### Chunks Completed
+1. The library builds without GPUI for iOS (`desktop` feature, workspace, iOS TLS roots).
+2. The `stoat-ffi` UniFFI crate, `build-core.sh` → `StoatCore.xcframework`, the XcodeGen project, and a glass tab-bar shell with bridge tests.
+3. Log in, 2FA, restore and log out, with tokens in the iOS Keychain.
+4. `src/live.rs` shared event dispatch, `AccountController`, and the Home/Servers/channel lists with a live connection banner.
+5. Reading channels: paging, reply originals, the divider, mark-read while on screen, and a reload after reconnecting.
+6. Sending: pending, confirmed or failed rows, retry and discard, replies, typing, `can_send`, and the glass composer.
+7. The icon, the You tab, signing and portrait settings, remembering the tab and channel, and the README.
+
+### Divergences
+- Chunk 1: the workspace started as `["."]`, and `ios/stoat-ffi` was added in chunk 2.
+- Chunk 2: `build-core.sh` re-executes itself under a clean environment; `test.sh` picks the simulator by UDID and boots it first.
+- Chunk 3: no separate `accounts.rs`; `StoatClient::with_session_name` was added; an opt-in live HTTPS test; a bindgen slice bug was fixed.
+- Chunk 4: `Changed` is a struct; the controller also fetches settings and `GET /`; `Core::forget_session`; tab badges; the `fake_stoat` example and DEBUG dev login.
+- Chunk 5: bottom scroll anchoring instead of `scrollPosition(id:)` pinning; reply originals are fetched; the reload after reconnecting is done in Rust.
+- Chunk 6: retry uses a fresh key after an answered failure (as desktop); send-error text and the duplicate check moved onto `ApiError`; `can_send` added to core; no slowmode countdown yet; the tab bar is hidden in chats.
+- Chunk 7: the signed device build needs your Xcode account; an `--ios` icon mode; `@SceneStorage` for places.
+
+### Definition of Done
+- [x] `cargo test && cargo clippy --all-targets -- -D warnings` passes with default features (1143 tests). Desktop behaving as before: **pending your `cargo run` check**.
+- [x] `cargo check --lib --no-default-features --target aarch64-apple-ios` succeeds, and `gpui-kit`, `livekit` and `keyring` are absent from that `cargo tree`.
+- [x] `scripts/ios/build-core.sh` produces `ios/build/StoatCore.xcframework` with device and simulator slices, and `xcodebuild … test` passes on a simulator.
+- [ ] Logging in with email, password and TOTP works against `api.stoat.chat`: **pending you**. Covered by wiremock tests and the live bogus-login HTTPS test. The token goes only to the Keychain under `{API URL}#{user ID}`; `accounts.json` holds no token.
+- [ ] Relaunching restores the session; a rejected token returns to login; an unreachable server shows Retry: covered by Rust tests, **pending you on the real instance**.
+- [ ] Home and Servers lists with live unread state: covered by tests and the simulator against `fake_stoat`, **pending you on real data**.
+- [ ] A channel shows its history, pages back to the start, applies live edits and deletes, and acks on screen: covered by tests, **pending you**.
+- [x] Sent messages show as pending, then sent, or failed with retry, and never twice (tests). The Airplane-mode check is **pending you**.
+- [x] The tab bar, toolbars, composer and banner use system Liquid Glass (`TabView`, `.glassEffect`, `GlassEffectContainer`, `.buttonStyle(.glass/.glassProminent)`), with no custom blur. Light and dark mode are **pending you**.
+- [ ] The app installs and runs on your iPhone from Xcode: **pending your Xcode account**. The unsigned device build succeeds.
+- [x] The README documents building for the simulator and installing on a device.
+
+### Remaining Manual Steps
+1. Add your Apple ID in Xcode → Settings → Accounts, then run on your iPhone (README "Running on your iPhone").
+2. `cargo run`: the desktop app still launches and connects.
+3. Log in with 2FA on the phone, relaunch and land signed in, then later log out and check Stoat's Settings → Sessions.
+4. Compare servers and DMs with desktop. Send yourself a DM from desktop and watch the unread dot appear live.
+5. Read a long channel back several pages: no jumps or duplicates. Edit and delete from desktop and watch the phone update.
+6. Read on the phone, then check the unread dot clears on desktop.
+7. Send messages and replies. In Airplane mode, send, see the row fail, turn Airplane mode off, tap retry, and check it sends once.
+8. Background the app for 5+ minutes and return: it reconnects, and the open channel reloads.
+9. Check light and dark mode, and that the tab bar shrinks while scrolling.
+10. Use it for a day on cellular, locking and unlocking and switching apps.
