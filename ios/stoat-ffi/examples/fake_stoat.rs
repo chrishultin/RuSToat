@@ -162,6 +162,19 @@ async fn serve_media(api: &wiremock::MockServer, icon: Vec<u8>) {
         )
         .mount(api)
         .await;
+    // The video and voice note, by their originals' own names. AVPlayer
+    // streams with `Range` requests, and won't play without them.
+    for (route, name, kind) in [
+        ("/attachments/f-clip/clip.mp4", "clip.mp4", "video/mp4"),
+        ("/attachments/f-voice/voice.m4a", "voice.m4a", "audio/mp4"),
+    ] {
+        let bytes = media(name);
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(move |request: &Request| ranged(request, &bytes, kind))
+            .mount(api)
+            .await;
+    }
     Mock::given(method("GET"))
         .and(path("/proxy"))
         .respond_with(move |request: &Request| {
@@ -182,4 +195,33 @@ async fn serve_media(api: &wiremock::MockServer, icon: Vec<u8>) {
         })
         .mount(api)
         .await;
+}
+
+/// `bytes`, or the part a `Range: bytes=a-b` header asks for (206).
+fn ranged(request: &Request, bytes: &[u8], kind: &str) -> ResponseTemplate {
+    let len = bytes.len();
+    let range = request
+        .headers
+        .get("Range")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("bytes="))
+        .and_then(|v| v.split_once('-'))
+        .and_then(|(start, end)| {
+            let start: usize = start.parse().ok()?;
+            let end = if end.is_empty() {
+                len - 1
+            } else {
+                end.parse::<usize>().ok()?.min(len - 1)
+            };
+            (start <= end).then_some((start, end))
+        });
+    match range {
+        Some((start, end)) => ResponseTemplate::new(206)
+            .insert_header("Content-Range", format!("bytes {start}-{end}/{len}"))
+            .insert_header("Accept-Ranges", "bytes")
+            .set_body_raw(bytes[start..=end].to_vec(), kind),
+        None => ResponseTemplate::new(200)
+            .insert_header("Accept-Ranges", "bytes")
+            .set_body_raw(bytes.to_vec(), kind),
+    }
 }

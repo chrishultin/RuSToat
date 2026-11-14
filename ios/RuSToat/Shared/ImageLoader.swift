@@ -1,3 +1,4 @@
+import AVFoundation
 import ImageIO
 import SwiftUI
 import UIKit
@@ -80,6 +81,39 @@ final class ImageLoader {
             images.setObject(image, forKey: key, cost: Self.cost(of: image))
         }
         return image
+    }
+
+    /// The first frame of the video at `url`, upright, fitted to `size`
+    /// points at `scale`, kept in the memory cache like a picture. Only the
+    /// start of the file is fetched (AVFoundation asks for ranges).
+    func poster(_ url: URL, fitting size: CGSize, scale: CGFloat) async -> UIImage? {
+        let pixels = Self.pixels(fitting: size, scale: scale)
+        let key = "poster|\(Self.key(url, pixels))" as NSString
+        if let image = images.object(forKey: key) {
+            return image
+        }
+        if let task = decoding[key as String] {
+            return await task.value
+        }
+        let task = Task<UIImage?, Never> {
+            let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = CGSize(width: pixels, height: pixels)
+            guard let frame = try? await generator.image(at: .zero).image else { return nil }
+            return UIImage(cgImage: frame, scale: scale, orientation: .up)
+        }
+        decoding[key as String] = task
+        let image = await task.value
+        decoding[key as String] = nil
+        if let image {
+            images.setObject(image, forKey: key, cost: Self.cost(of: image))
+        }
+        return image
+    }
+
+    /// A poster already made for `url` at this size.
+    func cachedPoster(_ url: URL, fitting size: CGSize, scale: CGFloat) -> UIImage? {
+        images.object(forKey: "poster|\(Self.key(url, Self.pixels(fitting: size, scale: scale)))" as NSString)
     }
 
     /// The bytes at `url` (from the disk cache when they're there), with

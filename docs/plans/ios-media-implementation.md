@@ -157,3 +157,62 @@ Deferred to the end: scroll a real channel full of photos quickly, checking for 
 
 ### Manual Validation
 Deferred to the end, because `simctl` can't drive gestures: pinch-zoom a photo, swipe to the next, drag down to close, and share one to Messages.
+
+## Chunk 3: Video and audio
+
+### Changes Made
+- `tests/fixtures/media/clip.mp4` (new, 28 kB) and `voice.m4a` (new, 14 kB), made once with `ffmpeg`:
+  - the clip is 3 s of `testsrc2` at 320×180, H.264 baseline, with a 440 Hz tone;
+  - the voice note is 4 s of a 330 Hz tone in AAC.
+
+  Both use `+faststart`.
+- `tests/fixtures/messages_media.json`: the clip's metadata is now its real 320×180, and both files have their real sizes. `ios/stoat-ffi/tests/media.rs` was updated to match (display 320×180, small enough as it is).
+- `ios/stoat-ffi/examples/fake_stoat.rs`: serves the originals (`/attachments/f-clip/clip.mp4`, `/attachments/f-voice/voice.m4a`) through `ranged()`. That answers `Range: bytes=a-b` with 206 and `Content-Range`, which AVPlayer needs.
+- `ios/RuSToat/Shared/Playback.swift` (new):
+  - a `@MainActor @Observable` "now playing" with `current` (a file ID);
+  - `start` pauses the previous player; `pause` and `stopped` clear `current` only for that item;
+  - the `.playback` audio session is activated just before the first item plays (injectable for tests);
+  - `Pausable`, which `AVPlayer` adopts;
+  - `timeLabel`: "0:05", "12:34", "1:02:03", and "0:00" for unknown times.
+- `ios/RuSToat/Shared/ImageLoader.swift`: `poster(_:fitting:scale:)` and `cachedPoster`. These take the first frame from `AVAssetImageGenerator` (`image(at: .zero)`, with the track's transform applied, limited to the pixel size). The frame is kept in the same memory cache, keyed by URL, and generation is shared like a decode.
+- `ios/RuSToat/Chat/Media/VideoAttachment.swift` (new):
+  - `VideoAttachmentView` is drawn at its display size. It shows a dark box, then the poster with a play button.
+  - A tap swaps in `VideoPlayer(player:)`, muted, registered with `Playback`.
+  - The full-screen button unmutes and presents `ClosingPlayerController` (an `AVPlayerViewController` that reports its dismissal) with the same player, over the top view controller.
+  - Scrolling away pauses the player and drops it back to the poster, unless full screen is up.
+  - A spoiler video is covered with `SpoilerCover`, and no poster is made until it's uncovered.
+- `ios/RuSToat/Chat/Media/AudioAttachment.swift` (new):
+  - `AudioAttachmentView`: the file card with play/pause, a `Slider` scrubber, and "elapsed / total".
+  - `AudioPlayerModel`:
+    - reads the length from the file's header on appear;
+    - makes its `AVPlayer` on first play;
+    - updates the time from a 0.25 s periodic observer (not while scrubbing) and seeks when the scrubber is let go;
+    - rewinds to the start when it finishes;
+    - lets the player go when the row leaves.
+- `ios/RuSToat/Chat/MessageRowView.swift`: audio and video attachments use the new views. A card's large image and a bot's media are now sized inside the card's padding; before, they overflowed it by the padding.
+- DEBUG `RUSTOAT_DEV_PLAY=<file ID>` starts a video or voice note at launch, for screenshots.
+- `ios/RuSToatTests/PlaybackTests.swift` (new, 4 tests):
+  - a second item pauses the first, and the session is activated once, only when something plays;
+  - pausing and stopping affect only the current item;
+  - restarting the same item doesn't pause it;
+  - time labels.
+
+### Divergences
+- **No Rust change was needed for video spoilers.** The core's `AttachmentView::Video` already carries `spoiler` through `uncovered`, and chunk 1 maps it. The tests cover it with a plain video; the reveal is the same `reveal_attachment` as for images.
+- **Videos have no ThumbHash**: Stoat's video metadata doesn't include one. They show a dark box until the poster is ready, which the plan allowed for.
+- **Full screen presents `AVPlayerViewController` modally** from the top view controller, not through a SwiftUI `fullScreenCover`. That gives the system's own close button and swipe-down, and shares the inline player.
+- **Fixed in passing (chunk 1 bug):** large images in embed cards were sized to the column, not the card, and overflowed by its padding.
+- **The fixture clip is 28 kB**, a little more than the plan's "a few kB", to have both video and sound.
+
+### Verification Performed
+- Swift: 34 tests in 10 suites passed (PlaybackTests 4).
+- `cargo test -p stoat-ffi`: 84 passed. Desktop `cargo test`: 1499 passed, 0 failed, 5 ignored. Both clippy runs are clean.
+- Simulator against `fake_stoat`, in #chat, scrolled to bob's message:
+  - the PDF card;
+  - the voice note's player, reading "0:00 / 0:04";
+  - the clip's poster (the first `testsrc2` frame) with its play button. This also shows range requests work.
+  - With `RUSTOAT_DEV_PLAY=f-clip`: the clip playing inline at 2.5 s, with the full-screen button.
+  - With `RUSTOAT_DEV_PLAY=f-voice`: the pause button, the scrubber advancing, and "0:03 / 0:04".
+
+### Manual Validation
+Deferred to the end: play a video inline and full screen; play a voice note; start one while another plays. Also check on a device that a large video from Stoat's real file server streams, which depends on its range support.

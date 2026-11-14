@@ -159,8 +159,8 @@ async fn files_audio_and_video_carry_what_their_players_need() {
         panic!("{video:?}")
     };
     assert_eq!(video.url, format!("{CDN}/attachments/f-clip/clip.mp4"));
-    assert_eq!((video.width, video.height), (400, 225));
-    assert_eq!((video.original_width, video.original_height), (640, 360));
+    assert_eq!((video.width, video.height), (320, 180), "small enough as it is");
+    assert_eq!((video.original_width, video.original_height), (320, 180));
     assert!(!video.spoiler);
 }
 

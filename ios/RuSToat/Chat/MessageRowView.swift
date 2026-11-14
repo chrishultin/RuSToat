@@ -243,8 +243,8 @@ struct MessageRowView: View {
     }
 }
 
-/// An attachment: images inline, everything else as a card that opens in
-/// Safari for now.
+/// An attachment: images and videos inline, audio with a player, and
+/// other files as a card that opens in Safari.
 struct AttachmentView: View {
     let attachment: AttachmentItem
     let actions: MessageActions
@@ -267,13 +267,9 @@ struct AttachmentView: View {
             }
             .disabled(file.url == nil)
         case .audio(let audio):
-            FileCard(name: audio.name, detail: audio.sizeLabel, icon: "waveform", spoiler: audio.spoiler) {
-                open(audio.url)
-            }
+            AudioAttachmentView(audio: audio)
         case .video(let video):
-            FileCard(name: video.name, detail: video.sizeLabel, icon: "film", spoiler: video.spoiler) {
-                open(video.url)
-            }
+            VideoAttachmentView(video: video, uncover: actions.revealAttachment)
         case .local(let local):
             FileCard(name: local.name, detail: local.sizeLabel, icon: local.kind.symbol, spoiler: local.spoiler) {}
                 .disabled(true)
@@ -423,10 +419,14 @@ struct EmbedCard: View {
                 }
             }
             if let image = card.image {
-                remote(image, size: size(image))
+                // Inside the card's padding.
+                remote(image, size: MediaLayout.fit(
+                    width: image.width, height: image.height, available: min(available, 320) - 20
+                ))
             }
             if let media = card.media {
                 AttachmentView(attachment: media, actions: actions, view: view)
+                    .environment(\.mediaMaxWidth, min(available, 320) - 20)
             }
         }
         .padding(10)

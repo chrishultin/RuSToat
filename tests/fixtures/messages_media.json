@@ -193,7 +193,7 @@
             "type": "Audio"
           },
           "content_type": "audio/mp4",
-          "size": 6144
+          "size": 13931
         },
         {
           "_id": "f-clip",
@@ -201,11 +201,11 @@
           "filename": "clip.mp4",
           "metadata": {
             "type": "Video",
-            "width": 640,
-            "height": 360
+            "width": 320,
+            "height": 180
           },
           "content_type": "video/mp4",
-          "size": 20480
+          "size": 27865
         }
       ]
     },
