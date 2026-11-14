@@ -6,7 +6,7 @@ description = "Proof-of-concept Stoat Chat desktop client built with GPUI"
 publish = false
 
 [workspace]
-members = ["."]
+members = [".", "ios/stoat-ffi"]
 
 [features]
 default = ["desktop"]

@@ -1,0 +1,7 @@
+# Swift binding names. The app imports the generated code as part of its own
+# module; the C half is the `StoatCoreFFI` module inside the XCFramework.
+[bindings.swift]
+module_name = "StoatCore"
+ffi_module_name = "StoatCoreFFI"
+ffi_module_filename = "StoatCoreFFI"
+generate_module_map = true

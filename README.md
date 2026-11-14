@@ -95,6 +95,25 @@ RuSToat used to run as `chat.stoat.rustoat` with the Keychain service `chat.stoa
 - **The Application Support folder** `chat.stoat.rustoat` is renamed to `com.chrishultin.rustoat`, unless the new one already exists.
 - **macOS asks for notification permission again,** once, for the new bundle identifier. The old "RuSToat" entry in System Settings → Notifications can be removed.
 
+## Building for iPhone
+
+`ios/` holds a SwiftUI app for iPhone (iOS 26 or later) on the same Rust core: `ios/stoat-ffi` exposes the library, built without its `desktop` feature, to Swift through [UniFFI](https://mozilla.github.io/uniffi-rs/). The plan is in [`docs/plans/ios-app.md`](docs/plans/ios-app.md).
+
+Requirements: Xcode 26 or later with an iOS simulator, rustup (it adds the iOS targets from `rust-toolchain.toml`), and [XcodeGen](https://github.com/yonaskolb/XcodeGen):
+
+```bash
+brew install xcodegen
+scripts/ios/build-core.sh          # Rust core → ios/build/StoatCore.xcframework + Swift bindings
+(cd ios && xcodegen generate)      # ios/project.yml → ios/RuSToat.xcodeproj
+open ios/RuSToat.xcodeproj
+```
+
+Then pick an iPhone simulator and press Run. The first `build-core.sh` compiles the core in release mode for the device and the simulator, which takes a few minutes.
+
+- **Xcode rebuilds the core itself** before each build (a script phase in `project.yml`), for only the slice it needs. Cargo's change tracking keeps this to under a second when no Rust changed.
+- **`RuSToat.xcodeproj`, `ios/build/` and `ios/RuSToat/Generated/` aren't committed.** After pulling changes to `project.yml` or adding Swift files, run `xcodegen generate` again.
+- **Bindings always match the library.** They're generated from the built library by a `uniffi-bindgen` binary in `stoat-ffi` itself, from the same pinned UniFFI version.
+
 ## Releasing
 
 ```bash
@@ -133,6 +152,8 @@ The library's GPUI views, voice and macOS integrations sit behind the `desktop` 
 cargo clippy --lib --no-default-features -- -D warnings
 cargo check --lib --no-default-features --target aarch64-apple-ios
 ```
+
+`scripts/ios/test.sh` runs those, the `stoat-ffi` tests and the iPhone app's Swift tests on a simulator (the first available iPhone, or `IOS_SIMULATOR="iPhone 17"`).
 
 The tests use a mock Stoat API (`wiremock`) and an in-memory token store, so they need no network and never touch your Keychain. There are three opt-in checks:
 

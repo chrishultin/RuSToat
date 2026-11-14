@@ -4,3 +4,8 @@
 
 # Riptide artifacts (cloud-synced)
 .humanlayer/tasks/
+
+# The iPhone app: built core, bindings and the generated Xcode project
+/ios/build/
+/ios/RuSToat.xcodeproj/
+/ios/RuSToat/Generated/

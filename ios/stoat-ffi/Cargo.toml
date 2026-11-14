@@ -1,0 +1,29 @@
+[package]
+name = "stoat-ffi"
+version = "0.1.0"
+edition = "2024"
+description = "RuSToat's Rust core for the iOS app, exposed to Swift through UniFFI"
+publish = false
+
+[lib]
+# `staticlib` for the XCFramework (scripts/ios/build-core.sh); `lib` for the
+# Rust tests and the bindings generator.
+crate-type = ["staticlib", "lib"]
+
+[features]
+# The bindings generator's command line. Off in the library, so clap and
+# uniffi_bindgen stay out of the app.
+bindgen = ["uniffi/cli"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[dependencies]
+# The shared core, without GPUI, voice or `keyring`.
+stoat-gpui = { path = "../..", default-features = false }
+# Pinned: the generated Swift must match the scaffolding exactly, and the
+# generator runs from this crate (see `bindgen`).
+uniffi = "=0.32.2"
+thiserror = "2"
