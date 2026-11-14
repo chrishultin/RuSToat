@@ -245,6 +245,16 @@ impl Shared {
         (changed, reconnect)
     }
 
+    /// `channel`'s messages changed, and so may the lists (its last
+    /// message, for Home's order).
+    pub(crate) fn changed_lists_and(&self, channel: &str) {
+        self.changed(Changed {
+            lists: true,
+            timelines: vec![channel.to_string()],
+            ..Changed::default()
+        });
+    }
+
     pub(crate) fn timeline_changed(&self, channel: &str) {
         self.changed(Changed {
             timelines: vec![channel.to_string()],

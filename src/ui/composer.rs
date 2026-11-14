@@ -87,9 +87,6 @@ struct Completion {
     selected: usize,
 }
 
-/// Shown when an edit would leave the message empty (Stoat needs at least
-/// one character).
-const EMPTY_EDIT_TEXT: &str = "To delete the message, use Delete.";
 
 /// How the hint starts when Enter is held back by slowmode (see
 /// [`Composer::set_send_block`]); the time left follows.
@@ -826,7 +823,7 @@ impl Composer {
                     cx.emit(ComposerEvent::Edit { id, content });
                 }
                 SendCheck::Empty => {
-                    self.hint = Some(EMPTY_EDIT_TEXT.into());
+                    self.hint = Some(crate::draft::EMPTY_EDIT_TEXT.into());
                     cx.notify();
                 }
                 SendCheck::TooLong(_) => {}

@@ -2958,7 +2958,7 @@ impl ChatView {
                     }
                     Ok(Err(err)) => {
                         log::warn!("couldn't edit {id} in {channel}: {err:?}");
-                        edit_error_text(&err)
+                        SharedString::from(err.edit_failure_text())
                     }
                     Err(err) => {
                         log::warn!("edit task failed: {err:?}");
@@ -3247,7 +3247,7 @@ impl ChatView {
                     }
                     Ok(Err(err)) => {
                         log::warn!("couldn't delete {id} in {channel}: {err:?}");
-                        delete_error_text(&err)
+                        SharedString::from(err.delete_failure_text())
                     }
                     Err(err) => {
                         log::warn!("delete task failed: {err:?}");
@@ -13531,15 +13531,6 @@ fn composer_placeholder(channel: &ChannelEntry) -> String {
     }
 }
 
-/// What a refused delete's toast says.
-fn delete_error_text(err: &ApiError) -> SharedString {
-    use revolt_result::ErrorType;
-    match err.error_type() {
-        Some(ErrorType::MissingPermission { .. }) => "You can't delete this message.".into(),
-        _ => format!("Couldn't delete the message: {err}").into(),
-    }
-}
-
 /// What the pins panel says when loading them fails.
 fn pins_error_text(err: &ApiError) -> SharedString {
     use revolt_result::ErrorType;
@@ -13566,17 +13557,6 @@ fn search_error_text(err: &ApiError) -> SharedString {
             Some(ErrorType::InvalidOperation) => "Stoat didn't accept that search.".into(),
             _ => format!("Couldn't search: {err}").into(),
         },
-    }
-}
-
-/// What a refused edit's toast says.
-fn edit_error_text(err: &ApiError) -> SharedString {
-    use revolt_result::ErrorType;
-    match err.error_type() {
-        Some(ErrorType::MissingPermission { .. } | ErrorType::CannotEditMessage) => {
-            "You can't edit this message.".into()
-        }
-        _ => format!("Couldn't save your edit: {err}").into(),
     }
 }
 

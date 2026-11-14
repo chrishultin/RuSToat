@@ -5,6 +5,10 @@ import SwiftUI
 struct Composer: View {
     @Binding var text: String
     @Binding var replyingTo: MessageItem?
+    /// Editing one of the user's messages: the box holds its text, and
+    /// sending saves it.
+    var editing = false
+    var onCancelEdit: () -> Void = {}
     let placeholder: String
     let onChange: (String) -> Void
     let onSend: () -> Void
@@ -17,7 +21,21 @@ struct Composer: View {
     var body: some View {
         GlassEffectContainer(spacing: 8) {
             VStack(alignment: .leading, spacing: 8) {
-                if let reply = replyingTo {
+                if editing {
+                    HStack(spacing: 6) {
+                        Image(systemName: "pencil")
+                            .font(.caption)
+                        Text("Editing message")
+                            .font(.caption)
+                        Button("Cancel editing", systemImage: "xmark.circle.fill", action: onCancelEdit)
+                            .labelStyle(.iconOnly)
+                            .font(.caption)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .glassEffect(.regular, in: .capsule)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                } else if let reply = replyingTo {
                     HStack(spacing: 6) {
                         Image(systemName: "arrowshape.turn.up.left.fill")
                             .font(.caption)
@@ -44,27 +62,32 @@ struct Composer: View {
                         .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 22))
                         .onChange(of: text) { _, new in onChange(new) }
                     Button(action: send) {
-                        Image(systemName: "arrow.up")
+                        Image(systemName: editing ? "checkmark" : "arrow.up")
                             .font(.body.weight(.semibold))
                             .frame(width: 28, height: 28)
                     }
                     .buttonStyle(.glassProminent)
                     .buttonBorderShape(.circle)
-                    .disabled(empty)
-                    .accessibilityLabel("Send")
+                    .disabled(empty && !editing)
+                    .accessibilityLabel(editing ? "Save" : "Send")
                 }
             }
         }
         .padding(.horizontal, 12)
         .padding(.bottom, 8)
         .animation(.default, value: replyingTo?.key)
+        .animation(.default, value: editing)
         .onChange(of: replyingTo?.key) { _, key in
             if key != nil { focused = true }
+        }
+        .onChange(of: editing) { _, editing in
+            if editing { focused = true }
         }
     }
 
     private func send() {
-        guard !empty else { return }
+        // An empty edit is refused by the core, with a hint to use Delete.
+        guard !empty || editing else { return }
         onSend()
     }
 }

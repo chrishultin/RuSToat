@@ -1,12 +1,13 @@
 //! What can be done to a message from its menu: copying its text or a link
-//! to it, pinning, and reactions. (Editing and deleting follow.)
+//! to it, pinning, reactions, and editing and deleting the user's own.
 //!
 //! Each follows desktop's handling in `src/ui/chat.rs`.
 
+use stoat_gpui::draft::{EMPTY_EDIT_TEXT, MAX_MESSAGE_CHARS, SendCheck, check_send};
 use stoat_gpui::emoji::{self, EmojiChoice};
 use stoat_gpui::links;
 use stoat_gpui::runtime::spawn_io;
-use stoat_gpui::store::{FULL_REACTIONS_TEXT, TimelineRow};
+use stoat_gpui::store::{ChatStore, FULL_REACTIONS_TEXT, TimelineRow};
 
 use crate::CoreError;
 use crate::controller::AccountController;
@@ -224,6 +225,131 @@ impl AccountController {
             .apply_react(&channel_id, &message_id, &me, &emoji, !add);
         if undone {
             self.shared.timeline_changed(&channel_id);
+        }
+        Err(CoreError::failed(error))
+    }
+}
+
+/// Whether loaded message `id` in `channel` is the user's own.
+fn is_mine(store: &ChatStore, channel: &str, id: &str) -> bool {
+    store
+        .history(channel)
+        .is_some_and(|h| h.messages.iter().any(|m| m.id == id && m.author == store.me()))
+}
+
+/// Editing and deleting the user's own messages.
+#[uniffi::export]
+impl AccountController {
+    /// Change the text of the user's own message `message_id`. It shows at
+    /// once, marked edited; if Stoat refuses, the old text comes back and
+    /// desktop's text is returned. An edit can't empty a message (that's
+    /// Delete), and an unchanged one does nothing.
+    pub async fn edit(
+        &self,
+        channel_id: String,
+        message_id: String,
+        text: String,
+    ) -> Result<(), CoreError> {
+        let content = match check_send(&text, false) {
+            SendCheck::Ready(content) => content,
+            SendCheck::Empty => return Err(CoreError::failed(EMPTY_EDIT_TEXT)),
+            SendCheck::TooLong(chars) => {
+                return Err(CoreError::failed(format!(
+                    "This message is too long ({chars} characters; the most is {MAX_MESSAGE_CHARS})."
+                )));
+            }
+        };
+        let edit = {
+            let mut store = self.shared.store.lock().unwrap();
+            if !is_mine(&store, &channel_id, &message_id) {
+                return Err(CoreError::failed("You can only edit your own messages."));
+            }
+            if store.raw_content(&channel_id, &message_id) == Some(content.as_str()) {
+                return Ok(());
+            }
+            store.apply_local_edit(&channel_id, &message_id, &content)
+        };
+        let Some(edit) = edit else {
+            return Ok(());
+        };
+        self.shared.timeline_changed(&channel_id);
+
+        let client = self.shared.client.clone();
+        let request = spawn_io({
+            let (channel, id) = (channel_id.clone(), message_id.clone());
+            async move { client.edit_message(&channel, &id, &content).await }
+        });
+        let error = match request.await {
+            Ok(Ok(_)) => {
+                log::debug!("edited {message_id} in {channel_id}");
+                return Ok(());
+            }
+            Ok(Err(err)) => {
+                log::warn!("couldn't edit {message_id} in {channel_id}: {err:?}");
+                err.edit_failure_text()
+            }
+            Err(err) => {
+                log::warn!("edit task failed: {err:#}");
+                "Couldn't save your edit.".into()
+            }
+        };
+        let undone = self
+            .shared
+            .store
+            .lock()
+            .unwrap()
+            .undo_local_edit(&channel_id, &message_id, edit);
+        if undone {
+            self.shared.timeline_changed(&channel_id);
+        }
+        Err(CoreError::failed(error))
+    }
+
+    /// Delete the user's own message `message_id`. It goes at once; if
+    /// Stoat refuses, it comes back where it was and desktop's text is
+    /// returned. One already deleted elsewhere is fine.
+    pub async fn delete(&self, channel_id: String, message_id: String) -> Result<(), CoreError> {
+        let removed = {
+            let mut store = self.shared.store.lock().unwrap();
+            if !is_mine(&store, &channel_id, &message_id) {
+                return Err(CoreError::failed("You can only delete your own messages."));
+            }
+            store.remove_local(&channel_id, &message_id)
+        };
+        let Some(removed) = removed else {
+            return Ok(());
+        };
+        self.shared.changed_lists_and(&channel_id);
+
+        let client = self.shared.client.clone();
+        let request = spawn_io({
+            let (channel, id) = (channel_id.clone(), message_id.clone());
+            async move { client.delete_message(&channel, &id).await }
+        });
+        let error = match request.await {
+            Ok(Ok(())) => {
+                log::debug!("deleted {message_id} in {channel_id}");
+                return Ok(());
+            }
+            // Already gone (deleted elsewhere): what was wanted.
+            Ok(Err(err)) if err.is_not_found() => return Ok(()),
+            Ok(Err(err)) => {
+                log::warn!("couldn't delete {message_id} in {channel_id}: {err:?}");
+                err.delete_failure_text()
+            }
+            Err(err) => {
+                log::warn!("delete task failed: {err:#}");
+                "Couldn't delete the message.".into()
+            }
+        };
+        let restored = self
+            .shared
+            .store
+            .lock()
+            .unwrap()
+            .restore_local(&channel_id, removed);
+        if restored {
+            self.shared.changed_lists_and(&channel_id);
         }
         Err(CoreError::failed(error))
     }

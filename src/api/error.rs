@@ -153,6 +153,30 @@ impl ApiError {
         }
     }
 
+    /// Stoat has no such thing (`NotFound`): a message deleted elsewhere,
+    /// say.
+    pub fn is_not_found(&self) -> bool {
+        matches!(self.error_type(), Some(ErrorType::NotFound))
+    }
+
+    /// What a refused edit says.
+    pub fn edit_failure_text(&self) -> String {
+        match self.error_type() {
+            Some(ErrorType::MissingPermission { .. } | ErrorType::CannotEditMessage) => {
+                "You can't edit this message.".into()
+            }
+            _ => format!("Couldn't save your edit: {self}"),
+        }
+    }
+
+    /// What a refused delete says.
+    pub fn delete_failure_text(&self) -> String {
+        match self.error_type() {
+            Some(ErrorType::MissingPermission { .. }) => "You can't delete this message.".into(),
+            _ => format!("Couldn't delete the message: {self}"),
+        }
+    }
+
     /// The Stoat error type, if the server sent one.
     pub fn error_type(&self) -> Option<&ErrorType> {
         match self {

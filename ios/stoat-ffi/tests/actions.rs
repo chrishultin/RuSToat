@@ -302,3 +302,144 @@ async fn emoji_search_finds_unicode_and_the_servers_custom_emoji() {
     let picker = controller.reaction_picker("ch-general".into(), MINE.into());
     assert_eq!(picker.choices.last().unwrap().key, "01JE0000000000000000000E01");
 }
+
+// Editing and deleting.
+
+use wiremock::matchers::body_partial_json;
+
+fn message_path(id: &str) -> String {
+    format!("/channels/ch-general/messages/{id}")
+}
+
+fn bodies(controller: &AccountController) -> Vec<(String, Option<String>, bool)> {
+    controller
+        .timeline("ch-general".into())
+        .into_iter()
+        .filter_map(|row| match row {
+            TimelineItem::Message { message } => Some((message.id, message.body, message.edited)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn an_edit_shows_at_once() {
+    let events = Events::start().await;
+    let api = api(&events).await;
+    Mock::given(method("PATCH"))
+        .and(path(message_path(MINE)))
+        .and(body_partial_json(json!({ "content": "fixed" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "_id": MINE, "channel": "ch-general", "author": "u-me", "content": "fixed",
+            "edited": "2026-11-14T10:00:00.000Z"
+        })))
+        .expect(1)
+        .mount(&api)
+        .await;
+    let (controller, _) = opened(&api).await;
+    controller
+        // Trailing whitespace goes, as on desktop (leading spaces are kept).
+        .edit("ch-general".into(), MINE.into(), "fixed  \n".into())
+        .await
+        .unwrap();
+    let edited = message(&controller, MINE);
+    assert_eq!(edited.body.as_deref(), Some("fixed"));
+    assert!(edited.edited);
+    assert_eq!(controller.raw_text("ch-general".into(), MINE.into()).as_deref(), Some("fixed"));
+}
+
+#[tokio::test]
+async fn a_refused_edit_puts_the_old_text_back() {
+    let events = Events::start().await;
+    let api = api(&events).await;
+    Mock::given(method("PATCH"))
+        .and(path(message_path(MINE)))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({ "type": "CannotEditMessage" })))
+        .mount(&api)
+        .await;
+    let (controller, _) = opened(&api).await;
+    let err = controller
+        .edit("ch-general".into(), MINE.into(), "nope".into())
+        .await
+        .unwrap_err();
+    assert_eq!(err.to_string(), "You can't edit this message.");
+    let back = message(&controller, MINE);
+    assert_eq!(controller.raw_text("ch-general".into(), MINE.into()).as_deref(), Some("**mine**"));
+    assert!(!back.edited);
+}
+
+#[tokio::test]
+async fn edits_that_change_nothing_or_empty_the_message_send_nothing() {
+    let events = Events::start().await;
+    let api = api(&events).await;
+    let (controller, _) = opened(&api).await;
+    // No PATCH is mounted: any request would fail.
+    controller
+        .edit("ch-general".into(), MINE.into(), "**mine**".into())
+        .await
+        .unwrap();
+    let err = controller
+        .edit("ch-general".into(), MINE.into(), "   ".into())
+        .await
+        .unwrap_err();
+    assert_eq!(err.to_string(), "To delete the message, use Delete.");
+}
+
+#[tokio::test]
+async fn others_messages_cant_be_edited_or_deleted() {
+    let events = Events::start().await;
+    let api = api(&events).await;
+    let (controller, _) = opened(&api).await;
+    assert!(controller.edit("ch-general".into(), THEIRS.into(), "x".into()).await.is_err());
+    assert!(controller.delete("ch-general".into(), THEIRS.into()).await.is_err());
+    assert_eq!(bodies(&controller).len(), 2, "nothing removed");
+}
+
+#[tokio::test]
+async fn a_delete_removes_the_message_at_once() {
+    let events = Events::start().await;
+    let api = api(&events).await;
+    Mock::given(method("DELETE"))
+        .and(path(message_path(MINE)))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&api)
+        .await;
+    let (controller, _) = opened(&api).await;
+    controller.delete("ch-general".into(), MINE.into()).await.unwrap();
+    assert!(bodies(&controller).iter().all(|(id, ..)| id != MINE));
+    // Stoat's echo of it changes nothing more.
+    events.send(json!({ "type": "MessageDelete", "id": MINE, "channel": "ch-general" }));
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(bodies(&controller).len(), 1);
+}
+
+#[tokio::test]
+async fn a_refused_delete_puts_the_message_back_in_place() {
+    let events = Events::start().await;
+    let api = api(&events).await;
+    Mock::given(method("DELETE"))
+        .and(path(message_path(MINE)))
+        .respond_with(ResponseTemplate::new(500).set_body_string("oops"))
+        .mount(&api)
+        .await;
+    let (controller, _) = opened(&api).await;
+    let before = bodies(&controller);
+    let err = controller.delete("ch-general".into(), MINE.into()).await.unwrap_err();
+    assert!(err.to_string().starts_with("Couldn't delete the message"), "{err}");
+    assert_eq!(bodies(&controller), before);
+}
+
+#[tokio::test]
+async fn deleting_something_already_gone_is_fine() {
+    let events = Events::start().await;
+    let api = api(&events).await;
+    Mock::given(method("DELETE"))
+        .and(path(message_path(MINE)))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({ "type": "NotFound" })))
+        .mount(&api)
+        .await;
+    let (controller, _) = opened(&api).await;
+    controller.delete("ch-general".into(), MINE.into()).await.unwrap();
+    assert!(bodies(&controller).iter().all(|(id, ..)| id != MINE));
+}

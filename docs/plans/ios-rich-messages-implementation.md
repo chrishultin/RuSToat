@@ -217,3 +217,101 @@ Deferred to the end: pin on the phone and see it on desktop (needs a server wher
 
 ### Manual Validation
 Deferred to the end: react and unreact between the phone and desktop; the 20-emoji limit.
+
+## Chunk 6: Edit and delete your own messages
+
+### Changes Made
+- Core, so both apps share desktop's handling:
+  - `src/api/error.rs`: `ApiError::edit_failure_text()` and `delete_failure_text()`, moved from private functions in `src/ui/chat.rs`. Also `is_not_found()`.
+  - `src/draft.rs`: `pub const EMPTY_EDIT_TEXT`, moved from `src/ui/composer.rs`.
+  - Desktop uses all of these now; the text is unchanged.
+- `ios/stoat-ffi/src/actions.rs`:
+  - `async edit(channel, id, text) -> Result`, as desktop's `edit_message`:
+    - `draft::check_send`: blank is refused with "To delete the message, use Delete.", over-long with the count.
+    - Refused for a message that isn't the user's own; an unchanged text does nothing.
+    - `apply_local_edit` (a timeline change), then `PATCH`, then `undo_local_edit` with `edit_failure_text` on failure.
+  - `async delete(channel, id) -> Result`, as desktop's `delete_message`:
+    - Own messages only.
+    - `remove_local` (lists and timeline change), then `DELETE`; `NotFound` counts as done.
+    - Other failures call `restore_local` and return `delete_failure_text`.
+  - `is_mine` checks the loaded message's author.
+- `ios/stoat-ffi/src/controller.rs`: `Shared::changed_lists_and(channel)`.
+- `ios/stoat-ffi/tests/actions.rs`: 7 edit/delete tests, 17 in all:
+  - an edit PATCHes the content (trailing whitespace trimmed) and shows at once, `edited`;
+  - `CannotEditMessage` brings the old text back with desktop's text;
+  - unchanged or blank edits send nothing (blank gets the Delete hint);
+  - others' messages can't be edited or deleted;
+  - a delete removes at once, and its echo changes nothing more;
+  - a 500 puts the message back in place;
+  - `NotFound` counts as deleted.
+- Swift:
+  - `ios/RuSToat/Chat/Composer.swift`: an `editing` mode with a glass "Editing message" chip (✕ cancels) in place of the reply chip, a checkmark Save button, and focus on entry.
+  - `ios/RuSToat/Chat/MessageRowView.swift`: Edit and Delete Message in the menu for your own sent, non-system messages. `MessageActions.edit` and `delete`.
+  - `ios/RuSToat/Chat/ChatView.swift`:
+    - `startEditing` stashes the draft and fills the box with the message's text as typed; `finishEditing` restores the draft.
+    - Saving leaves edit mode at once, as desktop does, and runs `edit`, so a refusal shows its reason and the old text returns. A blank edit stays in the box, with the hint.
+    - Typing isn't reported while editing.
+    - A "Delete this message?" confirmation dialog.
+
+### Divergences
+- **Edit mode ends on Save, not on Stoat's answer,** as desktop's composer does. The plan didn't say which.
+- **Edit mode's visuals weren't screenshotted.** It's only reachable by long-pressing a message, and `simctl` can't tap. The logic is covered by the Rust tests, and the Swift build is warning-free.
+- **Core gained `ApiError::is_not_found()`.** The FFI crate can't depend on `revolt-result` directly, because `main` moved the `revolt-*` pins to 0.16.4.
+
+### Verification Performed
+- `cargo test -p stoat-ffi`: 76 passed (actions 17).
+- Swift: 19 tests in 7 suites passed, no warnings.
+- Desktop: `cargo test`: 1499 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings`: clean.
+- Signed device build: succeeded.
+
+### Manual Validation
+Deferred to the end: edit and delete from the phone and see desktop update; edit on desktop while the phone shows the channel; Airplane-mode rollbacks.
+
+## Summary
+
+_Completed: 2026-11-14 (code); manual checks pending._
+
+### Chunks Completed
+1. Rich text blocks: parsed in Rust with desktop's Markdown parser and options, and cached by render key; paragraphs, headings, quotes, code blocks with copy, lists, rules, maths source and tables drawn in SwiftUI.
+2. Mentions as pills (roles in colour), timestamps in local time (relative ones refreshed each minute), tap-to-reveal spoilers, and a warning before opening disguised links.
+3. Custom emoji, inline and large, from a once-per-URL image cache.
+4. The message menu (Reply, Copy Text, Copy Link, Pin/Unpin, Retry/Discard) and pins, plus the build fix that lets Xcode build straight after core API changes.
+5. Reactions: chips with tap-to-toggle and who-reacted; a picker with search that respects allowed emoji and the 20-emoji limit.
+6. Editing (in the composer) and deleting (after confirmation) your own messages, with rollback.
+
+### Divergences
+- Chunk 1: a flat span list per block instead of a nested inline tree. UniFFI handled the nested `RichBlock` as is.
+- Chunk 2:
+  - Custom text renderers don't draw on selectable text, so paragraphs with pills or spoilers aren't selectable (Copy Text covers them).
+  - Guarded links keep their `stoat:link?…` URL.
+  - `prepare` already guards links.
+- Chunk 3: no separate emoji id/name fields; 48 pt jumbo.
+- Chunk 4:
+  - Pins follow desktop (shown when Stoat's update arrives) rather than flipping optimistically; the plan was amended.
+  - Unplanned build fix: the core is read from the XCFramework's slices via search paths, the bindings are declared as the script's output and as an optional source, and the README build steps are simpler.
+- Chunk 5: long-press on a chip shows who reacted through a context menu.
+- Chunk 6:
+  - Edit mode ends on Save, as on desktop.
+  - Edit mode wasn't screenshotted.
+  - `ApiError::is_not_found()` was added.
+- Throughout: desktop's private user-facing texts (pin, reaction, edit, delete, the full-reactions and empty-edit texts) moved into core (`ApiError` methods, `store`, `draft`) so both apps show the same words. Desktop's behaviour is unchanged.
+
+### Definition of Done
+- [x] `cargo test && cargo clippy --all-targets -- -D warnings && scripts/ios/test.sh` passes (1499 desktop, 76 stoat-ffi, 19 Swift).
+- [x] Messages render paragraphs, headings, quotes, code blocks (with copy), lists, rules, tables and math source, parsed by `markdown::to_mdast` with desktop's options in `stoat-ffi` and cached by `render_key`.
+- [x] Mentions draw as pills (roles in their colour), timestamps in local time, spoilers hidden until tapped, and guarded links ask before opening. Unit-tested and screenshotted; the taps themselves are pending you.
+- [x] Custom emoji render inline and jumbo, each URL loaded once.
+- [x] The message menu offers Reply, Copy Text, Copy Link (when the instance has a web app), Pin/Unpin (when `can_pin`), and Retry/Discard for failed messages.
+- [x] Reactions show, toggle optimistically with rollback, list who reacted, and the picker respects allowed emoji and the 20-emoji limit.
+- [x] Your own messages can be edited in the composer and deleted after confirmation, both updating at once and rolling back on failure; others' can't.
+- [x] Every new action is covered by a wiremock test in `ios/stoat-ffi/tests/actions.rs`.
+
+### Remaining Manual Steps
+1. Compare a real channel with code blocks, quotes, lists and a table against desktop.
+2. Mentions as pills (a coloured role if your server has one); a `<t:…:R>` timestamp updating.
+3. Tap a spoiler; tap a disguised link and see the warning.
+4. Custom emoji inline and in emoji-only messages on a real server.
+5. React and unreact both ways with desktop; long-press a reaction to see who; try the picker's search.
+6. Pin and unpin on a server where you have Manage Messages; Copy Link and open it.
+7. Edit and delete your own messages; in Airplane mode, see each roll back with a message.
+8. Light and dark mode: pills, spoiler bars, code blocks and reaction chips stay legible.

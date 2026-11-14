@@ -32,6 +32,12 @@ struct ChatView: View {
     @State private var sendError: String?
     /// The message whose reaction picker is open.
     @State private var reactingTo: MessageItem?
+    /// The user's message being edited in the composer, and the draft it
+    /// replaced there (put back when the edit ends).
+    @State private var editing: MessageItem?
+    @State private var stashedDraft: String?
+    /// The user's message waiting for "Delete" to be confirmed.
+    @State private var deleting: MessageItem?
     /// A disguised link waiting for "Open" (its address and its text).
     @State private var guarded: (url: URL, text: String)?
     @Environment(\.scenePhase) private var scenePhase
@@ -91,6 +97,17 @@ struct ChatView: View {
                 Text("“\(guarded.text)” goes to \(guarded.url.absoluteString)")
             }
         }
+        .confirmationDialog("Delete this message?", isPresented: Binding(
+            get: { deleting != nil },
+            set: { if !$0 { deleting = nil } }
+        ), titleVisibility: .visible, presenting: deleting) { message in
+            Button("Delete", role: .destructive) {
+                if editing?.id == message.id { finishEditing() }
+                run { try await model.core.delete(channelId: route.id, messageId: message.id) }
+            }
+        } message: { _ in
+            Text("This can't be undone.")
+        }
         .sheet(item: $reactingTo) { message in
             ReactionPickerView(model: model, channelId: route.id, message: message) { key in
                 react(message.id, key)
@@ -122,9 +139,14 @@ struct ChatView: View {
                     Composer(
                         text: draft,
                         replyingTo: $replyingTo,
+                        editing: editing != nil,
+                        onCancelEdit: finishEditing,
                         placeholder: placeholderText,
                         onChange: { text in
-                            model.core.typing(channelId: route.id, empty: text.isEmpty)
+                            // Editing isn't typing a new message.
+                            if editing == nil {
+                                model.core.typing(channelId: route.id, empty: text.isEmpty)
+                            }
                         },
                         onSend: send
                     )
@@ -166,8 +188,26 @@ struct ChatView: View {
                 run { try await model.core.setPinned(channelId: route.id, messageId: id, pinned: pinned) }
             },
             react: { id, key in react(id, key) },
-            pickReaction: { message in reactingTo = message }
+            pickReaction: { message in reactingTo = message },
+            edit: startEditing,
+            delete: { message in deleting = message }
         )
+    }
+
+    private func startEditing(_ message: MessageItem) {
+        if editing == nil {
+            stashedDraft = model.drafts[route.id]
+        }
+        replyingTo = nil
+        editing = message
+        model.drafts[route.id] = model.core.rawText(channelId: route.id, messageId: message.id) ?? message.body
+    }
+
+    /// Leave edit mode, giving the composer back the draft it held before.
+    private func finishEditing() {
+        editing = nil
+        model.drafts[route.id] = stashedDraft
+        stashedDraft = nil
     }
 
     private func react(_ id: String, _ key: String) {
@@ -198,6 +238,18 @@ struct ChatView: View {
 
     private func send() {
         let text = model.drafts[route.id] ?? ""
+        if let message = editing {
+            // An empty edit stays in the box, with the hint to use Delete.
+            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                run { try await model.core.edit(channelId: route.id, messageId: message.id, text: text) }
+                return
+            }
+            // As on desktop: the edit shows at once and the box goes back
+            // to the draft; if Stoat refuses, the old text returns, with why.
+            finishEditing()
+            run { try await model.core.edit(channelId: route.id, messageId: message.id, text: text) }
+            return
+        }
         do {
             _ = try model.core.send(channelId: route.id, text: text, replyTo: replyingTo?.id)
             model.drafts[route.id] = nil

@@ -25,6 +25,10 @@ pub enum SendCheck {
     TooLong(usize),
 }
 
+/// Shown when an edit would leave the message empty (Stoat needs at least
+/// one character).
+pub const EMPTY_EDIT_TEXT: &str = "To delete the message, use Delete.";
+
 /// `has_attachments`: files go with it, so the text may be empty.
 pub fn check_send(text: &str, has_attachments: bool) -> SendCheck {
     let text = trim_message(text);

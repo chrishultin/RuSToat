@@ -21,6 +21,9 @@ struct MessageActions {
     let react: (String, String) -> Void
     /// Open the reaction picker for a message.
     let pickReaction: (MessageItem) -> Void
+    /// Edit or delete one of the user's own messages.
+    let edit: (MessageItem) -> Void
+    let delete: (MessageItem) -> Void
 }
 
 /// What tapping a `stoat:` link in a message does.
@@ -111,6 +114,11 @@ struct MessageRowView: View {
             } else {
                 Button("Pin", systemImage: "pin") { actions.setPinned(message.id, true) }
             }
+        }
+        if message.mine, message.pending == nil, !message.system {
+            Divider()
+            Button("Edit", systemImage: "pencil") { actions.edit(message) }
+            Button("Delete Message", systemImage: "trash", role: .destructive) { actions.delete(message) }
         }
         if case .failed = message.pending {
             Button("Retry", systemImage: "arrow.clockwise") { actions.retry(message.key) }
