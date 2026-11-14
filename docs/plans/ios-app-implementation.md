@@ -192,3 +192,51 @@ Deferred to the end: log in with your real account and 2FA, relaunch and land si
 
 ### Manual Validation
 Deferred to the end: compare servers and DMs with desktop, a live DM from desktop showing an unread dot, and background then return to see the reconnect banner.
+
+## Chunk 5: Reading a channel
+
+### Changes Made
+- `ios/stoat-ffi/src/timeline.rs` (new):
+  - `TimelineItem` (StartOfChannel, NewMessages, Message, Blocked) with `id()`, matching Swift's `Identifiable`.
+  - `MessageItem`, carrying `key`, `render_key`, `continuation`, `mine`, `jumbo`, `edited`, `system`, `pending`, replies, attachments and embeds.
+  - `PendingItem`, `ReplyItem`/`ReplyStateItem`, and compact `AttachmentItem` and `EmbedItem`.
+  - Conversions from the store's `TimelineRow`/`MessageRow`/`AttachmentView`/`EmbedView`.
+- `ios/stoat-ffi/src/controller.rs`:
+  - `HISTORY_PAGE = 50`.
+  - Shared state: `viewing` (the channel on screen), `dividers` (read position when opened), `reply_fetches`.
+  - `Shared::load_latest` (`fetch_messages` → `set_history`), `Shared::load_older` (`before` the oldest → `prepend_page`; returns whether there's more), and `Shared::fetch_replies` (`fetch_messages_around(…, 1)` → `add_reply_sources`, or `reply_source_unavailable`; up to 5 at a time, as desktop).
+  - On a reconnect's `Ready` (after `clear_histories`), the viewed channel is reloaded.
+  - Exported: `open_channel` (sets viewing, records the divider, loads if not loaded), `load_older`, `close_channel`, `timeline` (with `with_unread_divider`), and `mark_read`.
+  - `mark_read` only runs for the viewed channel, while connected and at the present. It acks locally with `apply_ack`, then sends `PUT …/ack/…`.
+- `ios/stoat-ffi/tests/reading.rs` (new, 8 tests): the first page loads oldest-first (opening again doesn't refetch); older pages prepend until StartOfChannel; keys stay unique and stable across a prepend; a live edit changes `render_key` and `edited`, and a delete removes the row; `mark_read` acks only the viewed, connected channel, exactly once (`expect(1)`); a reconnect reloads the open channel; the divider sits after the read position and stays until reopened; reply originals are fetched.
+- Swift:
+  - `Chat/ChatView.swift`:
+    - A `ScrollView`/`LazyVStack` with `.defaultScrollAnchor(.bottom, for: .initialOffset)` and `for: .sizeChanges`, which keeps the bottom fixed when older rows are inserted above.
+    - A top sentinel loads older pages, with Retry on error.
+    - `onScrollGeometryChange` tracks being at the bottom, and `markRead` is called only then, with the app active.
+    - A reload on `timelineVersions`/`readyCount` changes, `closeChannel` on disappear, and `stoat:` links handled as a no-op.
+    - `TimelineRowView` for StartOfChannel, the red "New messages" divider, and blocked runs. `TimelineItem: Identifiable` uses the message key.
+  - `Chat/MessageRowView.swift`: avatar and header on group starts, replies, text (`.id(renderKey)`), "(edited)", centred system messages, a `.sending` row dimmed and a failed row's reason in red. `AttachmentCard` (thumbnail or file card, opening in Safari) and `EmbedCard`.
+  - `Chat/MessageText.swift`: `AttributedString(markdown:)` with `.inlineOnlyPreservingWhitespace` and a partial-parse fallback.
+  - `Chat/ReplyPreviewView.swift`.
+  - `Home/HomeView.swift`: a navigation path, plus a DEBUG-only `RUSTOAT_DEV_OPEN` to open a channel at launch.
+- `ios/RuSToatTests/MessageTextTests.swift` (5 tests): bold and italics, code, links (http and `stoat:`), line breaks, and the fallback.
+- `README.md`: a note on `RUSTOAT_DEV_OPEN`.
+
+### Divergences
+- **Scroll position on prepend** uses `.defaultScrollAnchor(.bottom, for: .sizeChanges)`, not `scrollPosition(id:)` pinning. With bottom anchoring, rows inserted above don't move what's on screen, and new messages keep the list at the bottom. If a jump shows on a real device, the fallback is `scrollPosition(id:)`.
+- **Reply originals are fetched**, as on desktop. Otherwise replies would say "Loading…" forever.
+- **Reloading after a reconnect happens in Rust,** not Swift, so it's covered by a Rust test.
+- **The divider is fixed when the channel opens** and kept until it closes, as desktop does.
+- **Reactions are left out of `MessageItem`** (iOS milestone 2).
+- **A DEBUG-only `RUSTOAT_DEV_OPEN`** was added for simulator screenshots.
+
+### Verification Performed
+- `cargo test -p stoat-ffi --test reading`: 8 passed, three runs in a row. The full `stoat-ffi` suite: 2 + 7 + 11 + 8.
+- `cargo clippy -p stoat-ffi --all-targets -- -D warnings`: clean. `TimelineItem` has the store's `large_enum_variant` allowance.
+- Swift: 10 tests in 4 suites passed, with no warnings after fixes: the older-error text is now shown, and `MessageText.attributed` is `nonisolated`.
+- Desktop: `cargo test`: 1142 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings`: clean.
+- Simulator against `fake_stoat`, opening #general: start-of-channel header, grouped messages, `@bob`/`#random` mentions as links, a continuation without a header, the centred "Carol joined" system message, "(edited)", an image placeholder, and masquerade and webhook names.
+
+### Manual Validation
+Deferred to the end: scroll back several pages in a busy channel with no jumps or duplicates; edit and delete from desktop; check the unread dot clears on desktop after reading on the phone.

@@ -7,27 +7,37 @@
 //! reads plain-record snapshots back. The store's lock is never held across
 //! an `.await` or a call into Swift.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::StreamExt as _;
 use futures::channel::mpsc::UnboundedReceiver;
-use stoat_gpui::api::StoatClient;
+use stoat_gpui::api::{ApiError, StoatClient};
 use stoat_gpui::api::events::{self, Connection, ConnectionEvent};
 use stoat_gpui::live::{self, Changed};
 use stoat_gpui::media::MediaUrls;
 use stoat_gpui::notify::{self, NotificationSettings};
 use stoat_gpui::rail::{self, Ordering, ServerFolders};
-use stoat_gpui::runtime::runtime;
-use stoat_gpui::store::{ChannelEntry, ChannelKind, ChannelSection, ChatStore, ServerEntry};
+use stoat_gpui::runtime::{runtime, spawn_io};
+use stoat_gpui::store::{
+    ChannelEntry, ChannelKind, ChannelSection, ChatStore, ServerEntry, with_unread_divider,
+};
 
 use crate::CoreError;
 use crate::session::Core;
+use crate::timeline::{self, TimelineItem};
 
 /// How long to gather a burst of events (a `Ready`, a busy channel) before
 /// telling Swift once.
 const COALESCE: Duration = Duration::from_millis(50);
+
+/// Messages per page, as on desktop.
+pub const HISTORY_PAGE: usize = 50;
+
+/// Most reply originals fetched at once for one channel.
+const REPLY_FETCHES: usize = 5;
 
 /// What changed, so Swift knows what to read again.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -172,6 +182,14 @@ pub(crate) struct Shared {
     listener: Box<dyn ControllerListener>,
     /// A `Ready` has arrived before, so the next one is a reconnect.
     has_ready: AtomicBool,
+    /// The channel on screen, if any. Only it is marked read, and it's
+    /// reloaded after a reconnect.
+    viewing: Mutex<Option<String>>,
+    /// Where each open channel's "New messages" divider goes: the read
+    /// position when it was opened, if it had anything unread.
+    dividers: Mutex<HashMap<String, Option<String>>>,
+    /// Reply originals being fetched, by message ID.
+    reply_fetches: Mutex<HashSet<String>>,
 }
 
 impl Shared {
@@ -183,15 +201,97 @@ impl Shared {
 
     /// Apply one event to the store. A reconnect's `Ready` also drops
     /// loaded history, since events were missed while offline (as desktop).
-    fn apply(&self, event: events::ServerEvent) -> Changed {
+    /// Returns what changed, and whether it was a reconnect's `Ready`.
+    fn apply(&self, event: events::ServerEvent) -> (Changed, bool) {
         let ready = matches!(event, events::ServerEvent::Ready(_));
         let mut store = self.store.lock().unwrap();
         let changed = live::apply_event(&mut store, event, notify::now_ms().max(0) as u64);
-        if ready && self.has_ready.swap(true, AtomicOrdering::SeqCst) {
+        let reconnect = ready && self.has_ready.swap(true, AtomicOrdering::SeqCst);
+        if reconnect {
             log::info!("reconnected: dropping loaded history");
             store.clear_histories();
         }
-        changed
+        (changed, reconnect)
+    }
+
+    fn timeline_changed(&self, channel: &str) {
+        self.changed(Changed {
+            timelines: vec![channel.to_string()],
+            ..Changed::default()
+        });
+    }
+
+    /// Load `channel`'s latest page, replacing what's loaded (as desktop's
+    /// `load_history`).
+    async fn load_latest(self: Arc<Self>, channel: String) -> Result<(), ApiError> {
+        let page = self
+            .client
+            .fetch_messages(&channel, None, HISTORY_PAGE as i64)
+            .await?;
+        self.store
+            .lock()
+            .unwrap()
+            .set_history(&channel, page, HISTORY_PAGE);
+        self.timeline_changed(&channel);
+        runtime().spawn(self.clone().fetch_replies(channel));
+        Ok(())
+    }
+
+    /// Load the page before `channel`'s oldest loaded message. Whether
+    /// there's more before it.
+    async fn load_older(self: Arc<Self>, channel: String) -> Result<bool, ApiError> {
+        let before = {
+            let store = self.store.lock().unwrap();
+            match store.history(&channel) {
+                Some(history) if !history.exhausted => store.oldest_message_id(&channel).map(str::to_string),
+                _ => None,
+            }
+        };
+        let Some(before) = before else {
+            return Ok(false);
+        };
+        let page = self
+            .client
+            .fetch_messages(&channel, Some(&before), HISTORY_PAGE as i64)
+            .await?;
+        let more = {
+            let mut store = self.store.lock().unwrap();
+            store.prepend_page(&channel, page, HISTORY_PAGE);
+            store.history(&channel).is_some_and(|h| !h.exhausted)
+        };
+        self.timeline_changed(&channel);
+        runtime().spawn(self.clone().fetch_replies(channel));
+        Ok(more)
+    }
+
+    /// Fetch the originals of replies that aren't loaded (as desktop's
+    /// `fetch_reply_sources`), a few at a time.
+    async fn fetch_replies(self: Arc<Self>, channel: String) {
+        let missing = self.store.lock().unwrap().missing_reply_sources(&channel);
+        let wanted: Vec<String> = {
+            let mut fetching = self.reply_fetches.lock().unwrap();
+            missing
+                .into_iter()
+                .filter(|id| fetching.len() < REPLY_FETCHES && fetching.insert(id.clone()))
+                .collect()
+        };
+        for id in wanted {
+            let result = self.client.fetch_messages_around(&channel, &id, 1).await;
+            {
+                let mut store = self.store.lock().unwrap();
+                match result {
+                    Ok(page) => store.add_reply_sources(page, std::slice::from_ref(&id)),
+                    // Tried again with the next load.
+                    Err(ApiError::RateLimited { .. }) => {}
+                    Err(err) => {
+                        log::warn!("couldn't load reply source {id}: {err}");
+                        store.reply_source_unavailable(&id);
+                    }
+                }
+            }
+            self.reply_fetches.lock().unwrap().remove(&id);
+            self.timeline_changed(&channel);
+        }
     }
 
     /// The user settings `Ready` doesn't bring: notification levels and
@@ -272,9 +372,18 @@ impl Shared {
             let status = match event {
                 ConnectionEvent::Event(event) => {
                     let ready = matches!(event, events::ServerEvent::Ready(_));
-                    let changed = self.apply(event);
+                    let (changed, reconnect) = self.apply(event);
                     if ready {
                         runtime().spawn(self.clone().fetch_settings());
+                    }
+                    // Events were missed while offline: reload what's on screen.
+                    if reconnect && let Some(channel) = self.viewing.lock().unwrap().clone() {
+                        let shared = self.clone();
+                        runtime().spawn(async move {
+                            if let Err(err) = shared.load_latest(channel.clone()).await {
+                                log::warn!("couldn't reload {channel} after reconnecting: {err}");
+                            }
+                        });
                     }
                     if !changed.is_empty() {
                         pending.merge(changed);
@@ -336,6 +445,9 @@ impl AccountController {
                 store: Mutex::new(store),
                 listener,
                 has_ready: AtomicBool::new(false),
+                viewing: Mutex::new(None),
+                dividers: Mutex::new(HashMap::new()),
+                reply_fetches: Mutex::new(HashSet::new()),
             }),
             running: Mutex::new(None),
         })
@@ -443,5 +555,113 @@ impl AccountController {
             servers_unread,
             servers_mentions: count(servers_mentions),
         }
+    }
+}
+
+/// Reading a channel.
+#[uniffi::export]
+impl AccountController {
+    /// The user opened `channel_id`: it's on screen from now on (marked
+    /// read, reloaded after a reconnect) until [`Self::close_channel`].
+    /// Loads its latest messages if they aren't loaded.
+    pub async fn open_channel(&self, channel_id: String) -> Result<(), CoreError> {
+        let shared = &self.shared;
+        *shared.viewing.lock().unwrap() = Some(channel_id.clone());
+        let loaded = {
+            let store = shared.store.lock().unwrap();
+            // Where the user left off, before reading here moves it.
+            let after = store
+                .is_unread(&channel_id)
+                .then(|| store.read_position(&channel_id).map(str::to_string))
+                .flatten();
+            shared
+                .dividers
+                .lock()
+                .unwrap()
+                .entry(channel_id.clone())
+                .or_insert(after);
+            store.history(&channel_id).is_some()
+        };
+        if loaded {
+            runtime().spawn(shared.clone().fetch_replies(channel_id));
+            return Ok(());
+        }
+        spawn_io(shared.clone().load_latest(channel_id))
+            .await
+            .map_err(CoreError::failed)??;
+        Ok(())
+    }
+
+    /// Load older messages. Whether there are more before them.
+    pub async fn load_older(&self, channel_id: String) -> Result<bool, CoreError> {
+        Ok(spawn_io(self.shared.clone().load_older(channel_id))
+            .await
+            .map_err(CoreError::failed)??)
+    }
+
+    /// The user left `channel_id`.
+    pub fn close_channel(&self, channel_id: String) {
+        let mut viewing = self.shared.viewing.lock().unwrap();
+        if viewing.as_deref() == Some(channel_id.as_str()) {
+            *viewing = None;
+        }
+        self.shared.dividers.lock().unwrap().remove(&channel_id);
+    }
+
+    /// `channel_id`'s rows, oldest first, with the "New messages" divider
+    /// where the user left off. Empty until loaded.
+    pub fn timeline(&self, channel_id: String) -> Vec<TimelineItem> {
+        let rows = self.shared.store.lock().unwrap().timeline(&channel_id);
+        let divider = self
+            .shared
+            .dividers
+            .lock()
+            .unwrap()
+            .get(&channel_id)
+            .cloned()
+            .flatten();
+        let rows = match divider {
+            Some(after) => with_unread_divider(rows, &after),
+            None => rows,
+        };
+        rows.into_iter().map(timeline::item).collect()
+    }
+
+    /// Mark `channel_id` read up to its newest message, if it's the channel
+    /// on screen, the app is connected (so in the foreground), and there's
+    /// anything to mark. Swift calls this while the newest message is in
+    /// view. Whether it marked anything.
+    pub fn mark_read(&self, channel_id: String) -> bool {
+        if self.running.lock().unwrap().is_none()
+            || self.shared.viewing.lock().unwrap().as_deref() != Some(channel_id.as_str())
+        {
+            return false;
+        }
+        let latest = {
+            let mut store = self.shared.store.lock().unwrap();
+            // What's loaded isn't the newest, so reading it says nothing
+            // about what's after it.
+            if !store.is_at_present(&channel_id) {
+                return false;
+            }
+            let Some(latest) = store.unacked_latest(&channel_id) else {
+                return false;
+            };
+            // Cleared here straight away; the request follows.
+            store.apply_ack(&channel_id, &latest);
+            latest
+        };
+        self.shared.changed(Changed {
+            lists: true,
+            ..Changed::default()
+        });
+        let client = self.shared.client.clone();
+        runtime().spawn(async move {
+            match client.ack_message(&channel_id, &latest).await {
+                Ok(()) => log::debug!("acked {channel_id} up to {latest}"),
+                Err(err) => log::warn!("couldn't mark {channel_id} read: {err}"),
+            }
+        });
+        true
     }
 }

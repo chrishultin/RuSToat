@@ -8,6 +8,7 @@ uniffi::setup_scaffolding!();
 
 pub mod controller;
 pub mod session;
+pub mod timeline;
 
 /// An error Swift can show as it is: `message` is user-facing text.
 #[derive(Debug, thiserror::Error, uniffi::Error)]

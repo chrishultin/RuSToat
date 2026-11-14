@@ -112,7 +112,7 @@ Then pick an iPhone simulator and press Run. The first `build-core.sh` compiles 
 
 - **Xcode rebuilds the core itself** before each build (a script phase in `project.yml`), for only the slice it needs. Cargo's change tracking keeps this to under a second when no Rust changed.
 - **`RuSToat.xcodeproj`, `ios/build/` and `ios/RuSToat/Generated/` aren't committed.** After pulling changes to `project.yml` or adding Swift files, run `xcodegen generate` again.
-- **Trying it without a real account:** `cargo run -p stoat-ffi --example fake_stoat` serves the test fixtures (REST and the events websocket) on localhost and prints the address. Log in there with any email and password, or have a Debug build log in at launch: `SIMCTL_CHILD_RUSTOAT_DEV_LOGIN=http://127.0.0.1:PORT xcrun simctl launch booted com.chrishultin.rustoat.ios`.
+- **Trying it without a real account:** `cargo run -p stoat-ffi --example fake_stoat` serves the test fixtures (REST and the events websocket) on localhost and prints the address. Log in there with any email and password, or have a Debug build log in at launch: `SIMCTL_CHILD_RUSTOAT_DEV_LOGIN=http://127.0.0.1:PORT xcrun simctl launch booted com.chrishultin.rustoat.ios`. Add `SIMCTL_CHILD_RUSTOAT_DEV_OPEN=ch-general` to open a channel straight away.
 - **Bindings always match the library.** They're generated from the built library by a `uniffi-bindgen` binary in `stoat-ffi` itself, from the same pinned UniFFI version.
 
 ## Releasing
