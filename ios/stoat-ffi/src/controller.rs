@@ -707,6 +707,17 @@ impl AccountController {
         self.shared.dividers.lock().unwrap().remove(&channel_id);
     }
 
+    /// Show spoiler `index` of message `message_id` for the rest of the
+    /// session (the user tapped it).
+    pub fn reveal_spoiler(&self, channel_id: String, message_id: String, index: u32) {
+        self.shared
+            .store
+            .lock()
+            .unwrap()
+            .reveal_spoiler(&message_id, index as usize);
+        self.shared.timeline_changed(&channel_id);
+    }
+
     /// `channel_id`'s rows, oldest first, with the "New messages" divider
     /// where the user left off. Empty until loaded.
     pub fn timeline(&self, channel_id: String) -> Vec<TimelineItem> {

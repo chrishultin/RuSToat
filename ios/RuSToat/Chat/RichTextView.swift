@@ -97,18 +97,56 @@ struct RichBlockView: View {
     }
 }
 
-/// A run of spans as one `Text`, so it wraps and selects as a paragraph.
+/// A run of spans as one `Text`, so it wraps as a paragraph. Mentions and
+/// timestamps get a pill behind them, and hidden spoiler words a bar over
+/// them, drawn by `RichTextRenderer`. SwiftUI doesn't draw a custom
+/// renderer on selectable text, so only paragraphs without those are
+/// selectable (the message menu's Copy Text covers the rest).
 struct RichSpansText: View {
     let spans: [RichSpan]
 
     var body: some View {
-        Text(Self.attributed(spans))
-            .textSelection(.enabled)
-            .fixedSize(horizontal: false, vertical: true)
+        if spans.contains(where: { $0.kind != .text && $0.kind != .break }) {
+            Self.text(spans)
+                .textRenderer(RichTextRenderer())
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            Text(Self.attributed(spans))
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// The spans as one `Text`, each marked for the renderer as needed.
+    static func text(_ spans: [RichSpan]) -> Text {
+        spans.reduce(Text(verbatim: "")) { result, span in
+            var part = Text(attributed([span]))
+            switch span.kind {
+            case .mention(let kind, let colour):
+                part = part.customAttribute(Pill(tint: mentionTint(kind, colour)))
+            case .time:
+                part = part.customAttribute(Pill(tint: .secondary))
+            case .spoiler:
+                part = part.customAttribute(SpoilerBar())
+            case .text, .break:
+                break
+            }
+            return Text("\(result)\(part)")
+        }
+    }
+
+    /// A mention's colour: a role's own, else the accent colour.
+    static func mentionTint(_ kind: MentionKind, _ colour: String?) -> Color {
+        if kind == .role, let colour, let rgb = UInt32(colour.dropFirst(), radix: 16) {
+            return Color(red: Double((rgb >> 16) & 0xff) / 255,
+                         green: Double((rgb >> 8) & 0xff) / 255,
+                         blue: Double(rgb & 0xff) / 255)
+        }
+        return .accentColor
     }
 
     /// `spans` as styled text: bold, italics, strikethrough and code from
-    /// their flags, links from their URLs.
+    /// their flags, links from their URLs, and mentions in their colour.
     nonisolated static func attributed(_ spans: [RichSpan]) -> AttributedString {
         var out = AttributedString()
         for span in spans {
@@ -122,9 +160,48 @@ struct RichSpansText: View {
             if let link = span.link, let url = URL(string: link) {
                 part.link = url
             }
+            switch span.kind {
+            case .mention:
+                // Drawn in the pill's colour, not as a link's underline.
+                part.underlineStyle = nil
+                part.inlinePresentationIntent = (part.inlinePresentationIntent ?? []).union(.stronglyEmphasized)
+            default:
+                break
+            }
             out.append(part)
         }
         return out
+    }
+}
+
+/// Marks a mention or timestamp: drawn on a pill of `tint`.
+struct Pill: TextAttribute {
+    let tint: Color
+}
+
+/// Marks a hidden spoiler word: drawn as a bar until revealed.
+struct SpoilerBar: TextAttribute {}
+
+/// Draws message text, with pills behind mentions and timestamps and bars
+/// in place of hidden spoiler words. The layout is untouched, so lines
+/// don't move when a spoiler is revealed or a pill is drawn.
+struct RichTextRenderer: TextRenderer {
+    func draw(layout: Text.Layout, in context: inout GraphicsContext) {
+        for line in layout {
+            for run in line {
+                let bounds = run.typographicBounds.rect
+                if let pill = run[Pill.self] {
+                    let shape = Path(roundedRect: bounds.insetBy(dx: -2, dy: -1), cornerRadius: 5)
+                    context.fill(shape, with: .color(pill.tint.opacity(0.18)))
+                    context.draw(run)
+                } else if run[SpoilerBar.self] != nil {
+                    let shape = Path(roundedRect: bounds.insetBy(dx: 0, dy: 1), cornerRadius: 4)
+                    context.fill(shape, with: .color(.gray.opacity(0.55)))
+                } else {
+                    context.draw(run)
+                }
+            }
+        }
     }
 }
 

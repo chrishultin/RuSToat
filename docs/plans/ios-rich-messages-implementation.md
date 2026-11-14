@@ -41,3 +41,55 @@ Mode: continuous, with manual checks batched to the end, as for milestone 1. Bra
 
 ### Manual Validation
 Deferred to the end: compare a real channel with code blocks and quotes against desktop.
+
+## Chunk 2: Mentions, timestamps, spoilers and guarded links
+
+### Changes Made
+- `ios/stoat-ffi/src/rich_text.rs`:
+  - `SpanKind` gains `Mention { kind: MentionKind, colour }`, `Time { full }` and `Spoiler { index }`, with `MentionKind` covering User, Role, Channel, Everyone and Online.
+  - `stoat:` link targets are decoded with `markdown::parse_internal_link`; a role's colour comes through as `#rrggbb`.
+  - Timestamps are formatted in local time with `time::format_timestamp`, plus `timestamp_tooltip` as `full`.
+  - Spoiler words keep their `stoat:spoiler/…` link for taps. `stoat:link?…` (guarded) links keep their internal URL.
+  - Spans merge only with the same kind.
+  - `RichCache::get` keys text with a relative timestamp by the current minute too, so "in 3 hours" is reparsed each minute.
+  - Added a `chrono` dependency (the version already in the tree).
+- `ios/stoat-ffi/src/timeline.rs`: `MessageItem.relative_time` (from `markdown::has_relative_time`).
+- `ios/stoat-ffi/src/controller.rs`: `reveal_spoiler(channel, message, index)`, which calls `ChatStore::reveal_spoiler` and reports a timeline change.
+- `ios/stoat-ffi/tests/rich_text.rs`: 5 more tests, 20 in all:
+  - mention kinds and colours;
+  - a timestamp's text and its full form;
+  - hidden spoiler words through the real `prepare`, and revealed ones as code;
+  - a guarded link through `prepare`;
+  - the relative-time cache key.
+- `ios/stoat-ffi/tests/reading.rs`: `revealing_a_spoiler_redraws_its_message` (the `render_key` changes, no spoiler words remain, and a timeline change is reported).
+- `tests/fixtures/messages_rich.json`: a message with a user mention, a channel mention, `@everyone`, absolute and relative timestamps, a spoiler, and a disguised link.
+- Swift:
+  - `ios/RuSToat/Chat/RichTextView.swift`:
+    - `Pill` and `SpoilerBar` (`TextAttribute`s), and `RichTextRenderer` (`TextRenderer`), which draws a tinted rounded pill behind mentions and timestamps and a grey bar in place of hidden spoiler words, without moving the layout.
+    - `RichSpansText.text(_:)` builds one `Text` per paragraph from span `Text`s through interpolation, marking each.
+    - `mentionTint` gives a role its own colour, otherwise the accent colour.
+    - Mention spans are bold, without an underline.
+  - `ios/RuSToat/Chat/MessageRowView.swift`:
+    - `InternalLinkTap` parses `stoat:spoiler/N/…` and `stoat:link?url=…&text=…`, with form decoding: `+` becomes a space.
+    - A per-row `OpenURLAction` reveals spoilers and asks before opening guarded links; other `stoat:` links do nothing.
+    - `MessageActions` gains `revealSpoiler` and `openGuarded`.
+  - `ios/RuSToat/Chat/ChatView.swift`: an "Open this link?" alert showing the text and the real address; open-channel rows with relative times are redrawn each minute.
+- `ios/RuSToatTests/RichTextTests.swift`: `InternalLinkTapTests` (spoiler, guarded link, mention ignored, role colour).
+
+### Divergences
+- **`.textSelection(.enabled)` turns off custom `TextRenderer`s.** The first screenshot showed no pills or bars, and the spoiler as a plain link. Removing selection made them draw. So paragraphs containing a mention, timestamp or spoiler use the renderer and aren't selectable; all other text stays selectable. Copy Text (chunk 4) covers whole messages. This is the risk the plan named; the planned fallback (no pills) wasn't needed.
+- **No separate `Link { url, external_text }` span kind.** A guarded link keeps its `stoat:link?…` URL, and Swift decodes the real address from it when tapped.
+- **Desktop's `guard_links` is already applied inside `prepare`.** Guarding again in `blocks` was tried, broke reference links, and was reverted.
+
+### Verification Performed
+- `cargo test -p stoat-ffi`: 57 passed (rich_text 20, reading 9, plus the rest).
+- Swift: 16 tests in 5 suites passed, no warnings.
+- Desktop: `cargo test`: 1499 passed, 0 failed, 5 ignored. `cargo clippy --all-targets -- -D warnings`: clean.
+- Simulator against `fake_stoat`, opening #random:
+  - `@me`, `#general` and `@everyone` drawn as tinted pills;
+  - "Friday, 15 January 2027 01:00" and "in 2 months" as pills;
+  - "the cake is a lie" as grey bars;
+  - "click me" as a link (the tap warning is covered by unit tests).
+
+### Manual Validation
+Deferred to the end: tap a spoiler on a real message; tap a disguised link and see the warning.

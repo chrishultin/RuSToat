@@ -167,3 +167,89 @@ impl stoat_gpui::markdown::Names for Names {
         None
     }
 }
+
+use stoat_ffi::rich_text::MentionKind;
+
+fn spans_of(markdown: &str) -> Vec<RichSpan> {
+    match blocks(markdown).into_iter().next() {
+        Some(RichBlock::Paragraph { spans }) => spans,
+        other => panic!("expected a paragraph, got {other:?}"),
+    }
+}
+
+#[test]
+fn mentions_carry_their_kind_and_colour() {
+    let spans = spans_of(
+        "[@Ada](stoat:user/u-ada) [@Mods](stoat:role/r1/ff0000) [@Plain](stoat:role/r2) \
+         [#general](stoat:channel/ch-general) [@everyone](stoat:everyone) [@online](stoat:online)",
+    );
+    let kind = |text: &str| spans.iter().find(|s| s.text == text).map(|s| s.kind.clone());
+    assert_eq!(kind("@Ada"), Some(SpanKind::Mention { kind: MentionKind::User, colour: None }));
+    assert_eq!(
+        kind("@Mods"),
+        Some(SpanKind::Mention { kind: MentionKind::Role, colour: Some("#ff0000".into()) })
+    );
+    assert_eq!(kind("@Plain"), Some(SpanKind::Mention { kind: MentionKind::Role, colour: None }));
+    assert_eq!(
+        kind("#general"),
+        Some(SpanKind::Mention { kind: MentionKind::Channel, colour: None })
+    );
+    assert_eq!(
+        kind("@everyone"),
+        Some(SpanKind::Mention { kind: MentionKind::Everyone, colour: None })
+    );
+    assert_eq!(kind("@online"), Some(SpanKind::Mention { kind: MentionKind::Online, colour: None }));
+    // Each keeps its link, for taps.
+    assert!(spans.iter().any(|s| s.link.as_deref() == Some("stoat:user/u-ada")));
+}
+
+#[test]
+fn timestamps_show_in_local_time() {
+    let spans = spans_of(r"at [\<t\:1700000000\:D\>](stoat:time/1700000000/D) ok");
+    let time = spans.iter().find(|s| matches!(s.kind, SpanKind::Time { .. })).unwrap();
+    let when = stoat_gpui::time::local_from_seconds(1_700_000_000).unwrap();
+    let now = chrono::Local::now();
+    assert_eq!(time.text, stoat_gpui::time::format_timestamp(&when, Some('D'), &now));
+    let SpanKind::Time { full } = &time.kind else { unreachable!() };
+    assert_eq!(*full, stoat_gpui::time::timestamp_tooltip(&when));
+}
+
+#[test]
+fn hidden_spoilers_are_spoiler_words() {
+    let prepared = stoat_gpui::markdown::prepare("look ||secret words|| here", &Names);
+    let spans = spans_of(&prepared);
+    let words: Vec<_> = spans
+        .iter()
+        .filter(|s| matches!(s.kind, SpanKind::Spoiler { index: 0 }))
+        .map(|s| s.text.as_str())
+        .collect();
+    assert_eq!(words.concat().trim(), "secret words");
+    assert!(spans.iter().all(|s| !matches!(s.kind, SpanKind::Spoiler { .. })
+        || s.link.as_deref().is_some_and(|l| l.starts_with("stoat:spoiler/0/"))));
+    // Revealed, it's inline code with no spoiler words.
+    let revealed = stoat_gpui::markdown::prepare_with("look ||secret words|| here", &Names, |_| true);
+    let spans = spans_of(&revealed);
+    assert!(spans.iter().all(|s| !matches!(s.kind, SpanKind::Spoiler { .. })));
+    assert!(spans.iter().any(|s| s.code && s.text.contains("secret words")));
+}
+
+#[test]
+fn guarded_links_keep_their_internal_url() {
+    // `prepare` guards links whose text isn't their address.
+    let prepared = stoat_gpui::markdown::prepare("[click me](https://evil.example)", &Names);
+    let spans = spans_of(&prepared);
+    let link = spans.iter().find(|s| s.text == "click me").unwrap();
+    assert!(link.link.as_deref().unwrap().starts_with("stoat:link?"), "{link:?}");
+    assert_eq!(link.kind, SpanKind::Text);
+}
+
+#[test]
+fn relative_timestamps_are_parsed_again_later() {
+    let cache = RichCache::default();
+    let relative = r"[\<t\:1700000000\:R\>](stoat:time/1700000000/R)";
+    let a = cache.get("m:1", relative);
+    let b = cache.get("m:1", relative);
+    // Same minute: one entry, keyed by the minute.
+    assert!(std::sync::Arc::ptr_eq(&a, &b));
+    assert_eq!(cache.len(), 1);
+}

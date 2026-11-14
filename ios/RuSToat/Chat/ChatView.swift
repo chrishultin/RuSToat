@@ -28,6 +28,8 @@ struct ChatView: View {
     @State private var position = ScrollPosition(edge: .bottom)
     @State private var replyingTo: MessageItem?
     @State private var sendError: String?
+    /// A disguised link waiting for "Open" (its address and its text).
+    @State private var guarded: (url: URL, text: String)?
     @Environment(\.scenePhase) private var scenePhase
 
     private var hasMore: Bool {
@@ -71,7 +73,30 @@ struct ChatView: View {
             // Mentions, channels and the like open in-app later.
             url.scheme == "stoat" ? .handled : .systemAction
         })
+        .alert("Open this link?", isPresented: Binding(
+            get: { guarded != nil },
+            set: { if !$0 { guarded = nil } }
+        )) {
+            Button("Open") {
+                if let url = guarded?.url { UIApplication.shared.open(url) }
+                guarded = nil
+            }
+            Button("Cancel", role: .cancel) { guarded = nil }
+        } message: {
+            if let guarded {
+                Text("“\(guarded.text)” goes to \(guarded.url.absoluteString)")
+            }
+        }
         .task(id: route.id) { await open() }
+        // Relative timestamps ("in 3 hours") move on each minute.
+        .task(id: route.id) {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(60))
+                if rows.contains(where: { if case .message(let m) = $0 { m.relativeTime } else { false } }) {
+                    refresh()
+                }
+            }
+        }
         .onDisappear { model.core.closeChannel(channelId: route.id) }
         .onChange(of: model.timelineVersions[route.id]) { refresh() }
         .onChange(of: model.readyCount) { refresh() }
@@ -120,7 +145,11 @@ struct ChatView: View {
         MessageActions(
             reply: { message in replyingTo = message },
             retry: { key in model.core.retry(channelId: route.id, key: key) },
-            discard: { key in model.core.discard(channelId: route.id, key: key) }
+            discard: { key in model.core.discard(channelId: route.id, key: key) },
+            revealSpoiler: { message, index in
+                model.core.revealSpoiler(channelId: route.id, messageId: message, index: index)
+            },
+            openGuarded: { url, text in guarded = (url, text) }
         )
     }
 

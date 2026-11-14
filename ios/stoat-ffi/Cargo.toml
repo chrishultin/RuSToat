@@ -34,6 +34,8 @@ futures = "0.3"
 # Message Markdown, parsed with the same crate (and options) desktop's
 # TextView uses, so both apps split messages the same way.
 markdown = "1"
+# Timestamps' local time, as the core formats them.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tokio = { version = "1", features = ["time"] }
 
 [dev-dependencies]

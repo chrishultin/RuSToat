@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import Testing
 @testable import RuSToat
 
@@ -65,5 +66,26 @@ struct RichTextTests {
         #expect(RichBlockView.marker(ordered: true, number: 3, checked: nil) == "3.")
         #expect(RichBlockView.marker(ordered: false, number: 1, checked: nil) == "•")
         #expect(RichBlockView.marker(ordered: false, number: 1, checked: true) == "☑")
+    }
+}
+
+/// Spoiler and guarded-link taps.
+struct InternalLinkTapTests {
+    @Test func spoilerWords() {
+        #expect(InternalLinkTap(URL(string: "stoat:spoiler/2/0/3")!) == .spoiler(index: 2))
+    }
+
+    @Test func guardedLinks() {
+        let url = URL(string: "stoat:link?url=https%3A%2F%2Fevil.example%2Fx&text=click+me")!
+        #expect(InternalLinkTap(url) == .guarded(url: URL(string: "https://evil.example/x")!, text: "click me"))
+    }
+
+    @Test func mentionsDoNothingYet() {
+        #expect(InternalLinkTap(URL(string: "stoat:user/u-ada")!) == .ignore)
+    }
+
+    @Test func roleColoursAreParsed() {
+        #expect(RichSpansText.mentionTint(.role, "#ff0000") == Color(red: 1, green: 0, blue: 0))
+        #expect(RichSpansText.mentionTint(.user, nil) == .accentColor)
     }
 }

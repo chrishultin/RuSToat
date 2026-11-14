@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use markdown::mdast::Node;
+use stoat_gpui::markdown::{InternalLink, has_relative_time, parse_internal_link};
 
 /// A block of a message.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
@@ -90,6 +91,27 @@ pub enum SpanKind {
     Text,
     /// A line break inside the block (`text` is "\n").
     Break,
+    /// A mention, drawn as a pill. `colour` (`#rrggbb`) for a role with a
+    /// solid one.
+    Mention {
+        kind: MentionKind,
+        colour: Option<String>,
+    },
+    /// A `<t:…>` timestamp, its `text` in local time (as desktop shows
+    /// it). `full` is the whole date and time, for accessibility.
+    Time { full: String },
+    /// A word of a hidden spoiler, drawn as a bar. Tapping it (its link is
+    /// `stoat:spoiler/…`) reveals spoiler `index` of the message.
+    Spoiler { index: u32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum MentionKind {
+    User,
+    Role,
+    Channel,
+    Everyone,
+    Online,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -100,7 +122,8 @@ struct Style {
     code: bool,
 }
 
-/// `prepared` (Markdown from `markdown::prepare`) as blocks.
+/// `prepared` (Markdown from `markdown::prepare`, whose links are already
+/// guarded: see `markdown::guard_links`) as blocks.
 pub fn blocks(prepared: &str) -> Vec<RichBlock> {
     let mut options = markdown::ParseOptions::gfm();
     options.constructs.math_text = true;
@@ -235,35 +258,94 @@ impl Parser {
     fn spans(&self, nodes: &[Node]) -> Vec<RichSpan> {
         let mut out = Vec::new();
         for node in nodes {
-            self.inline(node, Style::default(), None, &mut out);
+            self.inline(node, Style::default(), None, &SpanKind::Text, &mut out);
         }
         merge(out)
     }
 
-    fn inline(&self, node: &Node, style: Style, link: Option<&str>, out: &mut Vec<RichSpan>) {
-        let children = |style: Style, link: Option<&str>, out: &mut Vec<RichSpan>| {
+    fn inline(
+        &self,
+        node: &Node,
+        style: Style,
+        link: Option<&str>,
+        kind: &SpanKind,
+        out: &mut Vec<RichSpan>,
+    ) {
+        let children = |style: Style, link: Option<&str>, kind: &SpanKind, out: &mut Vec<RichSpan>| {
             for child in node.children().into_iter().flatten() {
-                self.inline(child, style, link, out);
+                self.inline(child, style, link, kind, out);
             }
         };
         match node {
-            Node::Text(text) => out.push(span(&text.value, style, link, SpanKind::Text)),
+            Node::Text(text) => out.push(span(&text.value, style, link, kind.clone())),
             Node::Break(_) => out.push(span("\n", style, link, SpanKind::Break)),
-            Node::Strong(_) => children(Style { bold: true, ..style }, link, out),
-            Node::Emphasis(_) => children(Style { italic: true, ..style }, link, out),
-            Node::Delete(_) => children(Style { strike: true, ..style }, link, out),
-            Node::InlineCode(code) => {
-                out.push(span(&code.value, Style { code: true, ..style }, link, SpanKind::Text))
+            Node::Strong(_) => children(Style { bold: true, ..style }, link, kind, out),
+            Node::Emphasis(_) => children(Style { italic: true, ..style }, link, kind, out),
+            Node::Delete(_) => children(Style { strike: true, ..style }, link, kind, out),
+            Node::InlineCode(code) => out.push(span(
+                &code.value,
+                Style { code: true, ..style },
+                link,
+                kind.clone(),
+            )),
+            Node::InlineMath(math) => out.push(span(
+                &math.value,
+                Style { code: true, ..style },
+                link,
+                kind.clone(),
+            )),
+            Node::Link(l) => {
+                let url = l.url.as_str();
+                let mention = |kind, colour| SpanKind::Mention { kind, colour };
+                match parse_internal_link(url) {
+                    Some(InternalLink::User(_)) => {
+                        children(style, Some(url), &mention(MentionKind::User, None), out)
+                    }
+                    Some(InternalLink::Channel(_)) => {
+                        children(style, Some(url), &mention(MentionKind::Channel, None), out)
+                    }
+                    Some(InternalLink::Role { colour, .. }) => children(
+                        style,
+                        Some(url),
+                        &mention(MentionKind::Role, colour),
+                        out,
+                    ),
+                    Some(InternalLink::Everyone) => {
+                        children(style, Some(url), &mention(MentionKind::Everyone, None), out)
+                    }
+                    Some(InternalLink::Online) => {
+                        children(style, Some(url), &mention(MentionKind::Online, None), out)
+                    }
+                    Some(InternalLink::Time {
+                        seconds,
+                        style: time_style,
+                    }) => match timestamp(seconds, time_style) {
+                        Some((text, full)) => {
+                            out.push(span(&text, style, Some(url), SpanKind::Time { full }))
+                        }
+                        None => children(style, link, kind, out),
+                    },
+                    Some(InternalLink::Spoiler { index, .. }) => children(
+                        style,
+                        Some(url),
+                        &SpanKind::Spoiler {
+                            index: u32::try_from(index).unwrap_or(u32::MAX),
+                        },
+                        out,
+                    ),
+                    // `stoat:link?…` (a link whose text isn't its address)
+                    // and ordinary links: Swift opens them, warning first
+                    // for the former.
+                    Some(InternalLink::External { .. }) | None => {
+                        children(style, Some(url), kind, out)
+                    }
+                }
             }
-            Node::InlineMath(math) => {
-                out.push(span(&math.value, Style { code: true, ..style }, link, SpanKind::Text))
-            }
-            Node::Link(l) => children(style, Some(&l.url), out),
             Node::LinkReference(reference) => {
                 match self.definitions.get(&label(&reference.identifier)) {
-                    Some(url) => children(style, Some(url), out),
+                    Some(url) => children(style, Some(url), kind, out),
                     // Not a reference after all: as typed.
-                    None => out.push(span(&node_source(node), style, link, SpanKind::Text)),
+                    None => out.push(span(&node_source(node), style, link, kind.clone())),
                 }
             }
             // Images aren't embedded in messages: a link with their alt text.
@@ -275,16 +357,29 @@ impl Parser {
                 let url = self.definitions.get(&label(&reference.identifier));
                 out.push(span(&reference.alt, style, url.map(String::as_str), SpanKind::Text));
             }
-            Node::Html(html) => out.push(span(&html_text(&html.value), style, link, SpanKind::Text)),
+            Node::Html(html) => {
+                out.push(span(&html_text(&html.value), style, link, kind.clone()))
+            }
             other => {
                 if other.children().is_some() {
-                    children(style, link, out);
+                    children(style, link, kind, out);
                 } else {
-                    out.push(span(&other.to_string(), style, link, SpanKind::Text));
+                    out.push(span(&other.to_string(), style, link, kind.clone()));
                 }
             }
         }
     }
+}
+
+/// A `<t:…>` timestamp's text in local time, as desktop shows it, and its
+/// full date and time.
+fn timestamp(seconds: i64, style: Option<char>) -> Option<(String, String)> {
+    let when = stoat_gpui::time::local_from_seconds(seconds)?;
+    let now = chrono::Local::now();
+    Some((
+        stoat_gpui::time::format_timestamp(&when, style, &now),
+        stoat_gpui::time::timestamp_tooltip(&when),
+    ))
 }
 
 /// A link reference that didn't resolve, as typed: `[text]`.
@@ -317,13 +412,14 @@ pub(crate) fn attribute(tag: &str, name: &str) -> Option<String> {
     )
 }
 
-/// Join neighbouring text spans with the same style and link.
+/// Join neighbouring spans with the same kind, style and link (a mention's
+/// words, say). Breaks stay on their own.
 fn merge(spans: Vec<RichSpan>) -> Vec<RichSpan> {
     let mut out: Vec<RichSpan> = Vec::with_capacity(spans.len());
     for span in spans {
         if let Some(last) = out.last_mut()
-            && last.kind == SpanKind::Text
-            && span.kind == SpanKind::Text
+            && last.kind != SpanKind::Break
+            && last.kind == span.kind
             && (last.bold, last.italic, last.strike, last.code, &last.link)
                 == (span.bold, span.italic, span.strike, span.code, &span.link)
         {
@@ -347,16 +443,24 @@ pub struct RichCache {
 const CACHE_MAX: usize = 4000;
 
 impl RichCache {
+    /// `prepared`'s blocks, parsed once per `render_key`. Text with a
+    /// relative timestamp ("in 3 hours") is parsed again each minute.
     pub fn get(&self, render_key: &str, prepared: &str) -> Arc<Vec<RichBlock>> {
+        let key = if has_relative_time(prepared) {
+            let minute = chrono::Utc::now().timestamp() / 60;
+            format!("{render_key}@{minute}")
+        } else {
+            render_key.to_string()
+        };
         let mut cache = self.blocks.lock().unwrap();
-        if let Some(blocks) = cache.get(render_key) {
+        if let Some(blocks) = cache.get(&key) {
             return blocks.clone();
         }
         if cache.len() >= CACHE_MAX {
             cache.clear();
         }
         let parsed = Arc::new(blocks(prepared));
-        cache.insert(render_key.to_string(), parsed.clone());
+        cache.insert(key, parsed.clone());
         parsed
     }
 

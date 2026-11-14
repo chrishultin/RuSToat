@@ -6,6 +6,42 @@ struct MessageActions {
     /// By the pending message's key.
     let retry: (String) -> Void
     let discard: (String) -> Void
+    /// Reveal spoiler `index` of a message (by its ID).
+    let revealSpoiler: (String, UInt32) -> Void
+    /// A link whose text isn't its address: ask before opening `url`.
+    let openGuarded: (URL, String) -> Void
+}
+
+/// What tapping a `stoat:` link in a message does.
+enum InternalLinkTap: Equatable {
+    case spoiler(index: UInt32)
+    case guarded(url: URL, text: String)
+    /// Mentions, timestamps and the rest: nothing yet.
+    case ignore
+
+    init(_ url: URL) {
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let path = (components?.path ?? "").split(separator: "/").map(String.init)
+        switch path.first {
+        case "spoiler" where path.count > 1:
+            self = UInt32(path[1]).map { .spoiler(index: $0) } ?? .ignore
+        case "link":
+            // Form-encoded (`+` for a space), as the core writes it.
+            let query = components?.percentEncodedQueryItems ?? []
+            let value = { (name: String) in
+                query.first { $0.name == name }?.value?
+                    .replacingOccurrences(of: "+", with: " ")
+                    .removingPercentEncoding
+            }
+            if let target = value("url").flatMap(URL.init(string:)) {
+                self = .guarded(url: target, text: value("text") ?? "")
+            } else {
+                self = .ignore
+            }
+        default:
+            self = .ignore
+        }
+    }
 }
 
 /// A message: avatar, name and time on the first of a group, then its
@@ -21,11 +57,25 @@ struct MessageRowView: View {
             systemRow
         } else {
             row
+                .environment(\.openURL, OpenURLAction(handler: open))
                 .offset(x: swipe)
                 .contentShape(.rect)
                 .contextMenu { menu }
                 .simultaneousGesture(swipeToReply)
         }
+    }
+
+    private func open(_ url: URL) -> OpenURLAction.Result {
+        guard url.scheme == "stoat" else { return .systemAction }
+        switch InternalLinkTap(url) {
+        case .spoiler(let index):
+            actions.revealSpoiler(message.id, index)
+        case .guarded(let target, let text):
+            actions.openGuarded(target, text)
+        case .ignore:
+            break
+        }
+        return .handled
     }
 
     @ViewBuilder private var menu: some View {

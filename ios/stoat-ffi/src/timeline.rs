@@ -52,6 +52,8 @@ pub struct MessageItem {
     pub body: Option<String>,
     /// `body` as blocks to draw (empty without a body).
     pub rich: Vec<RichBlock>,
+    /// `body` has a relative timestamp ("in 3 hours"): redraw it each minute.
+    pub relative_time: bool,
     /// Changes whenever what's drawn for `body` changes.
     pub render_key: String,
     pub system: bool,
@@ -255,6 +257,10 @@ pub fn message(row: MessageRow, cache: &RichCache) -> MessageItem {
             .as_deref()
             .map(|body| cache.get(&row.render_key, body).as_ref().clone())
             .unwrap_or_default(),
+        relative_time: row
+            .body
+            .as_deref()
+            .is_some_and(stoat_gpui::markdown::has_relative_time),
         replies: row.replies.iter().map(reply).collect(),
         attachments: row.attachments.iter().map(attachment).collect(),
         embeds: row.embeds.iter().map(|e| embed(e, cache)).collect(),

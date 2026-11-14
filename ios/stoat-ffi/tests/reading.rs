@@ -317,3 +317,38 @@ async fn reply_previews_fetch_their_originals() {
     assert_eq!(reply.state, stoat_ffi::timeline::ReplyStateItem::Loaded);
     assert_eq!(reply.snippet, "message 5");
 }
+
+#[tokio::test]
+async fn revealing_a_spoiler_redraws_its_message() {
+    use stoat_ffi::rich_text::{RichBlock, SpanKind};
+    let events = Events::start().await;
+    let api = api(&events).await;
+    let mut latest = page(100, 150);
+    latest["messages"][0]["content"] = json!("the answer is ||42||");
+    Mock::given(method("GET"))
+        .and(path("/channels/ch-general/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(latest))
+        .mount(&api)
+        .await;
+    let (controller, recorder) = connected(&api).await;
+    controller.open_channel("ch-general".into()).await.unwrap();
+
+    let last = |c: &AccountController| messages(&c.timeline("ch-general".into())).pop().cloned().unwrap();
+    let hidden = |m: &stoat_ffi::timeline::MessageItem| {
+        m.rich.iter().any(|b| matches!(b, RichBlock::Paragraph { spans }
+            if spans.iter().any(|s| matches!(s.kind, SpanKind::Spoiler { index: 0 }))))
+    };
+    let before = last(&controller);
+    assert!(hidden(&before));
+    recorder.clear();
+
+    controller.reveal_spoiler("ch-general".into(), id(149), 0);
+    let after = last(&controller);
+    assert!(!hidden(&after));
+    assert_ne!(before.render_key, after.render_key);
+    recorder
+        .wait_for("the redraw", |h| {
+            matches!(h, Heard::Changed(c) if c.timelines == ["ch-general"])
+        })
+        .await;
+}
