@@ -27,6 +27,8 @@ struct MessageActions {
     /// Load a too-big image (by file ID), or uncover a spoiler attachment.
     let revealImage: (String) -> Void
     let revealAttachment: (String) -> Void
+    /// Open a message's picture (a file ID or an embed's address) full screen.
+    let viewImage: (MessageItem, String) -> Void
 }
 
 /// What tapping a `stoat:` link in a message does.
@@ -167,10 +169,14 @@ struct MessageRowView: View {
                             .id(message.renderKey)
                     }
                     ForEach(Array(message.attachments.enumerated()), id: \.offset) { _, attachment in
-                        AttachmentView(attachment: attachment, actions: actions)
+                        AttachmentView(attachment: attachment, actions: actions) { id in
+                            actions.viewImage(message, id)
+                        }
                     }
                     ForEach(Array(message.embeds.enumerated()), id: \.offset) { _, embed in
-                        EmbedCard(embed: embed, actions: actions)
+                        EmbedCard(embed: embed, actions: actions) { id in
+                            actions.viewImage(message, id)
+                        }
                     }
                     if !message.reactions.isEmpty {
                         ReactionsView(
@@ -242,6 +248,8 @@ struct MessageRowView: View {
 struct AttachmentView: View {
     let attachment: AttachmentItem
     let actions: MessageActions
+    /// Open a picture full screen (by its file ID).
+    let view: (String) -> Void
     @Environment(\.openURL) private var openURL
 
     var body: some View {
@@ -251,7 +259,7 @@ struct AttachmentView: View {
                 image: image,
                 reveal: actions.revealImage,
                 uncover: actions.revealAttachment,
-                open: { open(image.url) }
+                open: { view(image.id) }
             )
         case .file(let file):
             FileCard(name: file.name, detail: file.sizeLabel, icon: file.kind.symbol, spoiler: file.spoiler) {
@@ -331,6 +339,8 @@ struct FileCard: View {
 struct EmbedCard: View {
     let embed: EmbedItem
     let actions: MessageActions
+    /// Open a picture full screen (by its address, or a file's ID).
+    let view: (String) -> Void
     @Environment(\.openURL) private var openURL
     @Environment(\.mediaMaxWidth) private var available
 
@@ -339,7 +349,12 @@ struct EmbedCard: View {
         case .card(let card):
             cardView(card)
         case .image(let image):
-            picture(image, opening: image.source)
+            Button {
+                view(image.url)
+            } label: {
+                remote(image, size: size(image))
+            }
+            .buttonStyle(.plain)
         case .gifPoster(let image, let link):
             picture(image, opening: link)
                 .overlay(alignment: .bottomLeading) {
@@ -411,7 +426,7 @@ struct EmbedCard: View {
                 remote(image, size: size(image))
             }
             if let media = card.media {
-                AttachmentView(attachment: media, actions: actions)
+                AttachmentView(attachment: media, actions: actions, view: view)
             }
         }
         .padding(10)

@@ -41,6 +41,8 @@ struct ChatView: View {
     /// A disguised link waiting for "Open" (its address and its text).
     @State private var guarded: (url: URL, text: String)?
     @State private var mediaMaxWidth: CGFloat = 300
+    /// The pictures open full screen.
+    @State private var viewing: ViewerRequest?
     @Environment(\.scenePhase) private var scenePhase
 
     private var hasMore: Bool {
@@ -113,6 +115,9 @@ struct ChatView: View {
             }
         } message: { _ in
             Text("This can't be undone.")
+        }
+        .fullScreenCover(item: $viewing) { request in
+            ImageViewer(request: request)
         }
         .sheet(item: $reactingTo) { message in
             ReactionPickerView(model: model, channelId: route.id, message: message) { key in
@@ -198,8 +203,15 @@ struct ChatView: View {
             edit: startEditing,
             delete: { message in deleting = message },
             revealImage: { id in model.core.revealImage(channelId: route.id, fileId: id) },
-            revealAttachment: { id in model.core.revealAttachment(channelId: route.id, fileId: id) }
+            revealAttachment: { id in model.core.revealAttachment(channelId: route.id, fileId: id) },
+            viewImage: view
         )
+    }
+
+    /// Open picture `id` of `message` full screen, among its others.
+    private func view(_ message: MessageItem, _ id: String) {
+        let images = ViewerImage.images(of: message, available: mediaMaxWidth)
+        viewing = ViewerRequest(images: images, showing: id)
     }
 
     private func startEditing(_ message: MessageItem) {
@@ -318,6 +330,16 @@ struct ChatView: View {
             if let id = ProcessInfo.processInfo.environment["RUSTOAT_DEV_SCROLL"] {
                 try? await Task.sleep(for: .milliseconds(300))
                 position.scrollTo(id: id, anchor: .top)
+            }
+            // Or open a picture full screen (by file ID):
+            // SIMCTL_CHILD_RUSTOAT_DEV_VIEW=<file ID> xcrun simctl launch …
+            if let id = ProcessInfo.processInfo.environment["RUSTOAT_DEV_VIEW"] {
+                let message = rows.lazy.compactMap { row -> MessageItem? in
+                    guard case .message(let message) = row else { return nil }
+                    return ViewerImage.images(of: message, available: mediaMaxWidth)
+                        .contains { $0.id == id } ? message : nil
+                }.first
+                if let message { view(message, id) }
             }
             #endif
         } catch let CoreError.Failed(message) {

@@ -111,3 +111,49 @@ Simulator checks use a throwaway script that does these steps:
 
 ### Manual Validation
 Deferred to the end: scroll a real channel full of photos quickly, checking for jumps, flicker and the blurred previews.
+
+## Chunk 2: The full-screen image viewer
+
+### Changes Made
+- `ios/RuSToat/Chat/Media/ImageViewer.swift` (new):
+  - `ViewerImage.images(of:available:)`: the message's pictures that are showing, in order. That's image attachments that aren't too big or covered, then image embeds and bot-embed media. Each comes with its inline size, so the inline copy cached at that size is drawn at once.
+  - `ViewerRequest`: the images and the one to start on.
+  - `ViewerMath`: the pure parts. Page clamping, zoom clamping (1–4×), the double-tap target (2.5× or back to 1×), aspect fitting, the rectangle to zoom into around a point, and the dismiss rule (more than 120 pt, or a flick over 900 pt/s after at least 20 pt).
+  - `ImageViewer`:
+    - a paged `TabView`, presented by `fullScreenCover` with a clear presentation background;
+    - drag-down moves the pages and fades the black backdrop;
+    - a single tap hides or shows the top bar;
+    - the top bar has Close, the name with "2 of 3", and Share.
+    - Share is a `ShareLink` to the downloaded file, disabled until the file is ready.
+  - `ViewerFiles`: writes the file to `tmp/viewer/<id>/<name>`. A name without an extension (proxied embeds) gets one for its type, from ImageIO. The folder is removed when the viewer closes.
+  - `ViewerPage`: shows the inline copy (or the ThumbHash) at once, then loads the picture through `ImageLoader` at the screen's size × 3.
+  - `ZoomableImage` / `ZoomView`: a `UIScrollView` that zooms the picture by pinching and double-tapping, keeps it centred, and lays it out by the core's shape, so the preview and the full picture line up.
+  - Drag-to-close is a `UIPanGestureRecognizer` that starts only at 1× and mostly downwards. Other pans, the pager's included, wait for it to fail (`shouldBeRequiredToFailBy`), so sideways drags still page and zoomed drags still pan.
+- `ios/RuSToat/Chat/MessageRowView.swift`:
+  - `MessageActions.viewImage(message, id)`.
+  - `AttachmentView` and `EmbedCard` take a `view` closure. Inline images, image embeds and bot media open the viewer; GIF posters still open their page.
+- `ios/RuSToat/Chat/ChatView.swift`:
+  - presents the viewer from `viewing`;
+  - adds DEBUG `RUSTOAT_DEV_VIEW=<file ID>`, which opens a picture full screen at launch.
+- `ios/RuSToatTests/ImageViewerTests.swift` (new, 8 tests):
+  - paging;
+  - zoom clamping;
+  - double tap in and out;
+  - fitting;
+  - the zoom rectangle;
+  - dismiss thresholds;
+  - which pictures a message offers, and starting on the right one;
+  - share file names.
+
+### Divergences
+- **Drag-to-close is done in UIKit**, with a pan recognizer on the zoom view, rather than as a SwiftUI gesture over the `TabView`. That makes its priority over the pager's pan explicit (the plan's named risk). The rule is as planned: zoomed, a drag pans; at 1×, vertical closes and horizontal pages.
+- **The top bar is an overlay, not a toolbar**, so it can fade with a tap and hide during a drag.
+- **Image embeds and bot media open in the viewer too**, not just attachments. GIF posters and video links still open their pages.
+
+### Verification Performed
+- Swift: 30 tests in 9 suites passed (ImageViewerTests 8).
+- `cargo test -p stoat-ffi`: 84 passed. Desktop `cargo test`: 1499 passed, 0 failed, 5 ignored. Both clippy runs are clean.
+- Simulator against `fake_stoat` with `RUSTOAT_DEV_VIEW=f-portrait`: the tower photo full screen on black, fitted and centred (402×603 pt on the iPhone 17 Pro). The bar showed "portrait.jpg" and "2 of 2", with Close, and Share enabled once the file had downloaded.
+
+### Manual Validation
+Deferred to the end, because `simctl` can't drive gestures: pinch-zoom a photo, swipe to the next, drag down to close, and share one to Messages.
